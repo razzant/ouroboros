@@ -338,9 +338,9 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
     let detailsOpen = false;  // the headline card's Details stays as its reader left it across repaints
     // The held own wake's block, made at the first held wake: its words are this read's, its controls and the budget it
     // reads the work and accounting of the page's newest `/api/state` body. A failed or retired state read keeps the last
-    // body's controls, disabled; a newer body that no longer names this wake held (or names another) reads this tab
-    // again and shows no block meanwhile; a block for a new task first asks the page for one fresh state read. A press
-    // re-checks its facts and reads both again once it settles.
+    // body's controls, disabled; while the two disagree on which wake is held, no block, and (shown) both are read again;
+    // a block for a new task first asks the page for one fresh state read. A press re-checks its facts and reads both
+    // again once it settles.
     let held = null;
     let stateBody = stateSnapshots?.latest?.() || null;  // the newest body that stood
     let standing = Boolean(stateBody);
@@ -358,12 +358,19 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
     }
     function paintHeld() {
         let view = snapshot ? heldWakeView(snapshot, stateBody) : null;
-        if (view && !agrees()) {
-            view = null;  // the newest state says otherwise: its words would describe a wake no longer held
-            if (!rereading) { rereading = true; void refresh().finally(() => { rereading = false; }); }
+        const disagrees = Boolean(view) && !agrees();
+        // While the panel is shown, a block for a new task asks the page for one fresh state read, and a held wake the
+        // newest state does not name so asks for the state and this tab's read again, once, under one guard (a state
+        // read already asked may land disagreeing: that still reconciles).
+        if (view && shown()) {
+            if (disagrees && !rereading) {
+                rereading = true;
+                void Promise.all([readState(), refresh()]).finally(() => { rereading = false; });
+            } else if (!disagrees && view.taskId !== heldTask) void readState();
+            heldTask = view.taskId;
         }
-        if (view && view.taskId !== heldTask) void readState();
-        heldTask = view?.taskId || '';
+        if (!view) heldTask = '';
+        if (disagrees) view = null;  // the newest state says otherwise: its words would describe a wake no longer held
         if (!view && !held) return;
         if (!held) {
             held = createHeldWake(regions.held.ownerDocument || document, { current: heldNow,

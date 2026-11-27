@@ -779,8 +779,10 @@ test('the Dashboard block keeps the last confirmed controls, disabled, across a 
         watch: (watcher) => { watchers.add(watcher); return () => watchers.delete(watcher); } };
     const tell = () => watchers.forEach((watcher) => watcher());
     let reads = 0;
+    // Reconciling reads happen only while the panel is shown.
     const controller = initConsciousnessDashboard({ mount, ws: { send() {}, isConnected: () => true },
-        state: { activePage: 'chat' }, stateSnapshots, read: async () => { reads += 1; return normalizeConsciousness(held); } });
+        state: { activePage: 'dashboard', dashboardActiveSubtab: 'consciousness' }, stateSnapshots,
+        read: async () => { reads += 1; return normalizeConsciousness(held); } });
     try {
         await controller.refresh();
         const block = holder.querySelector('.cx-held');
@@ -804,9 +806,56 @@ test('the Dashboard block keeps the last confirmed controls, disabled, across a 
         tell();
         assert.equal(block.hidden, true);
         await new Promise((resolve) => setTimeout(resolve, 0));
-        assert.equal(reads, before + 1, 'the tab re-reads consciousness');
+        assert.deepEqual([reads, gates], [before + 1, 2], 'the tab re-reads consciousness and asks for the state once');
     } finally {
         controller.destroy();
         restoreDom(env.prior);
+    }
+});
+
+test('a held wake the page\'s older state does not name yet asks for a fresh state at once, only while the panel is shown', async () => {
+    const WAKE = 'e629aa8e';
+    const STOP = { action: 'stop', target: WAKE, scope: 'cascade' };
+    const RESUME = { action: 'resume', target: WAKE };
+    const held = { enabled: true, status: 'wake_paused', position: 'Also on its own and in places', live_wake_task_id: WAKE,
+        live_wake_held: true, detail: 'Its own wake-up is paused.', live_wake_hold: { cause: 'owner', ceiling_usd: null } };
+    const body = (bg, controls) => ({ bg_consciousness_enabled: true, bg_consciousness_state: bg,
+        works: [{ work_id: WAKE, room: 1, episode: { task_id: WAKE, live: true }, confirmed: true, controls }] });
+    for (const shownTab of [true, false]) {
+        const env = installDom();
+        const mount = fakeMount();
+        const holder = document.createElement('div');
+        mount.regions.set('[data-cx-held]', holder);
+        // The page's newest state was read before the hold: the wake still runs there.
+        let latest = body({ ...held, status: 'thinking', live_wake_held: false, detail: 'Wake-up runs.' }, [STOP]);
+        let gates = 0;
+        const watchers = new Set();
+        const stateSnapshots = { latest: () => latest, gate: async () => { gates += 1; return null; },
+            watch: (watcher) => { watchers.add(watcher); return () => watchers.delete(watcher); } };
+        let reads = 0;
+        const controller = initConsciousnessDashboard({ mount, ws: { send() {}, isConnected: () => true },
+            state: shownTab ? { activePage: 'dashboard', dashboardActiveSubtab: 'consciousness' } : { activePage: 'chat' },
+            stateSnapshots, read: async () => { reads += 1; return normalizeConsciousness(held); } });
+        try {
+            await controller.refresh();
+            for (let turn = 0; turn < 4; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+            const block = holder.querySelector('.cx-held');
+            assert.equal(!block || block.hidden, true, 'no controls on a state that does not name the wake held');
+            if (!shownTab) {
+                assert.deepEqual([gates, reads], [0, 1], 'hidden, the panel reads nothing more');
+                continue;
+            }
+            assert.equal(gates, 1, 'the state is asked at once, not at the next poll');
+            // The fresh state lands: the block and its controls appear, with no further read.
+            latest = body(held, [RESUME, STOP]);
+            watchers.forEach((watcher) => watcher());
+            const controls = holder.querySelector('.cx-held-actions').children
+                .filter((node) => !node.classList.contains('cx-held-door')).map((node) => `${node.textContent}${node.disabled ? ' (disabled)' : ''}`);
+            assert.deepEqual([holder.querySelector('.cx-held').hidden, controls], [false, ['Resume', 'Stop now']]);
+            assert.equal(gates, 1);
+        } finally {
+            controller.destroy();
+            restoreDom(env.prior);
+        }
     }
 });
