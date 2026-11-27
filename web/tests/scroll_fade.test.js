@@ -430,6 +430,21 @@ test('the shared scroller masks and the curve are one curve, and a room edge is 
         assert.deepEqual(y, [...tokens, ...[...tokens].reverse()], 'the vertical mask: the same curve at both ends');
         assert.deepEqual(x, [...tokens, ...[...tokens].reverse()], 'the horizontal mask: the same curve at both ends');
     }
+    // And each alpha is painted where the curve puts it: the stop reading --edge-aN lies N tenths of its end's run from
+    // the clear end, in the curve and at every end of both masks (positions parsed, each end normalised to 0..1).
+    const misplaced = (text) => (gradientsIn(text)[0] ?? text).split(/,(?![^(]*\))/).map((stop) => stop.trim()).flatMap((stop) => {
+        const token = stop.match(/^rgb\(0 0 0 \/ var\(--edge-a(\d)\)\) (.+)$/);
+        if (!token) return [];
+        const at = token[2];
+        const share = at.match(/^(\d+)%$/) ? 1 - Number(at.slice(0, -1)) / 100
+            : Number((at.match(/^calc\((?:var\(--scroll-fade-inset\) \+ var\(--scroll-fade-top\)|100% - var\(--scroll-fade-(?:bottom|end)\)|var\(--scroll-fade-start\)) \* ([\d.]+)\)$/) || [])[1]);
+        return Math.abs(share - Number(token[1]) / 10) < 1e-9 ? [] : [stop];
+    });
+    for (const text of consumers) assert.deepEqual(misplaced(text), [], 'every stop where the curve paints it');
+    const moved = consumers[1].replace('rgb(0 0 0 / var(--edge-a9)) calc(100% - var(--scroll-fade-bottom) * .9)',
+        'rgb(0 0 0 / var(--edge-a9)) calc(100% - var(--scroll-fade-bottom) * .1)');
+    assert.notEqual(moved, consumers[1]);
+    assert.equal(misplaced(moved).length, 1, 'one stop moved along its end is caught (the fold would stay bright to the cut)');
     // A room's edge, read from the parsed sheet (whitespace and line breaks do not matter).
     const rules = rulesOf(readFileSync(new URL('../style.css', import.meta.url), 'utf8'));
     const decl = (rule, prop) => rules.filter((r) => r.rule === rule).flatMap((r) => r.decls).find(([p]) => p === prop)?.[1];
