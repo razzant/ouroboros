@@ -16,6 +16,7 @@ SYSTEM, BIBLE and the common identity/narrative core remain caller-owned.
 from __future__ import annotations
 
 import pathlib
+import posixpath
 import re
 from typing import Any, List, Mapping, Optional
 
@@ -50,7 +51,8 @@ def _read_doc(env: Any, rel_path: str) -> str:
         return ""
 
 
-def generate_doc_nav_map(text: str, *, title: str, rel_path: str, instructions: bool = True) -> str:
+def generate_doc_nav_map(text: str, *, title: str, rel_path: str, instructions: bool = True,
+                         compact: bool = False) -> str:
     """Build a compact, fence-aware navigation map of a markdown doc.
 
     Lists every ``##`` through ``####`` heading with its inclusive line range
@@ -74,7 +76,7 @@ def generate_doc_nav_map(text: str, *, title: str, rel_path: str, instructions: 
     if not entries:
         out.append("- (no `##`/`###`/`####` headings; "
                    + (f"read `{rel_path}` directly)" if instructions else f"source: `{rel_path}`)"))
-    return "\n".join([*out, *_nav_lines(entries)])
+    return "\n".join([*out, *_nav_lines(entries, compact=compact)])
 
 
 def _nav_entries(text: str) -> List[tuple[int, str, int, int]]:
@@ -99,7 +101,11 @@ def _nav_entries(text: str) -> List[tuple[int, str, int, int]]:
             for idx, (level, title, lineno) in enumerate(headings)]
 
 
-def _nav_lines(entries: List[tuple[int, str, int, int]]) -> List[str]:
+def _nav_lines(entries: List[tuple[int, str, int, int]], *, compact: bool = False) -> List[str]:
+    """``compact``: the packet notation ``first-last title`` (``PACKET_INDEX``); nesting is the ranges' own (a parent's
+    range starts at its heading, before its children's, and contains them), so no indent repeats it."""
+    if compact:
+        return [f"{first}-{last} {title}" for _level, title, first, last in entries]
     return [f"{'  ' * (level - 2)}- {title} — lines {first}-{last}" for level, title, first, last in entries]
 
 
@@ -159,20 +165,21 @@ def design_bible_view(text: Optional[str], *, source: str, installed: bool = Fal
                       "needs those excerpts in its packet."])
 
 
-def design_navigation(text: str | None, *, source: str, disclosure: str = "") -> str:
-    """Index DESIGN headings; a review supplies its actual inline coverage and its own reader guidance."""
+def design_navigation(text: str | None, *, source: str, disclosure: str = "", compact: bool = False) -> str:
+    """Index DESIGN headings; a review supplies its actual inline coverage and its own reader guidance. ``compact``:
+    the packet notation, whose convention the packet states once (``PACKET_INDEX``)."""
     locator = f"Source: {source}."
     if text is None:
         return f"## DESIGN.md source unavailable\n\n{locator} No DESIGN content or navigation delivered."
     if disclosure:
-        locator += f" Ranges are inclusive. {disclosure} Availability is not evidence of reading or application."
+        locator += f"{'' if compact else ' Ranges are inclusive.'} {disclosure} Availability is not evidence of reading or application."
     else:
         locator += (" Use this exact source path when reading; relative paths may address a candidate. "
                     "Ranges are inclusive. Navigation only: DESIGN content is not inlined; "
                     "availability is not evidence of reading or application. Select relevant original sections; "
                     "a participant without source-reading tools needs those excerpts in its packet.")
     return (
-        generate_doc_nav_map(text, title="DESIGN.md", rel_path="docs/DESIGN.md", instructions=False)
+        generate_doc_nav_map(text, title="DESIGN.md", rel_path="docs/DESIGN.md", instructions=False, compact=compact)
         + f"\n\n{locator}"
     )
 
@@ -281,7 +288,7 @@ def task_design_navigation(ctx: Any, task: Mapping[str, Any]) -> str:
     return HostSection("design_bible", view, navigation)
 
 
-def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
+def book_navigation(book: ReferenceBook, *, instructions: bool = True, whole: frozenset = frozenset()) -> str:
     """The compact, CHAPTER-ADDRESSED view of one reference book.
 
     The authored introductions are the overview (there is no second editable
@@ -304,8 +311,8 @@ def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
             rel_path=book.entrypoint.source_path,
             instructions=instructions,
         )
-    if not instructions:
-        return _packet_book_index(book)
+    if not instructions and _plain_contents(book):
+        return _packet_book_index(book, whole=whole)
     return overview_book(
         book,
         lambda chapter: generate_doc_nav_map(
@@ -318,33 +325,55 @@ def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
     ).text
 
 
-PACKET_BOOK_INDEX = ("This overview contains introductions, not complete chapters. Each chapter below gives its title "
-                     "and physical source path once, its introduction, then every heading with its inclusive line range "
-                     "in that file (a parent's range includes its descendants).")
+PACKET_INDEX = ("Indexes: `first-last title` per heading, inclusive lines of the file above; a heading within another's "
+                "range is its subheading. An introduction inlined above is not repeated.")
+PACKET_CHAPTER_DIR = "Chapters in `{folder}/`:"
 
 
-def _packet_book_index(book: ReferenceBook) -> str:
+def _contents(book: ReferenceBook) -> tuple:
+    """The entrypoint's Chapters list span and its link labels (the membership loader proved them one per chapter)."""
+    entry = book.entrypoint
+    section = next(h for h in entry.headings if h.level == 2 and h.title == "Chapters")
+    listed = next(s for s in entry.lists if section.span.end_byte <= s.start_byte < section.section.end_byte)
+    items = [s for s in entry.list_items if listed.start_byte <= s.start_byte < listed.end_byte]
+    links = [link for link in entry.links if listed.start_byte <= link.span.start_byte < listed.end_byte]
+    return listed, items, links
+
+
+def _plain_contents(book: ReferenceBook) -> bool:
+    """Every Chapters item is its link alone; an item that also carries prose keeps the overview form, which keeps it."""
+    listed, items, links = _contents(book)
+    return len(items) == len(links) and all(
+        book.entrypoint.text_at(item).strip().lstrip("-*+ ").strip() == book.entrypoint.text_at(link.span).strip()
+        for item, link in zip(items, links))
+
+
+def _packet_book_index(book: ReferenceBook, *, whole: frozenset = frozenset()) -> str:
     """The view a reader without tools gets: the same facts as the overview, each written once.
 
     The overview repeats each chapter's title and address (the contents list, the chapter heading, its source
     line, its map's heading) and spells the range convention on every heading. Here the contents list gives way
     to one line per chapter (title, the list's own wording where it differs, physical path); the entrypoint's
-    other text, each authored introduction and every heading with its range stay verbatim. The membership
-    loader already proved the list and the chapters correspond one to one, in order."""
+    other text, each authored introduction and every heading with its range stay verbatim, in the notation
+    ``PACKET_INDEX`` states once for the packet. An introduction is skipped only for a chapter in ``whole`` (its
+    physical path, delivered whole elsewhere in the same packet)."""
     from ouroboros.reference_books import _preamble
 
     entry = book.entrypoint
-    section = next(h for h in entry.headings if h.level == 2 and h.title == "Chapters")
-    listed = next(s for s in entry.lists if section.span.end_byte <= s.start_byte < section.section.end_byte)
-    labels = [link.label for link in entry.links if listed.start_byte <= link.span.start_byte < listed.end_byte]
-    rows = [(entry.raw[:listed.start_byte] + entry.raw[listed.end_byte:]).decode("utf-8").rstrip(), PACKET_BOOK_INDEX]
-    for chapter, label in zip(book.chapters, labels):
+    listed, _items, links = _contents(book)
+    rows = [(entry.raw[:listed.start_byte] + entry.raw[listed.end_byte:]).decode("utf-8").rstrip()]
+    folders = {posixpath.dirname(chapter.source_path) for chapter in book.chapters}
+    folder = folders.pop() if len(folders) == 1 else ""  # one home for the shared directory, stated once
+    if folder:
+        rows.append(PACKET_CHAPTER_DIR.format(folder=folder))
+    for chapter, link in zip(book.chapters, links):
         title = chapter.headings[0].title
-        listed_as = "" if label == title else f" (listed as {label})"
-        rows.append("\n".join([f"# {title}{listed_as} — `{chapter.source_path}`", chapter.text_at(_preamble(chapter)),
-                               *(f"{'  ' * (level - 2)}- {first}-{last} {name}"
-                                 for level, name, first, last in _nav_entries(chapter.text))]))
-    return "\n\n".join(rows)
+        listed_as = "" if link.label == title else f" (listed as {link.label})"
+        intro = [] if chapter.source_path in whole else [chapter.text_at(_preamble(chapter)).strip()]
+        address = chapter.source_path[len(folder) + 1:] if folder else chapter.source_path
+        rows.append("\n".join([f"{title}{listed_as}: {address}", *intro,
+                               *_nav_lines(_nav_entries(chapter.text), compact=True)]))
+    return "\n".join(rows)
 
 
 def book_map_section(book: ReferenceBook, section_id: str) -> str:

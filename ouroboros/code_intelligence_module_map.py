@@ -98,6 +98,25 @@ def _lead(relpath: str, raw: bytes) -> str:
     return ""
 
 
+def installed_lead(root: pathlib.Path, relpath: str) -> Tuple[str, str]:
+    """One file's own lead, read through the same reader as ``module_map``: ``("lead", text)``, or ``(kind, "")`` with
+    kind ``none`` (no docstring or header), ``other`` (a file kind without one), ``absent`` or ``unreadable``."""
+    pure = pathlib.PurePosixPath(relpath)
+    if pure.is_absolute() or ".." in pure.parts or not relpath:
+        return "absent", ""
+    if not relpath.endswith((".py", *_JS_SUFFIXES)):
+        return "other", ""
+    try:
+        lead = _lead(relpath, work_domain.read_bytes(pathlib.Path(root) / relpath))
+    except work_domain.WorkDomainUnsettled:
+        raise
+    except FileNotFoundError:
+        return "absent", ""
+    except (OSError, PermissionError, ValueError):
+        return "unreadable", ""
+    return ("lead", lead) if lead else ("none", "")
+
+
 def _default_list_prefix(root: pathlib.Path) -> ListPrefix:
     def listed(prefix: str) -> Tuple[List[str], List[str]]:
         from ouroboros.code_intelligence import build_code_inventory

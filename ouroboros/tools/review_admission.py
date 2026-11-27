@@ -127,12 +127,12 @@ def density_probe_before_size_refusal(ctx: Any, model: str, sample: str, *, surf
     return outcome
 
 
-def triad_fit_note(touched_paths: Sequence[str]) -> str:
-    """What a packet says in place of the full snapshots it dropped to fit the strictest reviewer."""
+def triad_fit_note() -> str:
+    """What a packet says in place of the full snapshots it dropped to fit the strictest reviewer; the touched paths
+    are the packet's own "Changed files" list, not repeated here."""
     return ("TRIAD FIT NOTE: Full post-change snapshots were omitted because they duplicate the complete staged diff "
-            "and would exceed the strictest configured reviewer's input limit. Every touched path is listed below; "
-            "all added/deleted lines remain in the staged diff.\n\n"
-            + ("\n".join(f"- {path}" for path in touched_paths) or "(no paths reported)"))
+            "and would exceed the strictest configured reviewer's input limit. Every touched path is listed under "
+            "\"Changed files\"; all added/deleted lines remain in the staged diff.")
 
 
 def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
@@ -218,8 +218,7 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
             slot_limits = {key: _slot_input_limit(index) for index, key in enumerate(keys)}
             input_limit = _rv._quorum_input_token_limit(keys, slot_limits)
     if input_limit and estimate_tokens(prompt) > input_limit:
-        touched_paths = [line.strip() for line in changed.splitlines() if line.strip()]
-        fit_note = triad_fit_note(touched_paths)
+        fit_note = triad_fit_note()
         prompt, stable_prefix_len = assemble(fit_note, diff_text)
         if input_limit and estimate_tokens(prompt) > input_limit:
             from ouroboros.tools.review_binary_context import StagedDiffUnavailable
@@ -473,7 +472,7 @@ def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = Tr
         layer=layer, checklist_section="⟨checklist⟩", governance=governance, goal_section="⟨goal⟩", scope_section="⟨scope⟩",
         files_section="⟨files⟩", diff_text="⟨diff⟩", changed_files="⟨paths⟩", rebuttal_section="⟨rebuttal⟩",
         review_history_section="⟨history⟩", task_evidence_section="⟨evidence⟩")
-    packet_words = [prompt, *packet_head_material(layer), triad_fit_note(["⟨path⟩"]), triad_fit_note([]),
+    packet_words = [prompt, *packet_head_material(layer), triad_fit_note(),
                     pack_omission_note(["⟨path⟩"]), pack_exclusion_note(["⟨path⟩"], ["⟨path⟩"]),
                     *evidence_material(("packet",))]
     return every, packet_words, [*retrieving_material(layer), *evidence_material(("session", "native")),

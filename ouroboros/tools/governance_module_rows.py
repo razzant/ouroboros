@@ -18,17 +18,22 @@ from typing import Iterable, Optional, Sequence, Tuple
 MODULE_ROWS_PATH = "ouroboros/domains.toml#module_map"
 
 HEADING = ("Owners of the touched paths in the installed system (`ouroboros/domains.toml` and its `[references]`), "
-           "one row per path of the change; the change itself follows.")
+           "one row per path of the change, each with the installed file's own description (its first docstring or "
+           "header paragraph); the change itself follows.")
 DOMAIN_ROW = "- {path} ({change} in this change; domain {domain}: {title}; manuals: {manuals})"
 SURFACE_ROW = "- {path} ({change} in this change; surface {surface}; manuals: {manuals})"
 UNOWNED_ROW = "- {path} ({change} in this change; the installed map has no owner for it)"
 NO_MANUALS = "none named"
+LEAD_ROW = "  installed description: {lead}"
+# What a row says when the installed tree gives no description (``code_intelligence_module_map.installed_lead`` kinds).
+NO_LEAD = {"new": "none (new in this change)", "absent": "none (no such file in the installed tree)",
+           "none": "none (the installed file opens with no docstring or header comment)",
+           "other": "none (only Python and JS/TS/CSS files carry one)",
+           "unreadable": "none (the installed file could not be read)"}
 UNDEFINED_TITLE = "the installed map does not define this id"
 UNAVAILABLE = ("Owner rows of the touched paths were NOT delivered: the installed `ouroboros/domains.toml` is "
                "unavailable; the review's governance manifest records why.")
-YIELDED = ("Owner rows of the {count} touched path(s) were NOT delivered: with them this packet exceeded the strictest "
-           "configured reviewer's input limit, and they give way before any part of the change. The installed "
-           "`ouroboros/domains.toml` holds them.")
+YIELDED = "Owner rows of the {count} touched path(s) gave way first, to fit the input limit."
 YIELD_REASON = ("removed at the fit ladder's first step, to try to keep the change and its snapshots within the "
                 "strictest configured reviewer's input limit")
 # Git name-status letters and the words a row says; a rename or copy names its source; a path without a status says "touched".
@@ -58,12 +63,14 @@ def _owner(manifest, path: str) -> tuple:
     return ("surface", max(surfaces, key=len)) if surfaces else ("", "")
 
 
-def render_rows(manifest, entries: Iterable[Change]) -> ModuleRows:
-    """The block for ``entries`` against ``manifest`` (``domains``, ``modules``, ``references``): the one renderer,
-    which ``contract_material`` also runs. A rename or copy is owned where its source was, else where it landed."""
+def render_rows(manifest, entries: Iterable[Change], lead) -> ModuleRows:
+    """The block for ``entries`` against ``manifest`` (``domains``, ``modules``, ``references``) and ``lead`` (installed
+    path -> ``(kind, text)``): the one renderer, which ``contract_material`` also runs. A rename or copy is owned and
+    described where its source was, else where it landed; an added path is new."""
     lines = []
     for path, status, old in sorted((str(p).replace("\\", "/"), s, o) for s, p, o in entries):
-        source = _owner(manifest, old) if old and str(status)[:1].upper() in ("R", "C") else ("", "")
+        moved = bool(old) and str(status)[:1].upper() in ("R", "C")
+        source = _owner(manifest, old) if moved else ("", "")
         kind, key = source if source[0] else _owner(manifest, path)
         change, manuals = _change(status, old), ", ".join(manifest.references.get(key, ())) or NO_MANUALS
         if kind == "domain":
@@ -73,7 +80,9 @@ def render_rows(manifest, entries: Iterable[Change]) -> ModuleRows:
             lines.append(SURFACE_ROW.format(path=path, change=change, surface=key, manuals=manuals))
         else:
             lines.append(UNOWNED_ROW.format(path=path, change=change))
-    return ModuleRows("\n".join([HEADING, *lines]), len(lines)) if lines else ModuleRows()
+        found, text = ("new", "") if str(status)[:1].upper() == "A" else lead(old if moved else path)
+        lines.append(LEAD_ROW.format(lead=text if found == "lead" else NO_LEAD[found]))
+    return ModuleRows("\n".join([HEADING, *lines]), len(lines) // 2) if lines else ModuleRows()
 
 
 def module_rows(root: pathlib.Path, touched: Iterable[str], changes: Optional[Sequence[Change]] = None) -> ModuleRows:
@@ -88,7 +97,9 @@ def module_rows(root: pathlib.Path, touched: Iterable[str], changes: Optional[Se
     entries = list(changes or ())
     named = {path for _status, path, _old in entries}
     entries += [("", str(path), "") for path in dict.fromkeys(touched) if str(path) not in named]
-    return render_rows(manifest, entries)
+    from ouroboros.code_intelligence_module_map import installed_lead
+
+    return render_rows(manifest, entries, lambda path: installed_lead(pathlib.Path(root), path))
 
 
 def contract_material() -> tuple:
@@ -105,7 +116,10 @@ def contract_material() -> tuple:
                                            **{f"⟨{n} surface⟩": m for n, m in manuals.items()}})
     paths = [*(f"⟨{n} domain path⟩" for n in manuals), *(f"⟨{n} surface⟩⟨path⟩" for n in manuals),
              "⟨undefined path⟩", "⟨unowned path⟩"]
-    blocks = [render_rows(manifest, [(letter, path, "⟨old⟩") for path in paths]).text for letter in [*CHANGES, ""]]
+    kinds = ["lead", *NO_LEAD]
+    blocks = [render_rows(manifest, [(letter, path, "⟨old⟩") for path in paths],
+                          lambda _path, kind=kind: (kind, "⟨installed description⟩")).text
+              for letter in [*CHANGES, ""] for kind in kinds]
     return blocks, [UNAVAILABLE, YIELDED.format(count="⟨count⟩")]
 
 

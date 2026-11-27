@@ -225,10 +225,12 @@ def test_a_packet_seat_gets_one_installed_owner_row_per_path_and_no_other_module
     system = _packet_brief(tmp_path, installed, subject)
     assert _module_block(system).splitlines()[1:] == [
         "- ouroboros/a.py (modified in this change; domain D06: Review stack; manuals: docs/architecture/06-4.md)",
+        "  installed description: Installed lead of a.",  # the INSTALLED file's words, never the proposed tree's
         "- ouroboros/c\u00e9.py (renamed from ouroboros/c.py in this change; domain D06: Review stack; "
-        "manuals: docs/architecture/06-4.md)"]  # owned where its source was
+        "manuals: docs/architecture/06-4.md)",  # owned and described where its source was
+        "  installed description: Lead of c."]
     assert "ouroboros/b.py" not in system and "Lead of b." not in system  # no other module of the domain
-    assert "lead of a." not in _module_block(system) and "STAGED lead of a." in system  # the change carries it
+    assert "STAGED" not in _module_block(system) and "STAGED lead of a." in system  # the change carries it
 
 
 def test_the_synchronous_gate_reads_the_same_structured_set_from_the_staged_index(tmp_path):
@@ -311,29 +313,33 @@ def test_the_rows_give_way_first_in_the_fit_ladder_and_a_missing_manifest_is_sai
     assert UNAVAILABLE in _packet_brief(tmp_path / "bare", bare, subject)
 
 
-def _fixture_js(lines: int) -> bytes:
+def _fixture_js(lines: int, word: str = "fixture") -> bytes:
     """Frozen synthetic bytes this test owns (the shipped web tree may change freely)."""
-    return "".join(f"// fixture line {index:05d}: " + "x" * 60 + "\n" for index in range(lines)).encode()
+    return "".join(f"// {word} line {index:05d}: " + "x" * 60 + "\n" for index in range(lines)).encode()
 
 
-# (comment-touched file lines, added test file lines or 0, window, the pre-PR target's delivery)
+# (comment-touched file lines, added test file lines or 0, window, the pre-PR target's delivery), measured against the
+# target with its own governance code, navigation code and governance documents (27 Nov 2026).
 PRE_PR_DELIVERY = [
-    (900, 0, 131_072, "full"),   # with the pre-round-5 navigation: snapshot omitted
-    (150, 220, 100_000, "diff"),  # with the pre-round-5 navigation: REVIEW_BLOCKED (46,049 > 45,454)
-    (900, 0, 256_000, "full"),   # roomy control
+    (900, 0, 131_072, "full"),
+    (150, 220, 100_000, "diff"),
+    (150, 306, 100_000, "diff"),     # the target's last fitting size: a larger packet fixed cost refuses it
+    (150, 320, 100_000, "refused"),  # both refuse: the control that keeps the boundary honest
+    (300, 0, 100_000, "full"),       # the target's last whole-source size at this window
+    (900, 0, 256_000, "full"),       # roomy control
 ]
+FIXTURE_SENTINEL = "// fixture line 00007: "  # inside the source, outside the diff's hunk
 
 
 def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(tmp_path, monkeypatch):
-    """The expectations in ``PRE_PR_DELIVERY`` are what the pre-PR target (razzant/ouroboros bcac9f84126b: its
-    governance_context, its context_layout and its book blobs) delivered to a packet seat for exactly these bytes,
-    measured on 27 Nov 2026 beside this head ("full" = the touched file's whole source, "diff" = the diff with the
-    snapshot omitted). The subject is frozen synthetic bytes; the books, their navigation, the builder and the cold
-    sizing are the real ones, which is what this guards. A failure here means the tool-less packet's navigation grew
-    past what the pre-PR target delivered, so a change now costs a reviewer its snapshot or its review. A legitimate
-    re-measure follows only a deliberate change of the books' navigation size, against the same target.
-    Where the owner rows do not fit they give way with their counted notice; where the whole source arrives, so do
-    they."""
+    """The expectations in ``PRE_PR_DELIVERY`` are what the pre-PR target (razzant/ouroboros, measured 27 Nov 2026 at
+    bcac9f84126b and again at ad9e98f10198, with the target's governance_context, context_layout and governance
+    documents) delivered to a packet seat for exactly these bytes ("full" = the touched file's whole source, "diff" =
+    the diff with the snapshot omitted, "refused" = no packet). The subject is frozen synthetic bytes; the books,
+    their navigation, tier-1 governance, the owner rows, the builder and the cold sizing are the real ones, which is
+    what this guards. A failure means the packet's fixed cost (navigation, tier-1 governance, owner rows and their
+    notice) grew past what the pre-PR target spent, so a change now loses its snapshot or its review. A legitimate
+    re-measure follows only a deliberate change of that fixed cost, against the same target."""
     from ouroboros.tools import governance_module_rows as gmr, review as review_tool
     from ouroboros.tools.registry import ToolContext
 
@@ -348,19 +354,27 @@ def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(t
             stream.write("// Review one trailing comment.\n")
         if added:
             (subject / "web" / "tests").mkdir(parents=True)
-            (subject / "web" / "tests" / "fixture.test.js").write_bytes(_fixture_js(added))
+            (subject / "web" / "tests" / "fixture.test.js").write_bytes(_fixture_js(added, "testing"))
         _git(subject, "add", "-A")
         ctx = ToolContext(repo_dir=subject, drive_root=tmp_path / "drive")
         ctx._review_iteration_count = 0
         frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(subject), "index", surface="commit_gate",
                                                        governance_root=str(root), layer="body"))
         monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: window)
-        text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
+        where = f"packet fixed cost grew past the pre-PR target's: {(touched, added, window)}"
+        try:
+            text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive",
+                                        goal="Review these edits")["system"]
+        except ValueError as refusal:
+            assert delivered == "refused" and "REVIEW_BLOCKED" in str(refusal), where
+            continue
+        assert delivered != "refused", f"the control now fits: re-measure the target for {(touched, added, window)}"
         omitted = "Full post-change snapshots were omitted" in text
-        assert ("diff" if omitted else "full") == delivered, (touched, added, window)
-        assert "// Review one trailing comment." in text, (touched, window)
-        assert (gmr.HEADING in text) != ("were NOT delivered: with them" in text), (touched, window)
-        assert omitted or gmr.HEADING in text, (touched, window)
+        assert ("diff" if omitted else "full") == delivered, where
+        assert "// Review one trailing comment." in text, where
+        assert (FIXTURE_SENTINEL in text) == (not omitted), where  # the whole source is really there, or not
+        assert (gmr.HEADING in text) != (gmr.YIELDED.format(count=len([path for path in ("x", added) if path]))
+                                         in text), where
 
 
 def _edited_rows(needle, replacement):
@@ -385,9 +399,11 @@ EDITS = [('NO_MANUALS = "none named"', 'NO_MANUALS = "none published"'),
          ('UNDEFINED_TITLE = "the installed map does not define this id"', 'UNDEFINED_TITLE = "no installed definition"'),
          ('change; surface {surface}; manuals', 'change; surface area {surface}; manuals'),
          ('"T": "type-changed"', '"T": "mode-changed"'), ('TOUCHED = "touched"', 'TOUCHED = "named"'),
-         ("one row per path of the change;", "a row per path of the change;"),
+         ("path of the change, each with", "path of the change, every one with"),
          ("change; the installed map has no owner for it)", "change; the installed map owns it nowhere)"),
-         ("they give way before any part", "they yield before any part"),
+         ("gave way first, to fit", "yielded first, to fit"),
+         ('"  installed description: {lead}"', '"  installed summary: {lead}"'),
+         ('"none (new in this change)"', '"none (added in this change)"'),
          ('"unavailable; the review', '"unreadable; the review')]
 
 
@@ -542,3 +558,55 @@ def test_every_gate_variant_reads_one_structured_path_set_for_rows_and_file_bodi
         assert "- web/café.js (renamed from web/change-me.js in this change; surface web/" in block, label
         assert "- web/new.js (added in this change" in block and "- web/gone.js (deleted in this change" in block, label
         assert "THIS_RENAME_BODY" in prompt, label
+
+
+@pytest.mark.parametrize("touched, rule", [
+    (("ouroboros/genesis_project.py", "ouroboros/subagent_worktrees.py"), "never pruned by age"),
+    (("supervisor/telemetry_events.py", "ouroboros/subagent_worktrees.py"), "high-rate narration (live progress, chat frames) never joins it"),
+])
+def test_a_touched_file_rule_reaches_the_packet_when_its_snapshot_does_not(tmp_path, monkeypatch, touched, rule):
+    """The removed hand-kept tree told a reviewer of these files their rule even when only the diff fitted; the rule now
+    sits beside the file's name in its owning chapter section, which the packet selects for the touched path, and in
+    the owner rows' installed description when they fit."""
+    from ouroboros.tools import review as review_tool
+    from ouroboros.tools.registry import ToolContext
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    _installed, subject = _installed_and_subject(tmp_path)
+    for path in touched:
+        (subject / path).parent.mkdir(parents=True, exist_ok=True)
+        (subject / path).write_bytes((root / path).read_bytes())
+    _git(subject, "add", "-A")
+    _git(subject, "commit", "-qm", "identical source")
+    for path in touched:
+        with (subject / path).open("a", encoding="utf-8") as stream:
+            stream.write("\n# Review one trailing comment.\n")
+    _git(subject, "add", "-A")
+    ctx = ToolContext(repo_dir=subject, drive_root=tmp_path / "drive")
+    ctx._review_iteration_count = 0
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(subject), "index", surface="commit_gate",
+                                                   governance_root=str(root), layer="body"))
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 100_000)
+    text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
+    assert "Full post-change snapshots were omitted" in text and "# Review one trailing comment." in text
+    assert rule in text
+
+
+def test_the_frozen_builder_gives_a_conflict_anchor_outside_the_delta_its_row(tmp_path, monkeypatch):
+    """A managed resolution that keeps a conflict file at its mechanical-merge bytes leaves it out of the Git delta;
+    the reviewed set is the delta and the anchors, so the packet's owner rows still name it."""
+    from ouroboros.tools.registry import ToolContext
+    from tests import test_managed_review_subject as managed_fixture
+
+    repo, simple, tx = managed_fixture._managed_resolution_repo(tmp_path, monkeypatch)
+    _git(repo, "checkout", tx["m0_tree"], "--", "conflict.txt")  # the anchor back at its M0 bytes
+    _git(repo, "add", "-A")
+    installed, _subject = _installed_and_subject(tmp_path / "installed")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data", task_id=simple.task_id,
+                      task_metadata=simple.task_metadata)
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
+                                                   governance_root=str(installed), layer="body"))
+    assert frozen.managed is not None and "conflict.txt" not in {path for _s, path in frozen.name_status}
+    block = _module_block(build_two_part_brief(frozen, PACKET, goal="g", commit_message="m")["system"])
+    assert "- conflict.txt (touched in this change; the installed map has no owner for it)" in block
+    assert "- resolver_note.txt (added in this change" in block

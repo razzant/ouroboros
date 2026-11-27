@@ -324,7 +324,7 @@ def test_the_architecture_map_is_never_inlined_whole(repo):
                   if path.startswith("docs/architecture/") and "#" not in path]
     assert whole_arch == []
     assert "docs/ARCHITECTURE.md" in _paths(context, "navigation", tier=3)
-    assert "docs/architecture/02-web.md" in context.navigation
+    assert "Chapters in `docs/architecture/`:" in context.navigation and "\n02-web.md" in context.navigation
 
 
 def test_a_packet_row_receives_the_sections_that_name_a_touched_file(repo):
@@ -480,7 +480,8 @@ def test_one_owner_row_per_touched_path_precedes_the_sections_and_names_no_other
     context = _context(_with_manifest(repo))
     text = context.selected_inline
     assert text.count(ROW) == 1 and text.index(ROW) < text.index(SECTION)
-    assert "ouroboros/other.py" not in text and "lead." not in text  # no other module of the domain, no lead
+    assert "ouroboros/other.py" not in text and "other lead." not in text  # no other module of the domain
+    assert text.index(ROW) < text.index("  installed description: project_dialogue lead.")  # the touched file's own lead
     assert [row["disposition"] for row in context.manifest if row["path"] == MODULE_ROWS_PATH] == ["inline"]
     starved = _context(repo, usable_window_tokens=0)  # the share does not decide the rows: the fit ladder does
     assert ROW in starved.selected_inline and SECTION not in starved.selected_inline
@@ -497,13 +498,19 @@ def test_each_row_carries_its_git_change_both_sides_of_a_rename_and_a_non_ascii_
         ("A", "web/caf\u00e9.js", ""), ("D", "docs/gone.md", ""), ("R100", "docs/moved.js", "web/moved.js")])
     assert rows.count == 6 and rows.text.splitlines()[1:] == [
         "- anchor.png (touched in this change; the installed map has no owner for it)",  # a path outside the delta
+        "  installed description: none (only Python and JS/TS/CSS files carry one)",
         "- docs/gone.md (deleted in this change; the installed map has no owner for it)",
+        "  installed description: none (only Python and JS/TS/CSS files carry one)",
         "- docs/moved.js (renamed from web/moved.js in this change; surface web/; manuals: docs/web.md)",
+        "  installed description: none (no such file in the installed tree)",
         "- ouroboros/project_dialogue.py (modified in this change; domain D01: Agent core; "
         "manuals: docs/architecture/01-core.md)",
+        "  installed description: project_dialogue lead.",
         "- ouroboros/renamed.py (renamed from ouroboros/other.py in this change; domain D01: Agent core; "
         "manuals: docs/architecture/01-core.md)",
-        "- web/caf\u00e9.js (added in this change; surface web/; manuals: docs/web.md)"]
+        "  installed description: other lead.",  # described where its source was installed
+        "- web/caf\u00e9.js (added in this change; surface web/; manuals: docs/web.md)",
+        "  installed description: none (new in this change)"]
 
 
 def test_a_domain_id_the_installed_map_does_not_define_still_gives_the_row(repo):
@@ -515,7 +522,8 @@ def test_a_domain_id_the_installed_map_does_not_define_still_gives_the_row(repo)
                                                                      '"ouroboros/other.py" = "D60"'), encoding="utf-8")
     rows = module_rows(repo, [], [("M", "ouroboros/other.py", "")])
     assert rows.text.splitlines()[1:] == [
-        f"- ouroboros/other.py (modified in this change; domain D60: {UNDEFINED_TITLE}; manuals: none named)"]
+        f"- ouroboros/other.py (modified in this change; domain D60: {UNDEFINED_TITLE}; manuals: none named)",
+        "  installed description: other lead."]
     assert ROW in _context(repo).selected_inline  # the packet is prepared, the defined owner still answers
 
 
