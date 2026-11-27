@@ -7563,7 +7563,7 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .toast-stack {
     --toast-top: calc(76px + var(--inset-top));
     position: fixed;
-    right: 18px;
+    inset-inline-end: 18px;
     top: var(--toast-top);
     z-index: 120;
     display: flex;
@@ -7612,7 +7612,8 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; grid-row: 2; margin-inline-start: 0; justify-self: start; }
 /* The close: a small plain × in the corner, no plate or shadow (owner 27.11.2026); its ink deepens on hover. Under a
    finger its reach is the touch minimum (.ui-hit-area), wider than the glyph. A right-to-left interface mirrors the
-   toast inside (the × at its inline end) while the stack keeps the top right. */
+   page and its stack with it: the stack keeps the room's top corner at its inline end (top right in a left-to-right
+   interface) and the × the toast's. */
 .toast > .toast-dismiss {
     grid-column: 2;
     grid-row: 1;
@@ -7641,10 +7642,11 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
    once cut). A scrolling box clips what it holds, so its padding is the toasts' shadow room (0 18px 42px): left and
    below them, and the 18 px to the right edge that `right` kept before. Room notices keep their own place. */
 #toast-stack {
-    right: 0;
+    inset-inline-end: 0;
     box-sizing: border-box;
     max-height: calc(var(--vvh) - var(--toast-top) - var(--inset-bottom) - 18px);
-    padding: 0 18px 60px 42px;
+    padding-block: 0 60px;
+    padding-inline: 42px 18px;
     overflow-y: auto;
     overscroll-behavior: contain;
 }
@@ -12724,7 +12726,7 @@ html[data-telegram-fullscreen] body.keyboard-open :is(#content, #page-chat.activ
     box-shadow: none;
 }
 /* The page's notices keep their 18 px from the right inset, and a notice as wide as it may be as much from the left. */
-html[data-telegram-fullscreen] #toast-stack { padding-right: calc(18px + var(--inset-right)); }
+html[data-telegram-fullscreen] #toast-stack { padding-inline-end: calc(18px + var(--inset-right)); }
 html[data-telegram-fullscreen] #toast-stack .toast {
     max-width: min(420px, calc(100vw - 112px - var(--inset-left) - var(--inset-right)));
 }

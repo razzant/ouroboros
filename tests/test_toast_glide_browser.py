@@ -26,6 +26,9 @@ def _open(ui, width, height, *, touch=False):
     page.goto(ui['url'] + '/')
     page.wait_for_selector('#chat-input', state='attached')
     settle(page)
+    # The page's own notices (this fixture answers no saved history, which the room tells once) are not the stack under
+    # study: they leave first, so every count below is the test's own.
+    page.evaluate("() => document.querySelectorAll('#toast-stack .toast').forEach((toast) => toast.dispose())")
     return page
 
 
