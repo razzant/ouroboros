@@ -7,7 +7,7 @@ the captured core."""
 from __future__ import annotations
 
 import pathlib
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import memory_floor as floor, memory_view as mv
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
@@ -595,3 +595,45 @@ def start_facts(plan: Any, snapshot: mv.MemoryViewSnapshot, receipt: Mapping[str
                          telling_parts(snapshot, int(fact["telling"]), held["chars"])) if held["chars"] else ""
     except Exception:  # the composition is a segment of the facts row: its failure drops it alone
         return ""
+
+
+# The names a refused request's parts carry (``context_start_bound`` and ``context_fit``'s refusals).
+_SECTION_NAMES = {"shared_understanding": "overview"}
+_GOVERNANCE_NAMES = {"system": "system prompt", "bible": "constitution"}
+_ANONYMOUS_PREFIXES = {"stable", "dynamic", "head", "governance"}  # ``section_floor.capture_sections``' positional ids
+
+
+def _largest_first(parts: Iterable[Tuple[str, int]]) -> Tuple[Tuple[str, int], ...]:
+    return tuple(sorted(((name, size) for name, size in parts if size), key=lambda part: (-part[1], part[0])))
+
+
+def refusal_parts(core: Any, sections: Iterable[Any], receipts: Iterable[Mapping[str, Any]], schemas: Iterable[Any],
+                  shown: Any, user_content_json: str, *, mode: str, provider: str,
+                  reasoning_effort: str) -> Tuple[Tuple[str, int], ...]:
+    """Named sizes, in estimator tokens and largest first, of what a request the fitter refused holds.
+
+    Host sections by their producer's name (governance as ``system prompt`` and ``constitution``, a report by its
+    family, positional sections summed as ``other host sections``) in the forms the walk chose; the connections text,
+    the assignment and the tool schemas; the story and the room only when memory was rendered (``shown``).
+    """
+    from ouroboros.context_measurement import tool_schema_tokens
+    from ouroboros.section_floor import section_views
+
+    sections = tuple(sections)
+    views = section_views(sections, receipts)
+    sizes: Dict[str, int] = {}
+    for part in sections:
+        family, (prefix, _sep, index) = getattr(part, "report_family", ""), part.section_id.rpartition("_")
+        name = (_GOVERNANCE_NAMES.get(family, family) if family else "other host sections"
+                if prefix in _ANONYMOUS_PREFIXES and index.isdigit() else _SECTION_NAMES.get(part.section_id, part.section_id))
+        sizes[name] = sizes.get(name, 0) + mv.json_chars(views.get(part.section_id, part.full_text)) // 4
+    for parts, text in ((core.semi_stable_sections, core.semi_stable_text), (core.dynamic_sections, core.dynamic_text),
+                        (core.dynamic_head_sections, core.dynamic_head_text)):
+        if not parts and text:  # a core captured as plain text: its sections are drawn from it whole
+            sizes["other host sections"] = sizes.get("other host sections", 0) + mv.json_chars(text) // 4
+    sizes["connections"] = mv.json_chars(core.connections[mode == "nano"]) // 4
+    sizes["assignment"] = len(user_content_json) // 4
+    sizes["tool schemas"] = tool_schema_tokens(list(schemas), provider=provider, reasoning_effort=reasoning_effort)
+    if shown is not floor.NO_VIEW:
+        sizes["story"], sizes["room"] = floor.tokens_of(shown.story_chars), floor.tokens_of(shown.room_chars)
+    return _largest_first(sizes.items())

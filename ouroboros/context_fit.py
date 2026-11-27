@@ -1211,7 +1211,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         sent, fixed, reserve, window, boundary, allowances, receipts, shown, _, mode = last
     if kept is None and not cold_resume and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
         core_alone = overflows()  # then a Nano frame without held heads rendered no memory (the loop's cold skip)
-        from ouroboros.context_start_bound import refusal_parts  # names what the refused request holds
+        from ouroboros.context_view_facts import refusal_parts  # names what the refused request holds
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
                                else "Protected owner words and the minimum view cannot fit the usable input",
                                fixed_tokens=fixed, memory_tokens=floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars),
