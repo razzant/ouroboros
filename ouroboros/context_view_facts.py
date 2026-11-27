@@ -491,6 +491,12 @@ def refusal_route(unfit, route, record):
     return unfit
 
 
+# A window limit's source in a person's words (``window_projection``, the refusal's Details in ``realtime_setup``).
+WINDOW_SOURCES = {"user_setting": "set in Settings", "owner_ack": "owner confirmation",
+                  "provider_metadata": "server metadata", "local_health": "local serving window",
+                  "server_metadata": "the server's own window", "accepted": "an accepted request of that size"}
+
+
 def window_projection(record, *, under_way: bool = False):
     """Pure sourced projection shared by Main, Settings and terminal failures. ``under_way``: the reader is a Main
     work, whose requests after its start are read at ``admitted``; a single-shot caller sizes by ``usable`` alone.
@@ -502,9 +508,7 @@ def window_projection(record, *, under_way: bool = False):
     limit = record.limiting
     observed = limit.observed_at if limit else ""
     source = limit.source if limit else "unknown"
-    labels = {"user_setting": "set in Settings", "owner_ack": "owner confirmation",
-              "provider_metadata": "server metadata", "local_health": "local serving window",
-              "server_metadata": "the server's own window"}
+    labels = WINDOW_SOURCES
     label = labels.get(source, source)
     dated = f"{label} {observed.replace('T', ' ')[:16]}".strip()
     if source == "refusal":

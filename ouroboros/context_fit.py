@@ -1440,7 +1440,7 @@ def build_context_fit_plan(
                 ratio=state.ratio, work_room_levels=levels, **options)
         except MinimumViewUnfit as unfit:  # the refusal names its serving program and window in effect
             from ouroboros.context_view_facts import refusal_route
-            raise refusal_route(unfit, state.route, state.window_record)
+            raise refusal_route(unfit, state.route, replace(state.window_record, reserve=unfit.response_reserve_tokens))
 
     def walk(state):
         try:

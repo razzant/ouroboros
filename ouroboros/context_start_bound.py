@@ -118,8 +118,8 @@ def _refusal(task, ctx, spec, frame_texts, resolver, *, tool_schemas, nano_base,
 
 def _route_frame(answer: Any, task: Mapping[str, Any], *, tool_schemas, nano_base, effort: str,
                  preferred: str) -> Optional[Tuple[int, int, float, int, Any]]:
-    """``(Nano reserve, Nano window, density, Nano tool-schema tokens, the route's window record)`` of one route
-    answer, or None without a known window or a readable density."""
+    """``(Nano reserve, Nano window, density, Nano tool-schema tokens, the route's window record at Nano's reserve)``
+    of one route answer, or None without a known window or a readable density."""
     if answer is None:
         return None
     route, evidence = answer
@@ -130,13 +130,13 @@ def _route_frame(answer: Any, task: Mapping[str, Any], *, tool_schemas, nano_bas
                                        nano_tools=None, tool_frames=None, window_record=record,
                                        window_tokens=record.total_equivalent, admitted=False, preferred=preferred,
                                        output_reserve=output_reserve, working_reserve_tokens=working_reserve)
-    _target, reserve, window, _record = limits("nano")
+    _target, reserve, window, nano_record = limits("nano")  # the record of the mode that binds: Nano's reserve
     ratio = 1.0 if basis == "estimator" else _lowest_density(task, route, evidence)
     if ratio is None:
         return None
     schemas = tool_schema_tokens(list(tools_for("nano").schemas), provider=str(route.get("provider") or ""),
                                  reasoning_effort=effort)
-    return reserve, window, ratio, schemas, record
+    return reserve, window, ratio, schemas, nano_record
 
 
 def _lowest_density(task: Mapping[str, Any], route: Mapping[str, Any], evidence: Any) -> Optional[float]:

@@ -135,13 +135,18 @@ _STAGES = {"task_preparation": "Stage: before the engine was reached, while this
 
 
 def _limit_credit(limit):
-    """Where the window in effect came from (``context_view_facts.window_projection``'s source, basis and date)."""
-    from ouroboros.context_view_facts import _REFUSAL_BASES
+    """Where the window in effect came from (``context_view_facts.window_projection``'s source, basis and date), in a
+    person's words, and whether its number is an input limit (the window is then that input plus the reserve) or a
+    total."""
+    from ouroboros.context_view_facts import _REFUSAL_BASES, WINDOW_SOURCES
 
     if not isinstance(limit, dict) or limit.get("source") in (None, "", "unknown"):
         return "its source is not recorded with this refusal"
     basis = f" ({_REFUSAL_BASES.get(limit.get('basis'), limit.get('basis'))})" if limit.get("basis") else ""
-    return f"source: {limit['source']}{basis}; observed: {str(limit.get('observed_at') or 'not stated').replace('T', ' ')[:16]}"
+    number = (f"an input limit of {limit['tokens']:,} plus the reserve" if limit.get("kind") == "input"
+              and isinstance(limit.get("tokens"), int) else "a total")
+    return (f"{number}; source: {WINDOW_SOURCES.get(limit['source'], limit['source'])}{basis}; "
+            f"observed: {str(limit.get('observed_at') or 'not stated').replace('T', ' ')[:16]}")
 
 
 def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fixed=None, parts=(), extra="", model="",

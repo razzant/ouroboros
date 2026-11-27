@@ -528,3 +528,46 @@ def test_the_early_refusal_names_the_window_in_effect_with_its_own_source_and_da
     shipped = _refused_call_window_line(unfit, RouteFacts(25_000, None, 10_000, "estimator", "the engine's catalogue",
                                                           "2026-11-26"))
     assert "source: the engine's catalogue; observed: 2026-11-26." in shipped and "refusal" not in shipped
+
+
+def _two_sources(input_tokens=12_000, total_tokens=25_000):
+    """A route with an input limit from a size refusal and a total from my human's confirmation: Nano's reserve
+    (10,000 when Max is preferred) leaves the input limit binding, Max's (16,384) the total."""
+    from ouroboros.context_window import WindowLimit, WindowRecord
+
+    return WindowRecord("synthetic-route", input=WindowLimit(input_tokens, "input", "refusal", "2026-11-25T10:02:00+00:00",
+                                                             basis="provider_stated"),
+                        total=WindowLimit(total_tokens, "total", "owner_ack", "2026-11-21T09:00:00+00:00"), reserve=16_384)
+
+
+@pytest.mark.parametrize("site", ["early bound", "fit"])
+@pytest.mark.parametrize("sources", ["two", "one"])
+def test_a_refusal_names_the_window_record_of_the_mode_that_binds(drive, monkeypatch, site, sources):
+    """pr2rev1 G17, G18 on both raise sites: a start preferring Max is refused at Nano, so the window it names is
+    Nano's record (Nano's reserve), whose binding limit can be another source than Max's; Details say that source
+    in a person's words and whether its number is an input limit or a total. With one source (the other direction)
+    the credit is that source, a total."""
+    from tests.test_context_minimum_view_unfit import _refused_call_window_line
+    from ouroboros.contracts.realtime import RouteFacts
+
+    record = _two_sources() if sources == "two" else replace(_two_sources(), input=None)
+    for module in (fit, bound):
+        monkeypatch.setattr(module, "route_window", lambda *_a, **_kw: (16_384, 10_000, "estimator", True, record))
+    if site == "fit":
+        monkeypatch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
+    else:
+        capture_spy(monkeypatch, fail=True)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build(drive, resolver(25_000), mode="max")
+    unfit = raised.value
+    assert str(unfit).startswith("Core, resident tools and reserve cannot fit before memory" if site == "early bound"
+                                 else "Core, assignment, resident control tools") and unfit.response_reserve_tokens == 10_000
+    line = _refused_call_window_line(unfit, RouteFacts(None, None, 10_000, "estimator", "No published window", "2026-10-21"))
+    if sources == "two":
+        assert (unfit.window["source"], unfit.window["kind"], unfit.window["tokens"]) == ("refusal", "input", 12_000)
+        assert ("an input limit of 12,000 plus the reserve; source: refusal (provider stated); observed: 2026-11-25 10:02"
+                in line), line
+    else:
+        assert (unfit.window["source"], unfit.window["kind"]) == ("owner_ack", "total")
+        assert "a total; source: owner confirmation; observed: 2026-11-21 09:00" in line, line
+    assert "owner_ack" not in line and "user_setting" not in line
