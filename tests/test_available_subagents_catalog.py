@@ -188,7 +188,7 @@ def _context_env(tmp_path):
 
 def test_catalog_is_semi_stable_while_dated_history_stays_dynamic(tmp_path, monkeypatch):
     from ouroboros.context import _capture_context_core
-    from ouroboros.context_fit import _render_context_system_content
+    from ouroboros.context_fit import _governance_blocks, _system_blocks
     from ouroboros.memory import Memory
 
     env = _context_env(tmp_path)
@@ -228,7 +228,8 @@ def test_catalog_is_semi_stable_while_dated_history_stays_dynamic(tmp_path, monk
         {"id": "task-1", "type": "task", "text": "work"},
         None, None,
     )
-    blocks = _render_context_system_content(env, core, mode="max")
+    governance = _governance_blocks(env, core, mode="max")
+    blocks = _system_blocks(core, governance, "", "", mode="max")
     catalog_text = core.semi_stable_text.split("## Available subagents\n\n", 1)[1]
     catalog, _end = json.JSONDecoder().raw_decode(catalog_text)
 
@@ -237,7 +238,7 @@ def test_catalog_is_semi_stable_while_dated_history_stays_dynamic(tmp_path, monk
     assert blocks[-1]["text"] == core.dynamic_head_text + "\n\n" + core.dynamic_text  # knowledge leads the changing block
     assert "cache_control" not in blocks[-1]
     # A projection's story closes the story block after the catalog; its rooms open the changing block after the knowledge.
-    viewed = _render_context_system_content(env, core, mode="max", story="## My story\n\nS", room="## This room (R)")
+    viewed = _system_blocks(core, governance, "## My story\n\nS", "## This room (R)", mode="max")
     assert viewed[-2]["text"] == core.semi_stable_text + "\n\n## My story\n\nS"
     assert viewed[-1]["text"] == core.dynamic_head_text + "\n\n## This room (R)\n\n" + core.dynamic_text
     assert catalog["rows"][0]["recommended_use"] == owner_text

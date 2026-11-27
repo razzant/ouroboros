@@ -178,7 +178,7 @@ def test_the_round_facts_keep_a_recorded_ttl_without_inventing_response_age(tmp_
 def test_context_cache_facts(tmp_path, monkeypatch, kind, target, input_sources):
     from ouroboros import maintenance
     from ouroboros.context import _capture_context_core
-    from ouroboros.context_fit import _render_context_system_content
+    from ouroboros.context_fit import _governance_blocks, _system_blocks
     from ouroboros.memory import Memory
     from ouroboros.subagent_history import execution_identity
     from ouroboros.subagent_metrics import publish
@@ -197,7 +197,7 @@ def test_context_cache_facts(tmp_path, monkeypatch, kind, target, input_sources)
 
     def capture():
         core = _capture_context_core(env, Memory(drive_root=tmp_path), task, None, None)
-        return core, _render_context_system_content(env, core, mode="max"), json.dumps(registry.schemas(), sort_keys=True)
+        return core, _system_blocks(core, _governance_blocks(env, core, mode="max"), "", "", mode="max"), json.dumps(registry.schemas(), sort_keys=True)
 
     before, before_blocks, before_tools = capture()
     publish(tmp_path, {"row_id": "worker", "row_identity": execution_identity(task["configured_subagent"]),

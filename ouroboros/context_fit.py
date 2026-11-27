@@ -427,22 +427,6 @@ def _governance_blocks(env: Any, core: ContextCore, *, mode: str) -> Tuple[Any, 
     return _section_governance(env, core, mode=mode, reference_docs=reference_doc_sections)
 
 
-def _render_context_system_content(
-    env: Any,
-    core: ContextCore,
-    *,
-    mode: str,
-    story: str = "",
-    room: str = "",
-) -> List[Dict[str, Any]]:
-    """``[A'▸, D?▸, B▸, C]``: common governance, optional handbook, identity/story, changing facts.
-
-    ``story`` and ``room`` are the memory view rendered for this projection's mode and
-    selected forms; empty without a view.
-    """
-    return _system_blocks(core, _governance_blocks(env, core, mode=mode), story, room, mode=mode)
-
-
 def seal_task_transcript(messages: List[Dict[str, Any]], min_prefix_tokens: int = 2048) -> None:
     """Mark ONE stable message-side boundary for provider prompt caching.
 
@@ -987,8 +971,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         admitted=admitted, preferred=preferred, output_reserve=output_reserve, working_reserve_tokens=working_reserve_tokens)
     sections = {m: (*core.semi_stable_sections, *core.dynamic_sections, *core.dynamic_head_sections,
                     *(governance[shape[m]][0] if not isinstance(governance[shape[m]][0], str) else ())) for m in form}
-    integrating = _integrating(core, snapshot.spec.role if snapshot else None)
-    can_yield_maps = ((kept is None and not cold_resume) or start_work or unsent_start) and integrating
+    can_yield_maps = ((kept is None and not cold_resume) or start_work or unsent_start) and _integrating(core, snapshot.spec.role if snapshot else None)
     book_maps = floor.replay_book_maps(sections["low"], saved if kept is None else {}, core, retain=retain)
     low_maps = book_maps if kept is None else [r for r in (kept_sections or {}).get("low", ()) if r.get("section_id") in floor.BOOK_MAPS]
     saved_frame = saved.get("frame") if len(book_maps) == len(saved.get("book_maps", ())) else None  # a list now detailed: refit
