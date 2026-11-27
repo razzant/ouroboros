@@ -955,6 +955,7 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
     """One transaction checks legality, dispatch authority and money, then writes summary deltas.
     Expected seq/revision makes recovery losing a settlement race return the current row."""
     from ouroboros._usage_wait import transition_acquisition
+    from ouroboros.usage_admission import row_accounting_stash
     from ouroboros.usage_ledger import is_abandoned_settlement
 
     def check_fences():
@@ -1034,6 +1035,7 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
                 fields["effort"] = {**current["effort"], "reported": None, "report_source": None}
         row = {key: value for key, value in current.items() if key not in replaced}
         row.update(state=state, **fields)
+        stash = row_accounting_stash(view, current)  # read now: a claim's zero-wait COMMIT ends its statements
         if state == "dispatched":
             from ouroboros.owner_pause import LaunchBusy, OwnerPauseRefused, launch_admission
 
@@ -1049,9 +1051,7 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
                 raise _PhysicalSendNotStarted(str(exc) or "owner_pause") from exc
         else:
             appended = view.write(row, current)
-        from ouroboros.usage_admission import stash_row_accounting
-
-        stash_row_accounting(view, current)
+        stash()
         return copy.deepcopy(appended)
 
 
@@ -1188,9 +1188,9 @@ def apply_provider_price_receipt(drive_root, attempt_id: str, receipt: dict, *, 
         row.update(state="settled", cost_usd=cost, cost_final=True, settle_reason="late_receipt",
                    provider_price_receipt=copy.deepcopy(receipt))
         stored = view.write(row, current)
-        from ouroboros.usage_admission import stash_row_accounting
+        from ouroboros.usage_admission import row_accounting_stash
 
-        stash_row_accounting(view, current)
+        row_accounting_stash(view, current)()
         return {"status": "applied", "row": stored}
 
 
