@@ -1,16 +1,16 @@
-"""After Panic, only the desktop app's native confirmation turns consciousness back on; in an ordinary browser or on a
-phone, Dashboard › Consciousness explains that requirement and leaves manual per-task Resume available (docs/DESIGN.md
-"Dashboard › Consciousness"; ``supervisor/panic_choice.py``).
+"""After Panic the owner's Turn on in an ordinary browser or on a phone turns consciousness back on as in 7.12.1 (the
+owner 27.11), handing Ouroboros no choice of Panic-stopped tasks: only the desktop app's native confirmation hands that
+over (docs/DESIGN.md "Dashboard › Consciousness"; ``supervisor/panic_choice.py``). Manual per-task Resume stays.
 
 Two scenes. The first runs the shipped SPA in desktop and phone browser viewports over the shared fixture's endpoints,
-the consciousness reads answered with what the host's own functions produce: pressing Turn on opens an explanation
-alert with OK, sends no WebSocket ``/bg start``, and makes no retry. The second runs one whole browser path on a REAL
-isolated server (``direct_server_with_data``: its own data root, port and mock model): an installation stopped by Panic
-is written with the product's own writers while the server is down (no Panic is invoked), the server boots on it, plain
-``POST /api/command`` ``/bg start`` is refused, pressing Turn on in the browser explains the desktop-only confirmation
-without faking human consent or turning consciousness on, and manual per-task Resume in Main still returns the chosen
-task while consciousness stays off and no choice key is written to ``state.json``. Screenshots go to
-``OUROBOROS_UI_EVIDENCE_DIR`` when set, before assertions.
+the consciousness reads answered with what the host's own functions produce: pressing Turn on asks Turn on / Keep off
+with the host's words and a note that this Turn on hands over no choice; Keep off sends nothing, Turn on sends one
+WebSocket ``/bg start``. The second runs one whole browser path on a REAL isolated server (``direct_server_with_data``:
+its own data root, port and mock model): an installation stopped by Panic is written with the product's own writers
+while the server is down (no Panic is invoked), the server boots on it, Keep off changes nothing, manual per-task Resume
+in Main returns the chosen task while consciousness stays off, and then Turn on in the browser turns consciousness on,
+clears Panic's stop, leaves the other task's Panic hold standing and writes no choice key to ``state.json``.
+Screenshots go to ``OUROBOROS_UI_EVIDENCE_DIR`` when set, before assertions.
 """
 from __future__ import annotations
 
@@ -26,8 +26,26 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 pytestmark = [pytest.mark.ui_browser]
 BASIS = "0123456789abcdef0123456789abcdef"
 DIALOG = ".confirm-dialog"
-BROWSER_NOTE = ("Open Ouroboros in the desktop app on that computer to confirm this action after Panic. "
-                "Here you can resume individual tasks manually.")
+BROWSER_NOTE = ("Turning it on here hands Ouroboros no choice: the tasks stopped by Panic stay stopped until you "
+                "resume them.")
+HOST_LINES = ("Panic turned consciousness off.",
+              "Nothing starts right now: 2 tasks stopped by Panic stay stopped at this press.",
+              "Confirmed in the desktop app, Ouroboros may on its later wakes decide which of them to resume, even "
+              "one the Panic was pressed for.",
+              "A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits stay "
+              "in force.",
+              "Turning consciousness off, or restarting Ouroboros, ends that choice.")
+
+
+def _asks_with_the_host_words_and_the_note(page, width=None, height=None):
+    words = page.locator(DIALOG).inner_text()
+    assert "Turn on consciousness?" in words
+    assert all(line in words for line in HOST_LINES), words
+    assert BROWSER_NOTE in words and "desktop app on that computer" not in words
+    assert [button.inner_text() for button in page.locator(f"{DIALOG} button").all()] == ["Keep off", "Turn on"]
+    if width:
+        box = page.locator(DIALOG).bounding_box()
+        assert box["x"] >= 0 and box["x"] + box["width"] <= width and box["y"] + box["height"] <= height, box
 
 
 def _host_answers():
@@ -47,7 +65,7 @@ def _shot(page, name):
 
 
 @pytest.mark.parametrize("width,height,theme", [(1100, 750, "dark"), (390, 844, "light")])
-def test_turn_on_after_panic_explains_desktop_requirement_in_browser_and_sends_nothing(
+def test_turn_on_after_panic_in_browser_asks_and_sends_the_plain_start_only_on_yes(
         subscription_ui, width, height, theme):
     ui = subscription_ui
     status, preview = _host_answers()
@@ -77,28 +95,28 @@ def test_turn_on_after_panic_explains_desktop_requirement_in_browser_and_sends_n
 
     turn_on.click()
     page.wait_for_selector(DIALOG)
-    _shot(page, f"browser-explanation-alert-{width}-{theme}")
-    words = page.locator(DIALOG).inner_text()
-    assert "Turn on consciousness?" in words
-    assert "Panic turned consciousness off: it stays off until you turn it on in the desktop app." in words
-    assert "Nothing starts right now: 2 tasks stopped by Panic stay stopped at this press." in words
-    assert "On its later wakes Ouroboros may decide which of them to resume, even one the Panic was pressed for." in words
-    assert "A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits stay in force." in words
-    assert "Turning consciousness off, or restarting Ouroboros, ends that choice." in words
-    assert BROWSER_NOTE in words
-    assert [button.inner_text() for button in page.locator(f"{DIALOG} button").all()] == ["OK"]
-    box = page.locator(DIALOG).bounding_box()
-    assert box["x"] >= 0 and box["x"] + box["width"] <= width and box["y"] + box["height"] <= height, box
-    assert commands() == [], "browser alert sends no command"
+    _shot(page, f"browser-plain-turn-on-question-{width}-{theme}")
+    _asks_with_the_host_words_and_the_note(page, width, height)
+    assert commands() == [], "nothing is sent before the answer"
 
-    page.click(f"{DIALOG} [data-confirm-ok]")
+    page.click(f"{DIALOG} [data-confirm-cancel]")  # Keep off
     page.wait_for_selector(DIALOG, state="detached")
     page.wait_for_function(
         "(s) => { const b = document.querySelector(s); return b && !b.disabled && b.dataset.enabled === '0'; }",
         arg='#page-dashboard [data-cx-act="toggle"]',
     )
     page.wait_for_timeout(200)
-    assert commands() == [], "dismissing the explanation sends no /bg start and makes no retry"
+    assert commands() == [], "Keep off sends no /bg start and makes no retry"
+
+    turn_on.click()
+    page.wait_for_selector(DIALOG)
+    page.click(f"{DIALOG} [data-confirm-ok]")  # Turn on
+    page.wait_for_selector(DIALOG, state="detached")
+    for _ in range(50):
+        if commands():
+            break
+        page.wait_for_timeout(100)
+    assert [frame.get("cmd") for frame in commands()] == ["/bg start"], "Turn on sends the plain /bg start once"
 
 
 # --- one whole browser path on a real isolated server ------------------------------------------------------------
@@ -159,7 +177,7 @@ def _saved_state(data_dir):
     return json.loads((data_dir / "state" / "state.json").read_text(encoding="utf-8"))
 
 
-def test_a_real_server_explains_in_browser_after_panic_keeps_consciousness_off_and_manual_resume_works(
+def test_a_real_server_turns_consciousness_on_from_the_browser_after_panic_with_no_choice_and_manual_resume_works(
         direct_server_with_data, monkeypatch):
     from playwright.sync_api import sync_playwright
 
@@ -188,33 +206,14 @@ def test_a_real_server_explains_in_browser_after_panic_keeps_consciousness_off_a
             )
             _shot(page, "real-server-off-after-panic")
 
-            # A plain /bg start without the desktop confirmation is refused by the real server.
-            plain = page.request.post(url + "/api/command", data=json.dumps({"cmd": "/bg start"}),
-                                      headers={"Content-Type": "application/json"})
-            assert plain.ok, plain.text()
-            said = lambda: json.dumps(page.request.get(url + "/api/chat/history?chat_id=1").json(), ensure_ascii=False)
-            for _ in range(100):  # its own reply says so, in Main
-                if "This Turn on was not applied" in said():
-                    break
-                page.wait_for_timeout(100)
-            assert "This Turn on was not applied: Panic stopped consciousness" in said()
-            assert _saved_state(data_dir)["bg_consciousness_enabled"] is False
-
-            # In an ordinary browser (no pywebview bridge), Turn on shows the explanation alert and changes nothing.
+            # A plain browser (no pywebview bridge): Turn on asks in the real host's words; Keep off changes nothing.
             page.click(toggle)
             page.wait_for_selector(DIALOG)
-            _shot(page, "real-server-browser-explanation-alert")
-            words = page.locator(DIALOG).inner_text()
-            assert "Panic turned consciousness off: it stays off until you turn it on in the desktop app." in words
-            assert "Nothing starts right now: 2 tasks stopped by Panic stay stopped at this press." in words
-            assert "On its later wakes Ouroboros may decide which of them to resume, even one the Panic was pressed for." in words
-            assert "A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits stay in force." in words
-            assert "Turning consciousness off, or restarting Ouroboros, ends that choice." in words
-            assert BROWSER_NOTE in words
-            assert [button.inner_text() for button in page.locator(f"{DIALOG} button").all()] == ["OK"]
-            assert _saved_state(data_dir)["bg_consciousness_enabled"] is False, "explained before anything changes"
+            _shot(page, "real-server-browser-plain-turn-on-question")
+            _asks_with_the_host_words_and_the_note(page)
+            assert _saved_state(data_dir)["bg_consciousness_enabled"] is False, "asked before anything changes"
 
-            page.click(f"{DIALOG} [data-confirm-ok]")
+            page.click(f"{DIALOG} [data-confirm-cancel]")  # Keep off
             page.wait_for_selector(DIALOG, state="detached")
             page.wait_for_function(
                 "(s) => { const b = document.querySelector(s); return b && !b.disabled && b.dataset.enabled === '0'; }",
@@ -222,7 +221,7 @@ def test_a_real_server_explains_in_browser_after_panic_keeps_consciousness_off_a
             )
             state_body = page.request.get(url + "/api/state").json()
             assert state_body["bg_consciousness_enabled"] is False
-            assert listed() == holds, "browser alert leaves consciousness off and both Panic holds standing"
+            assert listed() == holds, "Keep off leaves consciousness off and both Panic holds standing"
 
             # Manual per-task Resume in Main remains available to the browser user while consciousness stays off.
             page.click('[data-nav-page="chat"]')
@@ -242,9 +241,31 @@ def test_a_real_server_explains_in_browser_after_panic_keeps_consciousness_off_a
             _shot(page, "real-server-browser-manual-resume")
             assert listed() == {"digest": holds["digest"]}, "manual Resume returned only the selected task"
             assert page.request.get(url + "/api/state").json()["bg_consciousness_enabled"] is False
+
+            # The owner's plain Turn on from this browser turns consciousness on, as in 7.12.1, handing over no choice.
+            page.click('[data-nav-page="dashboard"]')
+            page.click('[data-dashboard-tab="consciousness"]')
+            page.wait_for_function(
+                "(s) => { const b = document.querySelector(s); return b && !b.disabled && b.dataset.enabled === '0'; }",
+                arg=toggle,
+            )
+            page.click(toggle)
+            page.wait_for_selector(DIALOG)
+            page.click(f"{DIALOG} [data-confirm-ok]")  # Turn on
+            said = lambda: json.dumps(page.request.get(url + "/api/chat/history?chat_id=1").json(), ensure_ascii=False)
+            for _ in range(300):  # its own reply says so, in Main
+                if "Consciousness on" in said():
+                    break
+                page.wait_for_timeout(100)
+            assert "🧠 Consciousness on" in said(), said()[-3000:]
+            _shot(page, "real-server-browser-turned-on-after-panic")
+            saved = _saved_state(data_dir)
+            assert saved["bg_consciousness_enabled"] is True and "bg_consciousness_stop_source" not in saved, {
+                key: saved.get(key) for key in ("bg_consciousness_enabled", "bg_consciousness_stop_source")}
+            assert listed() == {"digest": holds["digest"]}, "the Turn on returned no work: the other Panic hold stands"
         finally:
             browser.close()
 
     saved = _saved_state(data_dir)
-    assert saved["bg_consciousness_enabled"] is False and saved.get("bg_consciousness_stop_source") == "panic"
+    assert saved["bg_consciousness_enabled"] is True and "bg_consciousness_stop_source" not in saved
     assert "bg_consciousness_panic_choice" not in saved
