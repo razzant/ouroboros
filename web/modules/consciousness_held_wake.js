@@ -85,7 +85,7 @@ export function createHeldWake(doc, { current = () => null, connected = () => tr
     head.append(name, status);
     const text = element('p', 'cx-held-text');
     const note = element('p', 'cx-held-note');
-    const advice = element('p', 'cx-held-note cx-held-advice');
+    const advice = element('p', 'cx-held-advice');
     const actions = element('div', 'cx-held-actions');
     const costs = element('button', 'btn btn-sm btn-default ui-hit-area cx-held-costs', 'Costs ›');
     costs.type = 'button';
