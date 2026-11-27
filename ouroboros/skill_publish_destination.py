@@ -219,7 +219,10 @@ def captured_release_digest(snapshot: Any) -> str:
 def hub_entry(skill: str, snapshot: Any, *, login: str, digest: str, existing: Optional[Dict[str, Any]],
               category: List[str]) -> Dict[str, Any]:
     """The one-entry hub record of a hosted skill; an existing entry keeps its recorded owner and categories
-    unless new ones are named. Generated fields (version, declaration, digest) follow the published files."""
+    unless new ones are named, and the hub's own wording for people as it is (the words its catalog reads, which the
+    hub's own refresh keeps too). Generated fields (version, declaration, digest) follow the published files."""
+    from ouroboros.skill_source_catalog import CATALOG_WORDS
+
     manifest = snapshot.manifest
     entry: Dict[str, Any] = {
         "schema_version": 2, "name": skill, "description": manifest.description,
@@ -236,6 +239,7 @@ def hub_entry(skill: str, snapshot: Any, *, login: str, digest: str, existing: O
         entry["install_specs"] = specs
     if (existing or {}).get("author"):
         entry["author"] = existing["author"]
+    entry.update({key: existing[key] for key in CATALOG_WORDS if key in (existing or {})})
     return entry
 
 

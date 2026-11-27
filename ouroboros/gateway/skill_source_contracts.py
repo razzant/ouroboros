@@ -143,14 +143,24 @@ class SkillCatalogItem(TypedDict, total=False):
     source's newest commit touching it, a registry's update time); absent when unknown. ``type``,
     ``needs_keys`` and ``permissions`` are the release manifest's: absent for a pointer entry, whose manifest
     lies in its author's repository and is read only by the detail or the install.
-    Official/recommended require exact endorsement through an Official hub row or the bundled source."""
+    Official/recommended require exact endorsement through an Official hub row or the bundled source.
+    ``source_key`` (null when the origin cannot be named exactly) is the opaque equality key of the source
+    view producing this item: stable across a refresh, shared by the two hub parts of one repository,
+    never carrying the URL, path or slug; the host and UI match an installed copy by it without pretending a
+    catalog entry exists, and a mismatched or absent key authorizes no action."""
 
     id: Required[str]
     source_id: Required[str]
     source_name: Required[str]
     trust: str
     name: Required[str]
-    title: str  # the catalog's human name ("" when it has none: show ``name``)
+    title: str  # the catalog's human name, a registry hit's display name ("" or absent when none: show ``name``)
+    widget_title: str  # the title its manifest's widget declares (ui_tab.title), a search name only; "" none or unread
+    # Search names only, absent for none: the other full names its manifest gives it (its own title or a place label
+    # where the catalog's title replaced it, further place labels); a pointer's from an installed unmodified copy of
+    # exactly this release; the headers its installed copy's widgets are published under while this process holds
+    # that copy's own folder's publication of exactly this release.
+    search_names: List[str]
     description: str
     pitch: str  # the catalog's one line for people ("" when it has none)
     needs: Optional[str]  # the prerequisite in words ("Needs a Telegram bot token"); "" none, null the catalog says nothing
@@ -171,6 +181,9 @@ class SkillCatalogItem(TypedDict, total=False):
     permissions: List[str]
     install_specs: Any
     installed: Optional[Dict[str, Any]]
+    source_key: Optional[str]  # opaque equality key of this item's source view (see SkillCatalogItem); present, null when unknown
+    connects: List[str]  # the services a connector connects ("Slack"), [] for none
+    icon: Dict[str, str]  # icon_spec: {kind: host, name} or {kind: svg, svg}; {} for the fallback
     registry_slug: str  # registry hits only
     registry_stats: Dict[str, Any]  # registry hits only
 
@@ -187,9 +200,11 @@ class SkillCatalogResponse(TypedDict, total=False):
 
 
 class SkillCatalogSearchResponse(TypedDict, total=False):
-    """``GET /api/skill-catalog/search``: matching items, registry (ClawHub) hits appended; a registry
-    that could not answer sets ``registry_error`` and keeps the local matches. A registry named by ``source``
-    with no ``q`` answers one page of its own order, ``next_cursor`` naming the next page while there is one."""
+    """``GET /api/skill-catalog/search``: items whose id is ``q`` or with every word of it in their title, widget
+    title, search names, name or description (space, ``_`` and ``-`` alike in the names), registry (ClawHub) hits
+    appended; a registry that could not answer sets ``registry_error`` and keeps the local matches. A registry named
+    by ``source`` with no ``q`` answers one page of its own order, ``next_cursor`` naming the next page while there
+    is one."""
 
     items: Required[List[SkillCatalogItem]]
     registry_error: str
@@ -216,6 +231,9 @@ class SkillCatalogInstallRequest(TypedDict):
     id: str
     turn_on_when_ready: NotRequired[bool]
     replace: NotRequired[bool]
+    expected_source_key: NotRequired[str]  # the shown card's source view selector; mismatch -> 409 candidate_changed
+    expected_digest: NotRequired[str]  # the shown card's release digest selector; mismatch -> 409 candidate_changed
+    version: NotRequired[str]  # registry rows only: pin the disclosed release at the marketplace's version selector
 
 
 class SkillCatalogInstallResponse(TypedDict, total=False):
@@ -231,6 +249,7 @@ class SkillCatalogInstallResponse(TypedDict, total=False):
     code: str
     error: str
     occupant: Dict[str, Any]  # name_taken: {name, source, locations}
+    candidate: Dict[str, str]  # 409 candidate_changed: the current {version, digest, source_key}
 
 
 class SkillPublishDestinationChoice(TypedDict):

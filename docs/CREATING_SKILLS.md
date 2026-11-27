@@ -1179,10 +1179,12 @@ contributes:
 - `provides: place` requires `type: extension` and the `presence` permission. The Browse "Connectors" filter and
   "Connects <Service>" are derived from it; no tag or suffix is needed.
 - The connector carries the service name in its place `label`; the technical skill id stays in details.
-  Skills cards prefer the optional top-level, one-line `title`, then the place contribution's `label`, then `name`.
-  Catalog entries may carry `title`; it is display text, never a new skill identity. Place, instance, account and
-  signal labels are authored content, outside the host's translation overlay; a host sentence that composes one
-  keeps it exactly as written, case included.
+  Skills cards prefer the optional top-level, one-line `title`, then the place contribution's `label`, then the title
+  of the skill's entry in its own source, then `name`. Catalog entries may carry `title`; it is display text, never a
+  new skill identity. Search finds the skill by each of these, by its `ui_tab.title` and by the headers its live
+  widget tabs register from its installed folder; actions still take `name`.
+  Place, instance, account and signal labels are authored content, outside the host's translation overlay; a host
+  sentence that composes one keeps it exactly as written, case included.
 
 The optional `settings` member names the connector's registered Settings section (for example
 `api.register_settings_section("connection", ...)`); it is a section id, not an embedded form or a new

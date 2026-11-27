@@ -41,15 +41,16 @@ export const placedOnCosts = (tab) => tab?.render?.page === COSTS_PAGE && !tab?.
 export const mountWidgetTab = (mount, tab, { signal, policy, messageHandlers, key }) => mountTabInto(mount, tab,
     { signal, messageHandlers, board: policy, key });
 
-// The card names itself by its words, not by an id built from the key: two valid keys (`quota:work_day`, `quota_work:day`)
-// would fold into one id, and a changed widget's card and its fresh one share a key while the old one stops.
+// Name each occurrence by its authored heading: two revisions of one key can stand side by side while one stops.
+let nextHeadingId = 0;
 function cardHtml(tab) {
     const key = widgetKey(tab);
     const framed = isFramedWidget(tab);
     const title = escapeHtml(tab.title || tab.tab_id || tab.skill);
-    return `<section class="ui-card costs-widget-card" data-widget-key="${escapeHtml(key)}"${framed ? ' data-widget-framed' : ''} aria-label="${title}">
+    const headingId = `costs-widget-heading-${++nextHeadingId}`;
+    return `<section class="ui-card costs-widget-card" data-widget-key="${escapeHtml(key)}"${framed ? ' data-widget-framed' : ''} aria-labelledby="${headingId}">
         <div class="costs-widget-head">
-            <h3 class="dashboard-card-title costs-widget-title">${title}</h3>
+            <h3 class="dashboard-card-title costs-widget-title" id="${headingId}" data-i18n-authored>${title}</h3>
             <div class="costs-widget-controls">${renderWidgetCardParts(tab).run}
                 <button type="button" class="costs-meter-action costs-widget-open" data-costs-widget-open aria-label="Open in Widgets" title="Open in Widgets">${controlIcon('chevron', 18)}</button>
             </div>
