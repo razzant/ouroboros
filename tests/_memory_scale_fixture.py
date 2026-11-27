@@ -282,3 +282,50 @@ def route_resolver(window, basis, working_reserve, *, provider='synthetic', call
             calls.append(allow_fetch)
         return {'provider': provider, 'model': provider}, evidence
     return resolve
+
+
+# The owner install's connections shape (measured 26.11): twelve remote MCP servers whose own instructions hold about
+# 33,400 characters together, 387 tool names. Synthetic names and text only.
+MCP_SHAPE = {'servers': 12, 'tools': 387, 'instructions': 33_400}
+
+
+def mcp_registry(root, monkeypatch, *, servers=MCP_SHAPE['servers'], tools=MCP_SHAPE['tools'],
+                 instructions=MCP_SHAPE['instructions'], instruction_text=None):
+    """``(ToolRegistry, {server id: its instruction text})`` over ``servers`` remote MCP servers listed through the real
+    manager with a stub transport (no process, no network), ``tools`` tool names spread over them and ``instructions``
+    characters of server instructions of uneven lengths (multilingual prose with line breaks and quotes, as servers
+    write them). ``instruction_text(i)`` replaces server ``i``'s text. The manager and the settings file are this test's
+    own (``monkeypatch`` restores both)."""
+    from ouroboros import config, mcp_client
+    from ouroboros.tools.registry import ToolRegistry
+
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, 'SETTINGS_PATH', root / 'mcp-settings.json')
+    monkeypatch.setattr(mcp_client, '_manager', mcp_client.MCPManager())
+    weights = [1 + (i % 4) for i in range(servers)]  # uneven: one guide is four times another
+    guides, listing = {}, {}
+    for i in range(servers):
+        server = f'srv{i:02d}'
+        size = instructions * weights[i] // sum(weights)
+        guide = instruction_text(i) if instruction_text else (
+            f'"{server}" usage:\n' + '\n'.join(prose(f'{server} guide {n}', 200) for n in range(max(1, size // 200))))
+        guides[server] = guide
+        count = tools // servers + (i < tools % servers)
+        listing[server] = [{'_server_instructions': guide}] + [
+            {'name': f'tool_{n:02d}', 'description': text(f'{server} tool {n}.', 140),
+             'input_schema': {'type': 'object', 'properties': {'id': {'type': 'string', 'description': 'An id'}}}}
+            for n in range(count)]
+
+    async def list_tools(cfg, timeout):
+        return [dict(row) for row in listing[cfg.id]]
+
+    manager = mcp_client.get_manager()
+    manager._async_list_tools = list_tools
+    rows = [{'id': server, 'name': server.upper(), 'enabled': True, 'transport': 'streamable_http',
+             'url': f'https://{server}.example/mcp'} for server in listing]
+    settings = {'MCP_ENABLED': True, 'MCP_SERVERS': rows}
+    config.SETTINGS_PATH.write_text(json.dumps(settings), encoding='utf-8')
+    mcp_client.reconfigure_from_settings(settings)
+    for row in rows:
+        manager.refresh_server(row['id'])
+    return ToolRegistry(repo_dir=root, drive_root=root), guides

@@ -859,8 +859,8 @@ def _section_root_for(env: Any, ctx: Any) -> str:
     return str(env.drive_root)
 
 
-def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
-    """This actor's connections map (``tool_connections``): Low/Max form, then Nano form."""
+def _connections(tool_registry: Any, task: Dict[str, Any], start_tools: Any = ()) -> Tuple[str, str]:
+    """This actor's connections map (``tool_connections``): Low/Max form, then Nano form (``start_tools``: its Nano base)."""
     if tool_registry is None:
         return "", ""
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
@@ -868,7 +868,7 @@ def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
     try:
         from ouroboros.tool_connections import connection_views
 
-        return connection_views(tool_registry, helper=helper)
+        return connection_views(tool_registry, helper=helper, start_tools=start_tools or ())
     except Exception as exc:
         log.warning("Failed to build the connections map", exc_info=True)
         text = (f"## Connections\n\nThe connections map could not be built ({type(exc).__name__}; its cause is in "
@@ -1323,7 +1323,7 @@ def build_context_fit_plan(
     from ouroboros import context_start_bound
 
     preferred = str(preferred_mode or get_context_mode() or "max")
-    connections = _connections(tool_registry, task)
+    connections = _connections(tool_registry, task, nano_base)
     canonical_root, context_memory = _canonical_memory(env, memory, task)
     timed("start_bound", context_start_bound.refuse_before_capture, task, ctx,
           spec=lambda: _view_spec(task, canonical_root, ctx),
