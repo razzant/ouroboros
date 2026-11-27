@@ -301,7 +301,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         shade.hidden = false;
         chip.setAttribute('aria-expanded', 'true');
         chip.dataset.open = '1';
-        bar.setAttribute('data-cx-shade', '');  // Main's history note waits behind it (room_work.css)
+        bar.setAttribute('data-cx-shade', '');  // the room is covered: its history notice leaves (chat.js)
         void readWakes();
         // A pointer open lands on the (ring-less) inner scrollport so PageDown scrolls it at once;
         // a keyboard open enters its first enabled control.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, PREVIEW_SCOPE, restoreDom, ElementStub } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, ElementStub, toastMessages } from './chat_dom_fixture.js';
 const row = (id, hour) => ({ role: 'assistant', text: id, ts: `2026-09-26T${hour}:00:00.000Z`,
   history_id: `chat:${id}`, history_position: { source: 'chat', offset: Number(id) } });
 const page = (messages, cursor, next = null) => ({ profile_scope: PREVIEW_SCOPE, messages, page_cursor: cursor, next_cursor: next,
@@ -153,7 +153,7 @@ for (const shallow of [false, true]) test(shallow
         chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true });
     const feed = document.byId.get('chat-messages');
     const status = () => ({ button: feed.querySelector('.chat-load-older').querySelector('.chat-load-older-btn').textContent,
-        note: feed.parentNode.querySelector('.chat-panel-statusbar').querySelector('.chat-load-older-note')?.textContent || '' });
+        note: toastMessages(document.body).join(' ') });
     try {
         await instance.refreshHistory({ revision: 1 });
         assert.equal((await instance.refreshHistory({ revision: 2 })).painted, false,
