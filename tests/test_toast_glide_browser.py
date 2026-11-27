@@ -26,8 +26,10 @@ def _open(ui, width, height, *, touch=False):
     page.goto(ui['url'] + '/')
     page.wait_for_selector('#chat-input', state='attached')
     settle(page)
-    # The page's own notices (this fixture answers no saved history, which the room tells once) are not the stack under
-    # study: they leave first, so every count below is the test's own.
+    # The page's own notices (a room's history read, once its answer or failure has landed) are not the stack under
+    # study: the room's first read settles, then they leave, so every count below is the test's own.
+    page.wait_for_function("""() => document.querySelector('#chat-messages')?.dataset.historyHydrated === 'true'
+        || document.querySelector('#chat-messages .chat-load-older-btn')?.textContent === 'Retry loading messages'""")
     page.evaluate("() => document.querySelectorAll('#toast-stack .toast').forEach((toast) => toast.dispose())")
     return page
 
