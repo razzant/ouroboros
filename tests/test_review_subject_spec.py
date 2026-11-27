@@ -461,6 +461,47 @@ def test_base_head_subject_reads_an_isolated_checkout_in_the_data_root(tmp_path)
     assert (foreign / "a.txt").read_text(encoding="utf-8") == "drift after the proposal\n"  # the live tree is untouched
 
 
+def test_the_pulse_of_a_frozen_range_speaks_of_that_ranges_own_two_sides(tmp_path):
+    """A reviewer of B..C reads B..C: the brief's pulse measures from the frozen parent, so a deletion an earlier
+    commit (A..B) made is not this change's removed prose and a manual only A..B touched is not "in this change";
+    the gate's own index subject keeps the contribution base, as the commit gate's pulse does."""
+    from ouroboros.tools.review_admission import build_two_part_brief
+
+    manifest = '[domains]\nD01 = "Core"\n[references]\nD01 = ["docs/DESIGN.md"]\n[modules]\n"ouroboros/core.py" = "D01"\n'
+    repo = _repo(tmp_path / "fork", files={"README.md": "A fork of the body.\n"})
+    (repo / "docs").mkdir()
+    (repo / "ouroboros").mkdir()
+    (repo / "docs/DESIGN.md").write_text("An approved old instruction.\n", encoding="utf-8")
+    (repo / "ouroboros/domains.toml").write_text(manifest, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "install docs")
+    _git(repo, "remote", "add", "canonical", "https://github.com/razzant/ouroboros.git")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    official = _out(repo, "rev-parse", "HEAD")
+    (repo / "docs/DESIGN.md").write_text("A different instruction.\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "an earlier change")
+    left = _out(repo, "rev-parse", "HEAD")
+    (repo / "ouroboros/new_focus.py").write_text('"""An added focus."""\n', encoding="utf-8")
+    (repo / "ouroboros/domains.toml").write_text(manifest + '"ouroboros/new_focus.py" = "D01"\n', encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "the reviewed range")
+    right = _out(repo, "rev-parse", "HEAD")
+    ctx = _ctx(repo, tmp_path)
+    seat = {"slot_id": "s1", "model": "m", "retrieves": False}
+    spec = ReviewSubjectSpec(root_kind="system_repo", root=str(repo), kind="base..head", base=left, head=right,
+                             layer="body")
+    with isolated_checkout(ctx, spec) as frozen:
+        brief = build_two_part_brief(frozen, seat, goal="Add a focus.", scope="One module.")["system"]
+    assert f"Diff pulse since the subject's parent {left[:12]}: files 2, lines +2/-0" in brief
+    assert "- ouroboros/new_focus.py: docs/DESIGN.md (not in this change)" in brief
+    assert "Removed governed prose" not in brief and "approved old instruction" not in brief
+    # The gate's own subject (the index at HEAD) still grows from the contribution base and names it.
+    (repo / "docs/DESIGN.md").write_text("A third instruction.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    gate = build_two_part_brief(freeze_subject(ctx, _index_spec(repo)), seat, goal="Add a focus.")["system"]
+    assert f"Diff pulse since canonical/ouroboros merge-base {official[:12]}" in gate
+    assert "- docs/DESIGN.md: An approved old instruction." in gate
+
 def test_base_head_requires_an_ancestor_base(tmp_path):
     system = _system_repo(tmp_path)
     foreign, _base, _head = _foreign_repo(tmp_path)

@@ -1391,6 +1391,7 @@ def _suite_facts(
 
 def diff_pulse(
     repo_dir: pathlib.Path, paths: Iterable[str] | None = None, *, staged: bool = False, limit: int = 5,
+    subject_parent: str = "",
 ) -> str:
     """A change's size since its contribution base as one fact line, the touched books'
     balance, then one fixed question; ``""`` when Git cannot measure the checkout.
@@ -1399,26 +1400,29 @@ def diff_pulse(
     earlier commits stay in the totals and the files they created stay listed as new;
     without a cached official ref the line says so and measures from HEAD; it measures from
     HEAD too, naming the base, when the base's side cannot be read here (a partial clone never
-    fetches it). With no diff readable at all, the touched books' balance stands alone. ``staged``
-    reads the index (what a commit or a review subject holds) for the diff, the module sizes and
-    the books' balance, otherwise the worktree and its untracked files. ``paths`` names the modules
-    and books shown (an edit's files); omitted, every changed path is. A shown test source adds the
-    suite's facts (declared items, new test modules, ``serial`` marks, recorded test-seconds, its
-    lines); a shown Python source adds the code-shape line (``code_shape_facts``: module handles
-    and the calls through them, re-exported names, a test's patched product-module names and
-    ``git init`` call sites). A fact for the mind, never a gate: one shape and one question for any size, and
-    the list bounds are presentation only, counting the rest.
+    fetches it). ``subject_parent`` (a frozen review subject's parent) replaces both: every line but the
+    books' balance, which names its own base, speaks of that subject's two sides. With no diff readable
+    at all, the touched books' balance stands alone. ``staged`` reads the index (what a commit or a review
+    subject holds) for the diff, the module sizes and the books' balance, otherwise the worktree and its
+    untracked files. ``paths`` names the modules and books shown (an edit's files); omitted, every
+    changed path is. A shown test source adds the suite's facts (declared items, new test modules,
+    ``serial`` marks, recorded test-seconds, its lines); a shown Python source adds the code-shape line
+    (``code_shape_facts``: module handles and the calls through them, re-exported names, a test's patched
+    product-module names and ``git init`` call sites). A fact for the mind, never a gate: one shape and
+    one question for any size; the list bounds are presentation only, counting the rest, and every
+    shown file's owning manuals are named.
     """
     from ouroboros.reference_books import _git_bytes, book_balance_note, contribution_base
+    from ouroboros.tools.governance_context import BODY_INVARIANTS_CHAPTER as INVARIANTS
 
     root = pathlib.Path(repo_dir)
-    upstream, merge_base = contribution_base(root)
+    upstream, merge_base = ("", "") if subject_parent else contribution_base(root)
 
     def diff(base: str, *options: str) -> bytes | None:
         return _git_bytes(root, "--no-optional-locks", "diff", *(("--cached",) if staged else ()),
                           "--no-renames", "-z", *options, base)
 
-    for base in ((merge_base, "HEAD") if merge_base else ("HEAD",)):
+    for base in ((subject_parent,) if subject_parent else (merge_base, "HEAD") if merge_base else ("HEAD",)):
         numstat = diff(base, "--numstat")
         status = diff(base, "--name-status") if numstat is not None else None
         if status is not None:
@@ -1456,8 +1460,8 @@ def diff_pulse(
     from ouroboros import code_shape_facts as shapes
 
     governed = [path for path in changed if shapes.governed_text(path)]  # every changed one: a move between them is quiet
-    at_base, current = _change_texts(root, base, staged, [*python, *governed], list(dict.fromkeys(
-        [*rows, *python, *gated, *governed, shapes.MANIFEST_PATH, shapes.INVARIANTS_PATH])))
+    at_base, current = _change_texts(root, base, staged, [*python, *governed, shapes.MANIFEST_PATH], list(
+        dict.fromkeys([*rows, *python, *gated, *governed, shapes.MANIFEST_PATH, INVARIANTS])))
     modules: list[tuple[GatedModule, int, int]] = []
     for path in shown:
         if staged:
@@ -1475,8 +1479,8 @@ def diff_pulse(
     modules.sort(key=lambda row: (row[2] - row[1], -row[0].line_count, row[0].path))
     created = set(new)
     # A side the file has but that was not read is unknown to both readers, never an addition or a deletion.
-    unread = [path for path in python if at_base[path] is None and path not in created
-              or current[path] is None and path not in gone]
+    unread, unread_prose = ([path for path in group if at_base[path] is None and path not in created
+                             or current[path] is None and path not in gone] for group in (python, governed))
     if rows:
         facts, test_sizes = _suite_facts(rows, at_base, current, new, unread)
         suite = f"; {facts}, test module lines: {listed(test_sizes)}"
@@ -1491,15 +1495,16 @@ def diff_pulse(
 
     added, deleted = sum(plus for plus, _ in changed.values()), sum(minus for _, minus in changed.values())
     named = f"{upstream.removeprefix('refs/remotes/')} merge-base {merge_base[:12]}"
-    since = (named if base == merge_base else f"HEAD (contribution diff from {named} unavailable)" if merge_base
-             else "HEAD (contribution base unavailable)")
+    since = (f"the subject's parent {base[:12]}" if subject_parent else named if base == merge_base else
+             f"HEAD (contribution diff from {named} unavailable)" if merge_base else "HEAD (contribution base unavailable)")
     sizes = [f"{module.path} {module.line_count} (+{plus}/-{minus})" for module, plus, minus in modules]
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
     # Where the body is touched the host names its manuals (BIBLE P1): owners per file, then the prose that left.
-    owners = shapes.ownership_note(shown, changed, current[shapes.MANIFEST_PATH], current[shapes.INVARIANTS_PATH], limit=limit)
-    prose = shapes.removed_prose_note(governed, at_base, current, locator=(
+    owners = shapes.ownership_note(shown, changed, current[shapes.MANIFEST_PATH], current[INVARIANTS],
+                                   base_manifest=at_base[shapes.MANIFEST_PATH], removed=gone)
+    prose = shapes.removed_prose_note(governed, at_base, current, unread=unread_prose, locator=(
         f"git diff {'--cached ' if staged else ''}{base[:12]} -- {' '.join(governed)}")) if set(governed) & set(shown) else ""
     return "\n".join(part for part in (fact, shape, owners, prose, book_balance_note(root, shown, staged=staged),
                                        DIFF_PULSE_QUESTION) if part)

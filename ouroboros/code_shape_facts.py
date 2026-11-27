@@ -412,7 +412,6 @@ def pulse_line(
 
 # --------------------------------------------------------------------------- the body's manuals beside a change
 MANIFEST_PATH = "ouroboros/domains.toml"
-INVARIANTS_PATH = "docs/architecture/10-key-invariants.md"
 
 
 def governed_text(path: str) -> bool:
@@ -437,43 +436,52 @@ def _naming_invariants(invariants: str, path: str) -> list[str]:
 
 
 def ownership_note(shown: Iterable[str], changed: Iterable[str], manifest: Optional[str], invariants: Optional[str],
-                   *, limit: int = 5) -> str:
-    """For each shown file the manifest declares an owner for: its owning manuals, each marked by whether this
-    change touches it, and the key invariants that name the file. One row per file, never one union, so a reader
-    sees which file left which manual untouched. ``manifest`` and ``invariants`` are the subject's own texts
-    (``None``: unread); an untouched manual is a fact for the mind and the reviewer, never a gate (BIBLE P3)."""
+                   *, base_manifest: Optional[str] = None, removed: Iterable[str] = ()) -> str:
+    """For each shown file the manifest declares an owner for, code or governed prose alike: its owning manuals,
+    each marked by whether this change touches it, and the key invariants that name the file, which a file
+    without a declared owner keeps too. One row per file and every row, never one union or a cut list, so a
+    reader sees which file left which manual untouched. A ``removed`` file keeps the owner ``base_manifest``
+    assigned it. ``manifest`` and ``invariants`` are the subject's own texts (``None``: unread); an untouched
+    manual is a fact for the mind and the reviewer, never a gate (BIBLE P3), and a manifest that cannot be
+    read is one named line, never a failure of the caller."""
     if not manifest:
         return ""
     from ouroboros.code_intelligence_architecture import load_domain_manifest
 
-    try:
-        owners = load_domain_manifest(pathlib.Path("."), manifest)
-    except ValueError:
-        return "Owning manuals: `ouroboros/domains.toml` does not parse here; no owner is named."
-    touched, rows = set(changed), []
+    def owners(text: Optional[str]):
+        try:
+            return load_domain_manifest(pathlib.Path("."), text or ""), ""
+        except Exception as exc:  # informational: no manifest fault escapes into an edit's or a review's receipt
+            return None, f"Owning manuals unavailable: {exc}; no owner is named."
+
+    now, notice = owners(manifest)
+    before = owners(base_manifest)[0] if base_manifest else None
+    touched, gone, rows = set(changed), set(removed), []
     for path in shown:
-        manuals = () if governed_text(path) else owners.manuals_for(path)
-        if not manuals:
-            continue
+        side = before if path in gone and before is not None else now
+        manuals = side.manuals_for(path) if side is not None else ()
         named = _naming_invariants(invariants, path) if invariants else []
-        rows.append(f"- {path}: " + ", ".join(
+        if not (manuals or named):
+            continue
+        rows.append(f"- {path}: " + (", ".join(
             f"{manual} ({'in this change' if manual in touched else 'not in this change'})" for manual in manuals)
-            + (f"; key invariants that name it: {', '.join(named)}" if named else ""))
-    if not rows:
-        return ""
-    more = [f"(+{len(rows) - limit} more files with declared owners)"] if len(rows) > limit else []
-    return "\n".join(["Owning manuals (`ouroboros/domains.toml` [references]), per file:", *rows[:limit], *more])
+            or "no owning manual declared") + (f"; key invariants that name it: {', '.join(named)}" if named else ""))
+    head = [notice] if notice else (["Owning manuals (`ouroboros/domains.toml` [references]), per file:"] if rows else [])
+    return "\n".join([*head, *rows])
 
 
 def removed_prose_note(documents: Iterable[str], at_base: Mapping[str, Optional[str]],
-                       current: Mapping[str, Optional[str]], *, locator: str, limit: int = 12, width: int = 240) -> str:
+                       current: Mapping[str, Optional[str]], *, locator: str, unread: Iterable[str] = (),
+                       limit: int = 12, width: int = 240) -> str:
     """The prose this change removed from governed documents: each line a document holds fewer times than at the
     base and no changed document gained, so a paragraph moved between them stays quiet and one deleted where a
-    twin survives elsewhere is still counted, in the document that lost it. Every removed line is counted; the first ``limit`` are shown, each whole or with
-    the number of characters cut, and the count not shown is stated beside ``locator``, the command that lists
-    all of them. Fenced blocks and blank lines are not prose; a side with no text (a new or deleted document, or
-    one that could not be read) counts as empty."""
-    documents = list(documents)
+    twin survives elsewhere is still counted, in the document that lost it. Every removed line is counted; the
+    first ``limit`` are shown, each whole or with the number of characters cut, and the count not shown is stated
+    beside ``locator``, the command that lists all of them. Fenced blocks and blank lines are not prose; an absent
+    side (a new or deleted document) counts as empty, while a document in ``unread`` (a side it has that could not
+    be read) is compared on neither side and named as unknown, never counted as removed."""
+    unknown = list(dict.fromkeys(unread))
+    documents = [path for path in documents if path not in unknown]
 
     def prose(text: Optional[str]) -> Iterator[str]:
         fenced = False
@@ -497,12 +505,15 @@ def removed_prose_note(documents: Iterable[str], at_base: Mapping[str, Optional[
                     arrived[line] -= 1
                 else:
                     removed.append((path, line))
-    if not removed:
-        return ""
-    shown = [f"- {path}: {line[:width]}" + (f" … (+{len(line) - width} characters)" if len(line) > width else "")
-             for path, line in removed[:limit]]
-    rest = (f"{len(removed) - limit} more removed lines are not shown here; " if len(removed) > limit else "")
-    gone = "1 line of the base is gone" if len(removed) == 1 else f"{len(removed)} lines of the base are gone"
-    return "\n".join([f"Removed governed prose: {gone} from the changed documents:", *shown,
-                      f"({rest}all of them: `{locator}`)"])
-
+    lines = []
+    if removed:
+        shown = [f"- {path}: {line[:width]}" + (f" … (+{len(line) - width} characters)" if len(line) > width else "")
+                 for path, line in removed[:limit]]
+        rest = (f"{len(removed) - limit} more removed lines are not shown here; " if len(removed) > limit else "")
+        gone = "1 line of the base is gone" if len(removed) == 1 else f"{len(removed)} lines of the base are gone"
+        lines = [f"Removed governed prose: {gone} from the changed documents:", *shown,
+                 f"({rest}all of them: `{locator}`)"]
+    if unknown:
+        lines.append(f"Removed governed prose unknown (a side was not read here, nothing is counted as removed): "
+                     f"{', '.join(unknown)}; read them with `{locator}`")
+    return "\n".join(lines)

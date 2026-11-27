@@ -113,7 +113,14 @@ def load_domain_manifest(repo_root: pathlib.Path, raw: str | None = None) -> Dom
         data = tomllib.loads(raw)
     except Exception as exc:
         raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} does not parse as TOML: {exc}") from exc
+    # Valid TOML of another shape is as invalid as a syntax error: one ValueError for every reader.
+    for name in ("domains", "modules", "references", "graph"):
+        if not isinstance(data.get(name, {}), dict):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} is invalid: [{name}] is not a table")
     graph = data.get("graph") or {}
+    for name in ("allowed", "lazy_only"):
+        if not isinstance(graph.get(name, []), list):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} is invalid: graph.{name} is not a list")
     for path in data.get("modules") or {}:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or "\\" in path:
