@@ -383,7 +383,7 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .settings-extension-checkbox {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--checkbox-gap);
     color: var(--text-primary);
     font-size: var(--type-body);
     line-height: var(--line-body);
@@ -430,12 +430,13 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .mcp-server-enabled {
     display: flex;
     align-items: flex-start;
-    gap: var(--space-2);
+    gap: var(--checkbox-gap);
     color: var(--text-primary);
     font-size: var(--type-body);
     line-height: var(--line-body);
+    --checkbox-line: 1lh;
 }
-.mcp-server-enabled > .ui-checkbox { flex: none; margin-top: 2px; }
+.mcp-server-enabled > .ui-checkbox { flex: none; }
 
 .mcp-server-status {
     max-width: 100%;
@@ -725,8 +726,8 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 }
 
 /* The per-row owner switch leads the card head. Padding buys a comfortable
-   pointer target around the 14px native box; the matching negative margin
-   keeps the head's own rhythm (docs/DESIGN.md §6). */
+   pointer target around the box; the matching negative margin keeps the
+   head's own rhythm (docs/DESIGN.md §6). */
 .available-subagent-enable {
     display: inline-flex;
     align-items: center;
@@ -780,7 +781,7 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .available-subagent-reviewer {
     display: inline-flex;
     align-items: center;
-    gap: var(--space-1);
+    gap: var(--checkbox-gap);
     min-height: 34px;
     color: var(--text-primary);
     font-size: var(--type-body);
@@ -811,6 +812,7 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .available-subagent-facts dt {
     color: var(--text-meta);
     font-size: var(--type-meta);
+    line-height: var(--line-meta);
     font-weight: 600;
 }
 
@@ -818,6 +820,7 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     margin: 0;
     color: var(--text-meta);
     font-size: var(--type-meta);
+    line-height: var(--line-meta);
     overflow-wrap: anywhere;
 }
 
@@ -895,17 +898,10 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     letter-spacing: normal;
 }
 
-/* The local toggle's checkbox and gap: one pair of dimensions for the toggles and for the
-   notes that line up with their label text (Startup & background). */
-:root {
-    --local-toggle-box: 14px;
-    --local-toggle-gap: 6px;
-}
-
 .local-toggle {
     display: inline-flex;
     align-items: center;
-    gap: var(--local-toggle-gap);
+    gap: var(--checkbox-gap);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     color: var(--text-meta);
@@ -913,14 +909,6 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     min-width: 0;
     white-space: normal;
     overflow-wrap: anywhere;
-}
-
-.local-toggle input[type="checkbox"] {
-    flex-shrink: 0;
-    accent-color: var(--accent);
-    width: var(--local-toggle-box);
-    height: var(--local-toggle-box);
-    cursor: pointer;
 }
 
 .local-toggle[data-warning="1"] {
@@ -1246,7 +1234,7 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .mcp-header-row .form-field, .mcp-header-row .secret-input-row { min-width: 0; }
 .mcp-import-entry { display: flex; flex-direction: column; gap: var(--space-1); overflow-wrap: anywhere; }
 .mcp-import-entry-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
-.mcp-import-choice { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
+.mcp-import-choice { display: inline-flex; align-items: center; gap: var(--checkbox-gap); cursor: pointer; }
 @container (max-width: 26rem) {
     :where(#page-settings, #page-skills) .mcp-header-row { grid-template-columns: minmax(0, 1fr); }
 }
@@ -1618,8 +1606,8 @@ textarea.ui-control.settings-rules-text {
 /* A key's page: its fields side by side while they fit, then Save and Test with one result line. */
 .accounts-key-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3); align-items: start; }
 /* A compatible key's consent: across the form, its sentence wrapping beside the box. */
-.accounts-key-consent { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.accounts-key-consent > .ui-checkbox { flex: none; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+.accounts-key-consent { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: var(--checkbox-gap); min-width: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.accounts-key-consent > .ui-checkbox { flex: none; margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); }
 .accounts-key-consent[hidden] { display: none; }
 .accounts-key .ui-action-row > .ui-result:empty { display: none; }
 .accounts-key .settings-card-note code { overflow-wrap: anywhere; }

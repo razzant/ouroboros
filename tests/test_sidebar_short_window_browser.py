@@ -337,18 +337,23 @@ BARS = """() => {
     return {head: side.querySelector('.sidebar-head').getBoundingClientRect().height,
             headPad: parseFloat(getComputedStyle(side).getPropertyValue('--sidebar-head-h')),
             railTop: parseFloat(getComputedStyle(side.querySelector('.nav-rail')).paddingTop),
-            headTop: parseFloat(getComputedStyle(side.querySelector('.sidebar-head')).paddingTop)};
+            headTop: parseFloat(getComputedStyle(side.querySelector('.sidebar-head')).paddingTop),
+            cardTop: side.querySelector('.sidebar-head [data-nav-page="chat"]').getBoundingClientRect().top
+                - side.getBoundingClientRect().top + side.scrollTop};
 }"""
 
 
 @pytest.mark.parametrize(('width', 'height', 'touch', 'late', 'grows'),
-                         [(1100, 480, False, 'title-band', 52), (390, 570, True, 'safe-area', 34)],
+                         [(1100, 480, False, 'title-band', 8), (390, 570, True, 'safe-area', 34)],
                          ids=['desk-title-band', 'drawer-safe-area'])
 def test_the_heads_measured_height_follows_a_band_or_a_safe_area_that_arrives_later(shell_ui, tmp_path, width, height,
                                                                                    touch, late, grows):
     """The head's measured height stays its real height when only its padding changes after the first paint, so the
     rows' scroll margin still keeps a focused row clear of it; the rail's first line moves with the head's. A drawer's
-    top line is the larger of the page row's 18px and the inset (5px past it), so a 47px inset adds 34."""
+    top line is the larger of the page row's 18px and the inset (5px past it), so a 47px inset adds 34. A macOS band
+    is the find row's own height (owner 27.11: Find a project stands on the lights' row), so a 52px band with no centre
+    takes the head's 16px top and the short window's 28px field and adds 8; the rail's first place then starts on
+    the card's line, under the lights."""
     page = seed_page(shell_ui, width, height, touch=touch)
     facts = {'engine': shell_ui['engine'], 'late': late}
     try:
@@ -369,7 +374,8 @@ def test_the_heads_measured_height_follows_a_band_or_a_safe_area_that_arrives_la
     assert abs(after['head'] - before['head'] - grows) <= 1, ('the late padding reached the head', facts)
     for state in (before, after):
         assert abs(state['headPad'] - state['head']) <= 0.5, facts
-        assert abs(state['railTop'] - state['headTop']) <= 0.5, ('the rail and the head share their first line', facts)
+        first = state['cardTop'] if state is after and late == 'title-band' else state['headTop']
+        assert abs(state['railTop'] - first) <= 0.5, ('the rail and the head share their first line', facts)
 
 
 # Focus without a keyboard walk, so WebKit (which Tabs only to fields by default) measures it too: the head's control
@@ -986,7 +992,7 @@ def test_a_very_short_drawer_reveals_rail_version_and_update_controls_by_keyboar
             capture_on=('nav-version-check', f'sidebar-short-568x320-version-{shell_ui["engine"]}'),
         )
         facts['ordinary_rev'] = _walk_rail_keyboard(
-            page, rev, '#primary-sidebar .sidebar-head [data-nav-page="chat"]',
+            page, rev, '#primary-sidebar .nav-find-input',  # the head's first control (owner 27.11)
             include_start=False, stop_on='nav-drawer-close',
         )
         facts['ordinary_foot_rev'] = _walk_rail_keyboard(
@@ -1019,7 +1025,7 @@ def test_a_very_short_drawer_reveals_rail_version_and_update_controls_by_keyboar
             capture_on=('update-notice-close', f'sidebar-short-568x320-update-{shell_ui["engine"]}'),
         )
         facts['update_rev'] = _walk_rail_keyboard(
-            page, rev, '#primary-sidebar .sidebar-head [data-nav-page="chat"]',
+            page, rev, '#primary-sidebar .nav-find-input',  # the head's first control (owner 27.11)
             include_start=False, stop_on='nav-drawer-close',
         )
         facts['update_foot_rev'] = _walk_rail_keyboard(

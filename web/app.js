@@ -41,7 +41,7 @@ import { getInterfaceSize } from './modules/interface_size.js';
 import { initDashboard } from './modules/dashboard.js';
 import { initStorage } from './modules/storage.js';
 import { SHELL_ICONS } from './modules/page_icons.js';
-import { mountNavRail, navRowFor, pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
+import { leadHeadWithFind, mountNavRail, navRowFor, pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
 import { bindPageBack, renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
 import { bindKeyboardViewport } from './modules/keyboard_viewport.js';
@@ -130,6 +130,7 @@ primarySidebar?.querySelector('.sidebar-head')?.insertAdjacentHTML('beforeend', 
 // foot or a version row gets it composed by mountNavRail (pages.js) — the retained version row moves into the
 // column's foot after the Projects, v7.7.0's replaced Utilities group leaves: one set stands.
 if (primarySidebar?.querySelector('.nav-rail, .sidebar-foot, #nav-version')) mountNavRail(primarySidebar);
+leadHeadWithFind(primarySidebar);  // Find a project and + lead the head before it is measured (pages.js)
 measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head
 // A short window scrolls the whole column: rows that wait past a pinned bar fade under it (style.css), as the list's do.
 if (primarySidebar) bindScrollFade(primarySidebar);
@@ -146,6 +147,7 @@ projectPanel?.insertAdjacentHTML('afterbegin', renderPageHeader({
     showMobileNav: false,
     variant: 'project',
     className: 'project-panel-bar project-inspector-header',
+    roomEdge: true,
     trailingHtml: `${panicButtonHtml()}<button id="project-panel-close" class="shell-icon-control project-panel-close" type="button" title="Close project thread" aria-label="Close project thread">${SHELL_ICONS.close}</button>`,
 }));
 const projectHeader = createRoomHeader({ bar: projectPanel?.querySelector('.project-panel-bar'), ws, openDashboardTab, refreshState: refreshProjectsNav });

@@ -198,7 +198,7 @@ def test_a_reply_strip_opens_and_closes_like_the_capsule_rows_fold(direct_server
 
 @pytest.mark.ui_browser
 def test_wizard_enabled_checkbox_stays_inline(subscription_ui):
-    """The real wizard keeps its already-fixed checkbox width at phone scale."""
+    """The real wizard's check box keeps the shared glyph size (ui.css --checkbox-size, a fine pointer) at phone width."""
     from tests.test_ui_smoke_agents_panel import _wizard_step_until, _WIZARD_ON_AGENTS_JS
     from tests.test_subscription_setup_browser import capture
 
@@ -218,7 +218,7 @@ def test_wizard_enabled_checkbox_stays_inline(subscription_ui):
             return {checkboxWidth:box.width, height:label.getBoundingClientRect().height,
                 textTop:word.top, textBottom:word.bottom, checkboxTop:box.top, checkboxBottom:box.bottom};
         }""")
-        assert geometry["checkboxWidth"] == 14, geometry
+        assert geometry["checkboxWidth"] == 16, geometry
         assert geometry["height"] <= 28, geometry
         assert geometry["textBottom"] <= geometry["checkboxBottom"] + 6, geometry
         capture(page, f"wizard-inline-checkbox-{width}")
