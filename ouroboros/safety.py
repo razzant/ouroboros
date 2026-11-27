@@ -673,14 +673,14 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     """Fixed host evidence, with authorship separate from semantic authorization. ``evidence`` (a dict) receives
     the destinations and notes resolved here, so a refusal names them without resolving them again; an extension
     call's place facts come from the descriptor being dispatched (``ext_tool``), never a later publication."""
-    from ouroboros.place_guard import call_place_facts, place_evidence
+    from ouroboros.place_guard import place_evidence, safety_place_facts
     from ouroboros.tool_effects import mcp_sends_as
     from ouroboros.safety_evidence import checked_call_evidence, focus_event_source, with_author
 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
     focus = metadata.get("focus") or {}
-    place = dict(call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {})
+    place = safety_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool)
     place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
     said, link, letter = letter_evidence(ctx, metadata, place_ids)  # a linked Ouroboros occasioned it: who, link facts now
     # A focus occasions the work; it does not establish where this call lands.
