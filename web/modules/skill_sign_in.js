@@ -526,14 +526,14 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         return { text: words('signed_in_as', 'Signed in as {account} via {client}.', { account: nameOf(account), client: account.client?.label || editor.client?.label || '' }), tone: 'ok' };
     }
 
-    function update(data) {
+    function update(data, fresh = true) {
         if (closed || !data) return;
         current = data;
         settle();
         paint();
         if ([...states.values()].some((state) => state.editor?.kind === 'waiting')) armReturn();
         else disarm?.();
-        const service = ask && services().find((row) => row.service === ask.service);
+        const service = ask && fresh && services().find((row) => row.service === ask.service);
         if (service) {
             const wanted = ask;
             ask = null;
@@ -550,8 +550,11 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         try {
             const data = await reload({ signal: lifetime.signal });
             if (!data || closed) return;
-            if (data !== current) update(data);
-        } catch { return; } // A failed read changes no displayed account fact.
+            if (data !== current || ask) update(data);
+        } catch { // A failed read changes no displayed account fact; a waiting chat button opens on what is shown.
+            if (ask && current) update(current);
+            return;
+        }
         if (!watched) return;
         for (const service of services()) {
             const state = stateOf(service.service), editor = state.editor;
@@ -910,7 +913,11 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
     container.addEventListener('click', onClick);
     container.addEventListener('change', onEdit);
     container.addEventListener('input', onEdit);
-    if (current) update(current); else void refresh();
+    // A conversation's button (no account named) chooses its account on a fresh status read, never on a snapshot this
+    // page kept from an earlier visit: the asked access may be newer than it.
+    const chatAsk = ask?.account === null;
+    if (current) update(current, !chatAsk);
+    if (!current || chatAsk) void refresh();
     return () => {
         if (closed) return;
         closed = true;

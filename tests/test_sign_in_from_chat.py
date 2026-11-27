@@ -7,6 +7,8 @@ computer, says where to finish it instead of drawing a dead button. Offline: a f
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from ouroboros import link_actions, sign_in_offers
@@ -61,7 +63,8 @@ def test_a_links_row_with_a_place_is_delivered_and_its_conversation_noted(tmp_pa
     bridge._broadcast_fn = sent.append
     ok, why = bridge.send_links(4242, [{"label": "Sign in to Google", "place": PLACE}], title="Calendar needs Google")
     assert (ok, why) == (True, "ok") and sent[-1]["actions"] == [{"label": "Sign in to Google", "place": PLACE}]
-    assert (tmp_path / "state" / "sign_in" / "offers.json").exists()
+    offers = json.loads((tmp_path / "state" / "sign_in" / "offers.json").read_text(encoding="utf-8"))
+    assert offers["calendar/google"]["at"] == sent[-1]["ts"], "noted at the row's own time, before anyone saw it"
     said = []
     monkeypatch.setattr(message_bus, "send_with_budget", lambda *a, **k: said.append((a, k)))
     assert sign_in_offers.announce(tmp_path, "calendar", "google", "Google")

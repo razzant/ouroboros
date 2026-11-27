@@ -29,7 +29,7 @@ def _path(data_dir: Any) -> pathlib.Path:
     return pathlib.Path(data_dir) / "state" / "sign_in" / "offers.json"
 
 
-def note(data_dir: Any, chat_id: int, actions: Iterable[Mapping[str, Any]]) -> None:
+def note(data_dir: Any, chat_id: int, actions: Iterable[Mapping[str, Any]], at: str = "") -> None:
     """Remember the conversation each sign-in place of a delivered links row was offered in. Never raises."""
     offered = [found for found in (sign_in_place(action.get("place")) for action in actions or ()) if found]
     if not offered or not chat_id or not data_dir:
@@ -39,8 +39,8 @@ def note(data_dir: Any, chat_id: int, actions: Iterable[Mapping[str, Any]]) -> N
             saved = read_json_dict(_path(data_dir)) or {}
             for skill, service in offered:
                 earlier = saved.get(f"{skill}/{service}")  # the same conversation offering again keeps its first time
-                at = earlier["at"] if isinstance(earlier, dict) and earlier.get("chat_id") == int(chat_id) else utc_now_iso()
-                saved[f"{skill}/{service}"] = {"chat_id": int(chat_id), "at": at}
+                same = isinstance(earlier, dict) and earlier.get("chat_id") == int(chat_id)
+                saved[f"{skill}/{service}"] = {"chat_id": int(chat_id), "at": earlier["at"] if same else (at or utc_now_iso())}
             atomic_write_json(_path(data_dir), saved)
     except Exception as exc:  # noqa: BLE001 — the links row is delivered either way
         log.warning("A sign-in offer could not be noted (%s)", type(exc).__name__)

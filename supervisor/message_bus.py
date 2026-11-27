@@ -899,6 +899,9 @@ class LocalChatBridge:
             actions=validated, title=safe_title,
         )
         from ouroboros.chat_references import delivery_transport, projection_fields
+        from ouroboros.sign_in_offers import note as note_sign_in_offers
+        # Noted at the row's own time before anyone sees it: a sign-in begun from its button always begins after it.
+        note_sign_in_offers(DATA_DIR, int(chat_id or 0), validated, at=ts)
         if stored:
             msg.update(projection_fields(stored))
         stamp_project_thread(DATA_DIR, msg)
@@ -914,8 +917,6 @@ class LocalChatBridge:
             "actions": validated,
             "ts": ts,
         })
-        from ouroboros.sign_in_offers import note as note_sign_in_offers
-        note_sign_in_offers(DATA_DIR, int(chat_id or 0), validated)  # «connected» comes back to this conversation
         return True, "ok"
 
     def send_quiz(
