@@ -4,6 +4,7 @@ Pure, synthetic: an incident-shaped plan history (earlier-schema waves with revi
 readers and decision-bearing attachments, then the plan record's asks and objections) and a ledger-shaped
 commit history. No drive, no producer, no provider.
 """
+from collections.abc import Mapping
 from copy import deepcopy
 import hashlib
 import json
@@ -444,17 +445,49 @@ def test_a_folds_refresh_leaves_every_index_before_its_note_and_retires_or_repla
 
 
 def _full_display(current):
-    """The display written before record subjects and remark fields: the producer's rows inline."""
-    full = {key: value for key, value in current.items() if key != "record_subjects"}
+    """The display a reader from before the display writes: the producer's rows inline, no display keys."""
+    full = {key: value for key, value in current.items() if key not in ("record_subjects", "display")}
     full["decision_rows"] = view._expanded_decision_rows(current)
     return full
 
 
+def without_sources(rows):
+    return [{k: v for k, v in r.items() if k != "source"} if isinstance(r, dict) else r for r in rows]
+
+
+def bound(history):
+    """``decision_ref`` -> binding of every bound decision, from the producer's own history (no display involved)."""
+    return {"decision:" + view._sha(e["bound_decision"]): e["bound_decision"]
+            for e in view.decision_entries(history) if e["bound_decision"]}
+
+
+def rewritten(row, current=None, *, meta=None, **facts_update):
+    """``row`` with its visible content (and, given ``meta``, its root's shape) changed, its 6A hash kept and the
+    visible hash bound to the new content."""
+    facts = json.loads(row["content"].partition("\n")[2])
+    facts.update(current=facts["current"] if current is None else current, **facts_update)
+    text = "[Current review decisions]\n" + json.dumps(facts, ensure_ascii=False, sort_keys=True)
+    return {**row, "content": text, view.REVIEW_CONTEXT_INDEX_KEY: {
+        **(row[view.REVIEW_CONTEXT_INDEX_KEY] if meta is None else meta),
+        "sha256": row[view.REVIEW_CONTEXT_INDEX_KEY]["sha256"],
+        "visible_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}}
+
+
+def full_copy(row):
+    """The row a reader from before the display wrote for the same decisions: the full display under its rule, its
+    root named ``repo_root``."""
+    meta = row[view.REVIEW_CONTEXT_INDEX_KEY]
+    facts = json.loads(row["content"].partition("\n")[2])
+    return rewritten(row, _full_display(facts["current"]), rule=view.INDEX_RULE, meta={
+        "family": meta["family"], "repo_root": meta.get("checkout", meta.get("repo_root"))})
+
+
 def test_commit_row_writes_each_repeated_delivery_once_and_reads_back_the_producers_rows_exactly():
     """BIBLE P1, repeated deliveries of one source: a review part's remark that is its reason's own field and a
-    record's subject on every one of its decisions leave the display; the expansion restores the producer's rows
-    byte for byte, so identity and bindings do not move. A remark that differs from every field, and a record whose
-    decisions carry different subjects, stay whole."""
+    record's subject on every one of its decisions leave the display, the rows so named listed in the marker
+    ``display``; the expansion restores the producer's rows byte for byte, so identity and bindings do not move. A
+    remark that differs from every field, and a record whose decisions carry different subjects, stay whole. A row
+    so shown names its root ``checkout`` (``display: 1``), not ``repo_root``."""
     history = commit_history()
     for row in history["decision_rows"]:
         row["subject"] = {"root": "/repo", "tree": "t" * 40, "record": row["review_record_id"]}
@@ -463,28 +496,79 @@ def test_commit_row_writes_each_repeated_delivery_once_and_reads_back_the_produc
     own = next(r for r in history["decision_rows"] if r["review_record_id"] == "rec-3" and r["decision_kind"] == "review_part")
     own["remark"] = "The actor's own short remark."
     mandatory, row, current = row_for(history, None, family="commit")
+    meta = row[view.REVIEW_CONTEXT_INDEX_KEY]
+    assert meta["display"] == 1 and meta["checkout"] == "" and "repo_root" not in meta
     shown = current["decision_rows"]
     assert set(current["record_subjects"]) == {"rec-1", "rec-3"}
     assert all("subject" not in r for r in shown if r["review_record_id"] != "rec-2")
     assert all("subject" in r for r in shown if r["review_record_id"] == "rec-2")
     aliased = [r for r in shown if "remark_field" in r]
     assert len(aliased) == 8 and all(r["remark_field"] == "findings" and "remark" not in r for r in aliased)
+    assert current["display"] == {"version": 1, "remark_rows": [i for i, r in enumerate(shown) if "remark_field" in r]}
     assert any(r.get("remark") == "The actor's own short remark." for r in shown)
-    assert [{k: v for k, v in r.items() if k != "source"} for r in view._expanded_decision_rows(current)] == [
-        {k: v for k, v in r.items() if k != "source"} for r in mandatory["decision_rows"]]
-    assert view.review_index_identity(current) == view.review_index_identity(_full_display(current))
-    assert view._index_bindings(current) == {"decision:" + view._sha(e["bound_decision"]): e["bound_decision"]
-                                             for e in view.decision_entries(history) if e["bound_decision"]}
-    full_text = "[Current review decisions]\n" + json.dumps(
-        {"family": "commit", "current": _full_display(current), "rule": view.INDEX_RULE}, ensure_ascii=False, sort_keys=True)
+    assert view._bytes(without_sources(view._expanded_decision_rows(current))) == view._bytes(
+        without_sources(mandatory["decision_rows"]))
+    assert view.review_index_identity(current) == view.review_index_identity(_full_display(current)) == meta["sha256"]
+    assert view._index_bindings(current) == bound(history)
+    facts = json.loads(row["content"].partition("\n")[2])
+    full_text = "[Current review decisions]\n" + json.dumps({**facts, "current": _full_display(current)},
+                                                            ensure_ascii=False, sort_keys=True)
     repeated = sum(len(json.dumps(r["reason"]["findings"], ensure_ascii=False, sort_keys=True)) for r in aliased)
     assert len(full_text) - len(row["content"]) >= repeated
 
 
+def test_the_display_restores_only_what_it_named_so_every_shape_round_trips_and_binds_as_before():
+    """The expansion is the exact inverse on every supported shape, compared as canonical JSON (as bindings compare):
+    it restores a remark only at the rows the marker names and a subject only from ``record_subjects``, never by
+    reading a producer's own field. Each case keeps its rows byte for byte and binds as the producer's history does:
+    a review part with its own ``remark_field`` beside a separate remark, an unfamiliar kind with its own field,
+    ``true`` beside ``1`` in a finding and in a subject, an object-valued legacy record id with a subject, and a
+    producer view that already holds ``record_subjects`` or ``display`` (shown whole)."""
+    base = commit_history()
+    for row in base["decision_rows"]:
+        row["subject"] = {"root": "/repo", "record": row["review_record_id"]}
+    cases = ("repeats", "own remark_field", "unfamiliar kind", "true and 1 in a finding", "true and 1 in a subject",
+             "object record id", "producer record_subjects", "producer display")
+    for case in cases:
+        history, extra = deepcopy(base), {}
+        first = history["decision_rows"][0]
+        if case == "own remark_field":
+            first.update(remark_field="provider_annotation", remark="The author retained this contrast in full.")
+        elif case == "unfamiliar kind":
+            first.update(decision_kind="previous_schema_row", remark_field="summary", remark="My own exact words.",
+                         reason={"summary": "A different summary."})
+        elif case == "true and 1 in a finding":
+            first.update(remark=[{"accepted": True}])
+            first["reason"]["findings"] = [{"accepted": 1}]
+        elif case == "true and 1 in a subject":  # rec-1's subjects equal as Python values, distinct as JSON
+            for row in history["decision_rows"]:
+                if row["review_record_id"] == "rec-1":
+                    row["subject"]["verified"] = True if row is first else 1
+        elif case == "object record id":
+            first["review_record_id"] = {"case": "retained"}
+        elif case == "producer record_subjects":
+            extra["record_subjects"] = {"rec-1": {"root": "/producer"}}
+            for row in history["decision_rows"]:
+                if row["review_record_id"] == "rec-1":
+                    del row["subject"]
+        elif case == "producer display":
+            extra["display"] = {"version": 1, "remark_rows": [0]}
+        mandatory = {**view.split_review_history(history)["mandatory"], **extra}
+        row = view._index_message(mandatory, "commit", "/repo", task_id=TASK)
+        current = json.loads(row["content"].partition("\n")[2])["current"]
+        assert view._bytes(without_sources(view._expanded_decision_rows(current))) == view._bytes(
+            without_sources(mandatory["decision_rows"])), case
+        assert view._index_bindings(current) == bound(history), case
+        assert all(current[key] == value for key, value in extra.items()), case  # a producer's own key, as written
+        assert row[view.REVIEW_CONTEXT_INDEX_KEY]["sha256"] == view.review_index_identity(_full_display(current)), case
+        assert view._review_index_identity(row) == ("commit", "/repo"), case
+
+
 def test_an_account_of_another_familys_decisions_is_no_gap_here_and_a_missing_member_here_still_is():
-    """A task-wide selection meets every family: a group whose members are all another family's is that family's
-    account, never an `unapplied_review_groups` gap repeated in every other row; a group naming a member this family
-    does not hold is still a gap, stated once."""
+    """A task-wide selection meets every family: a group none of whose members' sources this history holds is
+    another family's account, never an `unapplied_review_groups` gap repeated in every other row; a group naming a
+    member this family does not hold is still a gap, stated once, and so is a group of this family's decisions that
+    all changed since the account was written (their sources are here: stale, not foreign)."""
     plan, _operative = incident_history()
     commit = commit_history()
     plan_member = next(e["bound_decision"] for e in view.decision_entries(plan) if e["bound_decision"])
@@ -498,12 +582,24 @@ def test_an_account_of_another_familys_decisions_is_no_gap_here_and_a_missing_me
     partial = {"bound_decisions": [commit_member, missing], "remark": "group", "reason": "folded"}
     _shown, groups, gaps = view.project_decision_groups(commit, [partial], source_history=commit, selected_source=selected)
     assert groups == [] and len(gaps) == 1
+    members = [e for e in view.decision_entries(commit) if e["bound_decision"]
+               and e["row"]["decision_kind"] == "review_part" and e["row"].get("history_role") == "historical"][:2]
+    account = {"bound_decisions": [e["bound_decision"] for e in members], "remark": "group", "reason": "folded"}
+    _shown, groups, gaps = view.project_decision_groups(commit, [account], source_history=commit, selected_source=selected)
+    assert len(groups) == 1 and gaps == []  # the account as written applies
+    changed = deepcopy(commit)
+    for entry in members:  # each member's status moves; its immutable source stays
+        changed["decision_rows"][entry["index"]]["status"]["verified_after"] = True
+    _shown, groups, gaps = view.project_decision_groups(changed, [account], source_history=changed,
+                                                        selected_source=selected)
+    assert groups == [] and len(gaps) == 1 and gaps[0]["selection"] == account
 
 
-def test_a_folds_refresh_keeps_an_earlier_full_display_copy_of_the_same_decisions(tmp_path, monkeypatch):
-    """A running work's row written before the compact display stays the current row while its decisions stand: no
-    replacement and no second copy at a fold, with or without a floor (nothing is re-sent after an Update). Changed
-    decisions still replace or follow it (the floor test above)."""
+def test_a_folds_refresh_never_resends_an_earlier_full_display_copy_of_the_same_decisions(tmp_path, monkeypatch):
+    """A running work's row written before the display (full, ``repo_root``) holds the same decisions as the current
+    compact row of its family and root: a fold never appends a second copy. Before the fold's floor it stays as it
+    is; where its position may be rewritten (no floor, or at or after it) it takes the current, smaller display in
+    place. Changed decisions still replace or follow it (the floor test above)."""
     from ouroboros import review_history
 
     monkeypatch.setattr(review_history, "review_dispute_history", lambda *a, **k: deepcopy(commit_history()))
@@ -511,15 +607,167 @@ def test_a_folds_refresh_keeps_an_earlier_full_display_copy_of_the_same_decision
     messages = [{"role": "user", "content": "assignment"}]
     messages += view.review_context_updates(ctx, families={"commit:/repo": "/repo"}, messages=messages)[0]
     row = next(m for m in messages if view.REVIEW_CONTEXT_INDEX_KEY in m)
-    facts = json.loads(row["content"].partition("\n")[2])
-    assert any("remark_field" in r for r in facts["current"]["decision_rows"])
-    facts.update(current=_full_display(facts["current"]), rule="An earlier rule text.")
-    text = "[Current review decisions]\n" + json.dumps(facts, ensure_ascii=False, sort_keys=True)
-    earlier = {**row, "content": text, view.REVIEW_CONTEXT_INDEX_KEY: {
-        **row[view.REVIEW_CONTEXT_INDEX_KEY], "visible_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}}
-    assert view._review_index_identity(earlier) == ("commit", "/repo")
+    earlier = full_copy(row)
+    assert view._review_index_identity(earlier) == view._review_index_identity(row) == ("commit", "/repo")
+    assert len(earlier["content"]) > len(row["content"])
     note = {"role": "assistant", "content": "The mind's note."}
     transcript = [earlier if m is row else m for m in messages] + [note]
-    assert view.refresh_compacted_review_context(ctx, deepcopy(transcript), floor=2) == transcript
-    assert view.refresh_compacted_review_context(ctx, deepcopy(transcript)) == transcript
+    at = transcript.index(earlier)
+    assert view.refresh_compacted_review_context(ctx, deepcopy(transcript), floor=len(messages)) == transcript
+    for floor in (None, at):
+        assert view.refresh_compacted_review_context(ctx, deepcopy(transcript), floor=floor) == [
+            row if m is earlier else m for m in transcript], floor
     assert view.review_context_updates(ctx, families={"commit:/repo": "/repo"}, messages=transcript)[0] == []
+
+
+def test_a_folds_refresh_ignores_only_another_familys_gap_on_an_old_full_row(tmp_path, monkeypatch):
+    """After an Update a running work holds the rows a reader from before wrote: in full, with the gap that reader
+    stated in every family for an author group of another family's decisions (plan objections beside change
+    decisions), which the current reader no longer states. Such a row holds the same decisions as the current
+    compact row of its family and root, which supersedes it: before an ordinary fold's floor it stays and nothing is
+    appended; where its position may be rewritten it takes the current display in place, smaller. A gap of this
+    family's own group still differs: appended after it before the floor, replaced in place at or after it. The
+    plan row is judged the same way."""
+    from ouroboros import review_history
+
+    monkeypatch.setattr(review_history, "review_dispute_history", lambda *a, **k: deepcopy(commit_history()))
+    ctx = SimpleNamespace(task_id=TASK, drive_root=tmp_path, _pending_review_context={})
+    messages = [{"role": "user", "content": "assignment"}]
+    messages += view.review_context_updates(ctx, families={"commit:/repo": "/repo"}, messages=messages)[0]
+    current = next(m for m in messages if view.REVIEW_CONTEXT_INDEX_KEY in m)
+    plan, operative = incident_history()
+
+    def historical(history):
+        return [e["bound_decision"] for e in view.decision_entries(history)
+                if e["bound_decision"] and e["row"].get("history_role") == "historical"][:2]
+
+    def with_gap(row, members):
+        facts = json.loads(row["content"].partition("\n")[2])
+        gap = {"selection": {"bound_decisions": members, "remark": "an account", "reason": "folded"}, "reason": "'0'"}
+        return rewritten(row, {**facts["current"], "unapplied_review_groups": [gap]})
+
+    stale = [{**member, "content_sha256": "0" * 64} for member in historical(commit_history())]
+    note = {"role": "assistant", "content": "The mind's note."}
+    for old, same in ((with_gap(full_copy(current), historical(plan)), True), (with_gap(full_copy(current), stale), False)):
+        assert view._review_index_identity(old) == view._review_index_identity(current) == ("commit", "/repo")
+        assert view._same_index(old, current) is same and len(old["content"]) > len(current["content"])
+        before = [old if m is current else m for m in messages] + [note]
+        assert view.obsolete_review_index_positions([*before, current]) == (before.index(old),)
+        kept = view.refresh_compacted_review_context(ctx, deepcopy(before), floor=len(before) - 1)
+        assert kept == (before if same else [*before, current])
+        after = [messages[0], note, *(old if m is current else m for m in messages[1:])]
+        for floor in (None, 1):
+            assert view.refresh_compacted_review_context(ctx, deepcopy(after), floor=floor) == [
+                current if m is old else m for m in after], (same, floor)
+        assert view.review_context_updates(ctx, families={"commit:/repo": "/repo"}, messages=before)[0] == []
+    plan_row = row_for(plan, operative)[1]
+    assert view._same_index(with_gap(plan_row, historical(commit_history())), plan_row)
+    assert not view._same_index(with_gap(plan_row, [{**m, "content_sha256": "0" * 64} for m in historical(plan)]),
+                                plan_row)
+
+
+# A rolled-back reader: frozen copies of the resident-row recognizer and binding reader as they stood before the
+# display (f4cd41056), with what they call: what an older install applies to a newer transcript.
+_OLD_BODY_KIND = "review_history_body"
+_OLD_DECISION_KINDS = frozenset({"plan_objection", "plan_finding", "plan_author", "plan_closure", "review_part",
+                                 "author_decision"})
+
+
+def _old_sha(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _old_hash(value):
+    return isinstance(value, str) and len(value) == 64 and set(value) <= frozenset("0123456789abcdef")
+
+
+def _old_immutable_ref(value):
+    if not isinstance(value, Mapping) or not _old_hash(value.get("sha256")):
+        return None
+    if not isinstance(value.get("path"), str) or not value["path"]:
+        return None
+    size = value.get("size", value.get("bytes"))
+    if type(size) is not int or size < 0:
+        return None
+    return {"kind": value.get("kind", "legacy_wave"), "root": value.get("root", ""),
+            "path": value["path"], "size": size, "sha256": value["sha256"]}
+
+
+def _old_body_binding(source, field, value):
+    ref = _old_immutable_ref(source.get("source_ref", source)) if isinstance(source, Mapping) else None
+    if ref is None or not isinstance(field, str) or not field:
+        return None
+    return {"kind": _OLD_BODY_KIND, "source_ref": ref, "field": field, "content_sha256": _old_sha(value)}
+
+
+def _old_binding(value):
+    if not isinstance(value, Mapping) or value.get("kind") != _OLD_BODY_KIND:
+        raise ValueError("Invalid review body binding")
+    ref = _old_immutable_ref(value.get("source_ref"))
+    if ref is None or not isinstance(value.get("field"), str) or not value["field"] or not _old_hash(value.get("content_sha256")):
+        raise ValueError("Incomplete review body source identity")
+    return {"kind": _OLD_BODY_KIND, "source_ref": ref, "field": value["field"],
+            "content_sha256": value["content_sha256"]}
+
+
+def _old_index_bindings(current):
+    bindings, addresses = {}, current.get("addresses") or {}
+    for row in current.get("decision_rows") or []:
+        if not isinstance(row, Mapping):
+            continue
+        authored = row.get("authored_view") if isinstance(row.get("authored_view"), Mapping) else {}
+        try:
+            if authored.get("bound_decision"):
+                binding = _old_binding(authored["bound_decision"])
+            else:
+                kind, source = row.get("decision_kind"), addresses.get(row.get("source")) if isinstance(row.get("source"), str) else None
+                ref = _old_immutable_ref((source or {}).get("source_ref"))
+                if kind not in _OLD_DECISION_KINDS or ref is None:
+                    continue
+                binding = _old_body_binding({"source_ref": ref}, "decision:" + kind, {
+                    key: value for key, value in row.items() if key not in {"source", "revision", "history_role", "decision_ref"}})
+        except (ValueError, TypeError):
+            continue
+        bindings["decision:" + _old_sha(binding)] = binding
+    return bindings
+
+
+def _old_review_index_identity(row):
+    meta, text = row.get(view.REVIEW_CONTEXT_INDEX_KEY), row.get("content")
+    if (not isinstance(meta, dict) or meta.get("family") not in {"plan", "commit"}
+            or not isinstance(meta.get("repo_root"), str) or not _old_hash(meta.get("sha256"))
+            or not isinstance(text, str)
+            or meta.get("visible_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest()):
+        return None
+    return meta["family"], meta["repo_root"]
+
+
+def test_a_reader_from_before_the_display_ignores_a_compact_row_and_binds_every_decision_of_a_full_one():
+    """Rollback: a row written with the display names ``checkout`` and ``display: 1``, never ``repo_root``, so the
+    reader from before the display (frozen above), which rebuilds each binding from the visible decision, does not
+    recognize it and binds nothing wrong from it; a row with nothing to leave out keeps the full shape, and that
+    reader resolves every ``decision_ref`` its decisions carry. The current reader resolves both shapes as one
+    identity (family, root), and the newer copy supersedes the older whatever their shapes."""
+    changes = commit_history()
+    for row in changes["decision_rows"]:  # each record's subject on each of its decisions, as the producer repeats it
+        row["subject"] = {"root": "/repo", "record": row["review_record_id"]}
+    changes = view.canonical_decision_projection(changes)
+    plan, operative = incident_history()
+    compact = view._index_message(view.split_review_history(changes)["mandatory"], "commit", "/repo", task_id=TASK)
+    shown = json.loads(compact["content"].partition("\n")[2])["current"]
+    assert _old_review_index_identity(compact) is None and view._review_index_identity(compact) == ("commit", "/repo")
+    assert "display" in shown and "repo_root" not in compact[view.REVIEW_CONTEXT_INDEX_KEY]
+    assert view._index_bindings(shown) == bound(changes)
+    older = full_copy(compact)
+    for identity, history, row in ((("plan", ""), plan, row_for(plan, operative)[1]), (("commit", "/repo"), changes, older)):
+        assert _old_review_index_identity(row) == view._review_index_identity(row) == identity
+        current = json.loads(row["content"].partition("\n")[2])["current"]
+        carried = {r["decision_ref"] for r in current["decision_rows"] if "decision_ref" in r}
+        old = _old_index_bindings(current)
+        assert carried and carried == set(old) and old == bound(history) == view._index_bindings(current), identity
+    notes = [{"bound_decision": key, "remark": "r", "reason": "x"} for key in bound(changes)]
+    resolved = view.resolve_observed_review_notes(notes, {"messages": [compact]})
+    assert [note["bound_decision"] for note in resolved] == list(bound(changes).values())
+    assert view.obsolete_review_index_positions([older, compact]) == (0,)
+    assert view.obsolete_review_index_positions([compact, older]) == (0,)
