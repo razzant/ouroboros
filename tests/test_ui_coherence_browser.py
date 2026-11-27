@@ -60,7 +60,7 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     rows.extend({"role": "assistant", "text": f"Reading line {i}. " + "Useful content continues below the header. " * 6,
                  "ts": f"2026-09-09T00:01:{i:02}Z"} for i in range(12))
     page.route("**/api/chat/history*", lambda route: route.fulfill(
-        content_type="application/json", body=json.dumps({"messages": rows, "progress": []})))
+        content_type="application/json", body=json.dumps({"profile_scope": setup_browser.PREVIEW_SCOPE, "messages": rows, "progress": []})))
     open_app(ui)
     page.wait_for_selector(".system-message-actions")
     actions = page.locator("#chat-messages .system-message-actions")
@@ -104,8 +104,8 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
 
     pieces = two_steps_under_a_tint(paint)
     # The edge ends at the capsules' lower side, inside the bar, on every layout, the desk included; the deep step
-    # clears halfway down, where the soft one starts to. This history read left Main's note under the bar: a later
-    # sibling at the bar's own level, it paints over the bar as the capsules do, so its words stay sharp.
+    # clears halfway down, where the soft one starts to. Nothing hangs under the bar: a failed history read is the
+    # page's notice.
     capsules = header.evaluate("el => Math.max(...[...el.querySelectorAll('.app-page-actions button')].filter(b => b.getClientRects().length).map(b => b.getBoundingClientRect().bottom))")
     assert pieces["tint"]["height"] == pytest.approx(capsules, abs=1) and pieces["tint"]["height"] <= paint["bar"], (capsules, paint)
     assert pieces["soft"]["height"] == pytest.approx(capsules, abs=1), paint
@@ -113,12 +113,7 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     # The transcript's first row clears the bar (style.css --chat-top-reserve), the edge taking no more of it.
     feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
     assert feed_top >= paint["bar"] - 1, (feed_top, paint)
-    assert page.locator("#page-chat > .chat-page-note > *").count() and page.locator("#page-chat > .chat-page-note").is_visible()
-    order = page.evaluate("""() => { const bar = document.querySelector('#page-chat > .chat-page-header');
-        const note = document.querySelector('#page-chat > .chat-page-note');
-        return {after: Boolean(bar.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING),
-            bar: Number(getComputedStyle(bar).zIndex), note: Number(getComputedStyle(note).zIndex)}; }""")
-    assert order["after"] and order["note"] >= order["bar"], order
+    assert page.locator("#page-chat > .chat-page-note").count() == 0
     # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
     # never takes its box, and the strip still takes presses for the title bar.
     page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
@@ -236,7 +231,7 @@ def test_photo_menu_escapes_gallery_crop_downloads_and_cleans_up(subscription_ui
     page = subscription_ui["page"]
     page.set_viewport_size({"width": 390, "height": height})
     page.route("**/api/chat/history*", lambda route: route.fulfill(content_type="application/json", body=json.dumps({
-        "messages": [{"role": "assistant", "text": "Photo fixture is ready", "ts": "2026-09-09T00:00:00Z"}]})))
+        "profile_scope": setup_browser.PREVIEW_SCOPE, "messages": [{"role": "assistant", "text": "Photo fixture is ready", "ts": "2026-09-09T00:00:00Z"}]})))
     open_app(subscription_ui)
     page.get_by_text("Photo fixture is ready", exact=True).wait_for()
     # Actual media renderer, gallery grouping, menu and CSS. Callbacks only bind it
@@ -655,7 +650,8 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
             # Later Main reading below the questions, so a removal can happen above the reader.
             rows += [{'role': 'assistant', 'text': f'Later Main note {i}. ' + 'Reading continues below the questions. ' * 4,
                       'ts': f'2026-09-16T00:1{i}:00Z'} for i in range(8)]
-        route.fulfill(json={'messages': rows, 'progress': []})
+        route.fulfill(json={'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': rows, 'progress': [],
+                            'has_more': False, 'page_cursor': 'recent'})
     page.route('**/api/chat/history*', history)
     open_app(ui)
     mirrors = page.locator('#chat-messages .chat-bubble.project-question')
@@ -951,7 +947,7 @@ def test_main_waiting_pill_reaches_each_target_and_one_tap_close(subscription_ui
                 for i in range(8)] + [question] + [
                 {'role': 'assistant', 'text': f'Later Main note {i}. ' + 'Reading continues below the question. ' * 6,
                  'ts': f'2026-09-16T01:{i:02d}:00Z'} for i in range(14)]
-        route.fulfill(json={'messages': rows if main else [], 'progress': []})
+        route.fulfill(json={'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': rows if main else [], 'progress': []})
     page.route('**/api/chat/history*', history)
 
     def decide(route):

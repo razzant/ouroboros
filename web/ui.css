@@ -42,7 +42,6 @@
     --accent-18: rgba(201, 53, 69, 0.18);
     --accent-22: rgba(201, 53, 69, 0.22);
     --accent-25: rgba(201, 53, 69, 0.25);
-    --accent-35: rgba(201, 53, 69, 0.35);
     --accent-45: rgba(201, 53, 69, 0.45);
     --accent-55: rgba(201, 53, 69, 0.55);
     /* Project identity (vivid fuchsia): a converted task card, its sidebar marker,
@@ -174,6 +173,9 @@
     /* The one veil under every layer: dialogs, the Project panel, the file dialog and the reader, the feed under a row
        lifted by a long press. */
     --scrim: rgba(0, 0, 0, 0.45);
+    /* The veil's one softening: faint enough that the room behind an open layer, Main
+       beside a Project, still reads; glass on a floating object is --glass. */
+    --scrim-filter: blur(2px);
     --radius-object: 18px;
     --radius-inner: 12px;
     --radius-sheet: 24px;
@@ -1616,6 +1618,10 @@ select.ui-source-backing {
     .ui-source-options [role="option"] { min-height: 44px; align-content: center; }
 }
 textarea.ui-control { resize: vertical; }
+/* An empty multiline field has nothing to scroll sideways. WebKit lays a textarea's placeholder out zoom times as wide as
+   the field, so at an Interface size above 100 % (the window's page zoom) an empty field with a placeholder drew a
+   sideways bar under it. With words in it the placeholder is gone: a wrapping field wraps, a code field scrolls. */
+textarea:placeholder-shown { overflow-x: hidden; }
 /* A read-only multiline value (renderSafeField's output): the field's box keeps its border, fill and ring whole at every
    scroll state; the value's own body inside is the scrollport the shared fade masks, so a waiting edge fades text only.
    Selectable, in the value's ink; only a very long one scrolls, and its focus reaches that by keyboard. */

@@ -48,8 +48,11 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    over moving content wears its own material, whatever its ARIA role or parent bar. The work list (owner 2A, 25.10),
    menus, popovers and the shared modal dialogs (confirmations, an import, a skill's details) have an opaque neutral
    backing so underlying words cannot bleed through. The rest keep their own paint: the composer field, a note over
-   the transcript (Main's history note, the voice offer), toasts and float capsules stay glass, and the document
-   reader and file dialogs keep their near-opaque modal sheet over a scrim.
+   the transcript (the voice offer), toasts and float capsules stay glass, and the document
+   reader and file dialogs keep their near-opaque modal sheet over a scrim. The toast, a file's preview, the drop card,
+   the restart card, the file dialog, the document reader and the Project panel rest on the one float shadow, and a
+   staged file on the rest shadow; the veils behind the setup wizard, a files drop and an open Project soften with one
+   faint filter (`--scrim-filter`), so the room behind them still reads.
 3. **Colour says who and what.** Each voice colours its own objects: the owner blue,
    Ouroboros rose (its answers, its work cards and its card in the sidebar alike), System amber (gold on dark), a
    Project fuchsia. A role keeps its hue family in both themes and the theme gives it its
@@ -174,7 +177,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
   waits for its motion's end (`web/modules/motion.js`).
 - Where it lives: the values are `web/ui.css` tokens, dark in `:root` and light in
   `:root[data-theme="light"]` (`--elev-*`, `--radius-object` / `-inner` / `-sheet`,
-  `--surface-object` / `-object-opaque` / `-capsule` / `-float` / `-tray` / `-side`, `--glass`, `--voice-*`, `--relay-ledge-*`,
+  `--surface-object` / `-object-opaque` / `-capsule` / `-float` / `-tray` / `-side`, `--glass`, `--scrim-filter`, `--voice-*`, `--relay-ledge-*`,
   `--tone-*` with `--tone-crimson-ink`, `--tone-crimson-soft` / `-soft-ink` and `--tone-crimson-word`,
   `--status-warn-word` / `-error-word`, `--press` / `--press-solid`); the light
   block restates its own values of the hues and tints the dark seed sets differently, and the dark voice materials
@@ -416,7 +419,8 @@ to recolour, so an outline outside it would be a second frame.
 Text, number, password, select and multiline fields use the same `.ui-control`
 family; `.ui-switch` acts at once, `.ui-checkbox` on its form's Save. `.ui-field` groups a
 label, control and optional `.ui-field-help`. A placeholder is an example,
-never the field's only name. Help and validation belong to that field without
+never the field's only name. An empty multiline field shows no sideways scroll bar under its placeholder, at any
+Interface size; a field that takes one value per line does not wrap its lines. Help and validation belong to that field without
 changing the alignment of neighboring controls and their actions.
 
 **Three choices, three controls.** Pick one is `.ui-radio`, tick any is
@@ -769,8 +773,15 @@ Status, owner action, and urgent notification are separate product concepts:
   product's explicit incident/notification seam, not a red status or a failed
   task as a proxy.
 
-A status names who or what ends it; needed facts stay in their owning view. A toast announces news once:
-its words ignore presses, its visible keyboard-reachable × only hides it, and hover or focus pauses its timer.
+A status names who or what ends it; needed facts stay in their owning view. Events speak through the toast; a
+state of a place is shown by the place: news (a read failed, a restore landed inexactly) is the one toast, never a chip
+or row of its own, while a place's state (a gap, an upgrade in progress) stays in that place. A toast announces news
+once: its words are read and selected and ignore presses, its visible keyboard-reachable × only hides it, an action
+(Open, a way back) is its own button under the words, and hover or focus pauses its timer. The page's stack stands at
+the room's top corner, top right in a left-to-right interface; a blocking surface (the document reader, a file dialog,
+the Model sheet) shows its own notices, and the page's wait behind it, their time held. A toast wears the shared float
+material without a rim; its tone is its words' ink; its × is small and plain, no plate, in its top corner, one line of
+words centred on it, and under a finger the ×'s reach and the action's never meet.
 The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
 in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
 never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
@@ -1213,7 +1224,8 @@ exception, not a pattern for new notices.
 
 Built-in chrome uses words and monochrome `currentColor` vectors, not decorative
 emoji. System keeps its resting body and amber/gold label without an edge; status stays explicit in
-words and the tone primitive. Functional icons keep state and accessible names.
+words and the tone primitive. A System row's words, its title and its status sentences read at the voices' 16 px, the
+title strong; its name, time and metadata (a place, a count, a row's answer) keep 12. Functional icons keep state and accessible names.
 A host notice writes no pictograph. For rows written before notices, known typed host prefixes
 are hidden only at display (`host_notice_text.js`) and unlisted or ambiguous records remain
 literal. History, keys and exports keep the stored bytes; Copy keeps a notice's line and, for two
@@ -1499,8 +1511,9 @@ before or after; a refused session or sign-out erases only these copies, and a d
 Project's copy in its data profile goes once this browser learns of the deletion (a `deleting`
 row a state read brings once the socket proved that profile, a lookup of that Project, or the
 complete list Find a project and Show more read), staying within the total until then. Task activity remains separate.
-Failure and approximate-restoration notices are wrapping text in the room's header
-chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
+A failed read and an inexact restoration are news: each is told once per episode by an ordinary toast, only while
+its room is the one shown, and withdrawn when the room is left or covered (§4); the edge keeps the fact, its words and
+its Retry while it is true.
 
 A room first opens at its newest message, whatever its age or others' traffic. A return within the page
 session finds it as left: following, it follows the fresh end; reading older history, it
@@ -1554,16 +1567,15 @@ out of view; one the reader is on grows down.
 Reading far back releases newest pages, bounding retention as replies arrive.
 Disconnected fragments or uncertain coverage show
 `Some saved history is not loaded. Shown messages may have gaps.` at the
-in-feed `Load more history` edge heading the window, beside any failure or
-approximation (owner 21.10), never over newest rows (U021).
+in-feed `Load more history` edge heading the window, as do a store being upgraded and Main's unreadable project
+list (owner 21.10), never over newest rows (U021).
 Bytes added after an empty-source read remain missing until read from its
 start. Mixed cards keep one node and this note; dates, shared row IDs and exhausted
 cursors prove neither a separator nor full coverage.
 `Beginning of saved history` requires complete conversation delivery.
 Retained origins say `Saved project context` until a matching canonical row
 adopts the node and removes the label; context proves no archive coverage.
-On return, a lost place falls back to its card, then the clamped prior position,
-with this note until explicit navigation clears it.
+On return, a lost place falls back to its card, then the clamped prior position; the edge says so while it holds.
 Reconciliation keeps visible rows, card lines, selection, focus and expanded
 Reviews in their actual nodes.
 
@@ -1589,7 +1601,7 @@ no card speaks for it. The title
 ellipsizes first, and a new word never moves a neighbour or resizes the bar.
 Pressing the status, or ↓/↑ on it, opens that
 room's work and only that room's as one floating list under the bar's capsules, the same in every
-room (an opaque sheet of its own from the status capsule to the bar's last control, Main's history note waiting behind it): one row per work, the owner's unconfirmed sends, and unfinished cards an
+room (an opaque sheet of its own from the status capsule to the bar's last control): one row per work, the owner's unconfirmed sends, and unfinished cards an
 incomplete read has not confirmed (shown unknown, without controls). A Project
 with nothing else keeps its latest represented root card. Main's list opens when there is work or a start to show; a
 Project's starts with the room's whole name, wrapped (its title in the bar keeps one line, §10), so its title
@@ -1941,7 +1953,7 @@ A chat transport shows such a request as the host's note on where to enter it, w
 
 A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its subagents within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable (a row no census names now keeps its message, its controls and Project reference withdrawn); visibility never authorizes login, budget changes or automatic Resume.
 
-Work a Panic stopped comes back only by choice: one System message, `Stopped by Panic`, names every room's such work from the host's census of saved work, each with a check box, none chosen, and the `Stop…` its card had. `Choose all N` counts the rows a read offers now; it and `nothing waits` stand only on today's census saying its list is whole. The host's own word that it is not stands until a read says it is, after the last answer and through a missing read; with no row read it is one neutral line in the title's place, claiming no Panic, stop or work. A host silent on it is taken as neither. `Resume N selected` sends each chosen work's own Resume once, in census order, with the stop it was chosen under; each row says that stop's answer (accepted in its door's words, which is not running; refused in the host's; changed since chosen; no answer, never retried), an answer about a stop since changed reads as the earlier one's, and what was not chosen stays stopped. A work's Stop stands while its card grants it, whatever its Resume answered, and waits only for its own answer. Opening, reconnecting and repainting send nothing; the pill counts the message as one action and lands on its first box. It replaces only an owner-action card offering just that Resume; a card for anything else (a spending limit, a restart, model access) and a work the list cannot name keep their own.
+Work a Panic stopped comes back only by choice: one System message, `Stopped by Panic`, names every room's such work from the host's census of saved work, each with a check box, none chosen, and the `Stop…` its card had. `Choose all N` counts the rows a read offers now; it and `nothing waits` stand only on today's census saying its list is whole. The host's own word that it is not stands until a read says it is, after the last answer and through a missing read; with no row read Main holds no message: a host still starting is said by its bar's `Starting…`, and a ready host's word is one toast per episode, claiming no Panic, stop or work, its Retry a read that says so again when the list still is not whole. It stands until a whole read ends the episode; one the person closed stays closed for that run of the host, and Main left and returned to, or the tab reloaded, shows it again only on a ready host's fresh word. A host silent on it is taken as neither. `Resume N selected` sends each chosen work's own Resume once, in census order, with the stop it was chosen under; each row says that stop's answer (accepted in its door's words, which is not running; refused in the host's; changed since chosen; no answer, never retried), an answer about a stop since changed reads as the earlier one's, and what was not chosen stays stopped. A work's Stop stands while its card grants it, whatever its Resume answered, and waits only for its own answer. Opening, reconnecting and repainting send nothing; the pill counts the message as one action and lands on its first box. It replaces only an owner-action card offering just that Resume; a card for anything else (a spending limit, a restart, model access) and a work the list cannot name keep their own.
 
 One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. A room's mark and Ouroboros's picture turn amber for the same questions; the sidebar feed holds the row of a listed Project whose room is the owner's turn for as long as Main's pill keeps its question (the same reads keep and drop both). Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens; an action's landing focuses its explicit Resume while a press of it would act — the pill leads to the door, it never sends it. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
 
@@ -3845,7 +3857,7 @@ and, during a campaign, `Evolution ›`
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
 (owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
-(owner 2026-11-01); at the edge the transcript under them is darkened and blurred ("A room's edges"). A failure or approximation note hangs under the bar; a page
+(owner 2026-11-01); at the edge the transcript under them is darkened and blurred ("A room's edges"). Nothing hangs under the bar but its lists and search; a page
 has no caption line, its sidebar row and its tabs name it.
 
 ### Doors and containers
