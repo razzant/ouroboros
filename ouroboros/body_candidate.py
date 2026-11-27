@@ -871,14 +871,17 @@ def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefuse
         return None
     try:
         if not _serving_worktree(serving_repo_dir_for(ctx)):
-            return None  # no Git body (wheel/image install): the legacy in-place contract, disclosed in the map
+            # No Git body (wheel/image install): the legacy in-place contract, disclosed in the map; its first write
+            # is this work's entry into a body change all the same.
+            return entry_contact(ctx) or None
         bound = prepare(ctx)
     except CandidateRefused as exc:
         return exc
     except Exception as exc:
         return CandidateRefused("CANDIDATE_UNAVAILABLE", f"the candidate could not be prepared: {type(exc).__name__}: {exc}")
-    # A fresh bind returns the neighbour note and, once, the body's closed roads: the write that caused it already ran.
-    return None if bound.get("state") == "bound" else "\n\n".join(filter(None, (neighbour_note(ctx), closed_roads_contact(ctx)))) or None
+    # A fresh bind returns the neighbour note and, on the work's first entry, the body's closed roads: the write that
+    # caused it already ran.
+    return None if bound.get("state") == "bound" else "\n\n".join(filter(None, (neighbour_note(ctx), entry_contact(ctx)))) or None
 
 
 def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dict[str, str]]:
@@ -1348,8 +1351,8 @@ def discard_scratch(row: Dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 # Contacts: the host names the manuals' addresses where the body is touched (BIBLE P1)
 # --------------------------------------------------------------------------- #
-INVARIANTS_PATH = "docs/architecture/10-key-invariants.md"
 CLOSED_ROADS = "10.2 Closed roads"
+ENTERED = "body_change_entered"  # task metadata: this work already received the closed roads
 
 
 def own_body_root(ctx: Any, target: Any) -> Optional[pathlib.Path]:
@@ -1397,36 +1400,59 @@ def own_body_root(ctx: Any, target: Any) -> Optional[pathlib.Path]:
 
 
 def read_contact(ctx: Any, target: Any) -> str:
-    """One line for a read of Ouroboros's own body: the manuals ``ouroboros/domains.toml`` ``[references]``
-    declares for that file, and the chapter of invariants and closed roads. ``""`` for any other read, for a path
-    the manifest declares no owner for (documentation, tests) and when the manifest is unreadable: a fact the host
-    has, never a judgment of what the mind should read, and never part of the file's text (the caller delivers it
-    as a host note beside the result)."""
+    """One short line for a read of a source file of Ouroboros's own body: the first manual
+    ``ouroboros/domains.toml`` ``[references]`` declares for it (its owner), how many more it declares, and §10 of the
+    Body Map, whose rendered entry carries that chapter's title and path in every frame. ``""`` for any other read:
+    documentation (Markdown that is not a ruled text such as a prompt), tests, a path the manifest declares no
+    owner for, or an unreadable manifest. A fact the host has, never a judgment of what the mind should read, and
+    never part of the file's text (the caller delivers it as a host note beside the result). It keeps no state:
+    each read of the same file is followed by the same line, and the manifest is parsed per read."""
+    from ouroboros.code_shape_facts import is_test_source
+    from ouroboros.reference_books import ruled_text_of
+    from ouroboros.tools.governance_context import BODY_INVARIANTS_CHAPTER
+
     try:
         root = own_body_root(ctx, target)
         if root is None:
             return ""
+        relative = pathlib.Path(target).resolve(strict=False).relative_to(root).as_posix()
+        if is_test_source(relative) or (relative.lower().endswith(".md") and not ruled_text_of(relative)):
+            return ""  # documentation and tests, by their source role
         from ouroboros.code_intelligence_architecture import load_domain_manifest
 
-        relative = pathlib.Path(target).resolve(strict=False).relative_to(root).as_posix()
         manuals = load_domain_manifest(root).manuals_for(relative)
     except Exception:
         log.debug("own-body read contact unavailable", exc_info=True)
         return ""
     if not manuals:
         return ""
-    named = ", ".join(f"`{manual}`" for manual in manuals)
-    beside = "" if INVARIANTS_PATH in manuals else f"; key invariants and closed roads: `{INVARIANTS_PATH}`"
-    return f"[Own body — {relative} — owning manuals: {named}{beside}]"
+    more = f" (+{len(manuals) - 1} in domains.toml [references])" if len(manuals) > 1 else ""
+    beside = "" if manuals[0] == BODY_INVARIANTS_CHAPTER else "; invariants and closed roads: Body Map §10"
+    return f"[Own body: owning manual `{manuals[0]}`{more}{beside}]"
+
+
+def entry_contact(ctx: Any) -> str:
+    """The closed roads (``closed_roads_contact``) on this work's first entry into a change of its own body, ``""``
+    on every later one. One decision for every entry: a candidate prepared fresh, a first explicit resume (by this
+    work or another that takes it over), Cyber Pro's in-place choice, the first automatic bind and the first write
+    of an install with no Git body. The work's task metadata records the delivery, so a repeated resume of the
+    candidate it already holds, a second in-place choice or a later write carries none."""
+    metadata = _metadata(ctx)
+    if metadata.get(ENTERED):
+        return ""
+    roads = closed_roads_contact(ctx)
+    if roads:
+        metadata[ENTERED] = True
+    return roads
 
 
 def closed_roads_contact(ctx: Any) -> str:
-    """What the host adds once when a work starts changing Ouroboros's own body (a candidate prepared or resumed,
-    Cyber Pro's in-place decision, the first automatic bind): the Closed roads section of the serving body's key
-    invariants chapter, whole, and that chapter's address. Stated as what the body holds; where it rides the
-    result of a first write it cannot tell the mind what to do before that write. ``""`` when the chapter or the
-    section cannot be read."""
+    """What ``entry_contact`` adds on a work's first entry into a change of Ouroboros's own body: the Closed roads
+    section of the serving body's key invariants chapter, whole, and that chapter's address. Stated as what the
+    body holds; where it rides the result of a first write it cannot tell the mind what to do before that write.
+    ``""`` when the chapter or the section cannot be read."""
     from ouroboros.reference_books import load_reference_book, read_book_section
+    from ouroboros.tools.governance_context import BODY_INVARIANTS_CHAPTER
 
     try:
         book = load_reference_book(serving_repo_dir_for(ctx), "architecture")
@@ -1434,6 +1460,5 @@ def closed_roads_contact(ctx: Any) -> str:
     except (OSError, ValueError, KeyError):
         log.debug("closed roads contact unavailable", exc_info=True)
         return ""
-    return (f"[Own body — roads already closed, from `{INVARIANTS_PATH}`, which also holds the invariants every "
-            f"part keeps; the manuals that own each file are named where it is read]\n{roads}")
-
+    return (f"[Own body — roads already closed, from `{BODY_INVARIANTS_CHAPTER}`, which also holds the invariants "
+            f"every part keeps; the manuals that own each file are named where it is read]\n{roads}")

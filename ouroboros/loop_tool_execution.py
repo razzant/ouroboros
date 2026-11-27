@@ -1460,8 +1460,8 @@ def process_tool_results(
     from ouroboros.delegation_knowledge_index import with_knowledge_index
 
     # What the host adds to a call (``delivery_notes``) trails what the mind sees of it: a delivery
-    # note measured with the batch and kept beside the retained producer payload, so the host
-    # readers below (acknowledgements, receipts, result review) parse the result without it.
+    # note measured with the batch; a mark's note keeps the clean producer payload beside it, so the
+    # host readers below (acknowledgements, receipts, result review) parse the result without it.
     notes = delivery_notes(ctx, results)
     results = prepare_producer_sources(with_knowledge_index(ctx, results), getattr(ctx, "drive_root", None),
                                        task_id_for_artifacts(ctx) if ctx is not None else "", notes)
