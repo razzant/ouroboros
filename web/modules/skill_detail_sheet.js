@@ -5,6 +5,7 @@
 // so while it does. Close, Escape and the backdrop return focus to the opener.
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindScrollFade } from './scroll_fade.js';
+import { disposeNotices } from './toast.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { bindRenderedMarkdown, mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { mountConnectorPlaces } from './connector_places.js';
@@ -130,6 +131,7 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
         controller?.abort();
         disposePlaces?.();
         disposeSignIn?.();
+        disposeNotices(dialog);  // what a press in the sheet answered (toast.js `modalNotice`) leaves with it
         destroyChatMarkdown(content.querySelector('.skills-sheet-about'));
         // Close the modal first: WebKit's own close moves focus to what was focused before it opened
         // (a pressed button is not focused there), and the restore below then returns it to the opener.
