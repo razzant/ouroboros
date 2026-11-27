@@ -6,7 +6,8 @@ enforcement does not enumerate or reconstruct unrelated completed history». Two
 history of the first (settled tasks with 20-200 KB bodies, child drives with their own stores,
 frozen legacy result files, archive segments of other rooms newer than the requested room's
 rows, closed custody records). Each boundary is driven through its real public entry point in a
-fresh interpreter (tests/_cost_driver.py) and its work is counted (tests/_cost_meter.py):
+fresh interpreter (tests/_cost_driver.py) and its work is counted (tests/_cost_meter.py; a room read's in the
+history reader child that builds it as well, tests/_cost_reader.py):
 connections, statements, SQLite VM steps, file-system calls, the directory entries they deliver
 and bytes read by location, JSON decodes, child processes and threads. The contract is EQUALITY of those counters between the two
 roots; the one allowance is ``VM_ALLOWANCE`` SQLite VM steps for a deeper B-tree (logarithmic in
@@ -122,8 +123,10 @@ class KnownBreach(AssertionError):
 
 
 # A room read's known breach: its cause, and the k=1 -> k=30 growth of each counter it grows on this fixture's
-# drives (one causal pair, measured by the exact meter: 2f8ebe37's report). A precondition, an answer that differs,
-# any other counter, or more growth fails as a plain AssertionError; no growth at all is a strict XPASS.
+# drives (one causal pair, measured by the exact meter: 2f8ebe37's report; the same growth in the reader child that
+# builds the page since #4320, counted there: #4348). A precondition, an answer that differs, any other counter, or
+# more growth (a byte counter: beyond ``BYTE_JITTER``; the child decodes the request's live inputs, whose epoch is a
+# float of varying length) fails as a plain AssertionError; no growth at all is a strict XPASS.
 ROOM_GAPS: Dict[str, Tuple[str, Dict[str, int]]] = {"R_late": (
     "The tool-call evidence a late task's card replays (tool_call_log.replay_evidence -> Memory.read_task_recent) "
     "reads up to the three newest tools.jsonl archives, newest first, before it reaches the task's own rows; the "
@@ -242,9 +245,9 @@ def assert_flat(measured: Dict[Any, Any], tag: str, gap: Dict[str, int] | None =
     growing = sorted(((source, amount - little.get("callers", {}).get(source, 0))
                       for source, amount in big.get("callers", {}).items()
                       if amount > little.get("callers", {}).get(source, 0)), key=lambda item: -item[1])[:8]
-    if gap is not None:
-        excused = {key: value for key, value in breaches.items()
-                   if key in gap and value[1] - value[0] <= gap[key] * (large - K_SMALL) / 29}
+    if gap is not None:  # a byte counter keeps the jitter the law grants it (BYTE_KEYS): a timestamp's digits
+        excused = {key: value for key, value in breaches.items() if key in gap and value[1] - value[0] <= (
+            gap[key] * (large - K_SMALL) / 29 + (BYTE_JITTER if key in BYTE_KEYS else 0))}
         breaches = {key: value for key, value in breaches.items() if key not in excused}
     assert not breaches, (f"{tag} grows with unrelated history (k={K_SMALL} -> k={large}): {breaches}; "
                           f"history touched at k={large}: {touched}; growing readers: {growing}")
@@ -320,6 +323,10 @@ def test_b5_stop_of_a_tree_is_flat(measured):
 def test_room_history_is_flat(measured, tag):
     for k in (K_SMALL, measured["large"]):  # a page, never the import window's refusal
         assert measured[k]["import"]["state"] == "done" and measured[k]["responses"][tag]["status"] == 200, k
+        # Built where production builds it, the reader child (#4320), and counted there (#4348): an inline fallback at
+        # one size compares two different paths, and the server's share of a child read alone measures no build.
+        assert measured[k].get("read_paths", {}).get(tag) == ["child"], (k, measured[k].get("read_paths"))
+        assert any(source.endswith("<- (reader child)") for source in boundary(measured, tag, k)["callers"]), k
     assert_flat(measured, tag, ROOM_GAPS[tag][1] if tag in ROOM_GAPS else None)
 
 
@@ -336,7 +343,10 @@ def test_a_room_gap_excuses_only_its_own_counters_within_their_recorded_growth()
         assert_flat(measured(gap), "R_late", gap)
     with pytest.raises(KnownBreach):  # a smaller history grows proportionally less
         assert_flat(measured({key: amount * 14 // 29 for key, amount in gap.items()}, large=15), "R_late", gap)
-    for grown in ({**gap, "stat:root": 29}, {**gap, "json_loads": gap["json_loads"] + 1}):
+    with pytest.raises(KnownBreach):  # a byte count off by a timestamp's digits (the child decodes the live epoch)
+        assert_flat(measured({**gap, "json_chars": gap["json_chars"] + 2}), "R_late", gap)
+    for grown in ({**gap, "stat:root": 29}, {**gap, "json_loads": gap["json_loads"] + 1},
+                  {**gap, "read_bytes:archive": gap["read_bytes:archive"] + BYTE_JITTER + 1}):
         with pytest.raises(AssertionError, match="grows with unrelated history") as caught:
             assert_flat(measured(grown), "R_late", gap)
         assert not isinstance(caught.value, KnownBreach), grown
