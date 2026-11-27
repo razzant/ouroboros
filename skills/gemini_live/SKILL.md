@@ -1,7 +1,7 @@
 ---
 name: gemini_live
 description: Gemini native Live audio and image provider for Live Conversation.
-version: 0.1.22
+version: 0.1.23
 type: extension
 runtime: python3
 entry: plugin.py
@@ -52,9 +52,11 @@ reasoning without a level control. Respond opens a host-labelled greeting fact.
 Silent tool results use native SILENT scheduling on the ordinary model; the
 extended-thinking model does not support scheduling, so the feature must finish
 hangup locally. Tool-schema changes coalesce into one pending fresh renewal.
-The catalog offers both models and 30 prebuilt voices. Its 92k o200k window is
-measured for the ordinary model and a labelled hypothesis for extended thinking;
-the documented 131,072 provider-token input limit is a separate quantity.
+The catalog offers both models and 30 prebuilt voices. Both declare a 118,000
+provider-token window (measured 2026-11-27; extended thinking on two sessions) with
+a 10,000 reserve. The provider's eviction trigger is the adapter's own wire setting,
+128,000 with a 118,000 sliding target, above the window; the documented 131,072
+input limit is a separate quantity.
 Every completed response reports modality usage, cached input and thinking units
 where Gemini supplies them, with raw evidence and status. Sparse modality lists
 prove omitted zeroes when their counts cover the reported total, or for an input

@@ -46,19 +46,30 @@ VOICES = tuple(CatalogVoice(name, f"{name} \u2014 {style}") for name, style in (
     ('Laomedeia', 'Upbeat'), ('Achernar', 'Soft'), ('Alnilam', 'Firm'), ('Schedar', 'Even'), ('Gacrux', 'Mature'),
     ('Pulcherrima', 'Forward'), ('Achird', 'Friendly'), ('Zubenelgenubi', 'Casual'), ('Vindemiatrix', 'Gentle'),
     ('Sadachbia', 'Lively'), ('Sadaltager', 'Knowledgeable'), ('Sulafat', 'Warm')))
-# Spoken turns held under a ~92k-token instruction once the session renews before ~2.5k
-# held audio tokens (18.10.2026); the endpoint documents a 131,072-token input. The
-# reserve is a planning margin for in-session growth.
-FACTS = RouteFacts(conversation_window_tokens=92_000, working_reserve_tokens=10_000, basis='provider',
-                   source='spoken retention held under a ~92k-token instruction, owner probes 2026-10-18; '
-                          '10k reserve is a planning margin; input 131,072 provider tokens documented at '
+# The provider's own eviction (contextWindowCompression) is a wire setting of this adapter,
+# not the declared window. Measured 27.11.2026 (spoken probes through this adapter, 20 sessions):
+# spoken turns are lost exactly when the prompt passes triggerTokens - at 92,000 when the trigger
+# was the old window - and kept at 104-125k with the trigger at 128,000 until growth crossed it;
+# 129,060 was accepted and answered, ~142k refused at the first answer (close 1007); the documented
+# input is 131,072. So the trigger sits under the accepted input, and the sliding target leaves the
+# same 10,000 of growth below it. Both selections share these numbers.
+COMPRESSION_TRIGGER_TOKENS = 128_000
+COMPRESSION_TARGET_TOKENS = 118_000
+# The declared window sits a reserve under the trigger, never at it (a call admitted at the
+# trigger would start on the eviction line): setups up to 108,000 provider tokens. Measured
+# 27.11.2026: a five-minute call kept the spoken fact from 105k to 115k; set up at 118.8-120.6k,
+# above what this window admits, two of three calls kept it (the reserve is needed).
+FACTS = RouteFacts(conversation_window_tokens=118_000, working_reserve_tokens=10_000, basis='provider',
+                   source='spoken turns kept through five-minute calls at 105-115k provider tokens and to 125k '
+                          'with the provider eviction trigger at 128,000 (spoken probes 2026-11-27); 129,060 '
+                          'accepted; input 131,072 provider tokens documented at '
                           'https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live (read 2026-10-21)',
-                   observed='2026-10-18')
-THINKING_FACTS = RouteFacts(conversation_window_tokens=92_000, working_reserve_tokens=10_000, basis='provider',
-    source='hypothesis: use the ordinary model retention margin until this route is measured; '
-           'input 131,072 provider tokens documented at '
+                   observed='2026-11-27')
+THINKING_FACTS = RouteFacts(conversation_window_tokens=118_000, working_reserve_tokens=10_000, basis='provider',
+    source='spoken turns kept at 108-112k and at 125-129k with the provider eviction trigger at 128,000, '
+           'two sessions only (spoken probes 2026-11-27); input 131,072 provider tokens documented at '
            'https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live-extended-thinking (read 2026-10-21)',
-    observed='2026-10-21')
+    observed='2026-11-27')
 CATALOG = ProviderCatalog(
     label='Gemini \u00b7 Google', credential_settings=('GEMINI_API_KEY',),
     privacy='Call audio and the frames you show go to Google.',
@@ -192,10 +203,9 @@ def layout(selected, options):
         turn_taking['activityHandling'] = 'NO_INTERRUPTION'
     if turn_taking:
         setup['realtimeInputConfig'] = turn_taking
-    # Provider safety net; the host still re-tells canonical history on renewal.
-    facts = THINKING_FACTS if 'thinkingConfig' in generation else FACTS
-    setup['contextWindowCompression'] = {'triggerTokens': facts.conversation_window_tokens,
-        'slidingWindow': {'targetTokens': facts.conversation_window_tokens - facts.working_reserve_tokens}}
+    # Provider safety net above the declared window; the host still re-tells canonical history on renewal.
+    setup['contextWindowCompression'] = {'triggerTokens': COMPRESSION_TRIGGER_TOKENS,
+        'slidingWindow': {'targetTokens': COMPRESSION_TARGET_TOKENS}}
     events = [{'setup': setup}]
     if images and not options.resume_handle:
         events.append({'clientContent': {'turns': [{'role': 'user', 'parts': images}], 'turnComplete': False}})
