@@ -142,7 +142,7 @@ def test_a_reconnect_whose_history_read_fails_shows_the_failure_and_no_success_r
 
     page.route("**/api/chat/history*", outage)
     transport.await_reconnect(transport.disconnect())
-    page.get_by_text(FAILED).wait_for()
+    page.locator(MAIN).get_by_text(FAILED).wait_for()  # the feed's own note; the page's notice says it once too
     retry = page.locator(f"{MAIN} .chat-load-older-btn", has_text="Retry loading messages")
     retry.wait_for()
     settle(page)
@@ -154,7 +154,7 @@ def test_a_reconnect_whose_history_read_fails_shows_the_failure_and_no_success_r
     history[1].append(rw.assistant("Reply read once the history answers again.", 45))
     retry.click()
     page.locator(MAIN).get_by_text("Reply read once the history answers again.").wait_for()
-    page.get_by_text(FAILED).wait_for(state="hidden")
+    page.locator(MAIN).get_by_text(FAILED).wait_for(state="hidden")
     settle(page)
     assert page.locator(NOTICE).count() == 0
     assert [row["text"] for row in rows(page, MAIN)][-1] == "Reply read once the history answers again."
