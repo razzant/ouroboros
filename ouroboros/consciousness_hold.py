@@ -93,7 +93,8 @@ def queue_hold(row: Any, budget_fences: Any = None) -> str | None:
 
 def queue_veto(row: Any, budget_fences: Any = None) -> bool:
     """Whether the queue row keeps its own self-waking pause from going on by itself: a stop other than that pause's
-    own marker, a writer wait or a refusal, as the sleeper itself reads it (``supervisor.sleep_wake._vetoed``)."""
+    own marker, a writer wait or a refusal, the row's own vetoes as the sleeper reads them
+    (``supervisor.sleep_wake._vetoed``; its owner-pause fence, a store read, is not repeated here)."""
     from ouroboros.work_stop import continuation_refusal, current_stop, writer_wait
 
     row = row if isinstance(row, dict) else {}
