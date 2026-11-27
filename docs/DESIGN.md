@@ -326,7 +326,7 @@ whether it is final, its unresolved upper bound and what is unknown; composition
 hold and technical counts follow, quieter. Budget leads with Total budget and Consciousness, last 24 hours (§5 "A
 limit's card"), then the three limits' edit rows; a card whose limit holds a wake names it with its door and “If its
 charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown). Total budget's
-card names its own wake held by that budget, read again when the budget is saved: a line with its door, no control,
+card names its own wake stopped by that budget, read again when the budget is saved: a line with its door, no control,
 since raising the budget alone resumes nothing and Resume and Stop now stay on its card and block. Activity names a
 work whole in primary ink above its facts; a duration reads in seconds below a minute, then minutes or hours; a
 missing one is absent, never `0s`. A narrow temporary-space tray puts a qualified size under its group's name. A widget
@@ -1015,7 +1015,8 @@ status sentence's or a composer chip's dot is its tone, §4).
   restart, crash or Panic, grant access, a skill review that must run first, local
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
   or was stopped by a spending limit (new starts refused by its allowance, or its own wake proven held by a limit: its
-  allowance, the limit it started with, the total budget, a cap or limit of its own work); (2) a warning worth reading — warn toasts and sentences,
+  allowance, the limit it started with, the total budget, a cap or limit of its own work), or whose own wake a stop of
+  the app or Panic holds for Resume; (2) a warning worth reading — warn toasts and sentences,
   Settings and onboarding notes, warnings inside task timelines and reviews,
   account quota, and a work that went to a fallback route by itself, until that is resolved
   (its card's model fact and the same word in the Main sheet); (3) the System voice (a pale tint in the light theme, its name
@@ -2361,17 +2362,23 @@ settings are rows of this page.
 A held own wake is its own block, apart from the switch: a tray directly under the headline card's head, which keeps
 the position, money and Turn off and leaves the held wake's state to the block (`consciousness_held_wake.js`; the chip's
 Shade draws the same block under its header). Its head is “Own time”, the wake's start in the viewer's clock and its
-mark and word by the cause its records prove: a spending limit is the owner's amber dot (Paused), a Pause two bars, a
-sleep or a wake only queued for a worker the still mark (Waiting, Queued), an unreadable or unproven hold a ring. Then
-the host's sentence, without an id or a clock: what holds it, every proven cause named (only an unproven one keeps
-“paused or waiting in the queue”), and beneath it, quieter, its next step (Resume's estimated room at an allowance, as
-Costs and its Main card say it; that raising a limit alone resumes nothing; that Stop now frees the clock; that only
-the next own wake waits, wakes in places being separate). Its controls are exactly those its work's projection offers,
-on the shared task controls: Resume, Stop now after the shared confirmation, Close for a passed deadline; disabled
-while the socket is closed or a control of that task is pending. `Costs ›` opens the limit's row while the next step
-is a limit Costs edits (the allowance, the limit it started with, the total budget; a work's own cap is raised in
-chat); while the total budget holds it `Costs ›` is the primary and Resume a neutral capsule that stays pressable. The
-task door “Open in Main ↗” ends the row; the controls wrap and, under a finger, each reaches the touch minimum.
+mark and word by the cause its records prove: a spending limit, or a stop of the app or Panic that only the owner's
+Resume releases, is the owner's amber dot (Paused), a Pause two bars, a sleep or a wake queued for a worker the still
+mark (Waiting, Queued; queued only when its queue row holds nothing), a technical, unreadable or unproven hold a ring;
+past its hard deadline the shared “Deadline expired”. Then the host's sentence, without an id or a clock: what holds
+it, every proven cause named (only an unproven one keeps “paused or waiting in the queue”), and beneath it, quieter,
+its next step (that raising a limit alone resumes nothing; that Stop now frees the clock; that only the next own wake
+waits, wakes in places being separate) and what the same state says now: Resume's estimated room at an allowance, as
+Costs and its Main card say it, and whether the total budget has room (none left: raise it in Costs, then Resume;
+room: Resume continues it). A passed deadline drops that advice and the Costs door. Its controls are exactly those its
+work's projection offers, on the shared task controls: Resume, Stop now after the shared confirmation, Close for a
+passed deadline. They stay, disabled, while the socket is closed or the newest state read failed, and a press of one
+disables the others until it settles; a press made on another surface shows at the next state read, and every press
+checks again. `Costs ›` stands while the next step is a limit Costs edits (the allowance and the total budget open
+their rows; the limit it started with opens the tab; a work's own cap is raised in chat); while the total budget holds
+it with nothing left `Costs ›` is the primary and Resume a neutral capsule that stays pressable, and with room again
+Resume leads. The task door “Open in Main ↗” ends the row; the controls wrap and, under a finger, each reaches the touch
+minimum. A keyboard opening of the Shade lands on the block's first control, and its confirmation keeps the Shade open.
 
 “Open in Main ↗” lands on the card Main draws, else finds it through around-history; a focus door
 opens its captured conversation in the sheet, Back returns. An unowned room disables
@@ -3860,8 +3867,9 @@ Its word uses the viewer's zone and a short date when not today; passed explaine
 outcomes and passed allowance resets show no time.
 `Evolving` replaces the word during a campaign, even when off; Off is grey.
 Running shows moving dots, never a breathing glyph; a held own wake its cause's mark without time (the amber dot for a
-spending limit, two bars for a Pause, the still mark for a sleep or a queued wake, a ring when unproven: Dashboard ›
-Consciousness), so Telegram's row never reads a limit as `Consciousness ‖`; unknown a ring,
+spending limit or a stop only the owner's Resume releases, two bars for a Pause, the still mark for a sleep or a queued
+wake, a ring when unproven: Dashboard › Consciousness), so Telegram's row never reads a limit as `Consciousness ‖`;
+unknown a ring,
 failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except where the room covers Main (a phone, a
 finger's docked column) while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
 Its accessible name and the Shade state use the host sentence without adding a clock.
