@@ -219,9 +219,10 @@ def test_the_cards_check_asks_the_bot_api_server_the_skill_names(tmp_path):
     assert saved_api_base(tmp_path) is None
     (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_API_BASE": "http://127.0.0.1:8081/"}), encoding="utf-8")
     assert saved_api_base(tmp_path) == "http://127.0.0.1:8081"
-    for named in ("http://telegram_bot_api:8081", "https://bot.пример.рф"):  # names the poller itself accepts
-        (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_API_BASE": named + "/"}), encoding="utf-8")
-        assert saved_api_base(tmp_path) == named
-    for refused in ("file:///etc", "https://user:pw@example.org", "https://example.org/path", "https://example.org/?q"):
+    (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_API_BASE": "http://telegram_bot_api:8081/"}),
+                                            encoding="utf-8")
+    assert saved_api_base(tmp_path) == "http://telegram_bot_api:8081"  # a service name the poller accepts
+    for refused in ("file:///etc", "https://user:pw@example.org", "https://example.org/path", "https://example.org/?q",
+                    "https://bot.пример.рф"):  # a name in another script: the check asks the cloud, which knows the bot
         (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_API_BASE": refused}), encoding="utf-8")
         assert saved_api_base(tmp_path) is None, refused
