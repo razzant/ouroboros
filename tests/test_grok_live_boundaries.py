@@ -230,8 +230,20 @@ def _changed(echo, path, value):
     return echo
 
 
+class _Drop:
+    def __deepcopy__(self, memo):
+        return self
+
+
+DROP = _Drop()  # an overlay value that removes the key from the fake's echo
+WHOLE = "whole"  # an answer ("whole", value) replaces the session value itself; value DROP omits it
+
+
 class RecordedEchoWire(AddedWire):
-    """Answers each session.update with the fake's echo overlaid by the recorded xAI fields."""
+    """Answers each session.update with the fake's echo overlaid by the recorded xAI fields.
+
+    An answer of None leaves the fake's exact echo of the request, which the code before the
+    27.11 fix accepted too, so a test can reach the update it is about on either version."""
 
     def __init__(self, first=RECORDED_FIRST_ECHO, second=RECORDED_SECOND_ECHO, tools=None):
         super().__init__()
@@ -240,10 +252,17 @@ class RecordedEchoWire(AddedWire):
 
     def put(self, value):
         if value.get("type") == "session.updated" and self.answers:
-            session = {**value["session"], **copy.deepcopy(self.answers.pop(0))}
-            if self.tools is not None and "tools" in session:
-                session["tools"] = self.tools
-            value = {"type": "session.updated", "session": session}
+            answer = copy.deepcopy(self.answers.pop(0))
+            if isinstance(answer, tuple) and answer[0] == WHOLE:
+                value = {"type": "session.updated"}
+                if answer[1] is not DROP:
+                    value["session"] = answer[1]
+            else:
+                session = {**value["session"], **(answer or {})}
+                session = {k: v for k, v in session.items() if v is not DROP}
+                if self.tools is not None and "tools" in session:
+                    session["tools"] = self.tools
+                value = {"type": "session.updated", "session": session}
         super().put(value)
 
 
@@ -266,21 +285,120 @@ def test_recorded_echo_opens_a_session(providers, captured):
     (_changed(RECORDED_FIRST_ECHO, ("turn_detection", "type"), "server_vad"), RECORDED_SECOND_ECHO, "turn_detection"),
     (_changed(RECORDED_FIRST_ECHO, ("audio", "input", "turn_detection", "type"), "server_vad"),
      RECORDED_SECOND_ECHO, "audio"),
-    (RECORDED_FIRST_ECHO, _changed(RECORDED_SECOND_ECHO, ("turn_detection", "type"), "client_controlled"),
-     "turn_detection"),
-    (RECORDED_FIRST_ECHO, _changed(RECORDED_SECOND_ECHO, ("turn_detection",), None), "turn_detection"),
+    # A requested direction missing from a present audio echo refuses.
+    (_changed(RECORDED_FIRST_ECHO, ("audio", "output"), DROP), RECORDED_SECOND_ECHO, "audio"),
     (RECORDED_FIRST_ECHO, RECORDED_SECOND_ECHO, "tools"),
+    # Second-update rows: the first answer is the exact echo every version accepts, so the
+    # refusal they pin is the VAD activation's own.
+    (None, _changed(RECORDED_SECOND_ECHO, ("turn_detection", "type"), "client_controlled"), "turn_detection"),
+    (None, _changed(RECORDED_SECOND_ECHO, ("turn_detection",), None), "turn_detection"),
+    (None, _changed(RECORDED_SECOND_ECHO, ("audio", "input", "turn_detection", "type"), "client_controlled"),
+     "turn_detection"),
+    (None, _changed(_changed(RECORDED_SECOND_ECHO, ("audio", "input", "turn_detection", "type"), "client_controlled"),
+                    ("turn_detection",), DROP), "turn_detection"),
 ])
 def test_recorded_echo_dialect_still_refuses_a_changed_session(providers, captured, first, second, changed):
+    if isinstance(first, dict) and first["audio"]["output"] is DROP:
+        first = {**first, "audio": {"input": first["audio"]["input"]}}
     async def run():
         tools = [{"type": "function", "name": "invented_tool", "parameters": {}}] if changed == "tools" else None
-        adapter = make(providers, RecordedEchoWire(first, second, tools), captured)
+        wire = RecordedEchoWire(first, second, tools)
+        adapter = make(providers, wire, captured)
         try:
             with pytest.raises(RealtimeSetupError, match=f"session_mismatch.*Grok changed {changed}"):
+                await asyncio.wait_for(adapter.open(), 1)
+            if first is None:
+                assert wire.sent[-1] == {"type": "session.update", "session": {"turn_detection": {"type": "server_vad"}}}
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("second", [
+    RECORDED_SECOND_ECHO,
+    # Both representations of turn detection absent: a sparse acknowledgement.
+    _changed(_changed(RECORDED_SECOND_ECHO, ("turn_detection",), DROP), ("audio",), DROP),
+    ("whole", {}),
+    ("whole", DROP),
+])
+def test_vad_activation_accepts_the_recorded_and_sparse_answers(providers, captured, second):
+    async def run():
+        adapter = make(providers, RecordedEchoWire(None, second), captured)
+        try:
+            await asyncio.wait_for(adapter.open(), 1)
+            assert (await adapter.receive())[0].kind == "ready"
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["first", "second"])
+@pytest.mark.parametrize("value", [[], ""])
+def test_a_session_that_is_not_an_object_refuses(providers, captured, phase, value):
+    async def run():
+        answers = ((WHOLE, value), None) if phase == "first" else (None, (WHOLE, value))
+        adapter = make(providers, RecordedEchoWire(*answers), captured)
+        try:
+            with pytest.raises(RealtimeSetupError, match="session_mismatch"):
                 await asyncio.wait_for(adapter.open(), 1)
         finally:
             await adapter.close()
     asyncio.run(run())
+
+
+# The fixed adapter's own open() against xAI with a requested voice, paid proof of 27.11.2026
+# (sprint call-fit-20261125, probes/grok/ADAPTER_OPEN_PROOF.txt, p3-fixed-eve t=2.245/2.455 and
+# p4-fixed-xai_ara t=1.518/1.739): the requested id comes back at the top level and under audio.output.
+def _voice_echo(echo, voice):
+    return _changed(_changed(echo, ("voice",), voice), ("audio", "output", "voice"), voice)
+
+
+PROOF_ECHOES = {voice: (_voice_echo(RECORDED_FIRST_ECHO, voice), _voice_echo(RECORDED_SECOND_ECHO, voice))
+                for voice in ("eve", "xai_ara")}
+assert PROOF_ECHOES["eve"][0]["audio"]["output"] == {
+    "format": {"type": "audio/pcm", "rate": 24000}, "transport": "json", "voice": "eve"}
+
+
+def _open_with_voice(providers, captured, voice, wire):
+    selected = RealtimeInput("synthetic-grok", canonical_json([
+        {"role": "system", "content": "Synthetic ordinary rules."},
+        {"role": "user", "content": "Synthetic owner words."}]), "[]", 256, "nano", "core", "view")
+    adapter = providers["grok"].session(selected, LiveOptions(voice=voice), connect=wire.connect,
+                                        observe=lambda direction, raw: captured.append({"raw": raw}))
+    async def run():
+        try:
+            await asyncio.wait_for(adapter.open(), 1)
+            assert (await adapter.receive())[0].kind == "ready"
+        finally:
+            await adapter.close()
+    return run
+
+
+@pytest.mark.parametrize("voice,first", [
+    ("eve", PROOF_ECHOES["eve"][0]),
+    ("xai_ara", PROOF_ECHOES["xai_ara"][0]),
+    # Sparse: no nested voice, or no top-level voice, or neither.
+    ("eve", _changed(PROOF_ECHOES["eve"][0], ("audio", "output", "voice"), DROP)),
+    ("eve", _changed(PROOF_ECHOES["eve"][0], ("voice",), DROP)),
+    ("eve", _changed(_changed(PROOF_ECHOES["eve"][0], ("voice",), DROP), ("audio", "output", "voice"), DROP)),
+    # No voice requested: the provider's default under audio.output stays accepted.
+    (None, RECORDED_FIRST_ECHO),
+])
+def test_requested_voice_echo_opens(providers, captured, voice, first):
+    first = copy.deepcopy(first)
+    output = first["audio"]["output"]
+    if output.get("voice") is DROP:
+        del output["voice"]
+    second = PROOF_ECHOES[voice][1] if voice else RECORDED_SECOND_ECHO
+    asyncio.run(_open_with_voice(providers, captured, voice, RecordedEchoWire(first, second))())
+
+
+@pytest.mark.parametrize("top", ["eve", DROP])
+def test_a_contradictory_output_voice_refuses(providers, captured, top):
+    first = _changed(_changed(PROOF_ECHOES["eve"][0], ("audio", "output", "voice"), "xai_ara"), ("voice",), top)
+    run = _open_with_voice(providers, captured, "eve", RecordedEchoWire(first, PROOF_ECHOES["eve"][1]))
+    with pytest.raises(RealtimeSetupError, match="session_mismatch.*Grok changed audio"):
+        asyncio.run(run())
 
 
 def test_recorded_echo_at_the_check_seam(providers):

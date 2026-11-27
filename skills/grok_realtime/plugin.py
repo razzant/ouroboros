@@ -4,6 +4,7 @@ Protocol: https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech
 Read 2026-10-21; R6 observed outer response.done.usage is retained verbatim.
 Probe 2026-11-27: session.updated echoes a requested null turn_detection as an undocumented
 client_controlled block with tuning fields, and adds turn_detection under audio.input and voice under audio.output.
+A requested voice comes back with the same id in both places (adapter open() proof, 27.11.2026).
 """
 from __future__ import annotations
 import base64
@@ -71,9 +72,16 @@ def turn_detection_echoed(requested, echoed):
     return isinstance(echoed, dict) and all(k in echoed and echoed[k] == v for k, v in requested.items())
 
 
-def audio_echoed(requested, echoed, turn_detection):
+def nested_turn_detection_echoed(requested, echoed):
+    """A present audio.input.turn_detection must agree with the requested mode as well."""
+    nested = echoed.get('input') if isinstance(echoed, dict) else None
+    return not (isinstance(nested, dict) and 'turn_detection' in nested) or turn_detection_echoed(
+        requested, nested['turn_detection'])
+
+
+def audio_echoed(requested, echoed, turn_detection, voice):
     # Requested fields (format type and rate) stay exact; of the fields xAI adds, a non-JSON
-    # transport or a nested turn_detection that contradicts the requested one still refuses.
+    # transport, a nested turn_detection or an output voice that contradicts the request still refuses.
     if not isinstance(requested, dict) or not isinstance(echoed, dict):
         return requested == echoed
     for direction, fields in requested.items():
@@ -84,26 +92,31 @@ def audio_echoed(requested, echoed, turn_detection):
             continue
         if (any(k not in actual or actual[k] != v for k, v in fields.items())
                 or actual.get('transport', 'json') != fields.get('transport', 'json')
-                or (turn_detection is not ABSENT and 'turn_detection' in actual
-                    and not turn_detection_echoed(turn_detection, actual['turn_detection']))):
+                or (voice is not ABSENT and direction == 'output' and actual.get('voice', voice) != voice)):
             return False
-    return True
+    return turn_detection is ABSENT or nested_turn_detection_echoed(turn_detection, echoed)
 
 
 def check_session_echo(requested, actual):
     # Sparse top-level echoes already occur on xAI. For fields it does echo,
     # compare what was requested after the observed dialect normalization.
+    if not isinstance(actual, dict):
+        raise RealtimeSetupError('session_mismatch', 'Grok changed session')
     for key, value in requested.items():
         if key not in actual:
             continue
         if key == 'turn_detection':
             same = turn_detection_echoed(value, actual[key])
         elif key == 'audio':
-            same = audio_echoed(value, actual[key], requested.get('turn_detection', ABSENT))
+            same = audio_echoed(value, actual[key], requested.get('turn_detection', ABSENT),
+                                requested.get('voice', ABSENT))
         else:
             same = session_echo_value(key, actual[key]) == session_echo_value(key, value)
         if not same:
             raise RealtimeSetupError('session_mismatch', f'Grok changed {key}')
+    if ('turn_detection' in requested and 'audio' not in requested
+            and not nested_turn_detection_echoed(requested['turn_detection'], actual.get('audio'))):
+        raise RealtimeSetupError('session_mismatch', 'Grok changed turn_detection')
 
 
 def system_parts(content):
