@@ -143,8 +143,9 @@ def test_the_fresh_fixture_starts_on_every_shipped_call_model_and_on_hard_85k_te
     assert not shown.memory_facts.get("host_sections_addressed"), "no host section addressed for the window"
 
 
-def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None, shape="fresh"):
-    """The ``shape`` drive's call start (``rich`` with its twelve MCP servers through the real manager) through the adapter's own setup: the real ``ToolRegistry``, the call feature's
+def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None, shape="fresh", published=None):
+    """The ``shape`` drive's call start (``rich`` with its twelve MCP servers published through the real manager on
+    the drive the call preparation reads; their guides go into ``published``) through the adapter's own setup: the real ``ToolRegistry``, the call feature's
     ``INITIAL_TOOLS``, ``call_tools`` and ``session_options``, the ordinary builder for the call's messages, then
     ``realtime_setup.session_candidate`` with the adapter's registered session factory and a ``connect`` that fails the
     test. ``window`` narrows the catalogue's window for the candidate only (the ordinary build keeps the declared one).
@@ -177,9 +178,18 @@ def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window
     turn.model = module.ROUTE.model_prefix + model_id
     turn.spec = replace(turn.spec, chat_id=1, model=model_id)
     drive = scale.installed(tmp_path, shape)
+    # The data root is the drive before anything publishes: catalogues published on another root are dropped by the
+    # ordinary settings refresh of the call preparation (``mcp_client`` rebinds to the root it reads).
+    monkeypatch.setattr(config, "DATA_DIR", drive)
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: drive)
     if shape == "rich":
+        from ouroboros import mcp_client
         monkeypatch.setenv("OUROBOROS_DATA_DIR", str(drive))
-        scale.mcp_registry(drive, monkeypatch)
+        _registry, guides = scale.mcp_registry(drive, monkeypatch)
+        facts = mcp_client.get_manager().server_facts()
+        assert all(facts[server]["instructions"] == guide for server, guide in guides.items())
+        if published is not None:
+            published.update(guides)
     env, memory = scale.env_on(drive)
     turn.feature = dict(turn.feature, initial_tools=INITIAL_TOOLS, call_tools=call_tools(drive))
     task = dict(host_world.task, chat_id=1, model=turn.model,
@@ -188,8 +198,6 @@ def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window
                       is_direct_chat=True, task_metadata=task["metadata"], task_contract={})
     registry = ToolRegistry(env.repo_dir, drive)
     registry.set_context(ctx)
-    monkeypatch.setattr(config, "DATA_DIR", drive)
-    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: drive)
     monkeypatch.setattr(context, "get_context_mode", lambda: "nano")
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
     scope = f"{skill}-{shape}-start"
@@ -256,20 +264,47 @@ def test_a_window_too_small_for_the_native_candidate_is_refused_before_any_conne
 ADMITS = {"openai_realtime"}
 
 
+def _selected_texts(session):
+    rows = json.loads(session.selected.messages_json)
+    texts = []
+    for row in rows:
+        content = row.get("content")
+        parts = content if isinstance(content, list) else [content or ""]
+        texts.extend(part.get("text", "") if isinstance(part, dict) else str(part) for part in parts)
+    return texts
+
+
 @pytest.mark.parametrize("shape", ["mature", "rich"])
 @pytest.mark.parametrize("route", [pytest.param(route, id=f"{route[0]}:{route[1]}") for route in scale.call_routes()])
 def test_each_shipped_adapter_admits_or_refuses_a_mature_start_at_its_own_session_candidate(
         tmp_path, monkeypatch, host_world, route, shape):
+    """The eighth of work room is the fresh install's promise; on these installs a start that physically fits is
+    admitted, and one that leaves less than the eighth carries the start-room notice the product owes."""
+    from tests import _live_works_fixture as works
+
     skill, model_id, facts = route
+    guides = {}
     if skill not in ADMITS:
         with pytest.raises(fit.MinimumViewUnfit) as raised:  # a connection attempt would fail the test instead
-            _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, shape=shape)
+            _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, shape=shape, published=guides)
         assert raised.value.window_tokens == facts.conversation_window_tokens and raised.value.deficit_tokens > 0
+        assert len(guides) == (scale.MCP_SHAPE["servers"] if shape == "rich" else 0)
         return
-    (_session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id,
-                                                          shape=shape)
+    (session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id,
+                                                          shape=shape, published=guides)
     measured = proof["fit"]["measurement"]
     assert not attempts and measured["capacity_deficit_tokens"] == 0
     assert measured["capacity_total_tokens"] == facts.conversation_window_tokens
     assert measured["estimated_input_tokens"] + measured["response_reserve_tokens"] <= facts.conversation_window_tokens
-    assert proof.get("work_room", {}).get("deficit_tokens") == 0  # the call starts with its eighth of work room
+    texts = _selected_texts(session)
+    flat = " ".join(" ".join(text.split()) for text in texts)
+    room = proof.get("work_room", {})
+    if room.get("deficit_tokens"):  # less than the eighth: the start connects and says so
+        assert room.get("reason") == "start_room_shortfall" and "Start room is smaller than requested" in flat
+    if shape == "rich":  # the connections map carries every server's whole guide and every tool name, and every work
+        assert len(guides) == scale.MCP_SHAPE["servers"]
+        assert all(" ".join(guide.split()) in flat for guide in guides.values())
+        listed = [line for text in texts for line in text.splitlines()
+                  if line.startswith("- mcp_srv") and "callable as mcp_" in line]
+        assert sum(len(line.partition("__<name>: ")[2].split(", ")) for line in listed) == scale.MCP_SHAPE["tools"]
+        assert all(f"w{n:02d}{kind[:3]}" in flat for n, kind in enumerate(works.KINDS))
