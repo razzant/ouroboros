@@ -7,6 +7,7 @@ import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, roomBarHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
+import { roomCovered, roomNotice, watchRoomCover } from './room_notice.js';
 import { ORIGIN_ADDRESSED_NOTICE_TYPES, lineReplyFields, childRowPlacement, placedCardRow, createPlacedCardAnchors, replayConcludesTask } from './chat_row_placement.js';
 import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
@@ -2798,29 +2799,16 @@ export function createChatInstance({
         }
     }
 
-    // The room is the one the person looks at: shown, not under the drawer, another room's panel, its own work or
-    // consciousness sheet, or the setup wizard. A notice it owes waits for that; one it showed leaves when it stops.
-    const coverHost = asPanel ? container?.closest?.('.project-panel') : pageHeader;
-    const historyCovered = () => Boolean(coverHost?.matches?.('[data-rw-open], [data-cx-shade]')
-        || pageHeader?.hasAttribute?.('data-cx-shade') || document.getElementById?.('onboarding-overlay'));
+    // A room's news waits until it is the room shown and leaves when it is covered or left (room_notice.js).
+    const historyCovered = roomCovered(asPanel ? container?.closest?.('.project-panel') : pageHeader, pageHeader);
     const historyVisible = () => isInstanceVisible() && !messagesDiv.closest('[inert]') && !historyCovered()
         && !document.body?.classList.contains('nav-drawer-open') && (asPanel || (!isProjectOpening?.()
         && !document.body?.classList.contains('project-panel-open')));
-    // What happened to this room's history is the page's ordinary notice, its tone the event's own: a failed read is a
-    // failure, an inexact return or a restored list plain news (chat_render_batch.js, room_archive.js).
-    const historyNotice = (text, kind) => showToast(text, kind === 'failed' ? 'danger' : 'info',
-        { haptic: false, dismissLabel: tr('toast.dismiss', 'Dismiss notice') });
     const archive = isMain && !asPanel ? archiveDoor({ returnFocus: messagesDiv,
         readReceipt, syncHistory, isVisible: historyVisible }) : null;
-    const historyControls = createHistoryControls(messagesDiv, {
-        notify: historyNotice, archive, isVisible: historyVisible,
-    });
-    const coverWatch = typeof MutationObserver === 'function' ? new MutationObserver(() => {
-        if (historyVisible()) historyControls.showNotice(); else historyControls.hideNotice();
-    }) : null;
-    for (const [node, options] of [[coverHost, { attributes: true, attributeFilter: ['data-rw-open', 'data-cx-shade'] }],
-        [pageHeader, { attributes: true, attributeFilter: ['data-cx-shade'] }],
-        [document.body, { attributes: true, attributeFilter: ['class'], childList: true }]]) if (node) coverWatch?.observe(node, options);
+    const historyControls = createHistoryControls(messagesDiv, { notify: roomNotice, archive, isVisible: historyVisible });
+    const coverWatch = watchRoomCover(asPanel ? container?.closest?.('.project-panel') : pageHeader, pageHeader,
+        () => (historyVisible() ? historyControls.showNotice() : historyControls.hideNotice()));
     const { olderButton: loadOlderBtn } = historyControls;
 
     // The first gate closed to arrivals ('' none: a hydrated, healthy window that needs no rebuild).
