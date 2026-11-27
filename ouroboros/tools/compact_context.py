@@ -775,11 +775,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
         # When the mind wrote its note: the boundary that applies it may come later (a pause keeps it queued).
         "written_at": utc_now_iso(timespec="seconds"),
     }
-    from ouroboros.tools.tool_discovery import handed_guides  # a server these names make resident: its guide first
-
-    guides = handed_guides(ctx, schema_names or ())
-    return "Working view requested. The next complete tool boundary preserves exact sources and checks the full candidate before applying it; the resulting receipt reports actual changes." + (
-        f"\n\n{guides}" if guides else "")
+    return "Working view requested. The next complete tool boundary preserves exact sources and checks the full candidate before applying it; the resulting receipt reports actual changes."
 
 
 def get_tools() -> List[ToolEntry]:

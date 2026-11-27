@@ -148,7 +148,7 @@ def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape
     minimum with its reserve the start with the bound enabled gets a plan. Rows: the shipped call routes' distinct
     cases and a hard 85k text route; a provider route with a fresh witness under 1.0 (the bound's density is no higher
     than the fit's); a connections pair whose raw-shorter form is the escape-heavier one; the owner-shaped twelve MCP
-    servers with long instructions (Nano's map leaves them to their reader, Low/Max keep them); and a text route's
+    servers with long instructions (every map carries them); and a text route's
     question with no key (read without fetching, decided on the fit's own read)."""
     label, provider, facts = row
     registry, keyless = None, facts == "keyless"

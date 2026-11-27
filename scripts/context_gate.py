@@ -47,7 +47,6 @@ TESTS = (
     "tests/test_context_start_bound.py",
     "tests/test_context_minimum_view_unfit.py",
     "tests/test_context_view_tool.py",
-    "tests/test_nano_connections.py",
     "tests/test_live_works_line_form.py",
     "tests/test_installed_skills_manifest_syntax.py",
     "tests/test_memory_resident_facts.py",

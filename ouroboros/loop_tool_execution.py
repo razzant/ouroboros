@@ -655,12 +655,11 @@ def _execute_single_tool(
     tool_ok, ran_with = True, None
     try:
         from ouroboros.delegate_output import staged_read_delivery_scope
-        from ouroboros.tools.tool_discovery import guide_hold, with_gateway_schema
 
-        host_refusal = host_refusal if host_refusal is not None else guide_hold(tools, tc)  # an owed server's guide first
         with staged_read_delivery_scope():
             tool_result = host_refusal if host_refusal is not None else tools.execute_result(fn_name, args)
         if tc.get("via"):  # a gateway call's typed error carries its MCP tool's catalog schema
+            from ouroboros.tools.tool_discovery import with_gateway_schema
             tool_result = with_gateway_schema(tools, fn_name, tool_result)
         from ouroboros.place_guard import with_destination_facts  # a send into another place: its notes beside the act
         from ouroboros.tools.extension_dispatch import dispatched_descriptor  # read with the publication it ran
@@ -1226,8 +1225,8 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
     if not isinstance(getattr(tools._ctx, "_completion_observation", None), dict):
         tools._ctx._completion_observation = completion_observation(tools._ctx, llm_trace)
     tools._ctx._completion_conflict = False
-    from ouroboros.tools.tool_discovery import begin_response_guides  # an envelope runs as its MCP call
-    tool_calls = begin_response_guides(tools._ctx, tool_calls, llm_trace)  # this response's owed server guides
+    from ouroboros.tools.tool_discovery import resolve_gateway_call
+    tool_calls = [resolve_gateway_call(tc) for tc in tool_calls]  # a gateway envelope runs as the MCP call it names
     validation = tuple(getattr(tools._ctx, "_request_wire_custom_receipts", ()) or ())
     tools._ctx._request_wire_custom_receipts = ()
     validation_by_id = custom_validation_by_call_id(validation)
@@ -1235,7 +1234,7 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
     legacy = len(tool_calls) > 1 and legacy_pool_response(  # the old pool's own question, lazy and strict as it was:
         str(tc.get("function", {}).get("name") or "").strip() for tc in tool_calls)  # a malformed call raises here
     names = [_call_name(tc) for tc in tool_calls]  # every other response runs in segments
-    from ouroboros.presence_context import confirmed_delivery_receipts, keep_first_receipts
+    from ouroboros.presence_context import keep_first_receipts
 
     def _execute(tc: Dict[str, Any]) -> Dict[str, Any]:
         if not local_finish_call(tools._ctx, tc):
@@ -1255,6 +1254,7 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
                 "is_code_tool": fn_name in tools.CODE_TOOLS,
                 "result_meta": _extract_result_metadata(fn_name, result, True),
             }
+        from ouroboros.presence_context import confirmed_delivery_receipts
         from ouroboros.tools.extension_dispatch import extension_call_scope
         before = confirmed_delivery_receipts(tools._ctx)
         with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
