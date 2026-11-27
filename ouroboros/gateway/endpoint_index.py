@@ -340,7 +340,9 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/owner/chat-processing": Shape(f"200:OwnerChatProcessingResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal",
                                              "OwnerChatProcessingRequest",
                                              note="An empty tier means Default. Omit project_id for Main. Enabling Main Ultrafast requires its four read tokens, confirmed destination and any API connection revision in if_unchanged."),
-    "POST /api/owner/safety-rules": Shape(f"200:OwnerSafetyRulesResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyRulesRequest"),
+    "POST /api/owner/safety-rules": Shape(
+        "200:OwnerSafetyRulesResponse 400,503:SettingsWriteRefusal "
+        "409:OwnerSafetyRulesNanoRefusal|SettingsWriteRefusal 500:SettingsPostCommitFailureResponse", "OwnerSafetyRulesRequest"),
     "POST /api/owner/safety-model": Shape(f"200:OwnerSafetyModelResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModelRequest"),
     "POST /api/owner/safety-mode": Shape(f"200:OwnerSafetyModeResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModeRequest"),
     "POST /api/owner/capability-ack": Shape(

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { MAIN_FOLLOW_NOTE, composeModelSource, createModelRolesEditor, inheritTargetOf, modelContextNote,
     modelSourceGroups, parseModelSource, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
+import { nanoMemoryWords } from '../modules/settings_local_model.js';
 import { configuredApiProviders, routeChoiceGroups } from '../modules/route_editor_primitives.js';
 import { settingsTitle } from '../modules/settings_home.js';
 
@@ -580,4 +581,52 @@ test('an empty Safety Supervisor\'s page names the route it runs on as the runti
     const viaLight = await rolePage(t, 'safety', { ...MAIN_ON_CODEX, OUROBOROS_MODEL_LIGHT: 'openai::gpt-light',
         OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'fast' } });
     assert.equal(placeholder(viaLight), 'Empty uses the Light model: gpt-light');
+});
+
+test('Nano Settings distinguishes new memory checks from a dated count', () => {
+    assert.equal(nanoMemoryWords(null), null);
+    assert.equal(nanoMemoryWords({}), null);
+    const sample = { status: 'not_claimed', reason: 'publication_scope_unqualified', measurement: 'exact',
+        current_sample: 'outside_limits', scope: 'cold_start', observed_at: '2026-11-26T12:23:46Z',
+        context_window: 80000, memory_tokens: 22404, minimum_input_tokens: 58056,
+        minimum_work_headroom_at_reply_floor_tokens: 13944, sent_max_tokens: 10000,
+        actual_work_headroom_at_wire_allowance_tokens: 10000 };
+    const outside = nanoMemoryWords(sample, 'en-US');
+    assert.match(outside.text, /not confirmed; prepared input outside limits/);
+    assert.equal(outside.warn, true);
+    assert.match(outside.detail, /Last exact count of a prepared Main input: cold start, Nov 26, 2026/);
+    assert.match(outside.detail, /targets up to 20,000 for memory and at least 15,000 for work input in total/);
+    assert.match(outside.detail, /Memory: 22,404 tokens.*minimum reply: 13,944 tokens.*prepared input: 10,000 tokens/);
+
+    // Work text the measured Main input already carries is not a shortfall: below 15,000 more it is unconfirmed.
+    const unconfirmed = nanoMemoryWords({ ...sample, current_sample: 'work_floor_unconfirmed', memory_tokens: 19000,
+        minimum_work_headroom_at_reply_floor_tokens: 3808 }, 'en-US');
+    assert.equal(unconfirmed.text, 'Nano 80k: new memory checks not confirmed.');
+    assert.equal(unconfirmed.warn, false);
+    assert.match(unconfirmed.detail, /minimum reply: 3,808 tokens/);
+
+    const protecting = { ...sample, status: 'protecting', reason: 'checked_controlled_growth',
+        protection_scope: 'unchanged_main_background', protection_observed_at: '2026-11-26T12:30:00Z' };
+    assert.match(nanoMemoryWords(protecting).text, /new memory is checked; prepared input outside limits/);
+    const noCount = nanoMemoryWords({ ...protecting, measurement: 'unavailable' });
+    assert.match(noCount.text, /new memory is checked/);
+    assert.match(noCount.detail, /This check covers a new task started in Main with the same setup\./);
+    assert.match(noCount.detail, /A direct chat reply or a project task can have less room\./);
+    assert.match(noCount.detail, /No exact measurement for the current local model and window\./);
+    assert.doesNotMatch(noCount.detail, /22,404|13,944/);
+    assert.doesNotMatch(nanoMemoryWords({ ...protecting, protection_scope: 'unexpected' }).text, /is checked/);
+
+    const paused = nanoMemoryWords({ ...sample, reason: 'confirmed_counter_unavailable' });
+    assert.match(paused.text, /memory check unavailable/);
+    assert.match(paused.detail, /Affected edits may be refused.*Last exact count/);
+    const otherWindow = nanoMemoryWords({ ...sample, reason: 'outside_qualified_window', context_window: 120000,
+        current_sample: 'unavailable', minimum_work_headroom_at_reply_floor_tokens: 53944 });
+    assert.equal(otherWindow.warn, false);
+    assert.match(otherWindow.detail, /Context window: 120,000 tokens/);
+    for (const reason of ['serving_binding_changed', 'unsupported_route', 'settings_read_failed', 'exact_counter_unproven']) {
+        const words = nanoMemoryWords({ ...sample, reason, measurement: 'unavailable' });
+        assert.match(words.detail, /No exact measurement/);
+        assert.doesNotMatch(words.detail, /22,404|13,944/);
+    }
+    assert.match(nanoMemoryWords(sample, 'de-DE').detail, /22\.404/);  // formatting follows the user's locale
 });

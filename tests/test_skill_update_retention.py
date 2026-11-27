@@ -751,3 +751,94 @@ def test_an_accepted_update_reloads_an_extension_the_owner_turned_on(request, tm
     assert extension_tool_answer(drive, "demo") == "2.0.0", acceptance
     assert acceptance["turn_on"] == "not_requested" and acceptance["extension_action"] == "extension_loaded"
     assert load_enabled(drive, "demo") and read_install_record(drive, "demo")["turn_on_when_ready"] is False
+
+
+@pytest.mark.parametrize("kind", ["hub", "registry"])
+def test_lock_contention_before_restore_keeps_update_snapshot_retryable_and_avoids_nested_lock(
+        request, tmp_path, monkeypatch, extension_runtime, kind):
+    from contextlib import contextmanager
+    from ouroboros import config, extension_loader, extension_registry_state, nano_activation, nano_publication
+    from ouroboros.nano_publication import publication_fence
+    from ouroboros.skill_install_record import settle_pending_update, update_backup_path
+
+    drive, update = _installed(request, tmp_path, monkeypatch, kind, basis="review")
+    previous = find_skill(drive, "demo").content_hash
+    save_review_state(drive, "demo", SkillReviewState(status="clean", content_hash=previous))
+    saved_review = (skill_state_dir(drive, "demo") / "review.json").read_bytes()
+    assert update()["needs_review"]
+    backup_path = update_backup_path(drive, "demo")
+    pending_record = read_install_record(drive, "demo")
+    assert pending_record["pending_update"] and backup_path.is_file()
+    payload = find_skill(drive, "demo").skill_dir
+    # A locally edited pending release has a working extension; its later negative
+    # review blocks calls but must not remove the loaded generation before settlement.
+    _extension(drive, payload, enabled=True)
+    candidate = find_skill(drive, "demo").content_hash
+    generation = extension_registry_state.extension_generation_digest("demo")
+    assert generation and extension_loader.is_extension_live("demo", drive)
+    save_review_state(drive, "demo", SkillReviewState(status="blockers", content_hash=candidate))
+
+    def assert_registration_retained():
+        assert not extension_loader.is_extension_live("demo", drive), "the rejected candidate must not be callable"
+        assert extension_registry_state.extension_generation_digest("demo") == generation, "the loaded bundle stays"
+
+    assert_registration_retained()
+    before = _tree(payload)
+
+    monkeypatch.setattr(config, "DATA_DIR", drive)
+    monkeypatch.setattr(nano_publication, "_NAME_LOCK_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(nano_publication.NanoPublication, "prepare",
+                        lambda *_a, **_kw: pytest.fail("rollback must not call the counter"))
+    real_lock = extension_registry_state._lifecycle_lock_for
+    real_fence = nano_activation.catalogue_write_fence
+    held = {"depth": 0, "fence": False}
+    unloads = []
+    real_unload = extension_loader.unload_extension
+
+    @contextmanager
+    def tracked_lock(name):
+        with real_lock(name):
+            held["depth"] += 1
+            try:
+                yield
+            finally:
+                held["depth"] -= 1
+
+    @contextmanager
+    def tracked_fence(root):
+        assert not held["depth"] and not held["fence"]
+        assert_registration_retained()
+        with real_fence(root):
+            held["fence"] = True
+            try:
+                yield
+            finally:
+                held["fence"] = False
+
+    def tracked_unload(name, **kwargs):
+        unloads.append((held["fence"], held["depth"] > 0))
+        return real_unload(name, **kwargs)
+
+    monkeypatch.setattr(extension_registry_state, "_lifecycle_lock_for", tracked_lock)
+    monkeypatch.setattr(nano_activation, "catalogue_write_fence", tracked_fence)
+    monkeypatch.setattr(extension_loader, "unload_extension", tracked_unload)
+    with publication_fence(drive):
+        with pytest.raises(installer.SkillInstallError) as contended:
+            update()  # actual source replacement; registry delegates to marketplace.update_skill
+        assert contended.value.code == "restore_failed"
+        assert_registration_retained()
+        assert not unloads
+    snapshot = json.loads(backup_path.read_bytes())
+    assert snapshot["restore_started"] is False and snapshot["payload_restored"] is False
+    assert snapshot["rejection_reason"] == "review_blockers"
+    assert read_install_record(drive, "demo") == pending_record and _tree(payload) == before
+
+    assert settle_pending_update(drive, "demo", force=True, refuse_live_call=True) == {
+        "status": "restored", "reason": "review_blockers"}
+    # Reconcile may unload again after returning to the old instruction payload.
+    assert unloads and unloads[0] == (True, True)
+    assert extension_registry_state.extension_generation_digest("demo") == ""
+    assert not extension_loader.is_extension_live("demo", drive)
+    assert find_skill(drive, "demo").content_hash == previous
+    assert not backup_path.exists()
+    assert (skill_state_dir(drive, "demo") / "review.json").read_bytes() == saved_review

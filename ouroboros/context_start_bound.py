@@ -118,6 +118,11 @@ def _route_frame(answer: Any, task: Mapping[str, Any], *, tool_schemas, nano_bas
     output_reserve, working_reserve, basis, _bound, record = route_window(route, evidence, preferred)
     if record.usable is None:
         return None
+    from ouroboros.nano_minimum import local_root_start_candidate
+
+    if (preferred == "nano" and not task.get("project_id") and task.get("chat_id") in (None, 1, "1")
+            and local_root_start_candidate(task, route, record)):
+        return None  # the serving formatter, not the character bound, decides this Main start
     tools_for, limits = _frame_choices(tool_schemas, resident=False, nano_base=nano_base, low_tools=None,
                                        nano_tools=None, tool_frames=None, window_record=record,
                                        window_tokens=record.total_equivalent, admitted=False, preferred=preferred,

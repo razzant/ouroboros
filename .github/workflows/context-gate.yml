@@ -8,6 +8,16 @@ on:
       - 'ouroboros/llm*.py'
       - 'ouroboros/loop*.py'
       - 'ouroboros/memory*.py'
+      - 'ouroboros/nano*.py'
+      - 'ouroboros/chronicle*.py'
+      - 'ouroboros/knowledge*.py'
+      - 'ouroboros/held_notes.py'
+      - 'ouroboros/skill_catalogue.py'
+      - 'ouroboros/skill_lifecycle_actions.py'
+      - 'ouroboros/skill_acceptance.py'
+      - 'ouroboros/skill_review.py'
+      - 'ouroboros/skill_review_runner.py'
+      - 'ouroboros/skill_source_install.py'
       - 'ouroboros/local*.py'
       - 'ouroboros/model*.py'
       - 'ouroboros/config*.py'
@@ -18,6 +28,9 @@ on:
       - 'ouroboros/response_limits.py'
       - 'ouroboros/deployment_policy.py'
       - 'ouroboros/gateway/settings.py'
+      - 'ouroboros/gateway/owner_settings.py'
+      - 'ouroboros/gateway/safety_settings.py'
+      - 'ouroboros/settings_integrity.py'
       - 'ouroboros/pricing.py'
       - 'ouroboros/reviewer_window.py'
       - 'ouroboros/review_native_episode.py'
@@ -26,6 +39,15 @@ on:
       - 'ouroboros/server_window.py'
       - 'ouroboros/window_learning.py'
       - 'ouroboros/agent.py'
+      - 'ouroboros/agent_dispatch.py'
+      - 'ouroboros/send_clock.py'
+      - 'ouroboros/cold_return.py'
+      - 'ouroboros/budget_pause.py'
+      - 'ouroboros/work_stop.py'
+      - 'ouroboros/server_owner_routing.py'
+      - 'supervisor/worker_chat_lane.py'
+      - 'supervisor/budget_resume.py'
+      - 'supervisor/queue_transitions.py'
       - 'ouroboros/live_conversation.py'
       - 'ouroboros/_usage_response.py'
       - 'ouroboros/usage_accounting.py'
@@ -56,6 +78,9 @@ on:
       - 'tests/test_llm*.py'
       - 'tests/test_local_tool_parsing.py'
       - 'tests/test_nano*.py'
+      - 'tests/test_send_clock.py'
+      - 'tests/test_cold_return.py'
+      - 'tests/_budget_pause_exact_helpers.py'
       - 'tests/_window_history.py'
       - 'tests/test_required_development_book.py'
       - 'tests/_first_contact.py'
@@ -70,6 +95,9 @@ on:
       - 'tests/test_live_call_start_fit.py'
       - 'ouroboros/delivery_facts.py'
       - 'tests/test_loop_llm_call.py'
+      - 'tests/test_local_input_measurement.py'
+      - 'tests/_memory_view_context.py'
+      - 'tests/_memory_inventory_shared.py'
       - 'tests/_ollama.py'
       - 'tests/fixtures/size_refusals/**'
       - 'tests/fixtures/server_windows/**'
@@ -78,6 +106,10 @@ on:
       - 'tests/conftest.py'
       - 'tests/ci_evidence.py'
       - 'scripts/context_gate.py'
+      - 'scripts/nano_reference_capacity.py'
+      - 'scripts/nano_reference_requirements.txt'
+      - 'tests/test_nano_reference_capacity.py'
+      - 'tests/test_nano_publication_admission.py'
       - 'scripts/safe_test.py'
       - 'scripts/ci_retry.py'
       - 'pyproject.toml'
@@ -102,6 +134,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-python-env
+        id: environment
+      - name: Nano 80k reference counts (Qwen and Gemma, no generation)
+        shell: bash
+        run: |
+          python -m pip --isolated --disable-pip-version-check install --no-deps --require-hashes \
+            --target "$RUNNER_TEMP/nano-reference-wheels" -r scripts/nano_reference_requirements.txt
+          TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RUNNER_TEMP/nano-reference-wheels" \
+            python scripts/nano_reference_capacity.py --cache "$RUNNER_TEMP/nano-reference-assets" --fetch
       - name: Refusals, serving windows, reply budgets and first contact
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
         shell: bash
         run: TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1 python scripts/context_gate.py --workers 2 --evidence-dir "$RUNNER_TEMP/context-gate"

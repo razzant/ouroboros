@@ -170,7 +170,9 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
 
         def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve, admitted,
                                 tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens,
-                                reasoning_effort, tool_frames, unsent_start):
+                                reasoning_effort, tool_frames, unsent_start, slack_tokens, telling_floor,
+                                exact_local_pressure):
+            assert (slack_tokens, telling_floor, exact_local_pressure) == (0, False, False)
             assert unsent_start is True  # no request of this fixture has been read (``start_unread``)
             assert measured_input_tokens is None  # this fixture has no prepared-input anchor
             assert tool_frames is None  # no resident schemas: no route schema frame to price

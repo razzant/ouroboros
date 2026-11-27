@@ -81,7 +81,8 @@ class FakeSettings:
     def document(self):
         return {**json.loads(json.dumps(self.values)), "_meta": {
             "setup_contract": self.setup_contract, "effects": {key: _effect(key) for key in self.values},
-            "tokens": {key: self._token(key) for key in self.values if not key.endswith("_API_KEY")}}}
+            "tokens": {key: self._token(key) for key in self.values if not key.endswith("_API_KEY")},
+            **getattr(self, "nano_fixture_meta", {})}}
 
     def status(self):
         now = datetime.now(timezone.utc).isoformat()
@@ -596,6 +597,143 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
     dialog.get_by_role("button", name="Remove").click()
     page.wait_for_function("() => /^Removed/.test(document.querySelector('#page-settings [data-settings-page=models] [data-entry-result]')?.textContent || '')")
     assert server.values["OUROBOROS_MODEL_FALLBACKS"] == "moonshotai/kimi-k3-pro, anthropic::claude-opus-test"
+    page.close()
+
+
+@pytest.mark.parametrize("width,height", SIZES)
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_nano_context_projects_passive_facts_in_models(subscription_ui, width, height, theme):
+    """Read the real Settings row over synthetic API responses; no model or live settings."""
+    from playwright.sync_api import expect
+
+    requests = []
+
+    def observed_page(**options):
+        page = subscription_ui["new_page"](locale="en-US", timezone_id="UTC", **options)
+        page.route(lambda url: not url.startswith(subscription_ui["url"] + "/"), lambda route: route.abort())
+        page.on("request", lambda request: requests.append((request.method, request.url)))
+        return page
+
+    page, server = _page({**subscription_ui, "new_page": observed_page}, width, height, theme)
+    open_settings(page, "models")
+    level = _settled(page, "models")
+    row = level.locator('[data-setting-row="models:context"]')
+    line = row.locator('[data-setting-meta]')
+    detail = level.locator('[data-nano-details]')
+    more = level.locator('[data-models-more]')
+    regular = "Set under the message field in Main. Project rooms and running work keep their own."
+    expect(line).to_have_text(regular)
+    expect(detail).to_be_hidden()
+
+    def paint(mode, fact, words):
+        start = len(requests)
+        server.values.update(OUROBOROS_CONTEXT_MODE=mode, USE_LOCAL_MAIN=mode == "nano")
+        server.nano_fixture_meta = {"nano_publication": fact} if fact is not None else {}
+        page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:settings-updated', {detail: {source: 'settings-row'}}))")
+        expect(line).to_have_text(words)
+        assert ("GET", subscription_ui["url"] + "/api/settings") in requests[start:]
+
+    # A dated preparation (not a model response) and a later proof about new memory can coexist.
+    # Wire shape: gateway/client_contracts.py and nano_publication.read_root_sample.
+    window, reply_floor, minimum, prepared, reply_limit = 80_000, 8_192, 58_056, 64_200, 12_000
+    scope = {"scope": "cold_start", "observed_at": "2026-11-26T12:23:46Z", "observation": "prepared"}
+    unchecked = {**scope, "status": "not_claimed", "reason": "publication_scope_unqualified",
+                 "measurement": "exact", "current_sample": "outside_limits", "context_window": window,
+                 "memory_tokens": 22_104, "whole_memory_tokens": 22_404, "minimum_input_tokens": minimum,
+                 "reply_floor_tokens": reply_floor, "minimum_reply_allowance_tokens": reply_floor,
+                 "minimum_work_headroom_at_reply_floor_tokens": window - minimum - reply_floor,
+                 "sent_max_tokens": reply_limit, "actual_input_tokens": prepared,
+                 "minimum_work_headroom_at_wire_allowance_tokens": window - minimum - reply_limit,
+                 "actual_work_headroom_at_wire_allowance_tokens": window - prepared - reply_limit,
+                 "pressure": {"memory_excess_tokens": 2_404, "prepared_overflow_tokens": 0}}
+    checking = {**unchecked, "status": "protecting", "reason": "checked_controlled_growth",
+                "protection_scope": "unchanged_main_background", "protection_observed_at": "2026-11-26T12:28:00Z",
+                "qualified_background_tokens": window - 20_000 - 15_000 - reply_floor,
+                "qualified_reply_floor_tokens": reply_floor}
+    gone = {**scope, "status": "not_claimed", "reason": "serving_binding_changed",
+            "measurement": "unavailable", "current_sample": "unavailable", "pressure": None}
+    paint("nano", unchecked, "Nano 80k: new memory checks not confirmed; prepared input outside limits.")
+    expect(line).to_have_attribute("data-tone", "warn")
+    expect(detail).to_be_hidden()
+    expect(more).to_contain_text("Nano memory")
+    row.scroll_into_view_if_needed()
+    assert level.evaluate(FITS) == {"page": 0, "doc": 0, "out": []}
+    setup_browser.capture(page, f"nano-context-summary-{width}-{theme}")
+    more.press("Enter")
+    expect(detail).to_be_visible()
+    expect(detail).to_contain_text("The last measurement did not establish that new memory can be checked.")
+    measured_words = (
+        "Last exact count of a prepared Main input: cold start, Nov 26, 2026, 12:23 PM.",
+        "Context window: 80,000 tokens.", "Smallest measured input: 58,056 tokens.",
+        "Memory with the full index: 22,404 tokens.", "Memory: 22,104 tokens.",
+        "Room left after the measured input with the minimum reply: 13,752 tokens.",
+        "Prepared reply limit: 12,000 tokens.", "Room left on the prepared input: 3,800 tokens.",
+    )
+    for words in measured_words:
+        expect(detail).to_contain_text(words)
+    expect(detail).not_to_contain_text("request sent")
+
+    paint("nano", checking, "Nano 80k: new memory is checked; prepared input outside limits.")
+    expect(detail).to_be_visible()
+    expect(line).to_have_attribute("data-tone", "warn")
+    expect(detail).to_contain_text("This check covers a new task started in Main with the same setup.")
+    expect(detail).to_contain_text("A direct chat reply or a project task can have less room.")
+    expect(detail).to_contain_text("Memory checks confirmed Nov 26, 2026, 12:28 PM.")
+    for words in measured_words:
+        expect(detail).to_contain_text(words)
+    detail.scroll_into_view_if_needed()
+    assert level.evaluate(FITS) == {"page": 0, "doc": 0, "out": []}
+    setup_browser.capture(page, f"nano-context-measurement-{width}-{theme}")
+
+    # Work text Main already carries is no shortfall: 68,000 measured and prepared (memory 19,000), reply 8,192,
+    # leaves 3,808 more, so the 15,000 floor is unconfirmed, not outside limits.
+    fitted, fitted_reply = 68_000, 8_192
+    unconfirmed = {**scope, "status": "not_claimed", "reason": "publication_scope_unqualified",
+                   "measurement": "exact", "current_sample": "work_floor_unconfirmed", "context_window": window,
+                   "memory_tokens": 19_000, "whole_memory_tokens": 19_000, "minimum_input_tokens": fitted,
+                   "reply_floor_tokens": fitted_reply, "minimum_reply_allowance_tokens": fitted_reply,
+                   "minimum_work_headroom_at_reply_floor_tokens": window - fitted - fitted_reply,
+                   "sent_max_tokens": fitted_reply, "actual_input_tokens": fitted,
+                   "minimum_work_headroom_at_wire_allowance_tokens": window - fitted - fitted_reply,
+                   "actual_work_headroom_at_wire_allowance_tokens": window - fitted - fitted_reply,
+                   "pressure": {"memory_excess_tokens": 0, "prepared_overflow_tokens": 0}}
+    paint("nano", {**gone, "reason": "confirmed_counter_unavailable"}, "Nano 80k: memory check unavailable.")
+    expect(line).to_have_attribute("data-tone", "warn")
+    expect(detail).to_contain_text("The exact counter is unavailable.")
+    expect(detail).not_to_contain_text("Last exact count")
+
+    paint("nano", unconfirmed, "Nano 80k: new memory checks not confirmed.")
+    assert line.get_attribute("data-tone") is None
+    expect(detail).to_be_visible()
+    expect(detail).to_contain_text("The last measurement did not establish that new memory can be checked.")
+    expect(detail).not_to_contain_text("The exact counter is unavailable.")
+    for words in ("Smallest measured input: 68,000 tokens.", "Memory with the full index: 19,000 tokens.",
+                  "Memory: 19,000 tokens.", "Room left after the measured input with the minimum reply: 3,808 tokens.",
+                  "Prepared reply limit: 8,192 tokens.", "Room left on the prepared input: 3,808 tokens."):
+        expect(detail).to_contain_text(words)
+    for stale in ("outside limits", "Memory checks confirmed", "22,404", "22,104", "58,056", "13,752", "12,000", "3,800"):
+        expect(detail).not_to_contain_text(stale)
+        expect(line).not_to_contain_text(stale)
+    detail.scroll_into_view_if_needed()
+    assert level.evaluate(FITS) == {"page": 0, "doc": 0, "out": []}
+    setup_browser.capture(page, f"nano-context-unconfirmed-{width}-{theme}")
+
+    paint("nano", gone, "Nano 80k: new memory checks not confirmed.")
+    assert line.get_attribute("data-tone") is None
+    expect(detail).to_contain_text("The earlier count no longer applies.")
+    expect(detail).to_contain_text("No exact measurement for the current local model and window.")
+    for stale in ("Memory checks confirmed", "22,404", "22,104", "58,056", "13,752", "12,000", "3,800",
+                  "68,000", "19,000", "3,808"):
+        expect(detail).not_to_contain_text(stale)
+    paint("max", checking, regular)  # Even an older response still carrying Nano metadata must not take over.
+    expect(detail).to_be_hidden()
+    expect(detail).to_have_text("")
+    expect(more).not_to_contain_text("Nano memory")
+    assert not server.posts and not subscription_ui["posts"]
+    assert not [(method, urlparse(url).path) for method, url in requests
+                if not url.startswith(subscription_ui["url"] + "/") or method not in {"GET", "HEAD"}
+                or urlparse(url).path.startswith(("/api/local-model/test", "/api/local-model/start",
+                                                  "/api/local-model/measure", "/api/chat/send", "/v1/"))]
     page.close()
 
 

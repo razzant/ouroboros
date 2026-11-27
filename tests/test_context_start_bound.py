@@ -162,7 +162,7 @@ def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape
                                             view_kind="owner_turn") == pytest.approx(0.8)
     elif facts == "reversed":
         facts = None
-        monkeypatch.setattr(context, "_connections", lambda *_a, **_kw: REVERSED)
+        monkeypatch.setattr(context, "_connections", lambda *_a, **_kw: (REVERSED, None))
     drive = scale.installed(tmp_path, shape)
 
     def outcome(window, *, bounded):
@@ -208,7 +208,7 @@ def test_the_connections_term_is_the_form_with_fewer_escaped_characters(drive, m
     escaped characters, which can be the raw-longer one."""
     from ouroboros.memory_view import json_chars
 
-    monkeypatch.setattr(context, "_connections", lambda *_a, **_kw: REVERSED)
+    monkeypatch.setattr(context, "_connections", lambda *_a, **_kw: (REVERSED, None))
     with monkeypatch.context() as patch:
         patch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
         wide = build(drive, resolver(1_000_000))

@@ -1415,7 +1415,8 @@ def _edit_batch(
         if note := edit_syntax_note(bindings[rel], text):
             notes.append(note)
     from ouroboros.contracts.task_constraint import normalize_task_constraint
-    from ouroboros.skill_repair_admission import repair_write_cas_error, advance_repair_expected_hash
+    from ouroboros.skill_repair_admission import (advance_repair_expected_hash, confirm_local_text_edit,
+                                                 local_edit_interval, repair_write_cas_error)
 
     constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     repair_binding = next((b for b in bindings.values() if b.skill_name), None)
@@ -1425,50 +1426,52 @@ def _edit_batch(
                                              task_id=ctx.task_id, repair_task=True):
             return refusal
         if not any(work_domain.is_work(targets[rel]) for rel in contents):  # the same proof as edit_text's own
-            from ouroboros.skill_repair_admission import confirm_local_text_edit
-
             local_edit = confirm_local_text_edit(ctx, repair_binding, [(targets[rel], originals[rel], text)
                                                                        for rel, text in contents.items()])
     changed: List[str] = []
     registered_outputs: List[str] = []
     order = list(contents)
     facts = shelf_facts(mutation_binding, contents)
-    for rel, text in contents.items():
-        try:
-            _land_edit_bytes(targets[rel], text)
-        except Exception as e:  # noqa: BLE001 - surface the failed path
-            return _partial_write_failure(
-                ctx, changed, source_tool, "EDIT_BATCH_ERROR",
-                f"write failed for {rel}: {e}",
-                mutation_binding, pending=order[len(changed) + 1:], facts=facts,
-            )
-        changed.append(rel)
-        if bindings[rel].root == "user_files":
-            from ouroboros.artifacts import copy_file_to_task_artifacts
 
+    # Nano capacity: refused, or held, from before the first file until the digest is recorded. A physical
+    # failure of a later file still leaves the earlier ones written, as it always did; no transaction is promised.
+    with local_edit_interval(local_edit) as held:
+        if held.refusal:
+            return held.refusal
+        for rel, text in contents.items():
             try:
-                record = copy_file_to_task_artifacts(ctx, targets[rel], kind="user_file")
-                if not record:
-                    raise OSError("user file recovery copy was not registered")
-                if record.get("sha256"):
-                    facts.setdefault("versions", {})[rel] = f"sha256:{record['sha256']}"
-                registered_outputs.append(f"ARTIFACT_OUTPUTS: registered user file -> artifact_store:{record['name']}")
-            except Exception as exc:
-                return _partial_write_failure(ctx, changed, source_tool, "EDIT_BATCH_ERROR",
-                                              f"{rel} WAS written but its user artifact registration failed: {exc}",
-                                              mutation_binding, pending=order[len(changed):], facts=facts)
-    if repair_binding and constraint and constraint.has_selected_skill:
-        advance_repair_expected_hash(repair_binding.state_drive_root, constraint, task_id=ctx.task_id,
-                                     local_edit=local_edit)
+                _land_edit_bytes(targets[rel], text)
+            except Exception as e:  # noqa: BLE001 - surface the failed path
+                return _partial_write_failure(
+                    ctx, changed, source_tool, "EDIT_BATCH_ERROR",
+                    f"write failed for {rel}: {e}",
+                    mutation_binding, pending=order[len(changed) + 1:], facts=facts,
+                )
+            changed.append(rel)
+            if bindings[rel].root == "user_files":
+                from ouroboros.artifacts import copy_file_to_task_artifacts
+
+                try:
+                    record = copy_file_to_task_artifacts(ctx, targets[rel], kind="user_file")
+                    if not record:
+                        raise OSError("user file recovery copy was not registered")
+                    if record.get("sha256"):
+                        facts.setdefault("versions", {})[rel] = f"sha256:{record['sha256']}"
+                    registered_outputs.append(f"ARTIFACT_OUTPUTS: registered user file -> artifact_store:{record['name']}")
+                except Exception as exc:
+                    return _partial_write_failure(ctx, changed, source_tool, "EDIT_BATCH_ERROR",
+                                                  f"{rel} WAS written but its user artifact registration failed: {exc}",
+                                                  mutation_binding, pending=order[len(changed):], facts=facts)
+        if repair_binding and constraint and constraint.has_selected_skill:
+            advance_repair_expected_hash(repair_binding.state_drive_root, constraint, task_id=ctx.task_id,
+                                         local_edit=local_edit)
     footer = _finish_mutation(ctx, changed, source_tool, mutation_binding, facts)
-    previews = "\n".join(f"Context after {rel}:\n{numbered_edit_preview(contents[rel], sites[rel])}"
-                         for rel in changed)
-    if registered_outputs:
-        previews += "\n" + "\n".join(registered_outputs)
+    previews = [f"Context after {rel}:\n{numbered_edit_preview(contents[rel], sites[rel])}" for rel in changed]
+    details = "\n".join(previews + registered_outputs)
     return with_argument_notes(ctx, _with_path_facts(ctx, source_tool, (
         f"✅ {source_tool} applied {len(applied)} edit(s) across {len(changed)} file(s):\n"
         + "\n".join("  " + a for a in applied)
-        + f"\n{previews}\n{footer}"
+        + f"\n{details}\n{footer}"
         + ("\nUnchanged, not rewritten (already held exactly this content): " + ", ".join(unchanged) if unchanged else "")
     ), mutation_binding.base_path if mutation_binding is not None else active_repo_dir_for(ctx), changed, unchanged,
         **facts), notes)

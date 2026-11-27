@@ -226,19 +226,45 @@ def _undo_landing(drive_root: pathlib.Path, name: str, record: Dict[str, Any], r
         restored = restore_update_snapshot(drive_root, name, "landing_failed")
     else:
         if rollback is not None:
-            restore_payload_state(rollback)
+            from ouroboros.nano_activation import catalogue_write_fence
+
+            with catalogue_write_fence(drive_root):
+                restore_payload_state(rollback)
         restored = True
     if aside is not None and not occupant_dir.exists():
         aside.rename(occupant_dir)
     if restored and was_live:
-        try:
-            from ouroboros.config import load_settings
-            from ouroboros.extension_loader import reconcile_extension
+        _reload_previous(drive_root, name)
 
-            reconcile_extension(name, pathlib.Path(drive_root), load_settings)
-        except Exception:
-            log.warning("%s was live before its failed landing and still needs reconciliation", name,
-                        exc_info=True)
+
+def _reload_previous(drive_root: pathlib.Path, name: str) -> None:
+    """Load again the extension a landing unloaded and did not replace; a failure is logged."""
+    try:
+        from ouroboros.config import load_settings
+        from ouroboros.extension_loader import reconcile_extension
+
+        reconcile_extension(name, pathlib.Path(drive_root), load_settings)
+    except Exception:
+        log.warning("%s was live before its failed landing and still needs reconciliation", name,
+                    exc_info=True)
+
+
+def _capacity_refused(drive_root: pathlib.Path, plan: Dict[str, Any], refusal: Any, rollback: Any,
+                      was_live: bool) -> SkillInstallError:
+    """The Nano check refused before any byte moved: drop the unused copy and load what was working."""
+    from ouroboros.marketplace.install import discard_payload_snapshot
+    from ouroboros.nano_activation import refusal_words
+
+    if rollback is not None:
+        discard_payload_snapshot(rollback)
+    if was_live:
+        _reload_previous(drive_root, plan["name"])
+    item, (happened, step) = plan["item"], refusal_words(refusal)
+    verb = "updated" if plan.get("update") else "installed"
+    return SkillInstallError(
+        f"nano_publication_{refusal.reason}",
+        f"{plan['name']} was not {verb}. {happened}; {step}. {refusal.detail}",
+        candidate={"version": item.get("version", ""), "digest": item.get("digest", "")})
 
 
 def _land_builtin(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[str, Any], *,
@@ -246,30 +272,39 @@ def _land_builtin(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[s
     """A built-in lands through its own source's installer, inside the same rollback as every release."""
     from ouroboros.config import REPO_DIR, ensure_data_skills_dir
     from ouroboros.marketplace.install import snapshot_payload_state
+    from ouroboros.nano_activation import prepare_skill_landing
+    from ouroboros.nano_publication import NanoPublicationRefused
     from ouroboros.skill_builtin import install_builtin_skill
 
     name = plan["name"]
     target = ensure_data_skills_dir(pathlib.Path(drive_root)) / BUCKETS["builtin"] / name
+    seed_dir = pathlib.Path(repo_dir or REPO_DIR) / "skills"
     _note(progress, f"Installing {name} from the built-in skills…")
     occupant_dir = pathlib.Path((plan.get("occupant") or {}).get("skill_dir") or target)
     was_live, rollback, aside = False, None, None
     try:
+        commit = prepare_skill_landing(drive_root, target, seed_dir / name, name, record,
+                                       keeps_snapshot=bool(plan.get("update")))
         was_live = _unload(drive_root, name)
         rollback = snapshot_payload_state(drive_root, name, target)
-        if occupant_dir.exists() and occupant_dir.resolve() != target.resolve():
-            aside = _move_aside(occupant_dir, name)
-        if plan.get("update"):
-            retain_update_snapshot(rollback, record)
-        result = install_builtin_skill(
-            name, drive_root=pathlib.Path(drive_root), seed_dir=pathlib.Path(repo_dir or REPO_DIR) / "skills",
-            turn_on_when_ready=bool(record.get("turn_on_when_ready")), installed_by=record["installed_by"],
-            reason=str(record.get("reason") or ""), task_id=str(record.get("task_id") or ""))
-        if not result.get("ok"):
-            raise SkillInstallError(str(result.get("code") or "builtin_install_failed"),
-                                    f"{name} was not installed: {result.get('error') or 'the built-in did not land'}")
-        builtin = read_install_record(pathlib.Path(drive_root), name) or {}
-        write_install_record(pathlib.Path(drive_root), name, {**builtin, **record,
-                             "release": {**builtin.get("release", {}), **record["release"]}})
+        with commit():
+            if occupant_dir.exists() and occupant_dir.resolve() != target.resolve():
+                aside = _move_aside(occupant_dir, name)
+            if plan.get("update"):
+                retain_update_snapshot(rollback, record)
+            result = install_builtin_skill(
+                name, drive_root=pathlib.Path(drive_root), seed_dir=seed_dir,
+                turn_on_when_ready=bool(record.get("turn_on_when_ready")), installed_by=record["installed_by"],
+                reason=str(record.get("reason") or ""), task_id=str(record.get("task_id") or ""))
+            if not result.get("ok"):
+                raise SkillInstallError(
+                    str(result.get("code") or "builtin_install_failed"),
+                    f"{name} was not installed: {result.get('error') or 'the built-in did not land'}")
+            builtin = read_install_record(pathlib.Path(drive_root), name) or {}
+            write_install_record(pathlib.Path(drive_root), name, {**builtin, **record,
+                                 "release": {**builtin.get("release", {}), **record["release"]}})
+    except NanoPublicationRefused as exc:
+        raise _capacity_refused(drive_root, plan, exc, rollback, was_live) from exc
     except Exception:
         _undo_landing(drive_root, name, record, rollback, aside, occupant_dir, was_live)
         raise
@@ -284,6 +319,8 @@ def _land_release(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[s
     from ouroboros.config import ensure_data_skills_dir
     from ouroboros.marketplace.fetcher import FetchError, copy_tree_checked, land_staged_tree
     from ouroboros.marketplace.install import snapshot_payload_state
+    from ouroboros.nano_activation import prepare_skill_landing
+    from ouroboros.nano_publication import NanoPublicationRefused
 
     row, item, name = plan["row"], plan["item"], plan["name"]
     if row["kind"] == "builtin":
@@ -313,18 +350,24 @@ def _land_release(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[s
     occupant_dir = pathlib.Path((plan.get("occupant") or {}).get("skill_dir") or target)
     was_live, rollback, aside = False, None, None
     try:
+        commit = prepare_skill_landing(drive_root, target, staging, name, record,
+                                       keeps_snapshot=bool(plan.get("update")))
         was_live = _unload(drive_root, name)
         rollback = snapshot_payload_state(drive_root, name, target)
-        if occupant_dir.exists() and occupant_dir.resolve() != target.resolve():
-            aside = _move_aside(occupant_dir, name)
-        if plan.get("update"):
-            retain_update_snapshot(rollback, record)
-        land_staged_tree(staging, target, replacement_suffix="replaced-source")
-        written = write_install_record(pathlib.Path(drive_root), name, record)
+        with commit():
+            if occupant_dir.exists() and occupant_dir.resolve() != target.resolve():
+                aside = _move_aside(occupant_dir, name)
+            if plan.get("update"):
+                retain_update_snapshot(rollback, record)
+            land_staged_tree(staging, target, replacement_suffix="replaced-source")
+            written = write_install_record(pathlib.Path(drive_root), name, record)
+    except NanoPublicationRefused as exc:
+        raise _capacity_refused(drive_root, plan, exc, rollback, was_live) from exc
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
         _undo_landing(drive_root, name, record, rollback, aside, occupant_dir, was_live)
         raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     if not record.get("pending_update"):
         keep_previous_payload(rollback.backup_dir, name)
     keep_previous_payload(aside, name)
@@ -351,8 +394,9 @@ def _install_registry(drive_root: pathlib.Path, plan: Dict[str, Any], *, actor: 
                            install_record=record, registry_url=row.get("url") or None,
                            expected_digest=str(expected_digest or ""))
     if not result.ok:
-        raise SkillInstallError("registry_install_failed", result.error or "install failed",
-                                int(result.error_status or 400))
+        capacity = str(result.error_code or "").startswith("nano_publication_")
+        raise SkillInstallError(result.error_code if capacity else "registry_install_failed",
+                                result.error or "install failed", int(result.error_status or 400))
     plan["name"] = result.sanitized_name  # the adapter decides the local name (it may avoid a clash)
     return read_install_record(pathlib.Path(drive_root), result.sanitized_name) or {}
 
@@ -395,8 +439,10 @@ def accept_and_turn_on(drive_root: pathlib.Path, name: str, *, repo_path: Option
             out["deps_error"] = deps_error
             out["setup_error"] = "Its packages did not install; it remains unavailable."
     if out["deps_status"] in {"installed", "not_required"}:  # only proven readiness permits turn-on
-        out["turn_on"] = reconcile_turn_on_when_ready(drive, name, repo_path=repo_path,
-                                                      reason="installed release accepted")["action"]
+        turn_on = reconcile_turn_on_when_ready(drive, name, repo_path=repo_path, reason="installed release accepted")
+        out["turn_on"] = turn_on["action"]
+        if any(code.startswith("nano_publication_") for code in turn_on.get("missing", [])):
+            out["turn_on_result"] = turn_on
         if out["turn_on"] not in {"enabled", "load_error"}:  # those two already loaded (or tried) these bytes
             out.update(_reload_accepted(drive, loaded, repo_path))
     else:
@@ -533,12 +579,13 @@ def settle_pending_updates_at_startup(drive_root: pathlib.Path) -> None:
 
 def settle_before_replacement(drive_root: pathlib.Path, name: str) -> None:
     """A later explicit replacement first returns an unfinished candidate to its kept base."""
-    from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
+    from ouroboros.extension_registry_state import realtime_load_refusal
 
-    with _lifecycle_lock_for(name):
-        if refusal := realtime_load_refusal(name):
-            raise SkillInstallError(refusal, "A live call is using this skill; retry after it ends.")
-        result = settle_pending_update(drive_root, name, force=True)
+    if refusal := realtime_load_refusal(name):
+        raise SkillInstallError(refusal, "A live call is using this skill; retry after it ends.")
+    result = settle_pending_update(drive_root, name, force=True, refuse_live_call=True)
+    if result.get("code") == "live_call_active":
+        raise SkillInstallError("live_call_active", "A live call is using this skill; retry after it ends.")
     if result["status"] == "restore_failed":
         raise SkillInstallError("restore_failed", f"The previous update of {name} could not be restored; "
                                                  "its payload and state evidence were kept.")
