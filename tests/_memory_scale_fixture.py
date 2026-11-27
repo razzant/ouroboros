@@ -296,12 +296,11 @@ MCP_SHAPE = {'servers': 12, 'tools': 387, 'instructions': 33_400}
 
 
 def mcp_registry(root, monkeypatch, *, servers=MCP_SHAPE['servers'], tools=MCP_SHAPE['tools'],
-                 instructions=MCP_SHAPE['instructions'], instruction_text=None):
+                 instructions=MCP_SHAPE['instructions']):
     """``(ToolRegistry, {server id: its instruction text})`` over ``servers`` remote MCP servers listed through the real
     manager with a stub transport (no process, no network), ``tools`` tool names spread over them and ``instructions``
     characters of server instructions of uneven lengths (multilingual prose with line breaks and quotes, as servers
-    write them). ``instruction_text(i)`` replaces server ``i``'s text. The manager and the settings file are this test's
-    own (``monkeypatch`` restores both)."""
+    write them). The manager and the settings file are this test's own (``monkeypatch`` restores both)."""
     from ouroboros import config, mcp_client
     from ouroboros.tools.registry import ToolRegistry
 
@@ -313,8 +312,7 @@ def mcp_registry(root, monkeypatch, *, servers=MCP_SHAPE['servers'], tools=MCP_S
     for i in range(servers):
         server = f'srv{i:02d}'
         size = instructions * weights[i] // sum(weights)
-        guide = instruction_text(i) if instruction_text else (
-            f'"{server}" usage:\n' + '\n'.join(prose(f'{server} guide {n}', 200) for n in range(max(1, size // 200))))
+        guide = f'"{server}" usage:\n' + '\n'.join(prose(f'{server} guide {n}', 200) for n in range(max(1, size // 200)))
         guides[server] = guide
         count = tools // servers + (i < tools % servers)
         listing[server] = [{'_server_instructions': guide}] + [
