@@ -40,7 +40,7 @@ from .lib.telegram_state import (
     _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
     _quiet_progress, _reply_target, _reply_ingress_transport, _carried_here, _bridged,
 )
-from .lib import telegram_i18n, telegram_inbound, telegram_places, telegram_quiz
+from .lib import telegram_i18n, telegram_inbound, telegram_pairing, telegram_places, telegram_quiz
 from .lib.telegram_origin import origin_label
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
@@ -523,7 +523,8 @@ async def _authorized_owner(api, client, update, pinned_chat: str, lang: str) ->
     if not pinned_chat:
         if str(chat.get("type") or "") != "private" or chat_id != user_id:
             return None
-        merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_CHAT_ID": str(chat_id)})
+        if not await telegram_pairing.bind_unbound(api, client, update, chat_id, lang):
+            return None  # a link from setup waits and this is not it (lib/telegram_pairing.py)
         pinned_chat = str(chat_id)
     if str(chat_id) == pinned_chat and str(user_id) == pinned_chat:
         return pinned_chat
@@ -889,8 +890,7 @@ async def _handle_owner_message(
         text = text.strip()
     # Handle /menu command locally — always allowed
     cleaned_text = text.lower().strip()
-    is_menu_cmd = _is_exact_bot_command(cleaned_text, "/menu")
-    if is_menu_cmd:
+    if _is_exact_bot_command(cleaned_text, "/menu"):
         header, keyboard = _build_menu_keyboard(command_mode, lang)
         if keyboard:
             await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
@@ -901,16 +901,16 @@ async def _handle_owner_message(
     # Handle /language locally — always allowed. Bare: the keyboard. With an argument
     # ("/language Quenya", "/language pt-BR", "/language invent a language and translate
     # everything into it"): the owner's words go to the host's one language writer.
-    is_lang_cmd = _is_exact_bot_command(cleaned_text, "/language")
-    if is_lang_cmd:
+    if _is_exact_bot_command(cleaned_text, "/language"):
         header, keyboard = _build_language_keyboard(lang)
         await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
         return
     # Handle /help command locally — always allowed
-    is_help_cmd = _is_exact_bot_command(cleaned_text, "/help")
-    if is_help_cmd:
-        help_text = _LOCALIZED_TEXTS[lang]["help_text"]
-        await client.send_message(chat_id, help_text)
+    if _is_exact_bot_command(cleaned_text, "/help"):
+        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["help_text"])
+        return
+    if telegram_pairing.start_payload(text) is not None:  # Start is the bridge's own in every mode, never a command
+        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["connected"])
         return
 
     if _panic_update(update):

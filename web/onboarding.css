@@ -1619,6 +1619,12 @@ textarea:not(.ui-control):not(.ui-checkbox):not(.ui-radio):focus {
 .skills-connection-pair { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-3); }
 .skills-connection-qr { flex: none; width: 148px; height: 148px; overflow: hidden; border-radius: 8px; }
 .skills-connection-qr svg { display: block; width: 100%; height: 100%; }
+/* On the phone itself a QR cannot be scanned by its own camera: the link alone (owner, 2026-11-27). */
+@media (pointer: coarse) {
+  @container skillsstep (max-width: 35rem) {
+    .skills-connection-qr, [data-connection-qr-hint], [data-connection-this-device] { display: none; }
+  }
+}
 .skills-connection-facts { display: grid; gap: var(--space-1); min-width: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .skills-connection-facts strong { color: var(--text-primary); font-size: var(--type-body); }
 .skills-connection-facts a { color: var(--text-primary); font-weight: 600; }

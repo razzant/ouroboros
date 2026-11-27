@@ -493,6 +493,11 @@ test('Connect opens the skill’s steps and its token field; a checked token sho
     assert.ok(card.includes(qrSvg(link, { label: 'QR code for @my_ouro_bot' })), 'the QR is the link with this card’s code');
     assert.match(text(card), /@my_ouro_bot Scan it with your phone’s camera, then press Start in Telegram\. You can finish setup now; the bot answers once Ouroboros starts\. On this device\? Open @my_ouro_bot Send results and errors of work here$/);
     assert.match(card, new RegExp(`href="${link.replace(/[.?]/g, '\\$&')}" target="_blank" rel="noopener noreferrer" data-connection-link`));
+    // On the phone itself the QR, its scan hint and «On this device?» step aside and the link alone stays (owner, 27.11).
+    assert.match(card, /<span data-connection-qr-hint>Scan it with your phone’s camera/);
+    assert.match(card, /<span data-connection-this-device>On this device\?<\/span>/);
+    assert.match(readFileSync(new URL('../onboarding.css', import.meta.url), 'utf8'),
+        /@media \(pointer: coarse\) \{\s*@container skillsstep \(max-width: 35rem\) \{\s*\.skills-connection-qr, \[data-connection-qr-hint\], \[data-connection-this-device\] \{ display: none; \}/);
     assert.match(card, /data-connection-option="TELEGRAM_NOTIFY_TASKS" checked/, 'on for a new connection');
     assert.equal(card.split(TOKEN).length - 1, 1, 'the token is the field’s own value only: never in the QR or a link');
     // The code is made once: hiding and opening again, or checking again, keeps it.
