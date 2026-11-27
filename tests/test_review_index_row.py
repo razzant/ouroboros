@@ -441,3 +441,85 @@ def test_a_folds_refresh_leaves_every_index_before_its_note_and_retires_or_repla
     assert view.obsolete_review_index_positions(appended) == (len(rest), len(rest) + 1)  # the appended copy stays
     last_current = [*rest, stale, current, note]
     assert view.refresh_compacted_review_context(ctx, deepcopy(last_current), floor=len(last_current) - 1) == last_current
+
+
+def _full_display(current):
+    """The display written before record subjects and remark fields: the producer's rows inline."""
+    full = {key: value for key, value in current.items() if key != "record_subjects"}
+    full["decision_rows"] = view._expanded_decision_rows(current)
+    return full
+
+
+def test_commit_row_writes_each_repeated_delivery_once_and_reads_back_the_producers_rows_exactly():
+    """BIBLE P1, repeated deliveries of one source: a review part's remark that is its reason's own field and a
+    record's subject on every one of its decisions leave the display; the expansion restores the producer's rows
+    byte for byte, so identity and bindings do not move. A remark that differs from every field, and a record whose
+    decisions carry different subjects, stay whole."""
+    history = commit_history()
+    for row in history["decision_rows"]:
+        row["subject"] = {"root": "/repo", "tree": "t" * 40, "record": row["review_record_id"]}
+    rec2 = [r for r in history["decision_rows"] if r["review_record_id"] == "rec-2"]
+    rec2[0]["subject"] = {"root": "/elsewhere"}
+    own = next(r for r in history["decision_rows"] if r["review_record_id"] == "rec-3" and r["decision_kind"] == "review_part")
+    own["remark"] = "The actor's own short remark."
+    mandatory, row, current = row_for(history, None, family="commit")
+    shown = current["decision_rows"]
+    assert set(current["record_subjects"]) == {"rec-1", "rec-3"}
+    assert all("subject" not in r for r in shown if r["review_record_id"] != "rec-2")
+    assert all("subject" in r for r in shown if r["review_record_id"] == "rec-2")
+    aliased = [r for r in shown if "remark_field" in r]
+    assert len(aliased) == 8 and all(r["remark_field"] == "findings" and "remark" not in r for r in aliased)
+    assert any(r.get("remark") == "The actor's own short remark." for r in shown)
+    assert [{k: v for k, v in r.items() if k != "source"} for r in view._expanded_decision_rows(current)] == [
+        {k: v for k, v in r.items() if k != "source"} for r in mandatory["decision_rows"]]
+    assert view.review_index_identity(current) == view.review_index_identity(_full_display(current))
+    assert view._index_bindings(current) == {"decision:" + view._sha(e["bound_decision"]): e["bound_decision"]
+                                             for e in view.decision_entries(history) if e["bound_decision"]}
+    full_text = "[Current review decisions]\n" + json.dumps(
+        {"family": "commit", "current": _full_display(current), "rule": view.INDEX_RULE}, ensure_ascii=False, sort_keys=True)
+    repeated = sum(len(json.dumps(r["reason"]["findings"], ensure_ascii=False, sort_keys=True)) for r in aliased)
+    assert len(full_text) - len(row["content"]) >= repeated
+
+
+def test_an_account_of_another_familys_decisions_is_no_gap_here_and_a_missing_member_here_still_is():
+    """A task-wide selection meets every family: a group whose members are all another family's is that family's
+    account, never an `unapplied_review_groups` gap repeated in every other row; a group naming a member this family
+    does not hold is still a gap, stated once."""
+    plan, _operative = incident_history()
+    commit = commit_history()
+    plan_member = next(e["bound_decision"] for e in view.decision_entries(plan) if e["bound_decision"])
+    commit_member = next(e["bound_decision"] for e in view.decision_entries(commit)
+                         if e["bound_decision"] and e["row"].get("history_role") == "historical")
+    selected = ref("review-history-view-test", {"t": 1})
+    foreign = {"bound_decisions": [plan_member], "remark": "plan account", "reason": "folded"}
+    _shown, groups, gaps = view.project_decision_groups(commit, [foreign], source_history=commit, selected_source=selected)
+    assert groups == [] and gaps == []
+    missing = {**commit_member, "content_sha256": "0" * 64}
+    partial = {"bound_decisions": [commit_member, missing], "remark": "group", "reason": "folded"}
+    _shown, groups, gaps = view.project_decision_groups(commit, [partial], source_history=commit, selected_source=selected)
+    assert groups == [] and len(gaps) == 1
+
+
+def test_a_folds_refresh_keeps_an_earlier_full_display_copy_of_the_same_decisions(tmp_path, monkeypatch):
+    """A running work's row written before the compact display stays the current row while its decisions stand: no
+    replacement and no second copy at a fold, with or without a floor (nothing is re-sent after an Update). Changed
+    decisions still replace or follow it (the floor test above)."""
+    from ouroboros import review_history
+
+    monkeypatch.setattr(review_history, "review_dispute_history", lambda *a, **k: deepcopy(commit_history()))
+    ctx = SimpleNamespace(task_id=TASK, drive_root=tmp_path, _pending_review_context={})
+    messages = [{"role": "user", "content": "assignment"}]
+    messages += view.review_context_updates(ctx, families={"commit:/repo": "/repo"}, messages=messages)[0]
+    row = next(m for m in messages if view.REVIEW_CONTEXT_INDEX_KEY in m)
+    facts = json.loads(row["content"].partition("\n")[2])
+    assert any("remark_field" in r for r in facts["current"]["decision_rows"])
+    facts.update(current=_full_display(facts["current"]), rule="An earlier rule text.")
+    text = "[Current review decisions]\n" + json.dumps(facts, ensure_ascii=False, sort_keys=True)
+    earlier = {**row, "content": text, view.REVIEW_CONTEXT_INDEX_KEY: {
+        **row[view.REVIEW_CONTEXT_INDEX_KEY], "visible_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}}
+    assert view._review_index_identity(earlier) == ("commit", "/repo")
+    note = {"role": "assistant", "content": "The mind's note."}
+    transcript = [earlier if m is row else m for m in messages] + [note]
+    assert view.refresh_compacted_review_context(ctx, deepcopy(transcript), floor=2) == transcript
+    assert view.refresh_compacted_review_context(ctx, deepcopy(transcript)) == transcript
+    assert view.review_context_updates(ctx, families={"commit:/repo": "/repo"}, messages=transcript)[0] == []

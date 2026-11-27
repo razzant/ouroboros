@@ -18,9 +18,14 @@ The resident ``[Current review decisions]`` row is the 6A view of the mandatory
 part (``review_index_view``): every decision verbatim, the operative subject,
 untransferred attachments and gaps, with reviewer letters,
 receipts, route/custody metadata and manifests behind one address table of exact
-readers. Its identity is the hash of those decision fields; a new copy is appended
-only when they change and is never rewritten in place between folds. Superseded
-copies are typed host state named by ``obsolete_review_index_positions``.
+readers. Repeated deliveries leave the display without changing what it says: a
+review record's subject is written once (``record_subjects``) and a review part's
+remark that is a field of its own reason is named by ``remark_field``; the
+expansion (``_expanded_decision_rows``) restores the producer's rows exactly. Its
+identity is the hash of those decision fields, read from the expansion; a new copy
+is appended only when they change and is never rewritten in place between folds,
+so an earlier full display of the same decisions stays current. Superseded copies
+are typed host state named by ``obsolete_review_index_positions``.
 """
 from __future__ import annotations
 
@@ -322,6 +327,8 @@ def project_decision_groups(history: dict, notes: Sequence[dict], *, source_hist
             continue
         try:
             bindings = _note_bindings(note)
+            if not any(_sha(binding) in entries for binding in bindings):
+                continue  # an account of another family's decisions belongs to that family's view, not a gap here
             selected = [entries[_sha(binding)] for binding in bindings]
             if any(entry["row"].get("history_role") != "historical" for entry in selected):
                 raise ValueError("current_or_unresolved_decision_stays_explicit")
@@ -394,9 +401,61 @@ def _body_message(body: dict, task_id: str) -> dict:
 INDEX_RULE = ("Every decision's finding, status and reason is verbatim and open findings are whole; the operative "
               "subject and untransferred attachments are here. Reviewer letters and outputs, receipts, route and "
               "custody metadata and manifests are behind `addresses`, each naming what it holds and its exact reader. "
+              "A review record's subject is written once in `record_subjects`; `remark_field` names the field of a "
+              "decision's own `reason` that is its remark. "
               "This supersedes earlier copies of the same family and is not a new verdict.")
 # Producer fields the resident row carries by address instead of verbatim.
 _INDEX_ADDRESSED = frozenset({"rounds", "decision_rows", "author_selections", "current_author_plan", "record_heads", "kind"})
+# A review part's remark is the first of these fields of its answer (``review_history.review_dispute_history``).
+_REMARK_FIELDS = ("items", "findings", "summary")
+
+
+def _compact_decision_rows(rows: list) -> tuple[list, dict]:
+    """The resident row's display of decision rows without repeated deliveries (BIBLE P1): a review record's
+    subject once, and a review part's remark that equals a field of its own reason by that field's name.
+    ``_expanded_decision_rows`` is the exact inverse; identity and bindings are read from the expansion, so
+    nothing a decision means, its source binding or an author's saved note changes. Unknown shapes stay whole."""
+    members: dict = {}
+    for row in rows:
+        if isinstance(row, Mapping) and isinstance(row.get("review_record_id"), str) and row["review_record_id"]:
+            members.setdefault(row["review_record_id"], []).append(row)
+    subjects = {rid: rows_[0]["subject"] for rid, rows_ in members.items()
+                if all("subject" in row and row["subject"] == rows_[0]["subject"] for row in rows_)}
+    compact = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            compact.append(row)
+            continue
+        row = {key: value for key, value in row.items()
+               if not (key == "subject" and row.get("review_record_id") in subjects)}
+        reason = row.get("reason")
+        if (row.get("decision_kind") == "review_part" and "remark" in row and "remark_field" not in row
+                and isinstance(reason, Mapping)):
+            field = next((name for name in _REMARK_FIELDS if name in reason and reason[name] == row["remark"]), None)
+            if field is not None:
+                row.pop("remark")
+                row["remark_field"] = field
+        compact.append(row)
+    return compact, subjects
+
+
+def _expanded_decision_rows(current: Mapping[str, Any]) -> list:
+    """The decision rows exactly as the producer wrote them (the inverse of ``_compact_decision_rows``)."""
+    subjects = current.get("record_subjects") if isinstance(current.get("record_subjects"), Mapping) else {}
+    rows = []
+    for row in current.get("decision_rows") or []:
+        if not isinstance(row, Mapping):
+            rows.append(row)
+            continue
+        row = dict(row)
+        if "subject" not in row and row.get("review_record_id") in subjects:
+            row["subject"] = copy.deepcopy(subjects[row["review_record_id"]])
+        if "remark_field" in row:
+            field = row.pop("remark_field")
+            reason = row.get("reason") if isinstance(row.get("reason"), Mapping) else {}
+            row["remark"] = copy.deepcopy(reason.get(field))
+        rows.append(row)
+    return rows
 
 
 def _reader(source: Any, ref: dict) -> dict | None:
@@ -504,12 +563,14 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
     if isinstance(author, Mapping):
         address(author.get("source") or author.get("source_ref"), "the current author plan (spec, prose, disposition)")
     view = {key: copy.deepcopy(value) for key, value in mandatory.items() if key not in _INDEX_ADDRESSED}
-    view["decision_rows"] = [
+    view["decision_rows"], subjects = _compact_decision_rows([
         {**copy.deepcopy(row), "source": address(row.get("source"), (
             "the author's selected review view (notes, groups and covered sources)"
             if row.get("decision_kind") == "actor_history_group" else f"source of the {row.get('decision_kind')} decision"))
          or copy.deepcopy(row.get("source"))} if isinstance(row, Mapping) else copy.deepcopy(row)
-        for row in mandatory.get("decision_rows") or []]
+        for row in mandatory.get("decision_rows") or []])
+    if subjects:
+        view["record_subjects"] = subjects
     waves = mandatory.get("rounds") or []
     view["attachments"] = [  # decision-bearing attachments stay whole until the author transfers their decisions
         {"wave": waves[item["path"][1]].get("cycle_index"), "source": address(
@@ -530,9 +591,10 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
 def review_index_identity(current: Mapping[str, Any]) -> str:
     """Hash of the 6A fields: each decision's ids, finding, status, reason, standing and actor note (never its
     address), the subject(s) and any round kept whole. Receipts and addresses are not identity: when they churn
-    while the decisions stand, nothing is appended."""
+    while the decisions stand, nothing is appended. Read from the expanded rows, so the compact display hashes as the
+    producer's rows do and a running work's earlier full copy keeps its identity."""
     decisions = [{key: value for key, value in row.items() if key != "source"} if isinstance(row, Mapping) else row
-                 for row in current.get("decision_rows") or []]
+                 for row in _expanded_decision_rows(current)]
     return _sha({"decisions": decisions, "subject": current.get("operative_subject"),
                  "subjects": current.get("subjects"), "rounds": current.get("rounds")})
 
@@ -540,7 +602,7 @@ def review_index_identity(current: Mapping[str, Any]) -> str:
 def _index_bindings(current: Mapping[str, Any]) -> dict:
     """``decision_ref`` -> exact binding, rebuilt from a resident row's decisions and its address table."""
     bindings, addresses = {}, current.get("addresses") or {}
-    for row in current.get("decision_rows") or []:
+    for row in _expanded_decision_rows(current):
         if not isinstance(row, Mapping):
             continue
         authored = row.get("authored_view") if isinstance(row.get("authored_view"), Mapping) else {}
@@ -1247,6 +1309,27 @@ def obsolete_review_index_positions(messages: Sequence[dict]) -> tuple[int, ...]
     return tuple(sorted(obsolete))
 
 
+def _canonical_index(row: Mapping[str, Any]) -> tuple | None:
+    """A resident row's content as the producer's rows, without the display's ``record_subjects``/``remark_field``."""
+    meta = row.get(REVIEW_CONTEXT_INDEX_KEY) or {}
+    try:
+        current = json.loads(row["content"].partition("\n")[2])["current"]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    canonical = {key: value for key, value in current.items() if key not in ("record_subjects", "decision_rows")}
+    canonical["decision_rows"] = _expanded_decision_rows(current)
+    return meta.get("family"), meta.get("repo_root"), _sha(canonical)
+
+
+def _same_index(row: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    """The same resident content: identical, or the same producer rows in the earlier full display (a running work's
+    copy from before an Update), so a display change alone never moves or re-sends a row."""
+    if row.get(REVIEW_CONTEXT_INDEX_KEY) == current.get(REVIEW_CONTEXT_INDEX_KEY):
+        return True
+    canonical = _canonical_index(row)
+    return canonical is not None and canonical == _canonical_index(current)
+
+
 def refresh_compacted_review_context(ctx: Any, candidate: list, *, selection: Any = _DEFAULT_SELECTION,
                                      floor: int | None = None) -> list:
     """At an explicit checkpointed rewrite, retire superseded index snapshots.
@@ -1276,7 +1359,8 @@ def refresh_compacted_review_context(ctx: Any, candidate: list, *, selection: An
         if not indices:
             continue
         current = desired.pop(identity)
-        same = [i for i in indices if candidate[i].get(REVIEW_CONTEXT_INDEX_KEY) == current[REVIEW_CONTEXT_INDEX_KEY]]
+        # The same decisions in an earlier display (a running work's full copy from before an Update) are current.
+        same = [i for i in indices if _same_index(candidate[i], current)]
         at = (same[-1] if same else indices[-1]) if floor is None else indices[-1]  # with a floor: the last copy
         removed.update(i for i in indices if i != at and (floor is None or i >= floor))
         if at not in same and (floor is None or at >= floor):
