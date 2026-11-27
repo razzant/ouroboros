@@ -69,7 +69,6 @@ import {
 } from './task_control_menu.js';
 import { composerMarkup, createComposer } from './composer.js';
 import { composerHeightAtRest, syncShortRoom } from './composer_fold.js';
-import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import { createChatReplies } from './chat_reply.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
@@ -165,6 +164,7 @@ import {
     ensureLiveActionsEl,
     dockChildReviewDoor,
     cardRowEvidenceRef,
+    createSubagentCardSummarizer,
     refitCollapsedActivity,
 } from './chat_activity.js';
 
@@ -1751,6 +1751,9 @@ export function createChatInstance({
     const evidencedTaskIds = new Set();
     // Late progress must not revive a terminal child.
     const subagentTerminalChildren = new Set();
+    const summarizeSubagentCardFrame = createSubagentCardSummarizer(
+        id => subagentChildParents.get(id), id => liveCardRecords.get(id)?.requestedExecutor,
+    );
 
     function renderLiveCardMeta(record, costProjection = null) {
         if (record && costProjection) record.costMeta = mergeStickyCostMeta(record.costMeta, costProjection);
@@ -1795,23 +1798,6 @@ export function createChatInstance({
         const replayTerminal = msg.task_terminal_status && taskDoneIsTerminal(msg);
         if (replayTerminal || TERMINAL_SUBAGENT_EVENTS.has(event)) subagentTerminalChildren.add(child.childId);
         return child.childId;
-    }
-
-    function summarizeSubagentCardFrame(evt, childId, overrides = {}, rawTs = '') {
-        const { parentId = '', role = '', model = '' } = subagentChildParents.get(childId) || {};
-        const summary = summarizeChatLiveEvent({
-            ...evt,
-            type: 'send_message',
-            is_progress: true,
-            delegation_role: 'subagent',
-            subagent_task_id: childId,
-            parent_task_id: parentId,
-            subagent_role: role,
-            model,
-            ...overrides,
-        }, liveCardRecords.get(childId)?.requestedExecutor);  // its kept selection, for a frame that repeats none
-        // The child's effort fact rides every frame that states a level (live, terminal, replay).
-        return summary ? withTaskCostMeta({ ...summary, ...(evt.effort_level ? { effort: effortFact(evt) } : {}) }, evt, { rawTs }) : null;
     }
 
     // A child's title is its lineage identity plus, for twins (one displayed identity under
