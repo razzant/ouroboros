@@ -95,8 +95,8 @@ def executor_blocked_outcome(
     the producer's detail, the reset instant, #1241) and names the alternatives recorded at this refusal, not ranked
     and not checked. Their rows stay whole in the usage and in the task's recorded ``subagent_availability``, which
     ``task_id`` (the refused task) lets the text address exactly; the owner's descriptions of them are resident in
-    the parent's Available subagents, so the text does not repeat them (owner, 27.11.2026). ``reason_code`` keeps
-    its codes.
+    the parent's Available subagents when present, so the text does not repeat them (owner, 27.11.2026).
+    ``reason_code`` keeps its codes.
     """
     from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
 
