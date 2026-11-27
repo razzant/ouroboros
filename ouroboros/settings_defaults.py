@@ -254,8 +254,8 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # Runtime mode: light | advanced | pro; pro still requires review gates.
     "OUROBOROS_RUNTIME_MODE": "advanced",
     # Context mode: nano | low | max, the owner-only working-context size (BIBLE P1: the agent cannot lower it).
-    # max: full docs and memory; low: book maps, memory held under the 250k target; nano: the same under 85k with a
-    # tool selection. It never changes the model or reasoning effort; the reply follows the route window
+    # max: memory under no mode target; low: memory held under the 250k target; nano: the same under 85k with a
+    # tool selection; the Body Map rides every mode. It never changes the model or reasoning effort; the reply follows the route window
     # (context_budget.reply_allowance_tokens: Nano floor 8,192, its target stands in for an unknown window).
     "OUROBOROS_CONTEXT_MODE": "max",
     # One-window compatibility tombstone for the retired persistent auto-Low mechanism.

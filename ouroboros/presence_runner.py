@@ -1044,7 +1044,6 @@ def _build_task(
         "text": str(event.text or "").strip(),
         "_is_direct_chat": True,
         "_presence_turn": True,
-        "context_requires_development": False,
         "metadata": metadata,
         "task_contract": ({"capability_ceiling": presence_ceiling_payload(admission.capability_ceiling)}
                           if admission.capability_ceiling is not None else {}),

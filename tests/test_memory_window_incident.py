@@ -66,6 +66,9 @@ def test_an_overfull_incident_start_runs_in_the_named_temporary_low_with_the_map
     sent = json.dumps(plan.messages_for("low"))
     assert BODY_MAP_PARTS.split("\n", 1)[1] in sent and BODY_MAP.split("\n", 1)[1] not in sent
     assert shown.calibrated_tokens + 65_536 <= 872_000
+    # Only the window cuts: Low's own target does not bind under the owner's Max, so what goes below a telling here is
+    # what my tellings beside the Map's parts could not hold (telling_need above the window, asserted above).
+    assert facts["floor"]["target_tokens"] is None and facts["floor"]["budget_allowance_tokens"] is None
 
 
 def test_incident_chosen_range_survives_zero_result_room(tmp_path, monkeypatch):

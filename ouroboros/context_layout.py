@@ -42,12 +42,6 @@ INDEX_STEPS = ("project_knowledge_index", "knowledge_index")
 WHOLE_OR_OUTLINE_STEPS = (*INDEX_STEPS, "registry")
 TIER0_WHOLE_OR_OUTLINE = frozenset(WHOLE_OR_OUTLINE_STEPS)
 
-def _read_doc(env: Any, rel_path: str) -> str:
-    try:
-        return env.repo_path(rel_path).read_text(encoding="utf-8")
-    except Exception:
-        return ""
-
 
 def generate_doc_nav_map(text: str, *, title: str, rel_path: str, instructions: bool = True) -> str:
     """Build a compact, fence-aware navigation map of a markdown doc.

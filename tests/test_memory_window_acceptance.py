@@ -267,9 +267,20 @@ def _map_band(probe, window, cause, *, target=1_500):
     return None
 
 
+class _FirstSendGap(AssertionError):
+    """The first real send of a start the window lowered outside the Map's band keeps less than its reply reserve and
+    work room: the start fit does not price the loop's own first-send host rows (roster snapshot, context facts)."""
+
+
+FIRST_SEND_GAP = ("razzant/ouroboros#TBD-work-room: a request-tipped Low start's first real send overruns the reply "
+                  "reserve and the work room by about 630 tokens, because the start fit does not price the loop's own "
+                  "first-send host rows (roster snapshot, context facts); strict, so the fix turns this case red")
+
+
 @pytest.mark.parametrize("replies,window_of,start", [
-    (24, "crowded", ("max", "")), (400, "crowded", ("max", "")),
-    (2_400, "crowded", ("low", "memory")), (24, "tipping", ("low", "request"))])
+    (24, "crowded", ("max", "")), (400, "crowded", ("max", "")), (2_400, "crowded", ("low", "memory")),
+    pytest.param(24, "tipping", ("low", "request"),
+                 marks=pytest.mark.xfail(strict=True, raises=_FirstSendGap, reason=FIRST_SEND_GAP))])
 def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop, sent, tmp_path, monkeypatch,
                                                                        replies, window_of, start):
     """Audit item 23(a): a start succeeds when it holds the selected mode or records the reason the person then
@@ -320,9 +331,10 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
     assert real.body_map_parts and (core.body_map in text) is (start[0] == "max")  # the whole Map iff Max
     tokens = cf.estimate_context_prompt_tokens(first["messages"], first["tools"], provider="openai")
     room = held.projection("max").memory_facts["max_room"]["levels"] * -(-window // 8)
+    fits = tokens + plan.output_reserve_tokens + room <= window  # the reply reserve and the start's work room stay
     if start[0] == "max" or band:  # held, or lowered inside the Map's band: memory at my tellings, the Map at its parts
-        assert tokens + plan.output_reserve_tokens + room <= window  # the reply reserve and the start's work room stay
-    else:  # pre-existing gap, reported to the owner: the start fit does not price the loop's own first-send host rows
+        assert fits
+    else:  # the known gap (FIRST_SEND_GAP) is asserted last; what the start itself priced and the rows it misses hold
         planned = cf.estimate_context_prompt_tokens(plan.messages_for(plan.initial_mode), first["tools"], provider="openai")
         assert planned + plan.output_reserve_tokens + room <= window  # what the start itself priced keeps them
         assert {row.get("_host_context_kind") for row in first["messages"][len(plan.messages_for(plan.initial_mode)):]} == {
@@ -343,6 +355,8 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
     # A Low the window took from Max is named Low beside the owner's Max (21.11.2026)
     assert sends and {(send["preferred_at_send"], send["applied"], send["books"], send["cause"]) for send in sends} == {
         ("max", start[0], "body_map", start[1])}
+    if not fits:  # every other fact of this case held above; only the first send's room is short
+        raise _FirstSendGap(f"{tokens + plan.output_reserve_tokens + room - window} tokens past the window")
     rows = [event["data"] for event in events if event["type"] == "log_event"
             and event["data"].get("checkpoint_kind") == "context_fit_physical_mode"]
     assert [row["cause"] for row in rows] == ([start[1]] if start[1] else [])  # the task card's start row

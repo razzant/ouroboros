@@ -69,7 +69,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "description": (
                 "Every child starts with my human's words for the work verbatim and dated, the marks in force "
                 "and the knowledge outline, plus task authority (a native child or nanny also keeps full governance "
-                "SYSTEM/BIBLE and book maps). Omit or shared: "
+                "SYSTEM/BIBLE and the body map). Omit or shared: "
                 "the default for research, implementation and ordinary review; a native child or nanny adds "
                 "room-claiming and linked note heads, my identity, life's top-level account (nannies "
                 "excepted), its room page, full assignment and attachments; a session leaf gets "

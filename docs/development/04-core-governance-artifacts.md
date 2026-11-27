@@ -72,7 +72,7 @@ Applicable body governance reaches review/reasoning whatever the `touched_paths`
 
 A new flow reasoning about structure, architecture or standards must:
 
-1. Explicitly load `ARCHITECTURE.md` (plus BIBLE.md for constitutional reasoning).
+1. Explicitly deliver Architecture as a row of the registry above: `ARCHITECTURE.md` whole, or the Body Map with its chapters readable at their addresses (plus BIBLE.md for constitutional reasoning).
 2. Log a warning when it is missing/unavailable — never skip silently; an unfit required artifact fails assembly ("No silent truncation").
 3. Add a presence test on the assembled prompt/context (enforcing surface; CHECKLISTS item 22 `context_building`, advisory, backstops review).
 

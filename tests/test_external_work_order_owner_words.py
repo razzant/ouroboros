@@ -561,7 +561,7 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     shared, rest = modes.split("declared:", 1)
     declared, selected = rest.split("Either choice can select knowledge_notes:", 1)
     assert "SYSTEM/BIBLE" in common and "task authority" in common
-    assert "book maps" in common and "book maps" not in shared
+    assert "the body map" in common and "the body map" not in shared
     assert "room-claiming and linked note heads" in shared
     assert "my identity, life's top-level account" in shared and "originating words" not in selection
     # Declared excludes the automatic heads and the other shared inputs, not the explicit selection.

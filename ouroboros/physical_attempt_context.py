@@ -37,7 +37,7 @@ class PhysicalAttemptContext:
     window_observation_fp: str = ""  # Main account scope, separate from capability/density route_fp
     required_book_tokens: int = 0  # a directly required handbook inside this candidate (density applied), its note too
     preferred_mode: str = ""  # the owner's mode this task's plan holds at send (Settings may differ by now)
-    # Why ``rendered_mode`` is lower ("" for agreement or an unknown cause): the start's Max room lost its whole books
+    # Why ``rendered_mode`` is lower ("" for agreement or an unknown cause): the start's Max room was lost
     # to ``memory``, to what the ``request`` itself carries, or to the ``route``'s window; ``window`` the start's window
     # took it otherwise; ``after_start`` a lower mode the task took after its start (``context_measurement.mode_cause``).
     mode_cause: str = ""

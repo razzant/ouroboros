@@ -546,7 +546,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # Popped BEFORE the row is built/queued so the announce fact never rides it.
     announce_project = task.pop("_announce_project", None)
     # The direct handbook answer is this start's own, on its contract, after any Presence authority: a copied one,
-    # true or false, stays with the work that started this. The row's copy keeps its older meaning in Max.
+    # true or false, stays with the work that started this. The row's top-level copy preloads nothing.
     if isinstance(task.get("task_contract"), dict):
         task["task_contract"].pop("context_requires_development", None)
     if isinstance(evt.get("context_requires_development"), bool):

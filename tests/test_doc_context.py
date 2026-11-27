@@ -546,12 +546,12 @@ def test_evolution_and_deep_self_review_carry_the_body_map_without_a_handbook():
     _required(_build_system_text({"type": "evolution", **REQUIRED}, context_mode="max"))
 
 
-def test_no_binding_or_room_preloads_the_handbook_only_the_contract_does():
+def test_no_binding_or_room_preloads_the_handbook_only_the_contract_does(tmp_path):
     """Neither the active repo binding nor project membership decides the handbook any more (it used to key on the
     binding, D-DEV 2026-08-08): a proven-foreign folder, an unknown folder, a direct chat in a project room, an
     opted-out room, evolution in a room and an explicit self-body flag all carry the same Map alone. The task's own
     contract requirement brings it whole on the same binding; an explicit false keeps it out."""
-    foreign = str(foreign_tree(pathlib.Path(tempfile.mkdtemp()) / "proj-tree"))
+    foreign = str(foreign_tree(tmp_path / "proj-tree"))
     cases = (
         {"project_id": "proj_sub", "workspace_root": foreign, "workspace_mode": "external"},
         {"project_id": "proj_sub", "workspace_root": "/tmp/proj-tree-unknown", "workspace_mode": "external"},
