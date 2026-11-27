@@ -46,6 +46,7 @@ TESTS = (
     "tests/test_live_call_start_fit.py",
     "tests/test_context_start_bound.py",
     "tests/test_context_minimum_view_unfit.py",
+    "tests/test_context_view_tool.py",
 
     "tests/test_local_tool_parsing.py",
     "tests/test_llm_ollama.py",

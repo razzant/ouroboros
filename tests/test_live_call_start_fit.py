@@ -20,6 +20,7 @@ from ouroboros.contracts.realtime import RouteFacts
 from ouroboros.tool_policy import NANO_RESIDENT_SCHEMA_NAMES, NANO_SCHEMA_META_NAMES
 from tests import _memory_scale_fixture as scale
 from tests import _memory_view_synthetic as syn
+from tests._live_world import host_world as host_world
 
 FACTS = RouteFacts(conversation_window_tokens=92_000, working_reserve_tokens=10_000, source="synthetic call window")
 
@@ -125,9 +126,9 @@ def _fresh_start(tmp_path, monkeypatch, resolve, mode, nano_base):
 def test_the_fresh_fixture_starts_on_every_shipped_call_model_and_on_hard_85k_text_at_the_ordinary_builder(
         tmp_path, monkeypatch, route):
     """A new install's start fits every shipped call model's window with its eighth of work room left and no host section
-    addressed for the window, and a hard 85,000-token text route keeps the owner's Nano. This drives the ordinary
-    builder the call's adapter calls; the adapter's ``session_candidate`` itself is not driven here (no keyless stack
-    reaches it for a synthetic drive without a socket), so its ``evidence['work_room']`` is read as the plan's notice."""
+    addressed for the window, and a hard 85,000-token text route keeps the owner's Nano. This prices the ordinary
+    builder with the fixture's synthetic schemas and the call's control base; each adapter's own session candidate is
+    driven by ``test_each_shipped_adapter_admits_the_fresh_start_at_its_own_session_candidate``."""
     skill, _model, facts = route
     if facts is None:
         resolve, base = scale.route_resolver(85_000, "provider", None), None
@@ -140,3 +141,106 @@ def test_the_fresh_fixture_starts_on_every_shipped_call_model_and_on_hard_85k_te
     assert plan.preferred_mode == "nano" and plan.initial_mode == "nano"
     assert "Start room is smaller than requested" not in shown.system_content_json  # the eighth is left
     assert not shown.memory_facts.get("host_sections_addressed"), "no host section addressed for the window"
+
+
+def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None):
+    """The fresh drive's call start through the adapter's own setup: the real ``ToolRegistry``, the call feature's
+    ``INITIAL_TOOLS``, ``call_tools`` and ``session_options``, the ordinary builder for the call's messages, then
+    ``realtime_setup.session_candidate`` with the adapter's registered session factory and a ``connect`` that fails the
+    test. ``window`` narrows the catalogue's window for the candidate only (the ordinary build keeps the declared one).
+    Returns ``(session_candidate's answer, connection attempts)``; the plugin is loaded as a package
+    (``extension_loader``)."""
+    import asyncio
+    import copy
+    import importlib.util
+    import sys
+    from dataclasses import replace
+
+    from ouroboros import capability_evidence as ce, config, context
+    from ouroboros.call_peers import LiveCallHub
+    from ouroboros.live_conversation import ConversationHost
+    from ouroboros.realtime_setup import session_candidate
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.tool_context import ToolContext
+    from skills.live_conversation.driver import INITIAL_TOOLS, call_tools, session_options
+
+    path = pathlib.Path(__file__).resolve().parents[1] / "skills" / skill / "plugin.py"
+    spec = importlib.util.spec_from_file_location(f"_adapter_start_{skill}", path,
+                                                  submodule_search_locations=[str(path.parent)])
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    model = module.CATALOG.model(model_id)
+    turn = copy.copy(host_world.host.turn)
+    turn.route, turn.catalog_model, turn.native_model = module.ROUTE, model, model_id
+    turn.model = module.ROUTE.model_prefix + model_id
+    turn.spec = replace(turn.spec, chat_id=1, model=model_id)
+    drive = scale.installed(tmp_path, "fresh")
+    env, memory = scale.env_on(drive)
+    turn.feature = dict(turn.feature, initial_tools=INITIAL_TOOLS, call_tools=call_tools(drive))
+    task = dict(host_world.task, chat_id=1, model=turn.model,
+                origin_message_ref={"chat_id": 1, "client_message_id": "call:fixture-call:open"})
+    ctx = ToolContext(repo_dir=env.repo_dir, drive_root=drive, branch_dev="test", task_id=task["id"], current_chat_id=1,
+                      is_direct_chat=True, task_metadata=task["metadata"], task_contract={})
+    registry = ToolRegistry(env.repo_dir, drive)
+    registry.set_context(ctx)
+    monkeypatch.setattr(config, "DATA_DIR", drive)
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: drive)
+    monkeypatch.setattr(context, "get_context_mode", lambda: "nano")
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
+    scope = f"{skill}-fresh-start"
+    route = dict(provider=turn.route.accounting_provider, model=turn.model, base_url=turn.route.endpoint,
+                 use_local=False, model_role="main", options={})
+    evidence = SimpleNamespace(route_fp=scope, status="confirmed", stale=False,
+                               window_tokens=model.facts.conversation_window_tokens, source=model.facts.source,
+                               route_facts=asdict(model.facts))
+    selection = initial_tool_schemas(registry, context_mode="max", standing=False, schema_names=INITIAL_TOOLS)
+    rows, _cap = context.build_llm_messages(env, memory, task, ctx=ctx, tool_schemas=selection, tool_registry=registry,
+                                            nano_base=INITIAL_TOOLS,
+                                            route_resolver=lambda _task, allow_fetch: (route, evidence))
+    if window is not None:
+        turn.catalog_model = replace(model, facts=replace(model.facts, conversation_window_tokens=window,
+                                                          accepted_input_tokens=None))
+    host = ConversationHost(turn, ctx, rows, registry, task, "", LiveCallHub(turn.spec))
+    factories, attempts = [], []
+    api = SimpleNamespace(register_realtime_provider=lambda _provider, **kw: factories.append(kw["session"]),
+                          get_settings=lambda *_a, **_kw: pytest.fail("sizing read settings or an account"))
+    module.register(api)
+
+    def connect(*_a, **_kw):
+        attempts.append(1)
+        pytest.fail("sizing tried to connect")
+
+    def factory(*args, **kwargs):
+        return factories[0](*args, connect=connect, **kwargs)
+    try:
+        return session_candidate(host, factory, session_options(host), observation_fp=scope), attempts
+    finally:
+        asyncio.run(host.finish())
+        host.wire.close()
+
+
+@pytest.mark.parametrize("route", [pytest.param(route, id=f"{route[0]}:{route[1]}") for route in scale.call_routes()])
+def test_each_shipped_adapter_admits_the_fresh_start_at_its_own_session_candidate(tmp_path, monkeypatch, host_world,
+                                                                                  route):
+    """Every shipped call model's own session candidate (its instructions, the call's tools, its serializer) admits a
+    new install's start within the catalogue's window, with no work-room deficit and no connection attempt."""
+    skill, model_id, facts = route
+    (_session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id)
+    measured = proof["fit"]["measurement"]
+    assert measured["capacity_deficit_tokens"] == 0 and measured["capacity_total_tokens"] == facts.conversation_window_tokens
+    assert measured["estimated_input_tokens"] + measured["response_reserve_tokens"] <= facts.conversation_window_tokens
+    assert proof.get("work_room", {}).get("deficit_tokens") == 0 and not attempts
+
+
+def test_a_window_too_small_for_the_native_candidate_is_refused_before_any_connection(tmp_path, monkeypatch,
+                                                                                       host_world):
+    """The same drive, its ordinary build fitted, on a window its session candidate cannot hold: a typed
+    ``context_capacity`` refusal, and nothing tried to connect."""
+    from ouroboros.contracts.realtime import RealtimeSetupError
+
+    skill, model_id, _facts = next(route for route in scale.call_routes() if route[0] == "grok_realtime")
+    with pytest.raises(RealtimeSetupError) as raised:  # a connection attempt would fail the test instead
+        _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, window=40_000)
+    assert raised.value.code == "context_capacity"

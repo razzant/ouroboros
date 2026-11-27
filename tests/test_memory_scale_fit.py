@@ -85,11 +85,12 @@ def test_the_mature_fixture_is_refused_typed_before_any_socket_on_every_route(tm
     model call; on the estimator-basis route (Grok) the frame alone already exceeds the window, so the memory capture
     is never reached. Expected to turn into starts by later changes: Grok and Gemini when host forms (the connections
     text's and lossless memory forms) shrink the always-whole frame below their windows; the 85k text route when the
-    owner-chosen narrowings (the accounts' temporary view, a per-room owner-words line) land. The positive
-    assertion is added per route by the pull request that makes it true. Driven at the ordinary builder: the adapters'
-    ``session_candidate`` is not reached for a synthetic drive (no keyless stack drives it without a socket). OpenAI's
-    133,554-token route is not a row: this drive carries no MCP servers or running works (``install``), so its
-    ordinary build fits there, and the refusal its adapter would add (``context_capacity``) is not reached here."""
+    owner-chosen narrowings (the accounts' temporary view; the owner's words of other rooms stay one line per message)
+    land. The positive assertion is added per route by the pull request that makes it true. This prices the ordinary
+    builder with the fixture's synthetic schemas; the adapters' own session candidates are driven on the fresh drive
+    (``tests/test_live_call_start_fit.py``). The mature drive holds no MCP servers, running works, nested account
+    changes or gist-bearing finished works (``install``), so its numbers are a lower bound, and OpenAI's 133,554-token
+    route is not asserted here either way."""
     from ouroboros import context, llm
 
     skill, _model, facts = route
