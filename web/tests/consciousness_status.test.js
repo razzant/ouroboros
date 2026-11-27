@@ -8,6 +8,8 @@ import { allowanceText, chipView, createConsciousnessStatus, wakeRows } from '..
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { turnConsciousness } from '../modules/consciousness_switch.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { createRoomHeader } from '../modules/chat_header.js';
+import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
 
 test.beforeEach((t) => {
     const started = performance.now();
@@ -738,4 +740,46 @@ test('an own wake written in an owner chat no Project holds is a door too: Main 
     assert.equal(rows(7, [3, 4]).taskId, 'own-7', 'a bound owner chat, not a Project room');
     assert.equal(rows(7, [7]).taskId, undefined, 'a Project room keeps its own card');
     assert.equal(rows(7, null).taskId, undefined, 'unknown Projects: no door claimed');
+});
+
+// ---- fix round 2
+
+test('a room header\'s Shade follows the page\'s state clock: a failed read or a retire withdraws its controls', async () => {
+    const posts = [];
+    const env = installDom(async (url, init = {}) => {
+        if (init.method === 'POST') posts.push(String(url));
+        return { ok: true, status: 200, json: async () => ({ ok: true, recent_wakes: [] }) };
+    });
+    try {
+        const bar = document.createElement('div');
+        env.mount.appendChild(bar);
+        // A Project panel's bar as app.js wires it: applied bodies through the sequencer's callback, the rest by following.
+        let header = null;
+        const snapshots = createStateSnapshotSequencer((data) => header?.update(data));
+        header = createRoomHeader({ bar, ws: { send() {}, isConnected: () => true } });
+        header.followState(snapshots);
+        const apply = async (body) => snapshots.apply(await snapshots.gate(), body);
+        const button = (label) => bar.querySelector('.cx-held-actions')?.children.find((node) => node.textContent === label);
+        await apply(heldBy('allowance'));
+        bar.querySelector('.cx-chip').click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual([button('Resume').disabled, button('Stop now').disabled], [false, false]);
+        // A failed read: the last controls stay, disabled, and a press sends nothing.
+        snapshots.fail(await snapshots.gate());
+        assert.deepEqual([Boolean(button('Resume')), button('Resume').disabled, button('Stop now').disabled], [true, true, true]);
+        await button('Resume').listeners.get('click')[0]({ target: button('Resume'), stopPropagation() {} });
+        assert.deepEqual(posts, [], 'no Resume on a read that failed');
+        await apply(heldBy('allowance'));
+        assert.equal(button('Resume').disabled, false, 'the next applied body stands again');
+        // A retired body (a socket change, a confirmed change elsewhere) withdraws them the same way.
+        snapshots.retire();
+        assert.deepEqual([button('Resume').disabled, button('Stop now').disabled], [true, true]);
+        // A replacement that no longer offers Resume removes it.
+        await apply(heldBy('allowance', [OFFERED[1]]));
+        assert.deepEqual([Boolean(button('Resume')), button('Stop now').disabled], [false, false]);
+        header.destroy();
+        snapshots.fail(await snapshots.gate());  // a destroyed header follows nothing
+    } finally {
+        restoreDom(env.prior);
+    }
 });
