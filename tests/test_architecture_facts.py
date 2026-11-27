@@ -400,7 +400,7 @@ def test_architecture_fact_vocabulary_is_closed():
         architecture_fact_rows(REPO, "unknown_fact x")
 
 
-# --- module_map: the live module addresses that replace a hand-kept tree -------------
+# --- module_map: live module addresses beside the hand-kept directory -----------------
 
 def _tracked(prefix: str) -> list[str]:
     import subprocess
@@ -532,3 +532,33 @@ def test_a_wrong_shaped_manifest_is_a_named_error_and_a_refused_prefix_is_incomp
     assert "module_map_excluded_from_inventory" in skipped and "enumeration complete" not in skipped
     missing = module_map("web/no_such_dir/")
     assert "enumeration complete" in missing and "module_map_scope_not_admitted" not in missing
+
+
+@pytest.mark.parametrize("protected, omits", [((), False), (("pkg/restricted.py",), True),
+                                              (("pkg/restricted.py", "pkg/visible.py"), True)])
+def test_module_map_says_when_its_view_omits_entries_of_the_prefix(tmp_path, protected, omits):
+    """A view that hides some or all files of a prefix (here a black-box reference artifact) reports the listing as
+    incomplete, never as the whole folder or an empty one; which entries are hidden is not said."""
+    import subprocess
+
+    from ouroboros.tools.query_code import _query_code
+    from ouroboros.tools.registry import ToolContext
+
+    repo = tmp_path / "work"
+    (repo / "pkg").mkdir(parents=True)
+    for name in ("visible.py", "restricted.py"):
+        (repo / "pkg" / name).write_text(f'"""Lead for {name}."""\n', encoding="utf-8")
+    (repo / "ouroboros").mkdir()
+    (repo / "ouroboros" / "domains.toml").write_text('[domains]\nD01 = "Example"\n[modules]\n"pkg/visible.py" = "D01"\n',
+                                                    encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data")
+    if protected:
+        ctx.task_contract = {"resource_policy": {"protected_artifacts": [{
+            "id": "reference", "role": "black_box_reference", "paths": list(protected)}]}}
+    out = _query_code(ctx, op="architecture", root="system_repo", query="module_map pkg/")
+    assert ("QUERY_CODE_TRUNCATED" in out) == omits, out
+    assert ("pkg/restricted.py" in out) == (not protected), out
+    if not protected:
+        assert "pkg/visible.py (D01)" in out

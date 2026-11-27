@@ -1,6 +1,6 @@
 # 1.1 Module Directory
 
-This part gives me my module directory: one hand-kept row per module or file of my code, grouped as the tree is, with what each is for and the sections that own it. `query_code`'s architecture fact `module_map` gives the live projection of the same addresses with each file's own lead.
+This part gives me my module directory: a curated, hand-kept row per module or file group of my code (unlisted modules and pages exist), grouped as the tree is, with what each is for and the sections that own it. `query_code`'s architecture fact `module_map` gives the live projection of the same addresses with each file's own lead.
 
 ```
 User → launcher.py (desktop/native) — lifecycle over packaged seed or managed checkout (Runtime topology; §2)

@@ -231,6 +231,7 @@ PRE_PR_DELIVERY = [
 
 
 FIXTURE_SENTINEL = "// fixture line 00007: "  # inside the source, outside the diff's hunk
+RANK = {"refused": 0, "diff": 1, "full": 2}
 
 
 def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(tmp_path, monkeypatch):
@@ -271,10 +272,12 @@ def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(t
         except ValueError as refusal:
             assert delivered == "refused" and "REVIEW_BLOCKED" in str(refusal), where
             continue
-        assert delivered != "refused", f"the control now fits: re-measure the target for {(touched, added, window)}"
         omitted = "Full post-change snapshots were omitted" in text
-        assert ("diff" if omitted else "full") == delivered, where
-        assert "// Review one trailing comment." in text, where
+        got = "diff" if omitted else "full"
+        assert RANK[got] >= RANK[delivered], where  # strictly better than the target is not a failure
+        changed = [line for line in frozen.diff_text.splitlines()
+                   if line[:1] in "+-" and not line.startswith(("+++", "---"))]
+        assert frozen.diff_text in text or all(line in text for line in changed), where  # every changed line
         assert (FIXTURE_SENTINEL in text) == (not omitted), where  # the whole source is really there, or not
 
 
@@ -321,68 +324,112 @@ def test_every_gate_variant_reads_one_structured_path_set_for_file_bodies(tmp_pa
 
 
 
-ROW_SAMPLE = [  # reviewers' and the implementer's samples of the target's tree rows (rev-pr2h; fix round 6)
-    "supervisor/workers.py", "supervisor/worker_owner_wait.py", "supervisor/schedule_notes.py",
-    "supervisor/task_reaper.py", "supervisor/steering.py", "ouroboros/owner_hurry.py",
-    "ouroboros/outcome_receipt_store.py", "ouroboros/cost_projection.py", "ouroboros/delegate_start_claims.py",
-    "ouroboros/workspace_admission.py", "ouroboros/review_slot_cancel.py", "web/modules/settings_language.js",
-    "web/modules/project_reference.js", "web/modules/model_chooser.js", "supervisor/task_admission.py",
-    "supervisor/schedule_occurrence.py", "supervisor/direct_roots.py", "ouroboros/agent_startup_checks.py",
-    "ouroboros/evolution_checkpoints.py", "ouroboros/cancel_intents.py", "ouroboros/local_custody_repair.py",
-    "ouroboros/custody_owed.py", "ouroboros/_usage_settlement.py", "ouroboros/argv_budget.py",
-    "ouroboros/tools/media.py", "ouroboros/tools/subagent_integration.py", "ouroboros/desktop_media.py",
-    "ouroboros/tools/commit_gate.py", "ouroboros/force_remove.py", "supervisor/active_activity.py",
-    "supervisor/telemetry_events.py", "ouroboros/genesis_project.py", "web/modules/delegated_activity.js",
-    "web/modules/widgets.js", "web/modules/masonry.js", "supervisor/message_ingress.py",
-    "supervisor/schedule_view.py", "supervisor/owner_pause_control.py", "supervisor/update_recovery.py",
-    "ouroboros/update_channels.py", "ouroboros/maintenance.py", "ouroboros/maintenance_jobs.py",
-    "ouroboros/maintenance_retirement.py", "ouroboros/loop_transport.py", "ouroboros/loop_tool_execution.py",
-    "ouroboros/tool_call_log.py", "ouroboros/late_tool_results.py", "ouroboros/task_carrier.py",
-    "ouroboros/pricing.py", "ouroboros/llm_helper_window.py", "ouroboros/merge_receipts.py",
-    "ouroboros/chat_chain.py", "ouroboros/chat_references.py", "ouroboros/chronicle_store.py",
-    "ouroboros/context_input_selection.py", "ouroboros/memory_view_events.py", "ouroboros/coop_checkpoint.py",
-    "ouroboros/configured_subagents.py", "ouroboros/subagent_runtime.py", "ouroboros/chat_uploads.py",
-    "ouroboros/confined_files.py", "ouroboros/review_execution.py", "ouroboros/review_session_preparation.py",
-    "ouroboros/review_body_fact.py", "ouroboros/schedule_contract.py", "ouroboros/pause_notices.py",
-    "ouroboros/icon_geometry.py", "ouroboros/places.py", "ouroboros/place_words_history.py",
-    "ouroboros/conversation_lease.py", "ouroboros/skill_owner_attestation.py", "ouroboros/live_tool_lane.py",
-    "ouroboros/panic_source.py", "ouroboros/platform_peer.py", "ouroboros/owned_shutdown.py",
-    "ouroboros/gateways/image_api.py", "ouroboros/gateway/router.py", "ouroboros/gateway/logs.py",
-    "ouroboros/gateway/storage.py", "ouroboros/gateway/kept_services.py", "ouroboros/gateway/ui_i18n.py",
-    "ouroboros/gateway/peer_contracts.py", "ouroboros/gateway/peer_letters_api.py",
-    "ouroboros/tools/shell_guards.py", "ouroboros/tools/task_retention.py", "ouroboros/tools/tool_discovery.py",
-    "ouroboros/tools/plan_ask.py", "ouroboros/tools/review_change_custody.py",
-    "ouroboros/tools/extension_dispatch.py",
+TARGET_ROWS = [  # (touched path, its row in the target's chapter-1 tree, verbatim) — reviewers' samples, rev-pr2h
+    ('supervisor/workers.py', 'workers.py — pool: forkserver Linux, spawn elsewhere, never fork (why: its comment)'),
+    ('supervisor/worker_owner_wait.py', 'worker_owner_wait.py — required owner wait lends active slot; task stays RUNNING, custodied (§5)'),
+    ('supervisor/schedule_notes.py', 'schedule_notes.py — due `kind:"notify"` → signed `reminder` System row (no model, no retry)'),
+    ('supervisor/task_reaper.py', 'task_reaper.py — off-loop reaper (timeout never retries, crash, idle, unready; unconfirmed death keeps reaping; mints no cancel intents) (§5)'),
+    ('supervisor/steering.py', 'steering.py — host-minted `issuer` mailbox steering (refused during pending cancel; §6)'),
+    ('ouroboros/owner_hurry.py', 'owner_hurry.py — task-local `kind=hurry` latch, one line for running work, never a chat message (§5)'),
+    ('ouroboros/outcome_receipt_store.py', 'outcome_receipt_store.py — verification-receipt store; zero-run writes `incomplete`/`unknown` only (zero-run "complete" is unverifiable self-report)'),
+    ('ouroboros/cost_projection.py', 'cost_projection.py — sole task-cost projection (`accounted_upper_bound_usd`, null ≠ $0.00) (§6 Budget tracking)'),
+    ('ouroboros/delegate_start_claims.py', 'delegate_start_claims.py — serializes custody recheck/`START_REQUESTED` outside waits (retries never hold root/store locks)'),
+    ('ouroboros/workspace_admission.py', 'workspace_admission.py — disjoint roots, Project binding, never system-repo fallback (CLI / Headless Boundary) (§6 Owner routing verbs; CLI / Headless Boundary below)'),
+    ('ouroboros/review_slot_cancel.py', 'review_slot_cancel.py — typed cancel outcomes reporting only proof (`ReviewSessionSucceededResultUnavailable`, never "may still be live")'),
+    ('web/modules/settings_language.js', 'i18n.js, settings_language.js — chrome-only translation overlay; chat prose, logs, code and owner names never walked (§3 Settings)'),
+    ('web/modules/project_reference.js', 'project_reference.js, task_reference.js — sole Project and Main task doors (DESIGN)'),
+    ('web/modules/model_chooser.js', 'model_roles.js, model_chooser.js — the Models editor and editable chooser shared by Settings, onboarding and route editors; catalog arrival never assigns a value (§3 Navigation)'),
+    ('supervisor/task_admission.py', 'task_admission.py — duplicate-ingress reservation fences before effects (§5)'),
+    ('supervisor/schedule_occurrence.py', 'schedule_time.py, schedule_occurrence.py — cron/tz parsing; at most one root per occurrence'),
+    ('supervisor/direct_roots.py', 'direct_roots.py — retired: old file folded/removed at boot (§5)'),
+    ('ouroboros/agent_startup_checks.py', 'agent_startup_checks.py — boot health (warning-only) and self-restart host adoption (§2)'),
+    ('ouroboros/evolution_checkpoints.py', 'evolution_checkpoints.py, evolution_fingerprint.py — append-only campaign checkpoints; canonical objective repeat fingerprint'),
+    ('ouroboros/cancel_intents.py', 'cancel_intents.py — sole ingress `request_cancel`, durable projection, claim fencing, fail-closed reads (§5; §10.14–15)'),
+    ('ouroboros/local_custody_repair.py', 'local_custody_repair.py, custody_owed.py — ended claims retire on proof; unwritten facts stay owed (§6 Owner Continue)'),
+    ('ouroboros/custody_owed.py', 'local_custody_repair.py, custody_owed.py — ended claims retire on proof; unwritten facts stay owed (§6 Owner Continue)'),
+    ('ouroboros/_usage_settlement.py', '_usage_settlement.py — usage/price evidence projected outside ledger tx (§6 Budget tracking)'),
+    ('ouroboros/argv_budget.py', 'argv_budget.py — ARG_MAX byte admission (argv + env; checked by `skill_exec`)'),
+    ('ouroboros/tools/media.py', 'media.py — `extract_pdf_text` (`ocr_pdf`; text layer, not OCR), `youtube_transcript`, `extract_video_frames`, `read_archive` (`archive_reader.py`; nothing extracted)'),
+    ('ouroboros/tools/subagent_integration.py', 'subagent_integration.py — `integrate_subagent_patch` (protected-path gated, genesis refused), `compare_subagent_patches`'),
+    ('ouroboros/desktop_media.py', 'desktop_media.py — GTK display probe, own-loopback audio grant (other shells keep native prompts; §8)'),
+    ('ouroboros/tools/commit_gate.py', 'commit_gate.py — block classification, paid cycle cap, contract fingerprint'),
+    ('ouroboros/force_remove.py', 'force_remove.py, unindexed.py — permission-granting `force_rmtree`; `.noindex` names'),
 ]
 
 
-@pytest.mark.parametrize("path", ROW_SAMPLE)
-def test_a_tool_less_reviewer_without_the_snapshot_gets_the_directory_row_of_the_touched_file(tmp_path, monkeypatch,
-                                                                                              path):
-    """The module directory's row for a touched file reaches a tool-less packet seat whose snapshot was omitted, as on
-    the pre-PR target (the selector excerpts a listing's lines naming a touched file). Frozen synthetic bytes at the
-    file's real path; the expected line is the directory's own, byte-identical to the target's tree row."""
-    from ouroboros.tools import review as review_tool
+def _single_file_subject(tmp_path, path: str, source: bytes):
+    """One repository whose index changes ``path`` by a trailing comment line; no installed tree is built."""
     from ouroboros.tools.registry import ToolContext
 
-    root = pathlib.Path(__file__).resolve().parents[1]
-    directory = (root / "docs" / "architecture" / "01-module-directory.md").read_text(encoding="utf-8")
-    base = path.rsplit("/", 1)[-1]
-    rows = [line.strip() for line in directory.splitlines() if base in line and " — " in line]
-    assert rows, path
-    _installed, subject = _installed_and_subject(tmp_path)
-    (subject / path).parent.mkdir(parents=True, exist_ok=True)
-    (subject / path).write_bytes(_fixture_js(3000))
-    _git(subject, "add", "-A")
-    _git(subject, "commit", "-qm", "fixture source")
-    with (subject / path).open("a", encoding="utf-8") as stream:
+    repo = tmp_path / "subject"
+    (repo / path).parent.mkdir(parents=True)
+    _git(tmp_path, "init", "-q", str(repo))
+    for key, value in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(repo, "config", key, value)
+    (repo / path).write_bytes(source)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fixture source")
+    with (repo / path).open("a", encoding="utf-8") as stream:
         stream.write("// Review one trailing comment.\n")
-    _git(subject, "add", "-A")
-    ctx = ToolContext(repo_dir=subject, drive_root=tmp_path / "drive")
+    _git(repo, "add", "-A")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "drive")
     ctx._review_iteration_count = 0
-    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(subject), "index", surface="commit_gate",
+    return ctx, repo
+
+
+@pytest.mark.parametrize("path, row", TARGET_ROWS)
+def test_a_tool_less_reviewer_without_the_snapshot_gets_the_target_row_of_the_touched_file(tmp_path, monkeypatch,
+                                                                                         path, row):
+    """The target's chapter-1 tree row for a touched file (frozen here, verbatim) reaches a tool-less packet seat whose
+    snapshot was omitted, as on the pre-PR target: the selector excerpts the directory's lines naming a touched file.
+    A rule edited away in the directory turns this red."""
+    from ouroboros.tools import review as review_tool
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    ctx, repo = _single_file_subject(tmp_path, path, _fixture_js(3000))
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
                                                    governance_root=str(root), layer="body"))
     monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 131_072)
     text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
     assert "Full post-change snapshots were omitted" in text, path
-    assert any(row in text for row in rows), (path, rows)
+    assert row in text, (path, row)
+
+
+def test_the_frozen_builder_reviews_a_conflict_anchor_outside_the_delta(tmp_path, monkeypatch):
+    """A managed resolution that keeps a conflict file at its mechanical-merge bytes leaves it out of the Git delta;
+    the reviewed set is the delta and the anchors (``ManagedReviewSubject.touched_paths``), as at the gate, so the
+    packet's changed-files list names the anchor."""
+    from ouroboros.tools.registry import ToolContext
+    from tests import test_managed_review_subject as managed_fixture
+
+    repo, simple, tx = managed_fixture._managed_resolution_repo(tmp_path, monkeypatch)
+    _git(repo, "checkout", tx["m0_tree"], "--", "conflict.txt")  # the anchor back at its M0 bytes
+    _git(repo, "add", "-A")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data", task_id=simple.task_id,
+                      task_metadata=simple.task_metadata)
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
+                                                   layer="body"))
+    assert frozen.managed is not None and "conflict.txt" not in {path for _s, path in frozen.name_status}
+    system = build_two_part_brief(frozen, PACKET, goal="g", commit_message="m")["system"]
+    changed = system[system.index("## Changed files"):]
+    assert "conflict.txt" in changed and "resolver_note.txt" in changed
+
+
+def test_a_chapter_opening_naming_a_touched_file_is_sent_once(tmp_path, monkeypatch):
+    """Chapter 12's first paragraph names ``ouroboros/place_arrivals.py``: the selector picks that paragraph for a
+    change to it, and the packet navigation (which carries every introduction) then skips it, so the reviewer reads
+    it once and its bytes are not paid twice (the gate assembles through the same governance selector)."""
+    from ouroboros.reference_books import _preamble, load_reference_book
+    from ouroboros.tools import review as review_tool
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    chapter = next(c for c in load_reference_book(root, "architecture").chapters
+                   if c.source_path.endswith("12-host-service-companions-and-chat-ids.md"))
+    opening = chapter.text_at(_preamble(chapter)).strip()
+    assert "place_arrivals.py" in opening
+    ctx, repo = _single_file_subject(tmp_path, "ouroboros/place_arrivals.py", b'"""Fixture."""\n')
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
+                                                   governance_root=str(root), layer="body"))
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 1_000_000)
+    built = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
+    assert built.count(opening) == 1

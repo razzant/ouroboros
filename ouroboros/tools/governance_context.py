@@ -321,13 +321,13 @@ def _opening_units(source) -> list:
 
 
 def _book_navigation(repo_dir: Path, book_id: str, book, load_doc, *, instructions: bool = True,
-                     whole: frozenset = frozenset()) -> str:
+                     inline: str = "") -> str:
     from ouroboros.context_layout import book_navigation, generate_doc_nav_map
     from ouroboros.reference_books import BOOK_ENTRYPOINTS
 
     entrypoint = BOOK_ENTRYPOINTS[book_id]
     if book is not None:
-        return book_navigation(book, instructions=instructions, whole=whole)
+        return book_navigation(book, instructions=instructions, inline=inline)
     # No book: map whatever the entrypoint reader returns, so the document stays
     # named and addressable even when its membership cannot be assembled.
     text = load_doc(repo_dir, entrypoint, on_missing="explicit")
@@ -552,7 +552,7 @@ def _skill_layer_context(repo_dir: Any, *, surface: str, delivery: str, checklis
             if chapter.source_path not in SKILL_REQUIRED_CHAPTERS:
                 rows.append(_row(chapter.source_path, 3, "navigation", len(chapter.text), "the map is never inlined whole"))
         maps.append(_book_navigation(root, book_id, book, load_governance_doc, instructions=not packet,
-                                     whole=frozenset(inline_texts)))
+                                     inline="\n".join(text for _title, text in tier1 + selected)))
     creating = load_governance_doc(root, CREATING_SKILLS_PATH, on_missing="explicit")
     rows.append(_row(CREATING_SKILLS_PATH, 3, "navigation", len(creating), "the skill author's guide: its heading map"))
     maps.append(generate_doc_nav_map(creating, title=CREATING_SKILLS_PATH.rsplit("/", 1)[-1], rel_path=CREATING_SKILLS_PATH,
@@ -822,7 +822,7 @@ def governance_context(
         PACKET_INDEX if packet else "",
         design_map,
         *(_book_navigation(root, book_id, book, load_governance_doc, instructions=not packet,
-                           whole=frozenset(inline_texts)) for book_id, book in ((DEVELOPMENT_BOOK_ID, dev_book),
+                           inline="\n".join(text for _title, text in tier1 + selected)) for book_id, book in ((DEVELOPMENT_BOOK_ID, dev_book),
                                                                                   (ARCHITECTURE_BOOK_ID, arch_book))),
     ])
 

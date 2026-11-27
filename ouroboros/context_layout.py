@@ -288,7 +288,7 @@ def task_design_navigation(ctx: Any, task: Mapping[str, Any]) -> str:
     return HostSection("design_bible", view, navigation)
 
 
-def book_navigation(book: ReferenceBook, *, instructions: bool = True, whole: frozenset = frozenset()) -> str:
+def book_navigation(book: ReferenceBook, *, instructions: bool = True, inline: str = "") -> str:
     """The compact, CHAPTER-ADDRESSED view of one reference book.
 
     The authored introductions are the overview (there is no second editable
@@ -312,7 +312,7 @@ def book_navigation(book: ReferenceBook, *, instructions: bool = True, whole: fr
             instructions=instructions,
         )
     if not instructions and _plain_contents(book):
-        return _packet_book_index(book, whole=whole)
+        return _packet_book_index(book, inline=inline)
     return overview_book(
         book,
         lambda chapter: generate_doc_nav_map(
@@ -348,15 +348,15 @@ def _plain_contents(book: ReferenceBook) -> bool:
         for item, link in zip(items, links))
 
 
-def _packet_book_index(book: ReferenceBook, *, whole: frozenset = frozenset()) -> str:
+def _packet_book_index(book: ReferenceBook, *, inline: str = "") -> str:
     """The view a reader without tools gets: the same facts as the overview, each written once.
 
     The overview repeats each chapter's title and address (the contents list, the chapter heading, its source
     line, its map's heading) and spells the range convention on every heading. Here the contents list gives way
     to one line per chapter (title, the list's own wording where it differs, physical path); the entrypoint's
     other text, each authored introduction and every heading with its range stay verbatim, in the notation
-    ``PACKET_INDEX`` states once for the packet. An introduction is skipped only for a chapter in ``whole`` (its
-    physical path, delivered whole elsewhere in the same packet)."""
+    ``PACKET_INDEX`` states once for the packet. An introduction is skipped only when ``inline`` (the text the same
+    packet already carries: a chapter inlined whole, a selected opening) holds it verbatim, so it is sent once."""
     from ouroboros.reference_books import _preamble
 
     entry = book.entrypoint
@@ -369,7 +369,8 @@ def _packet_book_index(book: ReferenceBook, *, whole: frozenset = frozenset()) -
     for chapter, link in zip(book.chapters, links):
         title = chapter.headings[0].title
         listed_as = "" if link.label == title else f" (listed as {link.label})"
-        intro = [] if chapter.source_path in whole else [chapter.text_at(_preamble(chapter)).strip()]
+        opening = chapter.text_at(_preamble(chapter)).strip()
+        intro = [] if opening in inline else [opening]  # the packet already carries it (a whole or selected unit)
         address = chapter.source_path[len(folder) + 1:] if folder else chapter.source_path
         rows.append("\n".join([f"{title}{listed_as}: {address}", *intro,
                                *_nav_lines(_nav_entries(chapter.text), compact=True)]))

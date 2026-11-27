@@ -69,7 +69,7 @@ D20 = "Presence"
 
 [references]
 # HUMAN section: the manuals that own each domain and non-Python surface, for the
-# `module_map` lookup, review packets and plan seats; `scripts/check_domains.py`
+# `module_map` lookup (a seat with tools); `scripts/check_domains.py`
 # requires a row per domain and existing files. `--write` leaves it untouched.
 D01 = ["docs/architecture/06-1-loop-tools-and-safety.md"]
 D02 = ["docs/architecture/06-2-model-calls-and-budget.md", "docs/MODEL_SEND_OBSERVABILITY.md", "docs/IMAGE_GENERATION.md"]
