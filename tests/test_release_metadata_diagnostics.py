@@ -251,9 +251,10 @@ def test_free_tool_json_reports_cumulative_books_with_an_explicit_byte_source(ca
     assert result["source"] == source and result["book_balance"]["source"] == "worktree"
     note = result["book_balance"]["note"]
     assert "+18 B vs HEAD" in note and "+36 B vs refs/remotes/official-renamed/ouroboros" in note
-    # A book's growth is a stated fact (a chapter is read on demand, under no size rule), so no rule is quoted;
-    # the rule's own words ride only a ruled text's growth (``tests/test_reference_book_balance.py``).
-    assert "under no size rule" in note and "local commits are not blocked" not in note
+    # The grown lines stand in the chapter's opening, which the resident Body Map carries: the Map is a ruled text,
+    # so its growth states the rule. The book itself is a stated fact under no size rule.
+    assert "Body Map" in note and "local commits are not blocked" in note
+    assert "Architecture book" in note and "under no size rule" in note
     assert _diagnose(ctx, source, paths=["change.py"])["book_balance"]["note"] == ""
 
 
