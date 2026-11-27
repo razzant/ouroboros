@@ -21,7 +21,7 @@ export const RESUME_ANSWER_MS = 60_000;
 // Rows shown before `Show all`: a long list would push the rest of Main's feed far away from its one Resume.
 export const SHOWN_ROWS = 8;
 const MAIN_CHAT_ID = 1;
-const PANIC_TOLD = 'ouro.panic_list_unread_told';  // this tab's record of the host run whose unreadable list was told
+const PANIC_CLOSED = 'ouro.panic_list_unread_closed';  // this tab's record of the host run whose notice the person closed
 // What one answer says, by kind: its tone and, unless the door's own words say it, its sentence.
 const ANSWERS = {
     pending: { tone: '', words: () => tx('Sending…') },
@@ -92,33 +92,35 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
     let census = 'unknown', censusAt = -Infinity, listSaid = '';
     let connected = true, sending = false, showAll = false, view = null, destroyed = false, serial = 0;
     let projects = new Map();   // project id and room chat id -> the Project's name, from the same body
-    // A ready host's own word that its list is not whole, with no row read: Main's notice, told once per episode while
-    // Main is the room shown (`isVisible`; chat.js's room seam, room_notice.js), withdrawn when Main is left or covered
-    // and told again on return while the list still is not whole and the person has not closed it. `unread`: the episode
-    // is open; `owed`: it waits to be told; `notice`: its toast while it stands. The episode outlives a reload of the same
-    // tab: the host run it was told for (`boot.since`, the lifespan's start) is kept in this tab's storage.
-    let unread = false, owed = false, stale = false, run = '', notice = null;
+    // A ready host's own word that its list is not whole, with no row read: Main's notice, one per episode. It stands
+    // while Main is the room shown (`isVisible`; chat.js's room seam, room_notice.js), is withdrawn when Main is left or
+    // covered and stands again on return while the list still is not whole, until the person closes it with its ×. Only
+    // that close is remembered, for the host run (`boot.since`, the lifespan's start), in this tab's storage: telling
+    // writes nothing, so a reload (the setup wizard's own included) is a return to Main. `unread`: the episode is open;
+    // `owed`: it waits to be told; `shut`: the person closed it; `notice`: its toast while it stands.
+    let unread = false, owed = false, stale = false, shut = false, run = '', notice = null;
     const withdraw = () => { notice?.dispose?.(); notice = null; };
-    const told = { get: () => { try { return storage?.getItem(PANIC_TOLD) || ''; } catch { return ''; } },
-        set: (run) => { try { if (run) storage?.setItem(PANIC_TOLD, run); else storage?.removeItem(PANIC_TOLD); } catch { /* no storage */ } } };
+    const closed = { get: () => { try { return storage?.getItem(PANIC_CLOSED) || ''; } catch { return ''; } },
+        set: (run) => { try { if (run) storage?.setItem(PANIC_CLOSED, run); else storage?.removeItem(PANIC_CLOSED); } catch { /* no storage */ } } };
     function tell() {
         withdraw();
         owed = false;
-        told.set(run);
         notice = notify(tx('Saved work could not be checked for anything waiting to resume.'), { ttl: 0, haptic: false,
             // A person's Retry reads again; a read that still is not whole (or fails) says so again.
             action: { label: tx('Retry'), run: async () => {
                 try { await refresh(); } catch { /* answered below */ }
                 if (!destroyed && unread && !records.size) { owed = true; if (isVisible()) tell(); }
             } } });
+        // The person's ×, and only it (it cannot be pressed while the notice is held out of sight), closes the episode.
+        notice?.querySelector?.('.toast-dismiss')?.addEventListener?.('click', () => { shut = true; owed = false; closed.set(run); });
     }
     // The room seam's view of this notice (chat_render_batch.js `others`). Left or covered, a notice still standing is
-    // withdrawn and owed again (one the person closed is not), but only a fresh read on return may tell it: Main reads
-    // nothing while away, and the host may have recovered meanwhile.
+    // withdrawn and owed again (one the person closed is not), but only a fresh read on return that is ready and says
+    // the list is not whole may tell it: Main reads nothing while away, and the host may have recovered or restarted.
     const roomNotice = {
         get owed() { return Boolean(owed && !stale && unread && !records.size && !destroyed); },
         announce() { if (roomNotice.owed) tell(); },
-        hide() { if (notice) { owed = notice.isConnected && !notice.classList?.contains('is-hiding'); stale = true; withdraw(); } },
+        hide() { if (notice) { owed = !shut; stale = true; withdraw(); } },
     };
 
     const label = (record) => record.row.task_name || fmt('Task {id}', { id: record.row.task_id.slice(0, 8) });
@@ -524,18 +526,19 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
             // With no row read Main holds no message. A host not ready yet is said by the room bar's Starting…
             // (host_starting_status.js) and the setup wizard covers everything, so nothing more; a ready host's own word
             // that its list is not whole is told once per episode by the page's notice, claiming no Panic, stop or work.
-            stale = false;
+            const ready = data.supervisor_ready === true && data.boot?.tasks_ready !== false;
+            if (ready && data.panic_recovery_complete === false) stale = false;  // only this word may tell an owed notice
             if (census === 'complete' || records.size) { withdraw(); owed = false; }
-            if (census === 'complete') { unread = false; told.set(''); }
+            if (census === 'complete') { unread = false; closed.set(''); }
             if (!records.size) {
-                const ready = data.supervisor_ready === true && data.boot?.tasks_ready !== false;
                 const seen = typeof data.boot?.since === 'string' ? data.boot.since : '';
                 // A host that restarted inside this tab is a new run: its own episode, told once.
                 if (unread && seen && run && seen !== run) { unread = false; owed = false; withdraw(); }
                 if (listSaid === 'partial' && ready && !unread) {
                     unread = true;
                     run = seen;
-                    owed = !run || told.get() !== run;  // a reload of this tab keeps the decision taken on this run
+                    shut = Boolean(run) && closed.get() === run;  // closed in this run before a reload: it stays closed
+                    owed = !shut;
                 }
                 if (roomNotice.owed && isVisible()) tell();
                 remove(); onChange(); return;

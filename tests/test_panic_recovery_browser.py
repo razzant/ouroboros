@@ -99,6 +99,7 @@ class FakeCore:
         self.writes: list[tuple[str, dict]] = []  # any other write the page made (preferences, read receipts)
         self.answers: dict[str, object] = {}
         self.state_reads = 0                      # /api/state bodies served
+        self.since = "run-1"                      # the host run (`boot.since`): a restart is a new one
         self.held: dict[str, object] = {}         # Resume requests left unanswered until release()
 
     def attention(self):
@@ -117,7 +118,8 @@ class FakeCore:
 
     def state(self):
         self.state_reads += 1
-        return {"sha": "fixture", "supervisor_ready": True, "projects": PROJECTS, "project_chat_ids": [21, 22],
+        return {"sha": "fixture", "supervisor_ready": True, "boot": {"tasks_ready": True, "since": self.since},
+                "projects": PROJECTS, "project_chat_ids": [21, 22],
                 "active_chat_activities": [], "active_chat_activities_complete": True,
                 "current_questions": [], "current_questions_complete": True,
                 "main_attention": self.attention(), "main_attention_complete": True,
@@ -546,24 +548,33 @@ def test_an_empty_first_list_that_is_not_whole_is_one_notice(spa):
     page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast:not(.is-hiding)').length === 1")
     assert core.state_reads > reads, "Retry read the state again"
     assert page.locator(MESSAGE).count() == 0, "a list still not whole is answered by the notice, never a card"
-    # The person closes it with its ×, which only hides it: later reads still not whole do not tell it again.
+    # A successful Retry: its read is whole, and the notice leaves with nothing said in its place.
+    core.complete = True
+    reads = core.state_reads
+    page.locator("#toast-stack .toast:not(.is-hiding)").get_by_role("button", name="Retry").click()
+    page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast').length === 0")
+    assert core.state_reads > reads, "Retry read the state again"
+    page.wait_for_timeout(400)  # past the Retry's own answer to that read
+    assert page.locator("#toast-stack .toast").count() == 0 and page.locator(MESSAGE).count() == 0, (
+        "a whole empty list: nothing waits, nothing to say")
+    # The host's word again is a new episode. It stands across a reload of the tab; the person's × closes it for this
+    # host run, a reload included; a host that restarted tells it again.
+    core.complete = False
+    page.locator("#toast-stack .toast").wait_for()
+    page.reload()
+    page.locator("#toast-stack .toast").wait_for()
     page.locator("#toast-stack .toast:not(.is-hiding)").get_by_role("button", name="Dismiss notice").click()
     page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast').length === 0")
+    page.reload()
+    page.wait_for_selector("#chat-input", state="attached")
     seen = core.state_reads
     deadline = 30_000
     while core.state_reads < seen + 2 and deadline > 0:
         page.wait_for_timeout(250)
         deadline -= 250
-    assert core.state_reads >= seen + 2, core.state_reads
-    assert page.locator("#toast-stack .toast").count() == 0, "closed by the person: not told again in this episode"
-    assert core.posts == [] and core.stops == [], "the × runs nothing"
-    core.complete = True
-    seen = core.state_reads
-    deadline = 30_000
-    while core.state_reads < seen + 1 and deadline > 0:
-        page.wait_for_timeout(250)
-        deadline -= 250
-    assert page.locator("#toast-stack .toast").count() == 0 and page.locator(MESSAGE).count() == 0, (
-        "a whole empty list: nothing waits, nothing to say")
-    assert core.posts == [] and core.stops == []
+    assert core.state_reads >= seen + 2, ("two more reads, still not whole", core.state_reads)
+    assert page.locator("#toast-stack .toast").count() == 0, "closed by the person in this run: none after a reload"
+    core.since = "run-2"
+    page.locator("#toast-stack .toast").wait_for()
+    assert core.posts == [] and core.stops == [], "the notice and its × run nothing"
     assert errors == []

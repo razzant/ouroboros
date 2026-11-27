@@ -478,18 +478,25 @@ test('Main\'s pill counts the Panic choice as one action and lands on its first 
 });
 
 // The bare line leaves the feed. A host not ready yet is said by the room bar (Starting…) and the setup wizard covers
-// everything; a ready host's own `false` with nothing read is told once per episode by the page's notice, a reload of the
-// same tab included, until a whole read ends it; a person's Retry that still does not read whole is answered.
+// everything; a ready host's own `false` with nothing read is one page notice per episode, standing until a whole read
+// ends it or the person closes it with its × (remembered for that host run across a reload); a person's Retry that
+// still does not read whole is answered.
 function noticeTrack() {
     const told = [];
     const notify = (text, options) => {
-        const notice = { text, options, disposed: false, isConnected: true, dispose() { this.disposed = true; this.isConnected = false; } };
+        const handlers = [];
+        const button = { addEventListener: (type, fn) => { if (type === 'click') handlers.push(fn); } };
+        const notice = { text, options, disposed: false, isConnected: true, handlers,
+            querySelector: (selector) => (selector === '.toast-dismiss' ? button : null),
+            dispose() { this.disposed = true; this.isConnected = false; } };
         told.push(notice);
         return notice;
     };
+    // The person's ×: toast.js hides the notice (it fades, then leaves) and the click reaches its listeners.
+    const close = (notice) => { notice.handlers.forEach((fn) => fn()); notice.dispose(); };
     const store = new Map();
     const storage = { getItem: k => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
-    return { told, notify, storage };
+    return { told, notify, close, storage };
 }
 
 test('a list not whole with no row read is no message: a ready host\'s word is one notice per episode, a starting one none', async (t) => {
@@ -503,14 +510,14 @@ test('a list not whole with no row read is no message: a ready host\'s word is o
         assert.deepEqual([r.message(), r.feed.children.length, told.length], [null, 0, 0],
             `a host not ready, or one that does not say, is told by nothing here (${JSON.stringify(starting)})`);
     }
-    covered = true;  // the setup wizard is up: nothing about rooms or recovery is announced over it
+    covered = true;  // Main is not the room shown (covered by its sheet, or another room): nothing is told yet
     r.panic.snapshot(census([], false, READY), 2);
-    assert.equal(told.length, 0, 'not over the setup wizard');
+    assert.equal(told.length, 0, 'not while Main is not shown');
     covered = false;
     r.panic.snapshot(census([], false, READY), 2);
     assert.deepEqual([r.message(), r.feed.children.length], [null, 0], 'never a System message or an empty card');
     assert.deepEqual(told.map(x => x.text), ['Saved work could not be checked for anything waiting to resume.'],
-        'told once the wizard is gone');
+        'told once Main is shown');
     assert.equal(r.panic.target(), null, 'the pill counts nothing');
     r.panic.snapshot(census([], false, READY), 3);
     r.panic.snapshot(null, 4);
@@ -558,12 +565,28 @@ test('the Panic notice is Main\'s: withdrawn when Main is left or covered, told 
     shown = true;
     r.panic.snapshot(census([], false, READY), 3);
     assert.equal(n.told.length, 3, 'back and still not whole: told again');
-    // Closed by the person with its × (which only hides it: the notice is leaving, still mounted for its fade), it is not
-    // told again in this episode.
-    n.told[2].classList = { contains: (name) => name === 'is-hiding' };
+    // Closed by the person with its ×, it is not told again in this episode.
+    n.close(n.told[2]);
     r.panic.notice.hide();
     r.panic.snapshot(census([], false, READY), 4);
     assert.equal(n.told.length, 3, 'closed by the person: not again');
+    // Left while it stands, then back while the host is starting again or does not say: silent until a ready host
+    // affirms the list is not whole.
+    const u = noticeTrack();
+    let on = true;
+    const s1 = rig(t, { notify: u.notify, extra: { storage: u.storage, isVisible: () => on } });
+    s1.panic.snapshot(census([], false, READY), 1);
+    on = false;
+    s1.panic.notice.hide();
+    on = true;
+    s1.panic.snapshot(census([], false, { supervisor_ready: false, boot: READY.boot }), 2);
+    s1.panic.snapshot(census([], false, { supervisor_ready: true, boot: { tasks_ready: false, since: 'run-a' } }), 3);
+    const unknown = census([], false, READY);
+    delete unknown.panic_recovery_complete;
+    s1.panic.snapshot(unknown, 4);
+    assert.equal(u.told.length, 1, 'an unready host or an unknown completeness keeps it pending and silent');
+    s1.panic.snapshot(census([], false, READY), 5);
+    assert.equal(u.told.length, 2, 'a ready host that says the list is not whole tells it');
     // A whole read while away means no notice on return.
     const m = noticeTrack();
     let seen = true;
@@ -586,29 +609,32 @@ test('the Panic notice is Main\'s: withdrawn when Main is left or covered, told 
     assert.equal(h.told.length, 1, 'told when Main is shown');
 });
 
-test('a reload of the same tab is not a new episode; a host restart inside the tab is', (t) => {
+test('a reload is a return to Main: the notice stands again unless the person closed it in this host run', (t) => {
     const n = noticeTrack();
     const READY = (since) => ({ supervisor_ready: true, boot: { tasks_ready: true, since } });
-    const first = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
+    const open = () => rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
+    // Told behind the setup wizard (held out of sight by toast.js), whose completion reloads the tab: it stands on Main.
+    const first = open();
     first.panic.snapshot(census([], false, READY('run-1')), 1);
     assert.equal(n.told.length, 1);
+    assert.equal(n.storage.getItem('ouro.panic_list_unread_closed'), null, 'telling writes nothing');
     first.panic.destroy();
-    const reloaded = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
+    const reloaded = open();
     reloaded.panic.snapshot(census([], false, READY('run-1')), 1);
-    assert.equal(n.told.length, 1, 'the same host run in the same tab: already told');
-    reloaded.panic.snapshot(census([], false, READY('run-2')), 2);
-    assert.equal(n.told.length, 2, 'the host restarted inside this tab: a new run is a new episode, told at once');
-    n.told[1].dispose();
-    reloaded.panic.notice.hide();
-    reloaded.panic.snapshot(census([], false, READY('run-2')), 3);
-    assert.equal(n.told.length, 2, 'closed: not again on this run');
+    assert.equal(n.told.length, 2, 'not closed and still not whole: it stands again after the reload');
+    // Closed with its ×, then reloaded: it stays closed for this host run.
+    n.close(n.told[1]);
     reloaded.panic.destroy();
-    const again = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
-    again.panic.snapshot(census([], false, READY('run-2')), 1);
-    assert.equal(n.told.length, 2, 'a reload keeps the decision taken on this run');
-    again.panic.snapshot(census([], true, READY('run-2')), 2);
-    assert.equal(n.storage.getItem('ouro.panic_list_unread_told'), null, 'a whole read clears the tab\'s record');
-    again.panic.destroy();
+    const after = open();
+    after.panic.snapshot(census([], false, READY('run-1')), 1);
+    assert.equal(n.told.length, 2, 'closed in this run: none after a reload');
+    // A host that restarted is a new run: its own episode, told at once.
+    after.panic.snapshot(census([], false, READY('run-2')), 2);
+    assert.equal(n.told.length, 3, 'a new run after a close is told');
+    after.panic.snapshot(census([], true, READY('run-2')), 3);
+    assert.equal(n.told[2].disposed, true, 'a whole read ends the episode');
+    assert.equal(n.storage.getItem('ouro.panic_list_unread_closed'), null, 'and clears the tab\'s record');
+    after.panic.destroy();
 });
 
 test('an older host that names no completeness is taken as neither whole, incomplete nor stopped', async (t) => {
