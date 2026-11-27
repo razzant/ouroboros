@@ -27,9 +27,11 @@ An answer taken beside the build never refuses by itself (owner, 12.11): the sam
 point and only a second refusal stands. Any failure inside the bound other than its refusal means no bound; the start
 goes on to the full fit unchanged.
 
-Where it applies: a resolver asked without fetching (a call's route, ``turn.resolve_route``) and a ``RouteQuestion``
-whose answer has arrived (a Claudexor text start). A text start whose question has no key (every other provider) gets
-no early bound: the full fit decides.
+Where it applies: a resolver asked without fetching (a call's route, ``turn.resolve_route``), a ``RouteQuestion``
+whose answer has arrived (a Claudexor text start), and a question with no key (every other text route), whose resolver
+is read without fetching (cached facts, never the network). For that one a refusal stands only on its second answer,
+the fit's own read of the route (``RouteQuestion.__call__``, a network read only where the fit makes it), so a cached
+or declared window only triggers the question: the number the full fit would use decides.
 
 The refusal is ``context_fit.MinimumViewUnfit`` with ``memory_measured`` False and the frame's named ``parts``;
 ``context_view_facts.refusal_parts`` names the parts of the fitter's own refusals the same way. Those name core, assignment, control-tool
@@ -85,8 +87,10 @@ def _refusal(task, ctx, spec, frame_texts, resolver, *, tool_schemas, nano_base,
     preferred = str(preferred or "max").strip().lower()
     preferred = preferred if preferred in {"low", "max", "nano"} else "max"
     peek = getattr(resolver, "peek", None)
-    first = _route_frame(peek() if callable(peek) else resolver(task, allow_fetch=False), task, tool_schemas=tool_schemas,
-                         nano_base=nano_base, effort=effort, preferred=preferred)
+    keyless = isinstance(resolver, RouteQuestion) and resolver.key is None  # a route no engine is asked about
+    answer = (resolver.resolver({**task, **resolver.route_fields}, allow_fetch=False) if keyless
+              else peek() if callable(peek) else resolver(task, allow_fetch=False))
+    first = _route_frame(answer, task, tool_schemas=tool_schemas, nano_base=nano_base, effort=effort, preferred=preferred)
     if first is None:  # no known window: nothing of the start is read here
         return None
     view = spec()
@@ -97,16 +101,21 @@ def _refusal(task, ctx, spec, frame_texts, resolver, *, tool_schemas, nano_base,
     if not _refuses(chars, first):
         return None
     # An answer taken beside the build never refuses by itself: the same question at the usual point decides.
-    again = resolver.again(task) if isinstance(resolver, RouteQuestion) else resolver(task, allow_fetch=True)
+    # A key-less question's second answer is the fit's own read (``RouteQuestion.__call__``): that number decides.
+    again = (resolver.again(task) if isinstance(resolver, RouteQuestion) and not keyless
+             else resolver(task, allow_fetch=True))
     second = _route_frame(again, task, tool_schemas=tool_schemas, nano_base=nano_base, effort=effort, preferred=preferred)
     if second is None or not _refuses(chars, second):
         return None
     reserve, window, ratio, schemas = second
     frame = chars // 4 + schemas
     parts = [(name, json_chars(text) // 4) for name, text in texts] + [("tool schemas", schemas)]
-    return MinimumViewUnfit("Core, resident tools and reserve cannot fit before memory", fixed_tokens=frame,
-                            memory_tokens=0, reserve_tokens=reserve, window_tokens=window, ratio=ratio,
-                            work_room_tokens=0, memory_measured=False, parts=_largest_first(parts))
+    refusal = MinimumViewUnfit("Core, resident tools and reserve cannot fit before memory", fixed_tokens=frame,
+                               memory_tokens=0, reserve_tokens=reserve, window_tokens=window, ratio=ratio,
+                               work_room_tokens=0, memory_measured=False, parts=_largest_first(parts))
+    # The serving program the fit's refusal names (``context_fit``), for its guidance (``agent_dispatch``).
+    refusal.server_program = ((again[0].get("_resolved_target") or {}).get("ollama_record") or {}).get("protocol")
+    return refusal
 
 
 def _route_frame(answer: Any, task: Mapping[str, Any], *, tool_schemas, nano_base, effort: str,
