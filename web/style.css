@@ -1023,7 +1023,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .chat-quiz-close:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 /* An owner-required action is a System message: the task, one sentence, the task's own controls. */
 .owner-action-body { display: flex; flex-direction: column; gap: var(--space-2); }
-.owner-action-reason { font-size: var(--type-meta); color: var(--text-meta); }
+.owner-action-reason { font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 /* The works Panic stopped (panic_recovery.js): Choose all/none beside the count, then one row per work, its box on the
    name's first line, its place and its last answer under the name, the Stop… its card had at the row's end; the one
    Resume follows the list. The whole label is the box's, so a finger reaches it anywhere, and a tap answers with the
@@ -1044,7 +1044,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .panic-recovery-pick {
     display: grid;
     grid-template-columns: var(--checkbox-size) minmax(0, 1fr);
-    column-gap: var(--space-2);
+    column-gap: var(--checkbox-gap);
     row-gap: 2px;
     align-items: start;
     cursor: pointer;
@@ -2147,6 +2147,7 @@ html[data-layout="stack"] .chat-find {
 }
 :is(.chat-load-older-note, .chat-history-gap) {
     font-size: var(--type-meta);
+    line-height: var(--line-meta);
     color: var(--text-meta);
     text-align: center;
     max-width: 460px;
@@ -4289,14 +4290,15 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 .chat-bubble .message li.task-list-item {
     display: flex;
     align-items: flex-start;
-    gap: var(--space-2);
+    gap: var(--checkbox-gap);
+    --checkbox-line: 1lh;
     margin-inline-start: calc(-1 * var(--space-5));
     list-style: none;
 }
 .ui-rich-content .task-list,
 .chat-bubble .message .task-list { list-style: none; }
-/* A task's mark is the shared check box (ui.css .ui-checkbox), inert: it sits on the item's first line. */
-.md-checkbox { margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); cursor: inherit; }
+/* A task's mark is the shared check box (ui.css .ui-checkbox), inert: it sits on the item's first line (--checkbox-line). */
+.md-checkbox { cursor: inherit; }
 .md-quote {
     display: block;
     margin: var(--space-3) 0;
@@ -6104,10 +6106,10 @@ body.keyboard-open .model-sheet[data-sheet="bottom"] {
 .chat-model-sheet-row .model-source-mark { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
 .chat-model-sheet-row b { flex: 1 1 12ch; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
 .chat-model-sheet-row span { flex: 0 1 auto; max-width: 100%; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
-.chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); }
+.chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* The sheet's lists (owner 10.11, «5. A», «6. A»): what is not on Main now, each row a name over its facts with
    its own tick; nothing is ticked until the owner ticks it. After the change the same rows say each one's result. */
-.chat-model-sheet-sub { margin: var(--space-3) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); }
+.chat-model-sheet-sub { margin: var(--space-3) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .chat-model-off-list { margin: 0 calc(-1 * var(--space-2)); padding: 0; list-style: none; }
 .chat-model-off {
     display: grid;
@@ -6122,7 +6124,7 @@ label.chat-model-off { cursor: pointer; }
     label.chat-model-off:hover { background: var(--menu-item-hover); }
 }
 .chat-model-off-name { min-width: 0; overflow: hidden; font-size: var(--type-body); text-overflow: ellipsis; white-space: nowrap; }
-.chat-model-off-meta { grid-column: 1; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.chat-model-off-meta { grid-column: 1; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .chat-model-off .ui-checkbox { grid-row: 1 / span 2; grid-column: 2; }
 .chat-model-off[data-result="refused"] .chat-model-off-meta { color: var(--status-error-fg); }
 
@@ -6956,7 +6958,7 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 .storage-free-group {
     display: grid;
     grid-template-columns: var(--checkbox-size) minmax(0, 1fr) auto;
-    column-gap: var(--space-2);
+    column-gap: var(--checkbox-gap);
     row-gap: 2px;
     align-items: baseline;
     padding-block: var(--space-2);
@@ -9850,12 +9852,14 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 .new-project-sources { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .new-project-sources > legend { padding: 0; margin-bottom: var(--space-1); color: var(--text-meta); font-size: var(--type-body); }
 .new-project-source-choices { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); color: var(--text-primary); }
-.new-project-source-choices > label { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
+.new-project-source-choices > label { display: inline-flex; align-items: center; gap: var(--checkbox-gap); cursor: pointer; }
 
 .new-project-selected-target { overflow-wrap: anywhere; }
 /* The folder's browser and the Git choice under it are two parts of the field, parted like the dialog's fields. */
 .new-project-attach { display: flex; flex-direction: column; gap: var(--space-3); }
 .new-project-attach[hidden] { display: none; }
+/* The Git choice's name reads like the folder choices above it; its help line stays the field's help. */
+.new-project-attach .local-toggle { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 
 .new-project-browser {
     border: 1px solid var(--divider);
@@ -9914,6 +9918,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     background: var(--status-warn-bg);
     color: var(--status-warn-word, var(--text-primary));
     font-size: var(--type-meta);
+    line-height: var(--line-meta);
     margin: 0;
 }
 

@@ -308,8 +308,9 @@ def test_scroller_edges_do_not_gain_opaque_positioned_descendants():
 # Every check box is the shared .ui-checkbox and every radio the shared .ui-radio (DESIGN "Controls and editable
 # choices", owner decision 27.11.2026): their size, shape, fill, mark and border live only in ui.css. A page places a
 # box; it never draws one.
-CHECKBOX_PAINT = re.compile(r"(?:^|[;{\s])(?:width|height|min-width|border[\w-]*|background[\w-]*|accent-color|appearance"
-                            r"|-webkit-appearance)\s*:", re.I)
+CHECKBOX_PAINT = re.compile(r"(?:^|[;{\s])(?:(?:min-|max-)?(?:width|height)|(?:min-|max-)?(?:inline|block)-size|border[\w-]*"
+                            r"|background[\w-]*|accent-color|appearance|-webkit-appearance|outline[\w-]*|box-shadow|color"
+                            r"|(?:-webkit-)?mask[\w-]*)\s*:", re.I)
 CHECKBOX_SUBJECT = re.compile(r"\[type=[\"']?(?:checkbox|radio)|\.ui-checkbox|\.ui-radio|\.md-checkbox|\.message-share-check", re.I)
 
 
@@ -349,8 +350,10 @@ def test_only_the_shared_control_draws_a_check_box():
              for rule in checkbox_paint_outside_the_control(css)]
     assert not found, "A page places a check box, never sizes, recolours or reshapes it:\n" + "\n".join(found)
     ui = without_comments(sheets["web/ui.css"])
-    shared = re.search(r"\n\.ui-checkbox, \.ui-radio \{([^}]*)\}", ui)[1]
-    assert "border-radius: var(--checkbox-radius);" in shared and "width: var(--checkbox-size);" in shared
+    shared = [" ".join(body.split()) for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", ui)
+              if {part.strip() for part in sel.split(",")} == {".ui-checkbox", ".ui-radio"}]
+    assert len(shared) == 1, "one base rule draws both"
+    assert "border-radius: var(--checkbox-radius);" in shared[0] and "width: var(--checkbox-size);" in shared[0]
     assert len(re.findall(r"--checkbox-radius:", ui)) == 1, "one token flips every box between round and square"
     assert shape_problems(ui) == [], shape_problems(ui)
 
@@ -429,13 +432,38 @@ DOM_CHECKBOX_TYPE = re.compile(r"""(?:\.type\s*=\s*|setAttribute\(\s*['"]type['"
 SHARED_CLASS = {"checkbox": "ui-checkbox", "radio": "ui-radio"}
 
 
+def tags_in(source, name="input"):
+    """Every `<name …>` tag of a markup string or template, `>` inside a `${…}` expression included (as tagFrom in
+    web/tests/ui_primitives.test.js reads them)."""
+    found, start = [], source.find("<" + name)
+    while start >= 0:
+        depth, index = 0, start
+        while index < len(source):
+            if source.startswith("${", index):
+                depth += 1
+                index += 1
+            elif depth and source[index] == "{":
+                depth += 1
+            elif depth and source[index] == "}":
+                depth -= 1
+            elif not depth and source[index] == ">":
+                found.append(source[start:index + 1])
+                break
+            index += 1
+        start = source.find("<" + name, start + 1)
+    return found
+
+
+SWITCH_ROLE = re.compile(r"""role\s*=\s*\\?["']switch""")
+
+
 def checkbox_inputs_outside_the_control(js):
-    """Check box and radio inputs a module builds without their shared class: a template's <input …> tag, or a DOM-built input
-    whose type is set within three lines of no ui-checkbox class. A switch (role="switch") is its own control."""
+    """Check box and radio inputs a source builds without their shared class: an `<input …>` tag, or a DOM-built input
+    whose type is set within three lines of no shared class. A switch (role="switch") is its own control."""
     found = []
-    for tag in re.findall(r"<input\b[^>]*>", js):
+    for tag in tags_in(js):
         kind = CHECKBOX_TYPE.search(tag)
-        if kind and not re.search(rf"\b{SHARED_CLASS[kind[1]]}\b", tag) and 'role="switch"' not in tag:
+        if kind and not re.search(rf"\b{SHARED_CLASS[kind[1]]}\b", tag) and not SWITCH_ROLE.search(tag):
             found.append(" ".join(tag.split())[:120])
     lines = js.splitlines()
     for index, line in enumerate(lines):
@@ -447,16 +475,25 @@ def checkbox_inputs_outside_the_control(js):
     return found
 
 
+def first_party_markup_sources():
+    vendored = {"marked.min.js", "mermaid.min.js", "chart.umd.min.js", "highlight.min.js", "purify.min.js"}
+    return sorted(path for pattern in ("*.html", "*.js", "modules/**/*.js") for path in WEB.glob(pattern)
+                  if path.name not in vendored and "vendor" not in path.parts and "tests" not in path.parts)
+
+
 def test_every_module_check_box_is_the_shared_control():
-    found = [f"{path.relative_to(ROOT).as_posix()}: {item}" for path in sorted((WEB / "modules").rglob("*.js"))
+    found = [f"{path.relative_to(ROOT).as_posix()}: {item}" for path in first_party_markup_sources()
              for item in checkbox_inputs_outside_the_control(path.read_text(encoding="utf-8"))]
     assert not found, "Every check box is .ui-checkbox (DESIGN 'Controls and editable choices'):\n" + "\n".join(found)
 
     assert checkbox_inputs_outside_the_control('html = `<input type="checkbox" data-x>`;')
+    assert checkbox_inputs_outside_the_control('html = `<input ${n > 0 ? "checked" : ""} type="checkbox">`;')
     assert checkbox_inputs_outside_the_control("const box = document.createElement('input');\nbox.type = 'checkbox';")
     assert not checkbox_inputs_outside_the_control('html = `<input class="ui-checkbox" type="checkbox" data-x>`;')
+    assert not checkbox_inputs_outside_the_control('html = `<input ${n > 0 ? "checked" : ""} class="ui-checkbox" type="checkbox">`;')
     assert not checkbox_inputs_outside_the_control("const box = document.createElement('input');\nbox.type = 'checkbox';\nbox.className = 'ui-checkbox';")
     assert not checkbox_inputs_outside_the_control('html = `<input type="checkbox" role="switch" data-x>`;')
+    assert not checkbox_inputs_outside_the_control("html = `<input type='checkbox' role='switch'>`;")
     assert checkbox_inputs_outside_the_control('html = `<input class="ui-checkbox" type="radio" name="x">`;')
     assert not checkbox_inputs_outside_the_control('html = `<input class="ui-radio" type="radio" name="x">`;')
 
@@ -465,11 +502,13 @@ def attach_command_tray_rules(sheets):
     """Every rule, in any sheet, whose subject is the terminal command tray itself."""
     return [(name, " ".join(selector.split())) for name, css in sheets.items()
             for selector, _ in re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css))
-            if any(part.strip() == ".harness-attach-command" for part in selector.split(","))]
+            if any(re.search(r"(?:^|[\s>+~])\.harness-attach-command(?::[\w-]+)*$", part.strip())
+                   for part in selector.split(","))]
 
 
 def test_the_terminal_command_tray_is_defined_once():
     sheets = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in first_party_sheets()}
-    assert [name for name, _ in attach_command_tray_rules(sheets)] == ["web/style.css"], attach_command_tray_rules(sheets)
+    assert {name for name, _ in attach_command_tray_rules(sheets)} == {"web/style.css"}, attach_command_tray_rules(sheets)
     assert len(attach_command_tray_rules({"a": ".harness-attach-command { margin: 0; }",
-                                          "b": ".harness-attach-command { padding: 0; }"})) == 2
+                                          "b": ".harness-login-card .harness-attach-command { padding: 0; }"})) == 2
+    assert not attach_command_tray_rules({"a": ".harness-external-terminal > .harness-attach-command-note { margin: 0; }"})
