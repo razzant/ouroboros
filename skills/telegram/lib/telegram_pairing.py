@@ -99,7 +99,9 @@ def saved_api_base(state_dir: Any) -> Optional[str]:
     if not path.is_file():
         return None
     base = str((json.loads(path.read_text(encoding="utf-8")) or {}).get("TELEGRAM_API_BASE") or "").strip()
-    return base.rstrip("/") if re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:]+/?", base) else None
+    # The poller's own rule (telegram_settings.validate_telegram_api_base): an origin with no path, query, fragment
+    # or credentials; a service name such as telegram_bot_api:8081 or an international domain included.
+    return base.rstrip("/") if re.fullmatch(r"https?://[^/\s?#@]+/?", base) else None
 
 
 async def bind_unbound(api, client, update: dict, chat_id: int, lang: str) -> bool:
