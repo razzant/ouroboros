@@ -696,3 +696,41 @@ def test_the_schema_weight_shown_is_the_weight_loaded(registry):
     full, _ = connection_views(registry, helper=False)
     gitlab = [s for s in registry.schemas() if s["function"]["name"].startswith("mcp_gitlab__")]
     assert f"call schemas ≈{tool_schema_tokens(gitlab)} tokens" in full
+
+
+# sha256 of every map form of ``tests._memory_scale_fixture.mcp_registry``'s default shape (twelve servers with long,
+# multi-line, quoted instructions), recorded from the code of origin/ouroboros 4fe3767cf: (Low/Max, Nano) per actor.
+# Nano and Low/Max carry every server's instructions; only a reviewed change of the map renews them.
+BASE_MAPS = {
+    "main": ("0ce5d9ce2720fa8edd72f1c37a12fd2b608bfb9295eeb41bb7e64efb4cc14ec3",
+             "9bb5353d77ee63d27272f85ae7dc120b240cf38cf8fa583b4ca5c677b0ed424a"),
+    "helper": ("074690c70289ff33ec5ccec5993c912b76490a36bf409cd4fa07be8ab6710322",
+               "9bb5353d77ee63d27272f85ae7dc120b240cf38cf8fa583b4ca5c677b0ed424a"),
+    "main without list_available_tools": ("736e5f68b13c83ba613b8344b17c3d8b8ceee450699a758cbb201b9a59674bfa",
+                                          "1342a4ac838fcd97e50cf408e3e59e317c701d53cdfd7bf3132efe75a1d3ee6c"),
+    "helper without list_available_tools": ("309f90aef1c60c55966ee12049d1391392e87c8e0863b6c22230493c035df664",
+                                            "1342a4ac838fcd97e50cf408e3e59e317c701d53cdfd7bf3132efe75a1d3ee6c"),
+    "main without enable_tools": ("832153e17d97d7c2e129fa3b8f3ba38ac4bf2030ff71aa52258e97aaf696bb94",
+                                  "d77935f1034f31afc3e7306b83b29cbba2b3ccc519e42fb23640fd56b788cee6"),
+    "helper without enable_tools": ("e10c13c10791a6f5dc10ce6d4118bb4c821dcb38667918a72164109cf890806f",
+                                    "d77935f1034f31afc3e7306b83b29cbba2b3ccc519e42fb23640fd56b788cee6"),
+}
+
+
+def test_every_map_of_twelve_servers_with_instructions_keeps_its_recorded_bytes(tmp_path, monkeypatch):
+    """Low, Max and Nano maps, for Main and a helper, with and without each selector, are byte for byte the recorded
+    ones, and every server's instructions are in each of them."""
+    import hashlib
+
+    from tests import _memory_scale_fixture as scale
+
+    registry, guides = scale.mcp_registry(tmp_path / "mcp", monkeypatch)
+    seen = {}
+    for disabled in (None, "list_available_tools", "enable_tools"):
+        registry._ctx.task_contract = {"disabled_tools": [disabled]} if disabled else {}
+        for actor in ("main", "helper"):
+            maps = connection_views(registry, helper=actor == "helper")
+            seen[actor + (f" without {disabled}" if disabled else "")] = tuple(
+                hashlib.sha256(text.encode("utf-8")).hexdigest() for text in maps)
+            assert all(" ".join(guide.split()) in text for text in maps for guide in guides.values())
+    assert seen == BASE_MAPS

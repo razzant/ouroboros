@@ -1,4 +1,5 @@
 """The card gallery replays current producer bytes, not hand-maintained wire shapes."""
+import json
 import subprocess
 import sys
 
@@ -19,6 +20,16 @@ def test_card_gallery_recording_matches_producers():
         "<dependency-python> -m scripts.generate_card_gallery_fixture`"
     )
     assert FIXTURE.stat().st_mtime_ns == modified and FIXTURE.read_bytes() == recorded
+
+
+def test_every_recorded_room_reads_the_history_its_producers_wrote():
+    """A task card's room replays what its producers stored. A read refused as still importing (an older body's export
+    left in a root no import ever reads) would record an empty room that the stand then draws as a state."""
+    corpus = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    for group in ("task_card", "share"):
+        for name, case in corpus[group].items():
+            for answer in case["history"]:
+                assert "error" not in answer and answer["messages"], (group, name, answer.get("reason_code"))
 
 
 @pytest.mark.parametrize(("root", "alias", "descendant"), [

@@ -22,7 +22,7 @@ import logging
 import pathlib
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
@@ -55,6 +55,15 @@ def _write_marker(drive_root: pathlib.Path, **fields: Any) -> Dict[str, Any]:
 
 
 write_marker = _write_marker  # the setup's connection cards keep their consent and outcome here too
+
+
+def update_marker(drive_root: pathlib.Path, change: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
+    """One read-change-write of the marker under its lock: ``change`` reads the current marker, returns fields to set."""
+    with _MARKER_LOCK:
+        current = read_marker(drive_root)
+        marker = {**current, **change(current), "schema_version": 1, "updated_at": utc_now_iso()}
+        atomic_write_json(marker_path(drive_root), marker)
+    return marker
 
 
 def _offer(drive_root: pathlib.Path, rows: List[Dict[str, Any]], repo_dir: Optional[pathlib.Path],

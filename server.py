@@ -341,8 +341,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         is_external_transport = source != "web"
         external_identity_present = (not is_external_transport) or (chat_id > 0 and user_id > 0)
         # Emergency Stop Invariant (#1307): the local door stops before any state read,
-        # chat record, state update or reply; an external transport needs a POSITIVELY
-        # bound owner (one lock-free read) and never registers a stranger from an unknown slot.
+        # chat record, state update or reply; an external transport's Panic goes to its door
+        # (``PanicIngress``: a positively bound pair, or a slot observed free) and never registers anyone.
         panic = lowered.startswith("/panic")
         if panic and not is_external_transport:
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)

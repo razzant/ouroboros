@@ -41,7 +41,12 @@ def capacity_case(name):
 
 
 def readers(text):
-    return sorted(set(re.findall(r"row:\d+@[^\s;'\])]+#[a-f0-9]+|memory_read\([^\n]*?\)", text)))
+    """Every exact reader the view prints. The reader's syntax stated once for a block's row addresses
+    (``memory_view_work.row_reader()``, a template naming no room or row) is how they read, not one of them."""
+    from ouroboros.memory_view_work import row_reader
+
+    found = set(re.findall(r"row:\d+@[^\s;'\])]+#[a-f0-9]+|memory_read\([^\n]*?\)", text))
+    return sorted(found - set(re.findall(r"memory_read\([^\n]*?\)", row_reader())))
 
 
 NAMED, BASELINE_HEADING = "## This room (Main [chat_id=1]) ", "## This room (Main) "
