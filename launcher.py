@@ -22,6 +22,12 @@ from contextlib import suppress
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+# Seal-safe imports: the current interpreter needs the flag before project imports;
+# PYTHONDONTWRITEBYTECODE alone only affects later child interpreters. Bundle writes
+# would invalidate a macOS signature and trigger AppTranslocation.
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+
 
 def _rehome_legacy_handoff() -> None:
     """Before package adoption can wait: repair a recognized legacy GUI handoff once."""
@@ -43,12 +49,6 @@ if __name__ == "__main__":
         from ouroboros.launcher_windows_runtime import refuse_while_setup_changes
 
         refuse_while_setup_changes(sys.executable, sys.argv[1:])
-
-# Seal-safe imports: the current interpreter needs the flag before project imports;
-# PYTHONDONTWRITEBYTECODE alone only affects later child interpreters. Bundle writes
-# would invalidate a macOS signature and trigger AppTranslocation.
-sys.dont_write_bytecode = True
-os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 from ouroboros.config import (
     AGENT_SERVER_PORT,
