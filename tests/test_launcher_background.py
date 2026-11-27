@@ -1447,7 +1447,7 @@ def test_desktop_panic_consciousness_confirm_uses_one_native_dialog_and_private_
     basis = "abcdef0123456789abcdef0123456789"
     preview_lines = [
         "Ouroboros will also wake between your messages.",
-        "Panic turned consciousness off: it stays off until you turn it on in the desktop app.",
+        "Panic turned consciousness off.",
         "Nothing starts right now: 2 tasks stopped by Panic stay stopped at this press.",
     ]
     requests_seen = []
