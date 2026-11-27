@@ -13,7 +13,6 @@ import asyncio
 import contextlib
 import json
 import os
-import secrets
 import socket
 import threading
 import time
@@ -23,73 +22,7 @@ import httpx
 import pytest
 
 from ouroboros import config, mcp_client, mcp_oauth, oauth_engine
-from tests.test_mcp_headers_loopback import loopback  # noqa: F401 -- the SSE fixture
-
-
-class _Provider:
-    """The SDK provider interface, in memory, auto-approving (no login page)."""
-
-    def __init__(self, base: str) -> None:
-        self.base, self.clients, self.codes, self.access, self.refresh = base, {}, {}, {}, {}
-        self.counts = {"register": 0, "refresh_ok": 0, "refresh_refused": 0, "revoke": 0}
-
-    async def get_client(self, client_id):
-        return self.clients.get(client_id)
-
-    async def register_client(self, client_info):
-        self.counts["register"] += 1
-        self.clients[client_info.client_id] = client_info
-
-    async def authorize(self, client, params):
-        from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
-
-        code = secrets.token_urlsafe(16)
-        self.codes[code] = AuthorizationCode(
-            code=code, scopes=params.scopes or ["mcp"], expires_at=time.time() + 300, client_id=client.client_id,
-            code_challenge=params.code_challenge, redirect_uri=params.redirect_uri,
-            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly, resource=params.resource)
-        return construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state, iss=self.base + "/")
-
-    async def load_authorization_code(self, client, code):
-        return self.codes.get(code)
-
-    def _issue(self, client_id, scopes):
-        from mcp.server.auth.provider import AccessToken, RefreshToken
-        from mcp.shared.auth import OAuthToken
-
-        access, refresh = secrets.token_urlsafe(16), secrets.token_urlsafe(16)
-        self.access[access] = AccessToken(token=access, client_id=client_id, scopes=scopes,
-                                          expires_at=int(time.time()) + 3600)
-        self.refresh[refresh] = RefreshToken(token=refresh, client_id=client_id, scopes=scopes)
-        return OAuthToken(access_token=access, token_type="Bearer", expires_in=3600, refresh_token=refresh,
-                          scope=" ".join(scopes))
-
-    async def exchange_authorization_code(self, client, code):
-        self.codes.pop(code.code, None)
-        return self._issue(client.client_id, code.scopes)
-
-    async def load_refresh_token(self, client, refresh_token):
-        found = self.refresh.get(refresh_token)
-        if found is None:
-            self.counts["refresh_refused"] += 1
-        return found
-
-    async def exchange_refresh_token(self, client, refresh_token, scopes):
-        from mcp.server.auth.provider import TokenError
-
-        if self.refresh.pop(refresh_token.token, None) is None:  # rotation: each refresh token works once
-            self.counts["refresh_refused"] += 1
-            raise TokenError("invalid_grant", "refresh token already used")
-        self.counts["refresh_ok"] += 1
-        return self._issue(client.client_id, scopes or refresh_token.scopes)
-
-    async def load_access_token(self, token):
-        return self.access.get(token)
-
-    async def revoke_token(self, token):
-        self.counts["revoke"] += 1
-        self.access.pop(token.token, None)
-        self.refresh.pop(token.token, None)
+from tests._mcp_loopback import _Provider, loopback  # noqa: F401 -- the SSE fixture
 
 
 def _serve_authorizing_server(running):
@@ -314,7 +247,7 @@ def test_the_minds_sign_in_hands_the_new_listing_to_the_server_process(signin, m
 
 
 def test_a_bare_401_without_a_bearer_challenge_stays_an_ordinary_error(tmp_path, monkeypatch):
-    from tests.test_mcp_headers_loopback import start_asgi
+    from tests._mcp_loopback import start_asgi
 
     async def bare_401(scope, receive, send):
         if scope["type"] == "http":
@@ -371,7 +304,7 @@ def _mock_as(monkeypatch, tmp_path, *, issuer="https://auth.example", token_scop
             return httpx.Response(200, json=body)
         raise AssertionError(str(request.url))
 
-    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
+    monkeypatch.setattr(oauth_engine, "http_client", lambda **_options: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
     return cfg, metadata, seen
 
 
@@ -490,7 +423,7 @@ def test_two_requests_of_one_event_loop_share_one_refresh_without_blocking_it(mo
         await asyncio.sleep(0.05)
         return httpx.Response(200, json={"access_token": "new-access", "expires_in": 3600})
 
-    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
+    monkeypatch.setattr(oauth_engine, "http_client", lambda **_options: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
 
     async def both():
         return await asyncio.gather(mcp_oauth.current_token(cfg), mcp_oauth.current_token(cfg), return_exceptions=True)
@@ -520,7 +453,7 @@ def test_a_malformed_refresh_keeps_the_grant_and_a_refused_one_asks_for_sign_in(
              "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}}
     for error, kept in (("invalid_request", True), ("invalid_grant", False)):
         mcp_oauth._save(cfg, grant)
-        monkeypatch.setattr(oauth_engine, "http_client", lambda error=error: httpx.AsyncClient(transport=httpx.MockTransport(
+        monkeypatch.setattr(oauth_engine, "http_client", lambda error=error, **_options: httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(400, json={"error": error}))))
         with pytest.raises(httpx.HTTPStatusError if kept else mcp_oauth.MCPAuthRequired):
             asyncio.run(mcp_oauth.current_token(cfg))
@@ -609,7 +542,7 @@ def test_invalid_client_keeps_a_pending_sign_in_of_another_registration(monkeypa
     mcp_oauth._save(cfg, {"tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1}, "pending": pending,
                           "metadata": {"token_endpoint": "https://auth.example/token"},
                           "client": {"client_id": "old-client", "issuer": "https://auth.example"}})
-    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+    monkeypatch.setattr(oauth_engine, "http_client", lambda **_options: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(401, json={"error": "invalid_client"}))))
     with pytest.raises(mcp_oauth.MCPAuthRequired):
         asyncio.run(mcp_oauth.current_token(cfg))
@@ -621,7 +554,7 @@ def test_refresh_refusals_without_a_body_ask_for_sign_in(monkeypatch, tmp_path, 
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
     mcp_oauth._save(cfg, {"tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
                           "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}})
-    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+    monkeypatch.setattr(oauth_engine, "http_client", lambda **_options: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(status, **({"json": {"error": error}} if error else {})))))
     with pytest.raises(mcp_oauth.MCPAuthRequired) as caught:
         asyncio.run(mcp_oauth.current_token(cfg))
@@ -781,7 +714,7 @@ def test_a_repeated_sign_in_refusal_keeps_the_open_states_start_and_a_later_one_
     mcp_oauth._save(cfg, {**_file(cfg), "tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
                           "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"},
                           "sign_in": {"state": "signed_in", "since": "2026-11-19T21:47:00+00:00"}})
-    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+    monkeypatch.setattr(oauth_engine, "http_client", lambda **_options: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(400, json={"error": "invalid_grant"}))))
     with pytest.raises(mcp_oauth.MCPAuthRequired):
         asyncio.run(mcp_oauth.current_token(cfg))
@@ -855,7 +788,7 @@ def test_an_open_sign_in_requirement_written_before_starts_were_kept_reads_as_un
     mcp_oauth._save(cfg, {**upgraded, "tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
                           "metadata": {"token_endpoint": "https://auth.example/token"},
                           "sign_in": {"state": "signed_in", "since": "2026-11-20T07:00:00+00:00"}})
-    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+    monkeypatch.setattr(oauth_engine, "http_client", lambda **_options: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(400, json={"error": "invalid_grant"}))))
     with pytest.raises(mcp_oauth.MCPAuthRequired):
         asyncio.run(mcp_oauth.current_token(cfg))

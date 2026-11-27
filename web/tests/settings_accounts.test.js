@@ -709,12 +709,15 @@ test('a stored key\'s row says only whether a value is saved: no echo, no "was",
     assert.equal(row('GITHUB_TOKEN').querySelector('[data-setting-undo]'), null);
     assert.equal(row('GITHUB_TOKEN').querySelector('[data-setting-control]').value, '', 'the field is emptied');
     assert.equal(row('GITHUB_TOKEN').querySelector('[data-secret-field]').hidden, true, 'and put away once the write landed');
-    // The plain row beside it keeps the row helper's words: what it was, and Undo.
+    // The plain row beside it keeps the old free text in raw Details, and Undo separately.
     const repo = row('GITHUB_REPO').querySelector('[data-setting-control]');
     repo.value = 'studio/other';
     await row('GITHUB_REPO').parentElement.fire('change', { target: repo });
     await settle();
-    assert.equal(row('GITHUB_REPO').querySelector('[data-setting-result]').textContent, 'Saved · applies to new tasks · was studio/home · Undo');
+    const repoResult = row('GITHUB_REPO').querySelector('[data-setting-result]');
+    assert.doesNotMatch(repoResult.textContent, /was studio\/home/);
+    assert.equal(repoResult.querySelector('.ui-result-details')?.textContent, 'studio/home');
+    assert.ok(repoResult.querySelector('[data-setting-undo]'));
     // Remove asks first; declined, nothing is sent; confirmed, the key is cleared and the row offers Add.
     const sent = world.posts().length;
     world.state.answer = false;

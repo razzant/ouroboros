@@ -627,7 +627,8 @@ async def _http_with_guards(cfg: MCPServerConfig):
     Cache-Control on its stream, while its message POSTs keep a configured Accept or
     Content-Type. URL userinfo (Cyber only) makes the HTTP client send Basic credentials
     in Authorization instead of a configured value. A server without saved credentials
-    carries the stored sign-in bearer (``mcp_oauth.StoredBearer``).
+    carries the stored sign-in bearer (``mcp_oauth.StoredBearer``). The guard reads the
+    owner's Extra certificate bundle once (``mcp_headers.reads_trust``).
     """
     from ouroboros.mcp_oauth import StoredBearer, applies
 
@@ -961,7 +962,6 @@ class MCPManager:
         self._settings_fingerprint = ""
         self._settings_mtime_ns: Optional[int] = None
         self.discovery = Discovery(self)
-        self._connection_fingerprint = ""
         self._listing_locks: dict[str, threading.Lock] = {}
         self._catalog_reader = mcp_catalog.CatalogReader()
         self._lister_pid: Optional[int] = None
@@ -1074,20 +1074,15 @@ class MCPManager:
         return unlisted
 
     def configuration_changed(self, settings: dict, *, reason: str) -> None:
-        """Server-owned boot/save/mtime event: prune, then schedule the latest pass."""
+        """Server-owned boot/save/mtime event: prune, then schedule what it owes (``Discovery.owed``)."""
         with self._lock:
             self.reconfigure(settings)
             configs = [rt.config for rt in self._servers.values()]
             mcp_catalog.prune_catalogs(configs)
             mcp_oauth.prune(configs)  # a removed server or a changed address loses its sign-in too
-            connections = self._fingerprint(settings, skill_settings=False)
-            values_only = connections == self._connection_fingerprint
-            self._connection_fingerprint = connections
+            owed = self.discovery.owed(settings, self._listing_fingerprint, configs if self._enabled else [])
             self._listing_fingerprint = self._settings_fingerprint
-        if values_only:
-            self.discovery.refresh(reason, missing_only=True)
-        else:
-            self.refresh_all_background(reason=reason)
+        self.discovery.schedule(reason, owed)
 
     def listed(self, settings: Dict[str, Any]) -> bool:
         """Whether this process's last server-owned configuration event already covered ``settings``."""

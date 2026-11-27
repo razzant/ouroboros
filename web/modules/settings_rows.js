@@ -203,7 +203,9 @@ export const ROWS = [
     { id: 'OUROBOROS_EXTRA_CA_BUNDLE', keys: ['OUROBOROS_EXTRA_CA_BUNDLE'], page: 'computer/advanced', fold: false,
         name: 'Extra certificate bundle', meta: 'A PEM file on this computer, for a network with its own authority.',
         more: 'Only for a network whose certificates the default bundle does not trust: a proxy that inspects TLS, or an endpoint '
-            + 'behind a national authority. Leave empty unless a provider fails with a certificate error.',
+            + 'behind a national authority. Model providers and HTTPS MCP servers, including their sign-in, use it. Leave empty unless '
+            + 'one of them fails with a certificate error. In Settings, Test and sign-in use a saved path immediately. Running tasks '
+            + 'keep the path they started with.',
         control: { kind: 'text', empty: 'none' }, aliases: ['Extra CA bundle', 'Extra CA Certificates', 'PEM', 'certificate'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'computer:reset', keys: [], page: 'computer/about', fold: true, name: 'Reset all data',
