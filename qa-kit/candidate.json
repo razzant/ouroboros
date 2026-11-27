@@ -1,0 +1,11 @@
+{
+  "candidate_sha": "88d6d83cdd7898cccc94ea8b45730a161ebf3f08",
+  "note": [
+    "candidate_sha: the 40-character commit of the REVIEWED candidate (the product under test, with the corrected installer). It must be fetchable by that SHA from this repository. An empty or malformed value stops both accept legs before any build. The opt-in installer smoke reads no pin from here either: it consumes the Setup the visible leg packs from this candidate.",
+    "Its VERSION may be a development marker (X.Y.Z-alpha.0): each accept job builds from a local carrier commit that differs only in VERSION, records both SHAs in projection.json, and the candidate's own unchanged release guard decides.",
+    "Setup is packed from the candidate's ONE built dist ZIP, extracted (pack_windows_setup.ps1 refuses a raw PyInstaller dist): the build must leave exactly one Ouroboros-*-windows-x64.zip in dist/, and each leg records that ZIP's digest.",
+    "The old release the migration leg starts from is not named here: it is pinned by digest in run.py (OLD_RELEASE) and never replaced by this candidate.",
+    "The temporary verification branch qualification/windows-packaging-acceptance holds qa-kit/ (this file), explorer-qa/ and the temporary .github/workflows/desktop-window.yml, on a tree whose .gitattributes keeps LF.",
+    "It is started only by hand: gh workflow run desktop-window.yml --ref qualification/windows-packaging-acceptance -f verified_ref_sha=<head of that branch>. verified_ref_sha is the head of the verification branch, not candidate_sha. The optional smoke_installer=true input adds, in the visible leg only and before its acceptance run, the candidate's own scripts/smoke_windows_setup.ps1 once, with -Compiler."
+  ]
+}
