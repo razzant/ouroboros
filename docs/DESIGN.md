@@ -417,6 +417,28 @@ label, control and optional `.ui-field-help`. A placeholder is an example,
 never the field's only name. Help and validation belong to that field without
 changing the alignment of neighboring controls and their actions.
 
+**Three choices, three controls.** Pick one is `.ui-radio`, tick any is
+`.ui-checkbox`, an on/off that acts at once is `.ui-switch`. Every check box is
+`.ui-checkbox`, and it is round: an input the product draws, with one size
+(`--checkbox-size`), one shape (`--checkbox-radius`, the single value that
+would make every box square), one white mark on the accent (a white bar on the
+accent when mixed), an edge that holds 3:1 on its surface, one focus ring and
+one disabled look. Under a finger the glyph keeps its size, and a person can
+reliably select each box or radio by a target of its own at least the touch
+minimum tall: the label row that holds it, or the space a lone box keeps around
+it, never a strip of its neighbour. A box stands one `--checkbox-gap` from
+its words, which wrap beside it, and sits on their first line. A form's boxes,
+a menu row's, the Panic list's and setup's are inputs; a share part's box and
+an authored task's mark, in the chat and in Share's part picker, are drawn
+marks wearing the same class, the task's state apart from the part's
+inclusion. The exported share card draws a task as document content. Under
+forced colours an input is the system's own box and a drawn mark takes the
+system's colours. A radio is the same glyph, always a circle, a dot when
+chosen. A page places a box and its words, never sizes, recolours or reshapes
+it, and no style sheet styles a checkbox or radio input of its own. New
+project's Initialize Git says what it does in a help line under the box,
+readable before the choice on every surface.
+
 **A search field has one look across the app**: a capsule a row high in the composer field's material, the search
 glyph at its start and a placeholder that names what it searches (`Find a project`, `Search settings`, `Find an
 installed skill`), no hairline; an action that belongs beside it (the sidebar's +) stands beside it at the same

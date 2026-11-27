@@ -1023,7 +1023,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .chat-quiz-close:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 /* An owner-required action is a System message: the task, one sentence, the task's own controls. */
 .owner-action-body { display: flex; flex-direction: column; gap: var(--space-2); }
-.owner-action-reason { font-size: var(--type-meta); color: var(--text-meta); }
+.owner-action-reason { font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 /* The works Panic stopped (panic_recovery.js): Choose all/none beside the count, then one row per work, its box on the
    name's first line, its place and its last answer under the name, the Stop… its card had at the row's end; the one
    Resume follows the list. The whole label is the box's, so a finger reaches it anywhere, and a tap answers with the
@@ -1043,15 +1043,15 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .panic-recovery-acts:empty { display: none; }
 .panic-recovery-pick {
     display: grid;
-    grid-template-columns: 14px minmax(0, 1fr);
-    column-gap: var(--space-2);
+    grid-template-columns: var(--checkbox-size) minmax(0, 1fr);
+    column-gap: var(--checkbox-gap);
     row-gap: 2px;
     align-items: start;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
 }
 .panic-recovery-pick.is-locked { cursor: default; }
-.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); }
 /* The words keep their column when a row that came back has no box. */
 .panic-recovery-pick > :not(.ui-checkbox) { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
 .panic-recovery-name { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); font-weight: 500; }
@@ -2141,11 +2141,13 @@ html[data-layout="stack"] .chat-find {
 }
 .msg-provenance {
     font-size: var(--type-meta);
+    line-height: var(--line-meta);
     color: var(--text-meta);
     margin-top: var(--space-2);
 }
 :is(.chat-load-older-note, .chat-history-gap) {
     font-size: var(--type-meta);
+    line-height: var(--line-meta);
     color: var(--text-meta);
     text-align: center;
     max-width: 460px;
@@ -4288,32 +4290,15 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 .chat-bubble .message li.task-list-item {
     display: flex;
     align-items: flex-start;
-    gap: var(--space-2);
+    gap: var(--checkbox-gap);
+    --checkbox-line: 1lh;
     margin-inline-start: calc(-1 * var(--space-5));
     list-style: none;
 }
 .ui-rich-content .task-list,
 .chat-bubble .message .task-list { list-style: none; }
-.md-checkbox {
-    display: inline-flex;
-    width: 18px;
-    height: 18px;
-    flex: 0 0 18px;
-    align-items: center;
-    justify-content: center;
-    margin-top: 1px;
-    border: 1px solid var(--field-border);
-    border-radius: var(--radius-inner);
-    background: var(--surface-tray);
-    color: var(--status-ok-fg);
-    font-size: var(--type-body);
-    font-weight: 700;
-    line-height: 1;
-}
-.md-checkbox.is-checked {
-    border-color: var(--status-ok-border);
-    background: var(--status-ok-bg);
-}
+/* A task's mark is the shared check box (ui.css .ui-checkbox), inert: it sits on the item's first line (--checkbox-line). */
+.md-checkbox { cursor: inherit; }
 .md-quote {
     display: block;
     margin: var(--space-3) 0;
@@ -6121,10 +6106,10 @@ body.keyboard-open .model-sheet[data-sheet="bottom"] {
 .chat-model-sheet-row .model-source-mark { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
 .chat-model-sheet-row b { flex: 1 1 12ch; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
 .chat-model-sheet-row span { flex: 0 1 auto; max-width: 100%; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
-.chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); }
+.chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* The sheet's lists (owner 10.11, «5. A», «6. A»): what is not on Main now, each row a name over its facts with
    its own tick; nothing is ticked until the owner ticks it. After the change the same rows say each one's result. */
-.chat-model-sheet-sub { margin: var(--space-3) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); }
+.chat-model-sheet-sub { margin: var(--space-3) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .chat-model-off-list { margin: 0 calc(-1 * var(--space-2)); padding: 0; list-style: none; }
 .chat-model-off {
     display: grid;
@@ -6139,8 +6124,8 @@ label.chat-model-off { cursor: pointer; }
     label.chat-model-off:hover { background: var(--menu-item-hover); }
 }
 .chat-model-off-name { min-width: 0; overflow: hidden; font-size: var(--type-body); text-overflow: ellipsis; white-space: nowrap; }
-.chat-model-off-meta { grid-column: 1; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
-.chat-model-off .ui-checkbox { grid-row: 1 / span 2; grid-column: 2; width: 18px; height: 18px; }
+.chat-model-off-meta { grid-column: 1; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
+.chat-model-off .ui-checkbox { grid-row: 1 / span 2; grid-column: 2; }
 .chat-model-off[data-result="refused"] .chat-model-off-meta { color: var(--status-error-fg); }
 
 /* A work's model on its card (card_model.js; DESIGN "A work's model on its card"): the first fact of the meta line,
@@ -6320,26 +6305,6 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
     color: var(--text-secondary);
 }
 
-
-.local-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding-bottom: 8px;
-    white-space: nowrap;
-}
-.local-toggle input[type="checkbox"] {
-    accent-color: var(--accent);
-    width: 14px;
-    height: 14px;
-    cursor: pointer;
-}
-.local-toggle[title] {
-    transition: color 0.2s;
-}
 
 .form-field input[type="range"] {
     -webkit-appearance: none;
@@ -6992,15 +6957,15 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 .storage-free-groups { display: grid; margin: 0; padding: 0; list-style: none; }
 .storage-free-group {
     display: grid;
-    grid-template-columns: 14px minmax(0, 1fr) auto;
-    column-gap: var(--space-2);
+    grid-template-columns: var(--checkbox-size) minmax(0, 1fr) auto;
+    column-gap: var(--checkbox-gap);
     row-gap: 2px;
     align-items: baseline;
     padding-block: var(--space-2);
     border-top: 1px solid var(--divider);
 }
 /* The checkbox sits on the name's first line, also when the name wraps. */
-.storage-free-group > .ui-checkbox { grid-column: 1; grid-row: 1; align-self: start; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+.storage-free-group > .ui-checkbox { grid-column: 1; grid-row: 1; align-self: start; margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); }
 .storage-free-label {
     grid-column: 2;
     min-width: 0;
@@ -7013,6 +6978,10 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 }
 .storage-free-size { grid-column: 3; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); white-space: nowrap; }
 .storage-free-why { grid-column: 2 / -1; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* Under a finger the row's name (the box's label) is the touch minimum tall: the row is the target, never a neighbour. */
+@media (pointer: coarse) {
+    .storage-free-group > .storage-free-label { min-height: var(--touch-target-min); }
+}
 /* Rows of a read-only list: no checkbox column, the name is plain text. */
 .storage-free-groups.is-single > .storage-free-group { grid-template-columns: minmax(0, 1fr) auto; }
 .storage-free-groups.is-single .storage-free-label { grid-column: 1; cursor: auto; }
@@ -9883,13 +9852,18 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 }
 
 /* The working folder is a field like the name (U023): its label, its options as one wrapping row of the shared
-   crimson-accent radios (ui.css .ui-checkbox), no outlined box, and one line under them for the chosen option. */
+   crimson-accent radios (ui.css .ui-radio), no outlined box, and one line under them for the chosen option. */
 .new-project-sources { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 .new-project-sources > legend { padding: 0; margin-bottom: var(--space-1); color: var(--text-meta); font-size: var(--type-body); }
 .new-project-source-choices { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); color: var(--text-primary); }
-.new-project-source-choices > label { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
+.new-project-source-choices > label { display: inline-flex; align-items: center; gap: var(--checkbox-gap); cursor: pointer; }
 
 .new-project-selected-target { overflow-wrap: anywhere; }
+/* The folder's browser and the Git choice under it are two parts of the field, parted like the dialog's fields. */
+.new-project-attach { display: flex; flex-direction: column; gap: var(--space-3); }
+.new-project-attach[hidden] { display: none; }
+/* The Git choice's name reads like the folder choices above it; its help line stays the field's help. */
+.new-project-attach .local-toggle { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 
 .new-project-browser {
     border: 1px solid var(--divider);
@@ -9948,6 +9922,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     background: var(--status-warn-bg);
     color: var(--status-warn-word, var(--text-primary));
     font-size: var(--type-meta);
+    line-height: var(--line-meta);
     margin: 0;
 }
 
@@ -10544,16 +10519,28 @@ html[data-layout="stack"] .project-panel {
     display: inline-block;
     user-select: all;
 }
+/* The terminal command's parts (what to do, the shell's name, the command, Copy) stand apart like the card's own
+   parts, in the settings pages and in setup alike; the command spans the card. */
+.harness-external-terminal { align-self: stretch; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); }
+.harness-external-terminal > .harness-attach-command { align-self: stretch; }
+.harness-advanced > .harness-attach-command { margin: var(--space-2) 0; }
+/* The command itself: one tray in Settings and in setup (onboarding.css adds none), selectable whole, wrapping
+   inside the card, left to right in any interface direction. */
 .harness-attach-command {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    font-size: var(--type-meta);
-    padding: 8px 10px;
-    border-radius: 8px;
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-inner);
     background: var(--surface-tray);
-    overflow-x: auto;
-    user-select: all;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
     white-space: pre-wrap;
-    word-break: break-all;
+    overflow-wrap: anywhere;
+    direction: ltr;
+    unicode-bidi: isolate;
+    text-align: left;
+    user-select: all;
 }
 /* Link-first login card (no-terminal UX): the sign-in link is the prominent
    action; copy stays an explicit secondary affordance. */
@@ -11559,6 +11546,8 @@ html[data-layout="stack"] .project-panel {
 }
 
 .message-share-marker:empty { display: none; }
+/* An authored task's own state: the shared inert mark (ui.css .ui-checkbox), on the line of the words. */
+.message-share-task { vertical-align: -3px; cursor: inherit; }
 
 /* Exact words are selectable inside the preview; a part's own words start where an item's marker does. */
 .message-share-words {
@@ -11618,34 +11607,10 @@ html[data-layout="stack"] .project-panel {
     border-top: 1px solid var(--divider);
 }
 
-/* One checkbox look for every part of the list — the app's own checkbox square (.md-checkbox's recipe: 18px,
-   the field's border, the inner radius, the tray fill), whether the control is a verbatim excerpt's own button
-   or a plain row's aria-hidden mirror. A mixed list keeps one affordance language: the empty box always, the
-   mark only when the part is chosen; the row keeps its hover and its chosen wash (the faint crimson one). */
-.message-share-check {
-    grid-column: 3;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    box-sizing: border-box;
-    width: 18px;
-    height: 18px;
-    min-width: 18px;
-    margin-top: 1px;
-    padding: 0;
-    border: 1px solid var(--field-border);
-    border-radius: var(--radius-inner);
-    background: var(--surface-tray);
-    color: var(--tone-crimson-word);
-}
-/* The chosen state lives on the plain row or the verbatim button, wherever the words put it (message_share.js). */
-.message-share-part[aria-checked="true"] > .message-share-check > svg,
-button.message-share-check[aria-checked="true"] > svg { opacity: 1; }
-.message-share-part[aria-checked="false"] > .message-share-check > svg,
-button.message-share-check[aria-checked="false"] > svg { opacity: 0; }
-button.message-share-check { cursor: pointer; }
-/* The bare checkbox takes the same focus ring as the rows around it (ui.css "One control, three tones"). */
-button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* Every part of the list wears the shared check box (ui.css .ui-checkbox), whether it is a verbatim excerpt's own
+   button or a plain row's aria-hidden mirror; the chosen state lives where the words put it (message_share.js). The
+   row keeps its hover and its chosen wash (the faint crimson one). */
+.message-share-check { grid-column: 3; margin-top: 1px; }
 
 .message-share-foot {
     display: flex;

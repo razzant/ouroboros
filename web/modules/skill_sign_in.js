@@ -315,7 +315,7 @@ export function signInEditorHtml(service, editor, pageHost = '') {
     const name = escapeHtml(`sign-in-client-${service.skill}-${service.service}`);
     const radios = clients.map((client) => {
         const source = clientSource(client);
-        return `<label class="ui-field ui-field-inline"><input class="ui-checkbox" type="radio" name="${name}" value="${escapeHtml(client.id)}"${
+        return `<label class="ui-field ui-field-inline"><input class="ui-radio" type="radio" name="${name}" value="${escapeHtml(client.id)}"${
             client.id === draft.client ? ' checked' : ''}> <span>${clientLine(client)}<span data-sign-in-suggestion="${escapeHtml(client.id)}">${
                 suggestion(pick, client.id)}</span>${source ? ` · ${source}` : ''}</span></label>`;
     }).join('');
@@ -363,7 +363,7 @@ export function clientFormHtml(service, form = {}, returnAddress = '') {
     const input = (key, type, value = '', extra = '') => `<input class="ui-control" type="${type}" data-client-field="${key}" value="${escapeHtml(value)}" autocomplete="${
         type === 'password' ? 'new-password' : 'off'}" spellcheck="false"${extra}>`;
     const field = (label, control, help = '') => `<label class="ui-field"><span>${label}</span>${control}${help ? `<span class="ui-field-help">${help}</span>` : ''}</label>`;
-    const radio = (value, checked, label) => `<label class="ui-field ui-field-inline"><input class="ui-checkbox" type="radio" name="${name}" value="${value}"${checked ? ' checked' : ''}> ${label}</label>`;
+    const radio = (value, checked, label) => `<label class="ui-field ui-field-inline"><input class="ui-radio" type="radio" name="${name}" value="${value}"${checked ? ' checked' : ''}> ${label}</label>`;
     const source = clientSource(form);
     const credentials = form.id && form.source && form.source !== 'owner'
         ? `<p class="ui-field-help">${html('other_credentials', 'Add a separate client to use a different client ID or secret.')}</p>`

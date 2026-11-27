@@ -303,3 +303,241 @@ def test_scroller_edges_do_not_gain_opaque_positioned_descendants():
         .scroll-fade-y .quiet { position: sticky; top: 0; background: transparent; }
     """
     assert not positioned_opaque_scroller_descendants(allowed), "composer, table heads and transparent edges stay allowed"
+
+
+# Every check box is the shared .ui-checkbox and every radio the shared .ui-radio (DESIGN "Controls and editable
+# choices", owner decision 27.11.2026): their size, shape, fill, mark and border live only in ui.css. A page places a
+# box; it never draws one.
+CHECKBOX_PAINT = re.compile(r"(?:^|[;{\s])(?:(?:min-|max-)?(?:width|height)|(?:min-|max-)?(?:inline|block)-size|border[\w-]*"
+                            r"|background[\w-]*|accent-color|appearance|-webkit-appearance|outline[\w-]*|box-shadow|color"
+                            r"|(?:-webkit-)?mask[\w-]*)\s*:", re.I)
+CHECKBOX_SUBJECT = re.compile(r"\[type=[\"']?(?:checkbox|radio)|\.ui-checkbox|\.ui-radio|\.md-checkbox|\.message-share-check|\.message-share-task", re.I)
+
+
+def checkbox_paint_outside_the_control(css):
+    """Rules of a page sheet that target a check box and paint it, or style a checkbox input by its type."""
+    found = []
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css)):
+        target = re.sub(r":not\((?:[^()]|\([^()]*\))*\)", "", selector)
+        if re.search(r"\[type=[\"']?(?:checkbox|radio)", target, re.I) or (CHECKBOX_SUBJECT.search(target) and CHECKBOX_PAINT.search(body)):
+            found.append(" ".join(selector.split()))
+    return found
+
+
+def shape_problems(ui_css):
+    """The check box's shape is the one token, whatever its value; a radio is a circle whatever the token says."""
+    rules = re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(ui_css))
+    found = []
+    for selector, body in rules:
+        radius = re.search(r"border-radius:\s*([^;]+);", body)
+        if not radius or not re.search(r"\.ui-(?:checkbox|radio)\b", selector):
+            continue
+        names = [part.strip() for part in selector.split(",")]
+        value = radius[1].strip()
+        if any(re.fullmatch(r"\.ui-radio", name) for name in names) and len(names) == 1:
+            if value != "50%":
+                found.append(f"a radio is shaped {value}")
+        elif value != "var(--checkbox-radius)":
+            found.append(f"{' '.join(selector.split())} shapes the box {value}, not the one token")
+    if not any(re.fullmatch(r"\s*\.ui-radio\s*", sel) and re.search(r"border-radius\s*:\s*50%\s*(?:;|$)", body)
+               for sel, body in rules):
+        found.append("no rule keeps the radio round on its own")
+    return found
+
+
+def test_only_the_shared_control_draws_a_check_box():
+    sheets = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in first_party_sheets()}
+    found = [f"{name}: {rule}" for name, css in sheets.items() if name != "web/ui.css"
+             for rule in checkbox_paint_outside_the_control(css)]
+    assert not found, "A page places a check box, never sizes, recolours or reshapes it:\n" + "\n".join(found)
+    ui = without_comments(sheets["web/ui.css"])
+    shared = [" ".join(body.split()) for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", ui)
+              if {part.strip() for part in sel.split(",")} == {".ui-checkbox", ".ui-radio"}]
+    assert len(shared) == 1, "one base rule draws both"
+    assert "border-radius: var(--checkbox-radius);" in shared[0] and "width: var(--checkbox-size);" in shared[0]
+    assert len(re.findall(r"--checkbox-radius:", ui)) == 1, "one token flips every box between round and square"
+    assert shape_problems(ui) == [], shape_problems(ui)
+
+    assert checkbox_paint_outside_the_control('.local-toggle input[type="checkbox"] { cursor: pointer; }')
+    assert checkbox_paint_outside_the_control(".x .ui-checkbox { width: 18px; }")
+    assert checkbox_paint_outside_the_control(".md-checkbox { border-radius: 4px; }")
+    assert not checkbox_paint_outside_the_control(".x > .ui-checkbox { grid-column: 1; margin-top: 2px; }")
+    assert checkbox_paint_outside_the_control('.x input[type="radio"] { margin: 0; }')
+    assert not checkbox_paint_outside_the_control("input:not(.ui-control):not(.ui-checkbox) { border: 1px solid; }")
+    good = ".ui-checkbox, .ui-radio { border-radius: var(--checkbox-radius); }\n.ui-radio { border-radius: 50%; }"
+    assert shape_problems(good) == [] and shape_problems(good.replace("var(--checkbox-radius)", "50%"))
+    assert shape_problems(".ui-checkbox, .ui-radio { border-radius: var(--checkbox-radius); }"), "radios follow the token"
+    assert shape_problems(good + "\n.ui-checkbox:checked { border-radius: 4px; }")
+
+
+FORCED_SYSTEM_COLOUR = re.compile(r"^(?:Canvas|CanvasText|Highlight|HighlightText|ButtonText|ButtonFace|ButtonBorder|"
+                                  r"LinkText|GrayText|Field|FieldText|Mark|MarkText|AccentColor|AccentColorText)$")
+
+
+def forced_mark_problems(ui_css):
+    """Inside forced colours, a drawn check box that opts out of the user's palette paints only in system colours, and
+    its edge, its ticked fill and its tick are all given (unchecked and checked both show)."""
+    css = without_comments(ui_css)
+    found, given = [], set()
+    for block in re.findall(r"@media \(forced-colors: active\) \{((?:[^{}]*\{[^{}]*\})*)\s*\}", css):
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", block):
+            if ".ui-checkbox" not in selector or "input" in selector.split(":not")[0].split(".")[0]:
+                continue
+            for prop, value in re.findall(r"(border-color|background-color|background)\s*:\s*([^;]+);", body):
+                if not FORCED_SYSTEM_COLOUR.match(value.strip()):
+                    found.append(f"{' '.join(selector.split())} {prop}: {value.strip()}")
+                given.add(("::before" in selector, "checked" in selector, prop.split("-")[0]))
+    for need in [(False, False, "border"), (False, True, "background"), (True, False, "background")]:
+        if need not in given:
+            found.append(f"forced colours give no {need}")
+    if "forced-color-adjust: none" in css and not given:
+        found.append("a drawn mark leaves the palette without system colours")
+    # The edge differs from the surface under it, and the tick from the ticked fill (CanvasText on Canvas, HighlightText
+    # on Highlight): a system colour on its own colour is the 1:1 mark again.
+    colours = {}
+    for block in re.findall(r"@media \(forced-colors: active\) \{((?:[^{}]*\{[^{}]*\})*)\s*\}", css):
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", block):
+            if ".ui-checkbox:not(input)" not in selector:
+                continue
+            state = "tick" if "::before" in selector else "checked" if "checked" in selector else "unchecked"
+            for prop, value in re.findall(r"(border-color|background-color|background)\s*:\s*([^;]+);", body):
+                colours[(state, prop.split("-")[0])] = value.strip()
+    if colours.get(("unchecked", "border")) and colours.get(("unchecked", "border")) == colours.get(("unchecked", "background")):
+        found.append("the unchecked edge is the colour of its own fill")
+    if colours.get(("tick", "background")) and colours.get(("tick", "background")) == colours.get(("checked", "background")):
+        found.append("the tick is the colour of the ticked fill")
+    return found
+
+
+def test_forced_colours_keep_every_drawn_mark_visible():
+    ui = (WEB / "ui.css").read_text(encoding="utf-8")
+    assert forced_mark_problems(ui) == [], forced_mark_problems(ui)
+    broken = "@media (forced-colors: active) {\n    .ui-checkbox:not(input) { forced-color-adjust: none; }\n}"
+    assert forced_mark_problems(broken), "opting out of the palette with nothing in its place is the 1:1 white-on-white mark"
+    themed = ("@media (forced-colors: active) {\n    .ui-checkbox:not(input) { forced-color-adjust: none; border-color: var(--x);"
+              " background-color: Canvas; }\n    .ui-checkbox:not(input):is(.is-checked) { background-color: Highlight; }\n"
+              "    .ui-checkbox:not(input)::before { background: HighlightText; }\n}")
+    assert forced_mark_problems(themed) and not forced_mark_problems(themed.replace("var(--x)", "CanvasText"))
+    assert forced_mark_problems(themed.replace("var(--x)", "Canvas")), "Canvas on Canvas is the vanished edge"
+    assert forced_mark_problems(themed.replace("var(--x)", "CanvasText").replace("HighlightText", "Highlight"))
+
+
+def checkbox_column_problems(css):
+    """A grid that places a check box in its first column reserves that column at the box's own size."""
+    rules = re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css))
+    owners = {" ".join(sel.split()).split(" > .ui-checkbox")[0] for sel, body in rules
+              if " > .ui-checkbox" in sel and re.search(r"grid-column:\s*1\b", body)}
+    found = []
+    for selector, body in rules:
+        name = " ".join(selector.split())
+        track = re.search(r"grid-template-columns:\s*([^\s;]+)", body)
+        if name in owners and track and track[1] != "var(--checkbox-size)":
+            found.append(f"{name} reserves {track[1]}")
+    return found
+
+
+def test_a_check_box_column_is_the_box_s_own_size():
+    found = [f"{path.name}: {item}" for path in first_party_sheets()
+             for item in checkbox_column_problems(path.read_text(encoding="utf-8"))]
+    assert not found, found
+    rows = ".r { display: grid; grid-template-columns: 14px minmax(0, 1fr); }\n.r > .ui-checkbox { grid-column: 1; }"
+    assert checkbox_column_problems(rows) and not checkbox_column_problems(rows.replace("14px", "var(--checkbox-size)"))
+
+
+CHECKBOX_TYPE = re.compile(r"""type\s*=\s*\\?["'](checkbox|radio)""")
+DOM_CHECKBOX_TYPE = re.compile(r"""(?:\.type\s*=\s*|setAttribute\(\s*['"]type['"]\s*,\s*)['"](checkbox|radio)""")
+SHARED_CLASS = {"checkbox": "ui-checkbox", "radio": "ui-radio"}
+
+
+def tags_in(source, name="input"):
+    """Every `<name …>` tag of a markup string or template, `>` inside a `${…}` expression included (as tagFrom in
+    web/tests/ui_primitives.test.js reads them)."""
+    found, start = [], source.find("<" + name)
+    while start >= 0:
+        depth, index = 0, start
+        while index < len(source):
+            if source.startswith("${", index):
+                depth += 1
+                index += 1
+            elif depth and source[index] == "{":
+                depth += 1
+            elif depth and source[index] == "}":
+                depth -= 1
+            elif not depth and source[index] == ">":
+                found.append(source[start:index + 1])
+                break
+            index += 1
+        start = source.find("<" + name, start + 1)
+    return found
+
+
+SWITCH_ROLE = re.compile(r"""role\s*=\s*\\?["']switch""")
+
+
+def checkbox_inputs_outside_the_control(js):
+    """Check box and radio inputs a source builds without their shared class: an `<input …>` tag, or a DOM-built input
+    whose type is set within three lines of no shared class. A switch (role="switch") is its own control."""
+    found = []
+    for tag in tags_in(js):
+        kind = CHECKBOX_TYPE.search(tag)
+        if kind and not re.search(rf"\b{SHARED_CLASS[kind[1]]}\b", tag) and not SWITCH_ROLE.search(tag):
+            found.append(" ".join(tag.split())[:120])
+    lines = js.splitlines()
+    for index, line in enumerate(lines):
+        kind = DOM_CHECKBOX_TYPE.search(line)
+        if kind:
+            near = "\n".join(lines[max(0, index - 3):index + 4])
+            if not re.search(rf"\b{SHARED_CLASS[kind[1]]}\b", near) and "switch" not in near:
+                found.append(f"line {index + 1}: {line.strip()[:120]}")
+    return found
+
+
+def first_party_markup_sources():
+    vendored = {"marked.min.js", "mermaid.min.js", "chart.umd.min.js", "highlight.min.js", "purify.min.js"}
+    return sorted(path for pattern in ("*.html", "*.js", "modules/**/*.js") for path in WEB.glob(pattern)
+                  if path.name not in vendored and "vendor" not in path.parts and "tests" not in path.parts)
+
+
+def test_every_module_check_box_is_the_shared_control():
+    found = [f"{path.relative_to(ROOT).as_posix()}: {item}" for path in first_party_markup_sources()
+             for item in checkbox_inputs_outside_the_control(path.read_text(encoding="utf-8"))]
+    assert not found, "Every check box is .ui-checkbox (DESIGN 'Controls and editable choices'):\n" + "\n".join(found)
+
+    assert checkbox_inputs_outside_the_control('html = `<input type="checkbox" data-x>`;')
+    assert checkbox_inputs_outside_the_control('html = `<input ${n > 0 ? "checked" : ""} type="checkbox">`;')
+    assert checkbox_inputs_outside_the_control("const box = document.createElement('input');\nbox.type = 'checkbox';")
+    assert not checkbox_inputs_outside_the_control('html = `<input class="ui-checkbox" type="checkbox" data-x>`;')
+    assert not checkbox_inputs_outside_the_control('html = `<input ${n > 0 ? "checked" : ""} class="ui-checkbox" type="checkbox">`;')
+    assert not checkbox_inputs_outside_the_control("const box = document.createElement('input');\nbox.type = 'checkbox';\nbox.className = 'ui-checkbox';")
+    assert not checkbox_inputs_outside_the_control('html = `<input type="checkbox" role="switch" data-x>`;')
+    assert not checkbox_inputs_outside_the_control("html = `<input type='checkbox' role='switch'>`;")
+    assert checkbox_inputs_outside_the_control('html = `<input class="ui-checkbox" type="radio" name="x">`;')
+    assert not checkbox_inputs_outside_the_control('html = `<input class="ui-radio" type="radio" name="x">`;')
+
+
+def attach_command_tray_rules(sheets):
+    """Every rule, in any sheet, whose subject is the terminal command tray itself."""
+    return [(name, " ".join(selector.split()), body) for name, css in sheets.items()
+            for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css))
+            if any(re.search(r"(?:^|[\s>+~])\.harness-attach-command(?::[\w-]+)*$", part.strip())
+                   for part in selector.split(","))]
+
+
+PLACEMENT = re.compile(r"^(?:margin[\w-]*|align-self|justify-self|place-self|order|grid-[\w-]+)$")
+
+
+def tray_drawing_rules(sheets):
+    """The rules that draw the tray: any declaration beyond placing it in its parent."""
+    return [(name, selector) for name, selector, body in attach_command_tray_rules(sheets)
+            if any(not PLACEMENT.match(prop.strip().lower()) for prop in re.findall(r"([\w-]+)\s*:", body))]
+
+
+def test_the_terminal_command_tray_is_defined_once():
+    sheets = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in first_party_sheets()}
+    assert len(tray_drawing_rules(sheets)) == 1, tray_drawing_rules(sheets)
+    one = ".harness-attach-command { padding: 8px; background: var(--surface-tray); }"
+    placed = "\n.harness-external-terminal > .harness-attach-command { align-self: stretch; margin: 0; }"
+    assert len(tray_drawing_rules({"a": one + placed})) == 1, "placing the tray is not a second recipe"
+    assert len(tray_drawing_rules({"a": one + "\n.harness-login-card .harness-attach-command { padding: 0; }"})) == 2
+    assert len(tray_drawing_rules({"a": one, "b": ".harness-attach-command { padding: 4px; }"})) == 2
+    assert not attach_command_tray_rules({"a": ".harness-external-terminal > .harness-attach-command-note { margin: 0; }"})
