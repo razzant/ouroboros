@@ -1656,10 +1656,13 @@ textarea.ui-control { resize: vertical; }
 :is(.ui-checkbox:is(:checked, [aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox):not(:indeterminate)::before {
     visibility: visible;
 }
-/* On a dark voice's own material the accent fill alone is too close to it: a ticked box keeps the voice's ink edge. */
-:root:not([data-theme="light"]) :is(.chat-bubble.assistant, .chat-live-card, .settings-voice)
-    :is(.ui-checkbox:is(:checked, [aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox) {
-    border-color: var(--text-primary);
+/* On a dark voice's own material the accent fill alone is too close to it: a ticked box keeps the voice's ink edge
+   (with the app's own palette only; forced colours have their own recipe below). */
+@media (forced-colors: none) {
+    :root:not([data-theme="light"]) :is(.chat-bubble.assistant, .chat-live-card, .settings-voice)
+        :is(.ui-checkbox:is(:checked, [aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox) {
+        border-color: var(--text-primary);
+    }
 }
 .ui-checkbox:is(:indeterminate, [aria-checked="mixed"]) {
     border-color: var(--accent);
@@ -1670,12 +1673,16 @@ textarea.ui-control { resize: vertical; }
 .ui-radio:checked { border-color: var(--accent); background-image: radial-gradient(var(--accent) 0 34%, transparent 40%); }
 :is(.ui-checkbox, .ui-radio):disabled { opacity: var(--control-disabled-opacity); cursor: not-allowed; }
 :is(.ui-checkbox, .ui-radio):focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-/* Under a finger the glyph keeps its size and gains the touch minimum as an invisible reach around it. */
+/* Under a finger the glyph keeps its size and the target is allocated, never borrowed from a neighbour: a label
+   holding a box or radio is the touch minimum tall (the whole label is the input's), and a box that is a control on
+   its own (a share part's button) keeps the touch minimum around it as margin its reach fills. */
 @media (pointer: coarse) {
-    :is(input.ui-checkbox, input.ui-radio, button.ui-checkbox)::after {
+    label:has(> :is(input.ui-checkbox, input.ui-radio)) { min-height: var(--touch-target-min); align-content: center; }
+    button.ui-checkbox { margin: calc((var(--touch-target-min) - var(--checkbox-size)) / 2); }
+    button.ui-checkbox::after {
         content: "";
         position: absolute;
-        inset: calc((var(--checkbox-size) - var(--touch-target-min)) / 2);
+        inset: calc((var(--checkbox-size) - var(--touch-target-min)) / 2 - 1.5px);  /* from inside the 1.5px edge */
     }
 }
 /* Forced colours: an input is the system's own box; a drawn mark that is not an input (a share part's, a task's) is
@@ -1685,10 +1692,12 @@ textarea.ui-control { resize: vertical; }
     input:is(.ui-checkbox, .ui-radio) { -webkit-appearance: auto; appearance: auto; }
     input.ui-checkbox::before { content: none; }
     .ui-checkbox:not(input) { forced-color-adjust: none; border-color: CanvasText; background-color: Canvas; }
-    .ui-checkbox:not(input):is([aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox:not(input) {
+    .ui-checkbox:not(input):is([aria-checked="true"], [aria-checked="mixed"], .is-checked),
+    [aria-checked="true"] > .ui-checkbox:not(input) {
         border-color: Highlight;
         background-color: Highlight;
     }
+    .ui-checkbox:not(input)[aria-checked="mixed"] { background-image: linear-gradient(HighlightText, HighlightText); }
     .ui-checkbox:not(input)::before { background: HighlightText; }
 }
 /* The switch: a label holding a checkbox with role="switch" and aria-checked, then its track and thumb, for a change

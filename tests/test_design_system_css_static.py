@@ -311,7 +311,7 @@ def test_scroller_edges_do_not_gain_opaque_positioned_descendants():
 CHECKBOX_PAINT = re.compile(r"(?:^|[;{\s])(?:(?:min-|max-)?(?:width|height)|(?:min-|max-)?(?:inline|block)-size|border[\w-]*"
                             r"|background[\w-]*|accent-color|appearance|-webkit-appearance|outline[\w-]*|box-shadow|color"
                             r"|(?:-webkit-)?mask[\w-]*)\s*:", re.I)
-CHECKBOX_SUBJECT = re.compile(r"\[type=[\"']?(?:checkbox|radio)|\.ui-checkbox|\.ui-radio|\.md-checkbox|\.message-share-check", re.I)
+CHECKBOX_SUBJECT = re.compile(r"\[type=[\"']?(?:checkbox|radio)|\.ui-checkbox|\.ui-radio|\.md-checkbox|\.message-share-check|\.message-share-task", re.I)
 
 
 def checkbox_paint_outside_the_control(css):
@@ -339,7 +339,8 @@ def shape_problems(ui_css):
                 found.append(f"a radio is shaped {value}")
         elif value != "var(--checkbox-radius)":
             found.append(f"{' '.join(selector.split())} shapes the box {value}, not the one token")
-    if not any(re.fullmatch(r"\s*\.ui-radio\s*", sel) and "border-radius: 50%" in body for sel, body in rules):
+    if not any(re.fullmatch(r"\s*\.ui-radio\s*", sel) and re.search(r"border-radius\s*:\s*50%\s*(?:;|$)", body)
+               for sel, body in rules):
         found.append("no rule keeps the radio round on its own")
     return found
 
@@ -391,6 +392,20 @@ def forced_mark_problems(ui_css):
             found.append(f"forced colours give no {need}")
     if "forced-color-adjust: none" in css and not given:
         found.append("a drawn mark leaves the palette without system colours")
+    # The edge differs from the surface under it, and the tick from the ticked fill (CanvasText on Canvas, HighlightText
+    # on Highlight): a system colour on its own colour is the 1:1 mark again.
+    colours = {}
+    for block in re.findall(r"@media \(forced-colors: active\) \{((?:[^{}]*\{[^{}]*\})*)\s*\}", css):
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", block):
+            if ".ui-checkbox:not(input)" not in selector:
+                continue
+            state = "tick" if "::before" in selector else "checked" if "checked" in selector else "unchecked"
+            for prop, value in re.findall(r"(border-color|background-color|background)\s*:\s*([^;]+);", body):
+                colours[(state, prop.split("-")[0])] = value.strip()
+    if colours.get(("unchecked", "border")) and colours.get(("unchecked", "border")) == colours.get(("unchecked", "background")):
+        found.append("the unchecked edge is the colour of its own fill")
+    if colours.get(("tick", "background")) and colours.get(("tick", "background")) == colours.get(("checked", "background")):
+        found.append("the tick is the colour of the ticked fill")
     return found
 
 
@@ -403,6 +418,8 @@ def test_forced_colours_keep_every_drawn_mark_visible():
               " background-color: Canvas; }\n    .ui-checkbox:not(input):is(.is-checked) { background-color: Highlight; }\n"
               "    .ui-checkbox:not(input)::before { background: HighlightText; }\n}")
     assert forced_mark_problems(themed) and not forced_mark_problems(themed.replace("var(--x)", "CanvasText"))
+    assert forced_mark_problems(themed.replace("var(--x)", "Canvas")), "Canvas on Canvas is the vanished edge"
+    assert forced_mark_problems(themed.replace("var(--x)", "CanvasText").replace("HighlightText", "Highlight"))
 
 
 def checkbox_column_problems(css):
@@ -500,15 +517,27 @@ def test_every_module_check_box_is_the_shared_control():
 
 def attach_command_tray_rules(sheets):
     """Every rule, in any sheet, whose subject is the terminal command tray itself."""
-    return [(name, " ".join(selector.split())) for name, css in sheets.items()
-            for selector, _ in re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css))
+    return [(name, " ".join(selector.split()), body) for name, css in sheets.items()
+            for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css))
             if any(re.search(r"(?:^|[\s>+~])\.harness-attach-command(?::[\w-]+)*$", part.strip())
                    for part in selector.split(","))]
 
 
+PLACEMENT = re.compile(r"^(?:margin[\w-]*|align-self|justify-self|place-self|order|grid-[\w-]+)$")
+
+
+def tray_drawing_rules(sheets):
+    """The rules that draw the tray: any declaration beyond placing it in its parent."""
+    return [(name, selector) for name, selector, body in attach_command_tray_rules(sheets)
+            if any(not PLACEMENT.match(prop.strip().lower()) for prop in re.findall(r"([\w-]+)\s*:", body))]
+
+
 def test_the_terminal_command_tray_is_defined_once():
     sheets = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in first_party_sheets()}
-    assert {name for name, _ in attach_command_tray_rules(sheets)} == {"web/style.css"}, attach_command_tray_rules(sheets)
-    assert len(attach_command_tray_rules({"a": ".harness-attach-command { margin: 0; }",
-                                          "b": ".harness-login-card .harness-attach-command { padding: 0; }"})) == 2
+    assert len(tray_drawing_rules(sheets)) == 1, tray_drawing_rules(sheets)
+    one = ".harness-attach-command { padding: 8px; background: var(--surface-tray); }"
+    placed = "\n.harness-external-terminal > .harness-attach-command { align-self: stretch; margin: 0; }"
+    assert len(tray_drawing_rules({"a": one + placed})) == 1, "placing the tray is not a second recipe"
+    assert len(tray_drawing_rules({"a": one + "\n.harness-login-card .harness-attach-command { padding: 0; }"})) == 2
+    assert len(tray_drawing_rules({"a": one, "b": ".harness-attach-command { padding: 4px; }"})) == 2
     assert not attach_command_tray_rules({"a": ".harness-external-terminal > .harness-attach-command-note { margin: 0; }"})
