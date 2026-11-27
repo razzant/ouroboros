@@ -410,7 +410,8 @@ _RULE_CONTENT = ("Every decision's finding, status and reason is verbatim and op
 _RULE_STANDING = "This supersedes earlier copies of the same family and is not a new verdict."
 INDEX_RULE = _RULE_CONTENT + _RULE_STANDING
 # The rule of a row written with the display (``_display_view``) also says what its display keys mean.
-DISPLAY_RULE = (_RULE_CONTENT + "A review record's subject is written once in `record_subjects`; `display.remark_rows` "
+DISPLAY_RULE = (_RULE_CONTENT + "A subject a review record repeats is written once in `record_subjects` (by "
+                "`review_record_id`; other subjects stay inline); `display.remark_rows` "
                 "lists the positions in `decision_rows` whose remark is the field of their own `reason` named by "
                 "`remark_field`. " + _RULE_STANDING)
 # Producer fields the resident row carries by address instead of verbatim.
@@ -1229,7 +1230,7 @@ def _foreign_group(note: Any, family: str) -> bool:
     record unreadable now) stays a gap; an unreadable group is never proven foreign."""
     try:
         other = _FAMILY_KINDS["commit" if family == "plan" else "plan"] if family in _FAMILY_KINDS else None
-        return bool(other) and all(binding["field"].removeprefix("decision:") in other
+        return bool(other) and all(binding["field"] in {"decision:" + kind for kind in other}
                                    for binding in _note_bindings(note))
     except (ValueError, TypeError, AttributeError):
         return False
@@ -1349,7 +1350,12 @@ def _review_index_identity(row: dict) -> tuple[str, str] | None:
             or not isinstance(text, str)
             or meta.get("visible_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest()):
         return None
-    root = meta.get("checkout") if _compact_envelope(meta) else meta.get("repo_root")
+    if _compact_envelope(meta):
+        root = meta.get("checkout")
+    elif "display" not in meta:
+        root = meta.get("repo_root")
+    else:  # an envelope tag no writer emits: an unknown row, never retired
+        return None
     return (meta["family"], root) if isinstance(root, str) else None
 
 

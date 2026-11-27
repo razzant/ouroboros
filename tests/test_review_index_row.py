@@ -597,6 +597,11 @@ def test_the_envelope_decides_how_a_row_is_read_and_only_the_integer_1_is_the_di
         tagged = {**displayed, view.REVIEW_CONTEXT_INDEX_KEY: {**displayed[view.REVIEW_CONTEXT_INDEX_KEY], "display": tag}}
         assert view._review_index_identity(tagged) is None, tag
         assert view.obsolete_review_index_positions([tagged, displayed]) == (), tag
+    assert view._review_index_identity(full) == ("commit", "/repo")  # the full shape: no tag at all
+    for tag in (True, 1.0):  # a tag beside a full row's repo_root is unknown too and displaces no genuine row
+        tagged = {**full, view.REVIEW_CONTEXT_INDEX_KEY: {**full[view.REVIEW_CONTEXT_INDEX_KEY], "display": tag}}
+        assert view._review_index_identity(tagged) is None, tag
+        assert view.obsolete_review_index_positions([full, tagged]) == (), tag
 
 
 def test_a_subject_leaves_its_rows_only_when_it_repeats():
@@ -642,6 +647,9 @@ def test_an_account_of_another_familys_decisions_is_no_gap_here_and_a_missing_me
     foreign = {"bound_decisions": [plan_member], "remark": "plan account", "reason": "folded"}
     _shown, groups, gaps = view.project_decision_groups(commit, [foreign], source_history=commit, selected_source=selected)
     assert groups == [] and gaps == []
+    bare = {**foreign, "bound_decisions": [{**plan_member, "field": plan_member["field"].removeprefix("decision:")}]}
+    _shown, groups, gaps = view.project_decision_groups(commit, [bare], source_history=commit, selected_source=selected)
+    assert groups == [] and len(gaps) == 1  # a bare kind name is no decision field: never proven foreign
     missing = {**commit_member, "content_sha256": "0" * 64}
     partial = {"bound_decisions": [commit_member, missing], "remark": "group", "reason": "folded"}
     _shown, groups, gaps = view.project_decision_groups(commit, [partial], source_history=commit, selected_source=selected)
