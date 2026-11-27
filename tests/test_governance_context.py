@@ -492,17 +492,31 @@ def test_each_row_carries_its_git_change_both_sides_of_a_rename_and_a_non_ascii_
     from ouroboros.tools.governance_module_rows import module_rows
 
     _with_manifest(repo)
-    rows = module_rows(repo, ["ignored.py"], [("M", "ouroboros/project_dialogue.py", ""),
-                                              ("R091", "ouroboros/renamed.py", "ouroboros/other.py"),
-                                              ("A", "web/caf\u00e9.js", ""), ("D", "docs/gone.md", "")])
-    assert rows.count == 4 and rows.text.splitlines()[1:] == [
+    rows = module_rows(repo, ["anchor.png", "ouroboros/project_dialogue.py"], [
+        ("M", "ouroboros/project_dialogue.py", ""), ("R091", "ouroboros/renamed.py", "ouroboros/other.py"),
+        ("A", "web/caf\u00e9.js", ""), ("D", "docs/gone.md", ""), ("R100", "docs/moved.js", "web/moved.js")])
+    assert rows.count == 6 and rows.text.splitlines()[1:] == [
+        "- anchor.png (touched in this change; the installed map has no owner for it)",  # a path outside the delta
         "- docs/gone.md (deleted in this change; the installed map has no owner for it)",
+        "- docs/moved.js (renamed from web/moved.js in this change; surface web/; manuals: docs/web.md)",
         "- ouroboros/project_dialogue.py (modified in this change; domain D01: Agent core; "
         "manuals: docs/architecture/01-core.md)",
         "- ouroboros/renamed.py (renamed from ouroboros/other.py in this change; domain D01: Agent core; "
         "manuals: docs/architecture/01-core.md)",
         "- web/caf\u00e9.js (added in this change; surface web/; manuals: docs/web.md)"]
-    assert "ignored.py" not in rows.text  # the change set, when the seam has it, is the one path set
+
+
+def test_a_domain_id_the_installed_map_does_not_define_still_gives_the_row(repo):
+    from ouroboros.tools.governance_module_rows import UNDEFINED_TITLE, module_rows
+
+    _with_manifest(repo)
+    manifest = repo / "ouroboros" / "domains.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace('"ouroboros/other.py" = "D01"',
+                                                                     '"ouroboros/other.py" = "D60"'), encoding="utf-8")
+    rows = module_rows(repo, [], [("M", "ouroboros/other.py", "")])
+    assert rows.text.splitlines()[1:] == [
+        f"- ouroboros/other.py (modified in this change; domain D60: {UNDEFINED_TITLE}; manuals: none named)"]
+    assert ROW in _context(repo).selected_inline  # the packet is prepared, the defined owner still answers
 
 
 def test_an_unreadable_installed_manifest_is_a_typed_notice_not_an_error_text(repo):
@@ -534,37 +548,31 @@ def test_yielded_rows_leave_every_other_byte_and_say_so_in_counted_words_and_in_
     assert yield_module_rows(given) is given and given.stable_inline == context.stable_inline
 
 
-def test_every_fixed_text_of_the_rows_is_counted_and_only_where_a_packet_seat_sits():
-    """Each template, every change word and the empty-manuals word included, is in the packet contract material;
-    removing any one from ``contract_material`` turns this red. A pool with no packet seat counts none of them."""
-    from ouroboros.tools import governance_module_rows as gmr
-    from ouroboros.tools.governance_context import BODY_LAYER, PACKET_DELIVERY, RETRIEVING_DELIVERY, navigation_material
-
-    packet = "\n".join(navigation_material(BODY_LAYER, PACKET_DELIVERY))
-    words = [gmr.placeholders(word) for word in [*gmr.CHANGES.values(), gmr.TOUCHED]]
-    expected = [gmr.placeholders(t, change=w, manuals=m) for t in gmr.TEMPLATES
-                for w in (words if "{change}" in t else [""]) for m in ("⟨manuals⟩", gmr.NO_MANUALS)]
-    assert expected and all(text in packet for text in expected), [t for t in expected if t not in packet]
-    retrieving = "\n".join(navigation_material(BODY_LAYER, RETRIEVING_DELIVERY))
-    assert not any(text in retrieving for text in expected)
-
-
-def test_every_line_a_packet_seat_gets_from_the_rows_is_one_of_the_templates(repo):
+def test_no_fixed_text_of_a_rendered_row_lives_outside_the_packet_contract(repo):
+    """The contract material is the renderer's own output over placeholder rows, under the section title: every line
+    a real block renders (each row kind and change word, two manuals, none, an undefined id) matches a contract line
+    with only its placeholders varying. A pool with no packet seat counts none of it."""
     import re
 
     from ouroboros.tools import governance_module_rows as gmr
+    from ouroboros.tools.governance_context import (BODY_LAYER, PACKET_DELIVERY, RETRIEVING_DELIVERY, _render,
+                                                    navigation_material)
 
+    packet = navigation_material(BODY_LAYER, PACKET_DELIVERY)
+    shapes = {re.compile("^" + ".+".join(re.escape(part) for part in re.split(r"⟨[^⟩]*⟩", line)) + "$")
+              for text in packet for line in text.splitlines() if line}
     _with_manifest(repo)
-    (repo / "ouroboros" / "domains.toml").write_text(
-        (repo / "ouroboros" / "domains.toml").read_text(encoding="utf-8").replace('"web/" = ["docs/web.md"]', '"web/" = []'),
-        encoding="utf-8")
-    rows = gmr.module_rows(repo, [], [("M", "ouroboros/other.py", ""), ("D", "ouroboros/gone.py", ""),
-                                      ("C100", "web/b.js", "web/a.js"), ("T", "x.py", "")])
-    shapes = [re.compile("^" + ".+".join(re.escape(part) for part in re.split(r"\{\w+\}", t)) + "$")
-              for t in gmr.TEMPLATES]
-    lines = rows.text.splitlines()
-    assert lines and all(any(shape.match(line) for shape in shapes) for line in lines), lines
-    assert "- web/b.js (copied from web/a.js in this change; surface web/; manuals: none named)" in lines
+    manifest = repo / "ouroboros" / "domains.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+        '"web/" = ["docs/web.md"]', '"web/" = ["docs/web.md", "docs/second.md"]\n"skills/" = []').replace(
+        '"ouroboros/other.py" = "D01"', '"ouroboros/other.py" = "D60"'), encoding="utf-8")
+    entries = [(letter, path, "web/a.js") for letter in [*gmr.CHANGES, ""]
+               for path in ("ouroboros/project_dialogue.py", "ouroboros/other.py", "web/b.js", "skills/c.js", "x.py")]
+    lines = _render(gmr.MODULE_ROWS_PATH, gmr.module_rows(repo, [], entries).text).splitlines()
+    assert len(lines) > 30 and all(any(shape.match(line) for shape in shapes) for line in lines if line), [
+        line for line in lines if line and not any(shape.match(line) for shape in shapes)]
+    retrieving = "\n".join(navigation_material(BODY_LAYER, RETRIEVING_DELIVERY))
+    assert gmr.HEADING not in retrieving and gmr.MODULE_ROWS_PATH not in retrieving
 
 
 # --- the body's cross-cutting invariants and chapter openings -------------------

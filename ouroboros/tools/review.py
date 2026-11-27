@@ -517,10 +517,16 @@ def _subject_changed_paths(frozen: Any, target_repo) -> tuple[str, str]:
         changed = "\n".join(path for _status, path in frozen.name_status)
         return changed, format_name_status_for_preflight(
             "\n".join(f"{status}\t{path}" for status, path in frozen.name_status), fallback=changed)
-    try:
-        changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=target_repo)
-    except Exception:
-        changed = ""
+    from ouroboros.tools.review_subject import subject_changes
+
+    # The structured, NUL-decoded set the owner rows read: a display-quoted name (a UTF-8 rename on default Git)
+    # would not open in the touched-file pack. Git's display form is for the preflight's text alone.
+    changed = "\n".join(path for _status, path, _source in subject_changes(target_repo))
+    if not changed:
+        try:
+            changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=target_repo)
+        except Exception:
+            changed = ""
     return changed, _build_preflight_staged(target_repo, fallback=changed)
 
 

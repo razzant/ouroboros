@@ -304,6 +304,8 @@ def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
             rel_path=book.entrypoint.source_path,
             instructions=instructions,
         )
+    if not instructions:
+        return _packet_book_index(book)
     return overview_book(
         book,
         lambda chapter: generate_doc_nav_map(
@@ -314,6 +316,35 @@ def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
         ),
         instructions=instructions,
     ).text
+
+
+PACKET_BOOK_INDEX = ("This overview contains introductions, not complete chapters. Each chapter below gives its title "
+                     "and physical source path once, its introduction, then every heading with its inclusive line range "
+                     "in that file (a parent's range includes its descendants).")
+
+
+def _packet_book_index(book: ReferenceBook) -> str:
+    """The view a reader without tools gets: the same facts as the overview, each written once.
+
+    The overview repeats each chapter's title and address (the contents list, the chapter heading, its source
+    line, its map's heading) and spells the range convention on every heading. Here the contents list gives way
+    to one line per chapter (title, the list's own wording where it differs, physical path); the entrypoint's
+    other text, each authored introduction and every heading with its range stay verbatim. The membership
+    loader already proved the list and the chapters correspond one to one, in order."""
+    from ouroboros.reference_books import _preamble
+
+    entry = book.entrypoint
+    section = next(h for h in entry.headings if h.level == 2 and h.title == "Chapters")
+    listed = next(s for s in entry.lists if section.span.end_byte <= s.start_byte < section.section.end_byte)
+    labels = [link.label for link in entry.links if listed.start_byte <= link.span.start_byte < listed.end_byte]
+    rows = [(entry.raw[:listed.start_byte] + entry.raw[listed.end_byte:]).decode("utf-8").rstrip(), PACKET_BOOK_INDEX]
+    for chapter, label in zip(book.chapters, labels):
+        title = chapter.headings[0].title
+        listed_as = "" if label == title else f" (listed as {label})"
+        rows.append("\n".join([f"# {title}{listed_as} — `{chapter.source_path}`", chapter.text_at(_preamble(chapter)),
+                               *(f"{'  ' * (level - 2)}- {first}-{last} {name}"
+                                 for level, name, first, last in _nav_entries(chapter.text))]))
+    return "\n\n".join(rows)
 
 
 def book_map_section(book: ReferenceBook, section_id: str) -> str:

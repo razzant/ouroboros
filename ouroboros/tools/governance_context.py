@@ -200,6 +200,7 @@ class GovernanceContext:
     selected_inline: str = ""
     inline_whole_documents: dict = field(default_factory=dict)
     layer: str = BODY_LAYER
+    owner_rows: int = 0  # owner rows inlined in ``selected_inline`` (``yield_module_rows`` removes them)
 
 
 def _normalize(path: Any) -> str:
@@ -375,7 +376,7 @@ def navigation_material(layer: str, delivery: str) -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a layer's governance navigation
     as its renderer composes it for ``delivery``, over placeholders (the subject's documents, the sources a skill
     owes). The documents it names, their headings and the guides' own text are not here."""
-    from ouroboros.context_layout import design_navigation
+    from ouroboros.context_layout import PACKET_BOOK_INDEX, design_navigation
     from ouroboros.tools.review_helpers import GOVERNANCE_OMISSION
 
     words = NAVIGATION_WORDS.get(layer, {})
@@ -386,10 +387,11 @@ def navigation_material(layer: str, delivery: str) -> list:
             pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note)
                             for note in _DESIGN_REVIEW_MAP.values())
             pointers.append(_INVARIANTS_UNAVAILABLE)
-            if delivery == PACKET_DELIVERY:  # only a packet seat is handed module rows
-                pointers.extend(gmr.contract_material())
+            if delivery == PACKET_DELIVERY:  # only a packet seat is handed owner rows, under their section title
+                blocks, notices = gmr.contract_material()
+                pointers.extend([*(_render(gmr.MODULE_ROWS_PATH, block) for block in blocks), *notices])
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
-                *(pointers if layer == BODY_LAYER else ())]
+                *(pointers if layer == BODY_LAYER else ()), *([PACKET_BOOK_INDEX] if delivery == PACKET_DELIVERY else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
     (tail,) = words[delivery]
     return [heading, *(rules + subject_words + tail for rules in (with_rules, without_rules)),
@@ -844,6 +846,7 @@ def governance_context(
         stable_inline=stable_inline,
         selected_inline=selected_inline,
         inline_whole_documents=inline_texts,
+        owner_rows=modules.count if modules.text else 0,
     )
 
 
@@ -856,12 +859,12 @@ def yield_module_rows(governance: GovernanceContext) -> GovernanceContext:
         return governance
     kept = [(title, text) for title, text in governance.inline_sections if title != gmr.MODULE_ROWS_PATH]
     rows_text = next(text for title, text in governance.inline_sections if title == gmr.MODULE_ROWS_PATH)
-    count = rows_text.count("\n- ")
     before, after = governance.selected_inline.split(_render(gmr.MODULE_ROWS_PATH, rows_text), 1)
     selected_inline = _join([before.removesuffix("\n\n"), after.removeprefix("\n\n")])
-    navigation = _join([governance.navigation, gmr.YIELDED.format(count=count)])
+    navigation = _join([governance.navigation, gmr.YIELDED.format(count=governance.owner_rows)])
     manifest = [dict(entry, disposition="navigation", reason=gmr.YIELD_REASON) if entry is row else entry
                 for entry in governance.manifest]
     return replace(
         governance, inline_sections=kept, navigation=navigation, manifest=manifest, selected_inline=selected_inline,
+        owner_rows=0,
         tokens_estimate=estimate_tokens(_join([governance.stable_inline, selected_inline, navigation])))

@@ -759,8 +759,8 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     from ouroboros.review_words import section_budget
 
     words = frozen_subject.review_words
-    touched_paths = [path for _status, path in frozen_subject.name_status] if frozen_subject.name_status else [
-        p.strip() for p in str(_rv.run_cmd(["git", "diff", "--cached", "--name-only"], cwd=review_root) or "").splitlines() if p.strip()]
+    touched_paths = (frozen_subject.managed.touched_paths() if frozen_subject.managed is not None  # delta ∪ anchors
+                     else [path for _status, path in frozen_subject.name_status])
     slot = ReviewSlot(slot_id=slot_id, model=model, session_profile=str(_field("session_profile") or ""),
                       use_local=_field("use_local", None))
     words_section = words.render(section_budget(_rv._triad_governance_usable_window([model], [slot])))
