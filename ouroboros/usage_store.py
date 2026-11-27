@@ -1057,14 +1057,15 @@ def read_usage_records(root: pathlib.Path | str) -> List[Dict[str, Any]]:
 def migrate_from_journal(root: pathlib.Path | str, *, initialize_journal: bool = False) -> Dict[str, Any]:
     """Create the store from the live journal (a lifecycle job; writers quiescent).
 
-    ``initialize_journal`` is the lifespan boot's alone: it brings a completed store to this
-    runtime's journal (``store_journal``); the supervisor's revival and lazy readers keep it.
+    ``initialize_journal`` is the lifespan boot's alone: it cleans up abandoned
+    import files and selects this runtime's journal (``store_journal``). Revival
+    and lazy readers of a published store do neither.
 
     Idempotent through ``meta.import.status``: a completed store is never
-    re-imported (an interrupted journal rename is retried); an unfinished
-    import (a sibling build file never published) is discarded and redone; a
-    published store that cannot be read is corruption and is refused, never
-    replaced. The live journal is read once with the
+    re-imported; a later change in the journal's size is reported, never merged.
+    An unfinished import (a sibling build file never published) is discarded and
+    redone; a published store that cannot be read is corruption and is refused,
+    never replaced. The live journal is read once with the
     validated reader; for every attempt id its LAST row is imported (open rows
     included), imported aggregates keep their weight, bindings are the
     ``BindingIndex`` fold of every live row, the marker continues the journal's
@@ -1081,10 +1082,14 @@ def migrate_from_journal(root: pathlib.Path | str, *, initialize_journal: bool =
     path.parent.mkdir(parents=True, exist_ok=True)
     with _process_lock(path):
         with _named_lock(root, IMPORT_LOCK_NAME, timeout_sec=600.0, stale_sec=600.0):
-            for stale in path.parent.glob(f"{path.name}.import-*"):
-                with contextlib.suppress(OSError):
-                    stale.unlink()  # an unfinished import never published: redone from scratch
-            if _identity(path) is not None:
+            published = not initialize_journal and _identity(path) is not None
+            if not published:
+                for stale in path.parent.glob(f"{path.name}.import-*"):
+                    with contextlib.suppress(OSError):
+                        stale.unlink()  # unpublished builds and their sidecars
+                # Recovery may publish the store during cleanup.
+                published = _identity(path) is not None
+            if published:
                 tier = _header_tier(path)
                 if initialize_journal and tier and _core.wal_file(path):
                     _select_journal(root, path, tier)  # leave WAL this runtime must not share before reading it
