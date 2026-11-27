@@ -15,7 +15,7 @@ import { installedSkillModel } from './skill_card_renderer.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import { modalNotice } from './toast.js';
 import {
-    buttonHtml, catalogWhoHtml, chipHtml, connectsServices, connectsText, countsAsYoursText, factsText, nameMatch, officialMarkHtml, plural,
+    buttonHtml, catalogNeedsText, catalogWhoHtml, chipHtml, connectsServices, connectsText, countsAsYoursText, factsText, nameMatch, officialMarkHtml, plural,
     relativeAge, skillIconHtml, skillNames, skillOfferChanged, skipReviewButtonHtml, statusHtml, trustSentence, versionText,
     skillTitle,
 } from './skill_presentation.js';
@@ -241,7 +241,9 @@ export function renderBrowseCard(item, { state, categoryLabels = new Map(), show
         item.source_id === 'builtin' ? chipHtml('Built in', 'neutral') : '',
         item.official ? officialMarkHtml() : '',  // explained from this entry (`officialSource`), never a source looked up by id
     ].join('');
-    const facts = factsText(item);
+    // The catalog's words about what it needs close the line, authored like the entry's other words (title, description).
+    const needs = catalogNeedsText(item);
+    const facts = [escapeHtml(factsText(item)), needs ? `<span data-i18n-authored>${escapeHtml(needs)}</span>` : ''].filter(Boolean).join(' · ');
     const connects = connectsText(item);
     const yours = countsAsYoursText(item);
     const cats = [connects ? chipHtml(connects, 'neutral') : '', ...(showCategory ? (item.category || [])
@@ -253,7 +255,7 @@ export function renderBrowseCard(item, { state, categoryLabels = new Map(), show
         ${long ? `<button type="button" class="skills-read-more ui-hit-area" data-browse-action="open" data-item="${id}">Read more ›</button>` : ''}
         <div class="skills-card-meta-lines">
             <div class="skills-card-who"><span data-i18n-authored>${escapeHtml(item.name)}</span> · ${catalogWhoHtml(item)}</div>
-            ${facts ? `<div class="skills-card-facts">${escapeHtml(facts)}</div>` : ''}
+            ${facts ? `<div class="skills-card-facts">${facts}</div>` : ''}
             ${yours ? `<div class="skills-card-facts">${escapeHtml(yours)}</div>` : ''}
             ${cats ? `<div class="skills-card-cats">${cats}</div>` : ''}
         </div>

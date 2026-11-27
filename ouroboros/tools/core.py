@@ -545,9 +545,11 @@ def _data_write(
     return result
 
 
-def _join_write_results(results: List[str]) -> str:
+def _join_write_results(results: List[str], *, failed: bool | None = None) -> str:
     rendered = "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
-    if any(str(line).lstrip().startswith("⚠️") for result in results for line in str(result).splitlines()):
+    if failed is None:
+        failed = any(str(line).lstrip().startswith("⚠️") for result in results for line in str(result).splitlines())
+    if failed:
         return "⚠️ WRITE_FILE_BATCH_PARTIAL_FAILURE: one or more writes failed.\n" + rendered
     return rendered
 
@@ -655,11 +657,13 @@ def _write_file(
     try:
         if files:
             results = []
+            failed = False
             binding_iter = iter(binding_items)
             for item in files:
                 rel_path = str(item.get("path") or "")
                 item_binding = next(binding_iter, None)
                 if item_binding is None:
+                    failed = True
                     results.append("⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects.")
                     continue
                 target = item_binding.target_path
@@ -668,6 +672,7 @@ def _write_file(
                         target, base_path=item_binding.base_path,
                     )
                     if block_reason:
+                        failed = True
                         results.append(f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}")
                         continue
                 body = str(item.get("content") or "")
@@ -681,18 +686,19 @@ def _write_file(
                     # Deferral 5: batch items overwrite too — shrink-guard each (parity with the
                     # single-file path), force=true bypasses.
                     if (shrink := _check_data_shrink_guard(target, body, force)):
+                        failed = True
                         results.append(shrink)
                         continue
                     if not tracker.land(target, body):  # crash-safe overwrite (G)
                         continue
                 result = f"OK: wrote {_root_display_path(normalized, rel_path)} ({len(body)} chars)"
                 if normalized == "user_files":
-                    result, _ok = tracker.capture_user_file(
+                    result, ok = tracker.capture_user_file(
                         target, rel_path, result, copy_artifact=copy_file_to_task_artifacts,
                     )
+                    failed = failed or not ok
                 results.append(result)
-            failed = any(str(result).lstrip().startswith("⚠️") for result in results)
-            body_text = _join_write_results(results) if results or not tracker.unchanged else ""
+            body_text = _join_write_results(results, failed=failed) if results or not tracker.unchanged else ""
             return with_argument_notes(ctx, tracker.publish(body_text, failed=failed), notes)
         target = binding_items[0].target_path
         if normalized == "artifact_store":

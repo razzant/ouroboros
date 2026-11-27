@@ -457,8 +457,8 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     circle = created.json()["circle"]
     assert not validate_ingress(circle, contract_typed_dict("CircleSummary")) and set(circle) == _declared("CircleSummary")
     assert circle["text_author"] == "owner" and circle["name"] == "Team" and circle["model"] == "circle/model"
-    connect = {"connector": "bridge", "account_id": "account", "conversation_id": "room", "label": "Room",
-               "note": "The team's room: answer when asked.", "description": "Where the team asks",
+    connect = {"connector": "bridge", "contribution_id": "chat", "account_id": "account", "conversation_id": "room",
+               "label": "Room", "note": "The team's room: answer when asked.", "description": "Where the team asks",
                "circle_id": circle["circle_id"]}
     assert BY_TOKEN["POST /api/places"]["request"]["schemas"] == ["PlaceConnectRequest"]
     assert _declared("PlaceConnectRequest") == set(connect)

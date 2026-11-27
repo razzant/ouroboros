@@ -436,6 +436,7 @@ def _waking_event_place(ctx, metadata, connector) -> str:
     the message's own thread does, through the same matcher dispatch uses."""
     from ouroboros.place_guard import _drive_root
     from ouroboros.places import PlaceError, place_for_target
+    from ouroboros.telegram_owner_bot import owner_bot_of
 
     event = (metadata.get("presence") or {}).get("event") or {}
     root = _drive_root(ctx)
@@ -444,7 +445,8 @@ def _waking_event_place(ctx, metadata, connector) -> str:
         return ""
     try:
         place, _known = place_for_target(root, connector=connector, targets=targets, conversation="conversation_id",
-                                         thread="thread_id", provider=str(event.get("provider") or ""))
+                                         thread="thread_id", provider=str(event.get("provider") or ""),
+                                         **({"owner_bot": owner} if (owner := owner_bot_of(root, connector)) else {}))
     except PlaceError:
         return ""
     return place.place_id if place is not None else ""
@@ -680,18 +682,66 @@ def refusal_facts(ctx) -> str:
             "finish_task(action=\"finish\", silent=true) keeps the answer as your internal note; summary reaches your human only.")
 
 
+def _sending_place(root, skill: str, payload: dict):
+    """The place a Telegram receipt's own sending task ran in, else None. The owner's bot and the connector's own share
+    the connector, and a receipt names its bot and chat but not which sent it. Neither today's bridge bot nor the places
+    left today say it: a disconnect removes a place, so the one left is no proof of the sender. Only what the sending
+    task kept does. The receipt's origin names a stored task of this connector (the proof its canonical row's
+    provenance takes), and the receipt's address, as ``conversation_key`` writes it, is the route the Host admitted that
+    task for: an account- or chat-wide place covers other bots, chats and topics, so its scope alone ties nothing. The
+    task's place must still exist and cover the address by its own scope and kind, and the task ran under its
+    connection as it stands: ``presence.place.revision`` (the place's revision at admission) is not older than the
+    place's ``connected_revision``, which a disconnect and a new connection move past every earlier admission."""
+    origin = payload.get("origin")
+    task_id = origin.get("task_id", "") if isinstance(origin, dict) else ""
+    if not task_id:
+        return None  # an automatic reply names no task
+    from ouroboros.dialogue_provenance import presence_provenance_from_task
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.store import StoreError
+    from ouroboros.task_results import load_task_result
+    try:
+        task = load_task_result(root, task_id, strict=True) or {}
+    except (OSError, ValueError, StoreError):
+        return None
+    provenance, admitted = presence_provenance_from_task(task), task
+    for step in ("metadata", "presence", "place"):
+        admitted = admitted.get(step) if isinstance(admitted, dict) else None
+    revision = admitted.get("revision") if isinstance(admitted, dict) else None
+    route = conversation_key(*(payload[key] for key in ("provider", "account_id", "conversation_id", "thread_id")))
+    if (provenance.get("transport_skill") != skill or provenance.get("conversation_key") != route
+            or type(revision) is not int):
+        return None
+    from ouroboros.places import places_of_connector
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+    place = next((p for p in places_of_connector(root, skill) if p.place_id == provenance.get("place_id")), None)
+    if place is None or revision < place.connected_revision:
+        return None
+    account = payload["account_id"]
+    # ``owner_bot`` fences by the place's own kind, never by the bot the bridge holds today
+    return resolve_place(root, connector=skill, places=[place], binding_id=place.place_id, provider=payload["provider"],
+                         account_id=account, conversation_id=payload["conversation_id"],
+                         thread_id=payload["thread_id"], owner_bot=account if is_owner_bot_place(place) else "")
+
+
 def record_late_delivery(root, skill: str, payload: dict, client_id: str):
-    """Receipts are evidence even when the destination is now closed to writes."""
+    """Receipts are evidence even when the destination is now closed to writes. The canonical receipt is stored before
+    this runs and never depends on what it finds. A Telegram receipt's note stays with the place its own sending task
+    proves (``_sending_place``) and is not written without that proof; every other connector finds it by the address."""
     if payload["state"] not in {"accepted", "delivered"}:
         return
-    place = resolve_place(root, connector=skill, provider=payload["provider"], account_id=payload["account_id"],
-                          conversation_id=payload["conversation_id"], thread_id=payload["thread_id"])
-    if place is None:
-        from ouroboros.places import places_of_connector
-        place = next((p for p in places_of_connector(root, skill) if p.destination and
-                      all(p.destination.get(key, "") in (payload[source], "*") for key, source in
-                          (("transport", "provider"), ("account_id", "account_id"),
-                           ("conversation_id", "conversation_id"), ("thread_id", "thread_id")))), None)
+    from ouroboros.telegram_owner_bot import FEED_CONNECTOR
+    if skill == FEED_CONNECTOR:
+        place = _sending_place(root, skill, payload)
+    else:
+        place = resolve_place(root, connector=skill, provider=payload["provider"], account_id=payload["account_id"],
+                              conversation_id=payload["conversation_id"], thread_id=payload["thread_id"])
+        if place is None:
+            from ouroboros.places import places_of_connector
+            place = next((p for p in places_of_connector(root, skill) if p.destination and
+                          all(p.destination.get(key, "") in (payload[source], "*") for key, source in
+                              (("transport", "provider"), ("account_id", "account_id"),
+                               ("conversation_id", "conversation_id"), ("thread_id", "thread_id")))), None)
     if place is None or place.state not in {"silent", "paused"}:
         return
     from ouroboros.presence_bindings import conversation_key

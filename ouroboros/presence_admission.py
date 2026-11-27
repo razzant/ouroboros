@@ -51,6 +51,9 @@ class PresenceAdmission:
     # The snapshot this admission read left its legacy connection's wake import unfinished
     # (``places_migration.import_unfinished``): only then may a captured arrival read the store again to finish it.
     unfinished_import: bool = False
+    # The connection an owner_bot event arrived under (``telegram_owner_bot``), checked at the event door and again at
+    # every re-admission of that event; None for every other place.
+    connected_revision: int | None = None
 
 
 def origin_outside(origin: PresenceEndpoint, provider: str, account_id: str, conversation_id: str, thread_id: str) -> bool:
@@ -60,16 +63,26 @@ def origin_outside(origin: PresenceEndpoint, provider: str, account_id: str, con
             or bool(origin.thread_id and thread_id != origin.thread_id))
 
 
-def _scoped_place(root, records, connector, binding_id, *, provider, account_id, conversation_id, thread_id, live_event):
+def _scoped_place(root, records, connector, binding_id, *, provider, account_id, conversation_id, thread_id, live_event,
+                  connected_revision=None):
+    from ouroboros.telegram_owner_bot import FEED_CONNECTOR, admits, is_owner_bot_place, owner_bridge_bot_id
+    # The owner's own bot (A) enters only through its exact owner_bot place, named, never a broader or B place.
+    owner_bot = owner_bridge_bot_id(root) if connector == FEED_CONNECTOR else ""
     if binding_id:
         place = next((p for p in records.places.values() if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
         if place is not None and place.connector != connector:
             raise PresenceAdmissionError("presence_binding_wrong_transport", "binding_id")
     else:
         place = resolve_place(root, connector=connector, provider=provider, account_id=account_id,
-                              conversation_id=conversation_id, thread_id=thread_id, places=records.places.values())
+                              conversation_id=conversation_id, thread_id=thread_id, places=records.places.values(),
+                              owner_bot=owner_bot)
+    if place is not None and not admits(place, account_id=account_id, conversation_id=conversation_id,
+                                        thread_id=thread_id, owner_bot=owner_bot, named=bool(binding_id)):
+        place = None
     if place is None:
         raise PresenceAdmissionError("place_not_connected", "place", "Add this place in Circles.")
+    if connected_revision is not None and is_owner_bot_place(place) and place.connected_revision != connected_revision:
+        raise PresenceAdmissionError("presence_origin_mismatch", "connected_revision")  # arrived under another connection
     if ((provider and place.provider != provider)
             or (place.account_id and account_id and place.account_id != account_id)
             or (place.conversation_id and conversation_id and place.conversation_id != conversation_id)
@@ -84,14 +97,18 @@ def _scoped_place(root, records, connector, binding_id, *, provider, account_id,
 def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str, binding_id: str = "",
                         global_max_rounds: int | None = None, repo_path: str | None = None,
                         provider: str = "", account_id: str = "", conversation_id: str = "",
-                        thread_id: str = "", live_event: bool = False, persist_import: bool = True) -> PresenceAdmission:
+                        thread_id: str = "", live_event: bool = False, persist_import: bool = True,
+                        connected_revision: int | None = None) -> PresenceAdmission:
     """Resolve a place and its circle from one snapshot. A live door previews the scope with persist_import=False
-    until the event passes capture. Only its subsequent admission can finish the proven import."""
+    until the event passes capture. Only its subsequent admission can finish the proven import. ``connected_revision``
+    (the event door's, ``-1`` when the sender named none): an owner_bot place admits only at its current connection."""
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+
     def read_place():
         records = place_records(drive_root, persist_import=persist_import)
         place, origin = _scoped_place(drive_root, records, authenticated_transport_skill, binding_id, provider=provider,
                                       account_id=account_id, conversation_id=conversation_id, thread_id=thread_id,
-                                      live_event=live_event)
+                                      live_event=live_event, connected_revision=connected_revision)
         return records, place, origin
 
     try:
@@ -109,7 +126,8 @@ def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str,
                              context_topics=place.context_topics, model_slot=place.model,
                              workspace_root=place.working_folder, place=place,
                              circle=records.circle_context(place.place_id),
-                             unfinished_import=import_unfinished(records, place))
+                             unfinished_import=import_unfinished(records, place),
+                             connected_revision=connected_revision if is_owner_bot_place(place) else None)
 
 
 def admit_captured_wakes(root: Path, admission: PresenceAdmission, event) -> PresenceAdmission:
@@ -121,7 +139,8 @@ def admit_captured_wakes(root: Path, admission: PresenceAdmission, event) -> Pre
     current = admit_presence_turn(drive_root=root, authenticated_transport_skill=admission.transport_skill,
                                   binding_id=admission.place.place_id, provider=event.provider,
                                   account_id=event.account_id, conversation_id=event.conversation_id,
-                                  thread_id=event.thread_id, live_event=True)
+                                  thread_id=event.thread_id, live_event=True,
+                                  connected_revision=admission.connected_revision)
     return replace(current, fact_labels=admission.fact_labels)
 
 

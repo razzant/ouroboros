@@ -211,7 +211,8 @@ def connector_fact_labels(root, admission, event):
             if missing <= expected:
                 raise WakeImportPending()
             raise _invalid_facts()
-    return place_fact_labels(matching_declarations(place, rows)) if place.contribution_id else declared
+    from ouroboros.telegram_owner_bot import declaring_place
+    return place_fact_labels(matching_declarations(declaring_place(place), rows)) if place.contribution_id else declared
 
 
 def settled_resend(root, turn_id, event, identity, continuing):
