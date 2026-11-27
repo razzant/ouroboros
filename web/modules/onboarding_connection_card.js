@@ -140,10 +140,10 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             ${qr ? `<div class="skills-connection-qr" data-i18n-authored>${qr}</div>` : ''}
             <div class="skills-connection-facts">
                 <strong data-connection-account data-i18n-authored>@${escapeHtml(account)}</strong>
-                ${declaration.hint ? `<span>${escapeHtml(declaration.hint)}</span>` : ''}
+                ${declaration.hint ? `<span data-connection-qr-hint>${escapeHtml(declaration.hint)}</span>` : ''}
                 ${declaration.allow ? `<span data-connection-allow${allowMark}>${escapeHtml(allowed)}</span>`
                     : declaration.note ? `<span>${escapeHtml(declaration.note)}</span>` : '<span>It connects when you finish setup.</span>'}
-                <span><span>On this device?</span> <a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer" data-connection-link${openMark}>${escapeHtml(open)}</a></span>
+                <span><span data-connection-this-device>On this device?</span> <a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer" data-connection-link${openMark}>${escapeHtml(open)}</a></span>
                 ${optionsHtml()}
             </div>
         </div>`;
