@@ -67,22 +67,28 @@ def block_label(message, index, block, plan):
 
 
 def _producer_kind(messages, index, first_user):
-    """Who produced a transcript row, from its typed metadata only (never its text): the kind the size facts count."""
-    from ouroboros.context_budget import OWNER_WORDS_KIND
-    from ouroboros.context_compaction import _capsule_metadata
+    """Who produced a transcript row, the kind the size facts count: typed metadata its producer's binding still vouches
+    for, never the text. A typed host row is its producer's while bound to its exact text (``host_row_intact``) and a
+    recorded review dispute while its source binding verifies (``_review_source_ref``); the owner's and principals'
+    words and my outward replies keep their delivery type, bound or not. An old merge into a typed row or another row
+    no binding vouches for is an ordinary delivered row."""
+    from ouroboros.context_budget import OWNER_ROW_KINDS, OWNER_WORDS_KIND, host_row_intact
+    from ouroboros.context_compaction import _capsule_metadata, _review_source_ref
     from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, _review_index_identity
 
     row = messages[index]
     if _review_index_identity(row) is not None:
         return "review decisions"
-    if row.get(REVIEW_HISTORY_MESSAGE_KEY):
+    if _review_source_ref(row) is not None:
         return "recorded review disputes"
     meta = _capsule_metadata(row)[1]
     if meta:
         return "my notes" if meta.get("authorship") == "actor" else "recovery address records"
     kind = row.get(HOST_CONTEXT_KIND_KEY)
-    if kind:
-        return {OWNER_WORDS_KIND: "owner and principal words", "owner_dialogue": "my outward replies"}.get(kind, str(kind))
+    if kind in OWNER_ROW_KINDS:
+        return "owner and principal words" if kind == OWNER_WORDS_KIND else "my outward replies"
+    if kind or row.get(REVIEW_HISTORY_MESSAGE_KEY):
+        return str(kind) if kind and host_row_intact(row) else "other delivered rows"
     if row.get("role") == "tool" or row.get("tool_calls"):
         return "tool calls and results"
     if row.get("role") == "assistant":
@@ -96,13 +102,13 @@ LARGEST_SINGLE = "largest single "  # the label of the largest single part when 
 def largest_parts(view, *, measured):
     """The view's three largest parts by producer kind and its largest single part, as ``[label, tokens]`` pairs: the
     named sizes the facts row, the size terminal and the native room fact each frame and calibrate as their own
-    (``measured``: the view's measured density, else raw estimates). Kinds come from typed metadata only
-    (``_producer_kind``), system blocks keep their block labels and the route's tool schemas are one part; ``kind ×N``
-    counts the transcript rows of a kind that spans several. The single part is a unit's id (else its block or kind),
-    said once: beside its kind when it is that kind's only part, else as a last pair labelled ``LARGEST_SINGLE``
-    (pairs, the size terminal's stored form that a same-task checkpoint carries across versions). Many small rows of
-    one kind read as the one part they are, so a resident kind that only grows is visible (BIBLE P1): facts, no advice
-    (owner 09.10 5A)."""
+    (``measured``: the view's measured density, else raw estimates). Kinds come from typed metadata its producer's
+    binding vouches for (``_producer_kind``), system blocks keep their block labels and the route's tool schemas are one
+    part; ``kind ×N`` counts the transcript rows of a kind that spans several. The single part is a unit's id (else its
+    block or kind), said once: beside its kind when it is that kind's only part, else as a last pair labelled
+    ``LARGEST_SINGLE`` (pairs, the size terminal's stored form that a same-task checkpoint carries across versions).
+    Many small rows of one kind read as the one part they are, so a resident kind that only grows is visible (BIBLE
+    P1): facts, no advice (owner 09.10 5A)."""
     from ouroboros.context_compaction import context_units
     from ouroboros.context_measurement import estimate_context_prompt_tokens, tool_schema_tokens
 

@@ -414,19 +414,13 @@ def test_size_facts_count_each_producer_kind_as_one_part_from_typed_metadata_onl
     """The facts line and a size refusal's terminal name what occupies the view by producer kind: nineteen small
     review-decision rows are one part larger than one big tool result (C11, 27.11: the review rows were 47% of the
     view, yet its largest single row was shown as "user ~36,406"). Kinds come from typed metadata only: a plain row
-    that merely starts with the review heading is an ordinary delivered row. The largest single part stays named."""
-    import hashlib
+    that merely starts with the review heading is an ordinary delivered row. The largest single part stays named. The
+    review rows are the review producer's own (``_index_message``), so the count follows whatever shape it writes."""
     from ouroboros.context_view_facts import largest_parts, largest_parts_text
-    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY
-
-    def review_row(n):
-        text = "[Current review decisions]\n" + json.dumps({"family": "commit", "current": {"n": n, "pad": "d" * 4000}})
-        return {"role": "user", "content": text, REVIEW_CONTEXT_INDEX_KEY: {
-            "family": "commit", "repo_root": f"/copy-{n}", "sha256": format(n, "064x"),
-            "visible_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}}
+    from ouroboros.review_history_view import _index_message
 
     messages = [{"role": "system", "content": "Core."}, {"role": "user", "content": "The assignment."},
-                *(review_row(n) for n in range(19)),
+                *(_index_message({"open": "d" * 4000}, "commit", f"/copy-{n}") for n in range(19)),
                 {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
                     "function": {"name": "read_file", "arguments": "{}"}}]},
                 {"role": "tool", "tool_call_id": "c1", "content": "big result " * 3000},
