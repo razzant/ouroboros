@@ -2370,7 +2370,7 @@ it, every proven cause named (only an unproven one keeps “paused or waiting in
 its next step (that raising a limit alone resumes nothing; that Stop now frees the clock; that only the next own wake
 waits, wakes in places being separate) and what the same state says now: Resume's estimated room at an allowance, as
 Costs and its Main card say it, and whether the total budget has room (none left: raise it in Costs, then Resume;
-room: Resume continues it). A passed deadline drops that advice and the Costs door. Its controls are exactly those its
+room: Resume continues it). A passed deadline drops those sentences, that advice and the Costs door. Its controls are exactly those its
 work's projection offers, on the shared task controls: Resume, Stop now after the shared confirmation, Close for a
 passed deadline. They stay, disabled, while the socket is closed or the newest state read failed, and a press of one
 disables the others until it settles; a press made on another surface shows at the next state read, and every press

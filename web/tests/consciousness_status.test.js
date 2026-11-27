@@ -783,3 +783,22 @@ test('a room header\'s Shade follows the page\'s state clock: a failed read or a
         restoreDom(env.prior);
     }
 });
+
+test('a passed deadline keeps no detail that promises the wake goes on; a live one keeps the host\'s words', async () => {
+    const token = 'c'.repeat(64);
+    const SLEEPS = 'Its own wake-up sleeps until what it waits for happens, then goes on by itself; its card shows what.';
+    const sleeping = (controls) => heldBy('sleep', controls, { detail: SLEEPS });
+    const { env, status, block, button } = await openHeld(sleeping(OFFERED));
+    try {
+        const text = block.querySelector('.cx-held-text');
+        assert.deepEqual([text.hidden, text.textContent, block.querySelector('.cx-held-word').textContent], [false, SLEEPS, 'Waiting']);
+        status.update(sleeping([{ action: 'close', target: WAKE, close_expired: token }, OFFERED[1]]));
+        assert.deepEqual([text.hidden, block.querySelector('.cx-held-word').textContent, Boolean(button('Close'))],
+            [true, 'Deadline expired', true], 'beside Close, no "goes on by itself"');
+        status.update(sleeping(OFFERED));
+        assert.deepEqual([text.hidden, text.textContent], [false, SLEEPS]);
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});

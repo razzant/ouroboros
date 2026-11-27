@@ -8,7 +8,7 @@
  * controls: Resume (`createTaskResumeButton`), Stop now (the shared stop request after its shared confirmation) and
  * Close for a passed deadline (`createTaskCloseButton`). `Costs ›` stands while the next step is a limit edited in
  * Costs and leads while the total budget holds the wake with nothing left (Resume then stays pressable, no longer the
- * primary: the server refuses honestly); a passed deadline says so in the shared word, with no continuation advice.
+ * primary: the server refuses honestly); a passed deadline says so in the shared word alone, beside Close.
  * The door to its card in Main is the task door (task_reference.js). Nothing here polls: each surface paints it from the
  * facts it already reads; the last confirmed controls stay, disabled, while the newest state read failed or the socket
  * is down, and every press re-checks those facts as they are then.
@@ -32,7 +32,7 @@ let sequence = 0;
  * consciousness state (consciousness_api.js); `data` an `/api/state` body whose work projection carries that wake's
  * controls (`workOfEpisode`) and whose accounting says the total budget now: without it the block offers only its
  * doors. A work past its hard deadline (its Close offer, or the server's own expired fact) says the shared expired word
- * and drops the continuation advice and the Costs door.
+ * and drops the host's sentences, the continuation advice and the Costs door.
  */
 export function heldWakeView(snapshot, data = null) {
     const taskId = heldWake(snapshot);
@@ -48,7 +48,8 @@ export function heldWakeView(snapshot, data = null) {
     return {
         taskId, ...(expired ? { mark: { shape: work?.mark || 'pause', hue: 'ink' }, word: deadlineExpiredWord() } : heldWakeState(snapshot)),
         time: clockText(snapshot.liveWakeStartedAt), expired,
-        text: snapshot.detail ? tr(snapshot.detail, snapshot.detail) : '',
+        // Past its deadline the host's sentence (sleep's "then goes on by itself") would promise what Close ends.
+        text: !expired && snapshot.detail ? tr(snapshot.detail, snapshot.detail) : '',
         note: !expired && snapshot.detailNote ? tr(snapshot.detailNote, snapshot.detailNote) : '',
         advice: room || budget.words,
         costs, costsRow: COSTS_ROWS[cause] || '', costsLeads: costs && cause === 'total_budget' && budget.room !== true,
