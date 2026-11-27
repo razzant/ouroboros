@@ -48,7 +48,8 @@ def test_both_raise_sites_name_their_measured_input_reserve_window_and_deficit(t
     assert error.estimated_input_tokens == math.ceil(error.raw_input_tokens * ratio)
     assert error.response_reserve_tokens == 10_000 and error.window_tokens == 92_000
     assert error.deficit_tokens == error.estimated_input_tokens + 10_000 - 92_000 > 0
-    for label, value in (("fixed input", error.fixed_input_tokens), ("memory view", error.memory_view_tokens),
+    memory = error.memory_view_tokens if error.memory_measured else "not measured"
+    for label, value in (("fixed input", error.fixed_input_tokens), ("memory view", memory),
                          ("reply/working reserve", 10_000), ("window", 92_000), ("deficit", error.deficit_tokens)):
         assert f"{label}={value}" in str(error)
 
@@ -67,8 +68,8 @@ def test_the_refusal_a_person_reads_says_need_limit_and_next_step_without_intern
     assert "Ollama" not in text and "OLLAMA_CONTEXT_LENGTH" not in text
     threshold = error.estimated_input_tokens + error.response_reserve_tokens
     assert threshold > error.window_tokens, "the refusal's own comparison"
-    # Measured: about, rounded up. A frame refused before memory was priced knows a lower bound: at least, rounded down.
-    needs = f"about {math.ceil(threshold / 1000) * 1000:,}" if shape == "memory" else f"at least {threshold // 1000 * 1000:,}"
+    # Measured: about, rounded up. A frame refused before memory was priced knows a lower bound: at least, exactly.
+    needs = f"about {math.ceil(threshold / 1000) * 1000:,}" if shape == "memory" else f"at least {threshold:,}"
     assert f"needs {needs} tokens" in text and f"the model's limit here is {error.window_tokens:,}" in text
     assert "larger window" in text and "send the request again" in text and "Context Length" in text
     # A room's own model outlives the default: the room's control is named first, the default as what it is.
@@ -121,6 +122,31 @@ def test_the_pooled_refusal_says_at_least_when_memory_was_not_measured(tmp_path,
     text = _context_capacity_terminal(raised.value)[0]
     assert ("needs at least" in text and "memory not measured" in text) is (shape == "fixed")
     assert ("needs about" in text) is (shape == "memory") and ("further memory" in text) is (shape == "memory")
+
+
+def test_an_unmeasured_refusal_never_prints_its_memory_as_a_number(tmp_path, monkeypatch):
+    """The exception's own message (logged, and stored as a counterfactual arm) names an unpriced memory as not
+    measured, never as 0; a measured refusal still prints its number."""
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path / "fixed", monkeypatch, "fixed")
+    assert raised.value.memory_measured is False
+    assert "memory view=0" not in str(raised.value) and "memory view=not measured" in str(raised.value)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path / "memory", monkeypatch, "memory")
+    assert raised.value.memory_measured is True
+    assert f"memory view={raised.value.memory_view_tokens}," in str(raised.value)
+
+
+def test_an_unmeasured_lower_bound_just_over_the_limit_reads_above_the_limit():
+    """A lower bound one token over the limit is never rounded down to the limit itself."""
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+
+    unfit = fit.MinimumViewUnfit("Core, resident tools and reserve cannot fit before memory", fixed_tokens=70_001,
+                                 memory_tokens=0, reserve_tokens=10_000, window_tokens=80_000, ratio=1.0,
+                                 memory_measured=False)
+    text = _context_capacity_terminal(unfit)[0]
+    need = text.split("the start needs at least ", 1)[1].split(" tokens", 1)[0]
+    assert int(need.replace(",", "")) > unfit.window_tokens
 
 
 def test_a_work_room_only_shortfall_starts_with_the_existing_notice(tmp_path, monkeypatch):

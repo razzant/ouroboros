@@ -787,7 +787,7 @@ class MinimumViewUnfit(ValueError):
         self.work_room_deficit_tokens = max(0, self.fixed_input_tokens + reserve_tokens + work_room_tokens - window_tokens)
         # Set only when the ordinary view fits and this task's required handbook alone does not: never a rescue's.
         self.required_book_tokens = math.ceil(required_book_tokens * ratio)
-        super().__init__(f"{message}: fixed input={self.fixed_input_tokens}, memory view={self.memory_view_tokens}, "
+        super().__init__(f"{message}: fixed input={self.fixed_input_tokens}, memory view={self.memory_view_tokens if memory_measured else 'not measured'}, "
                          f"reply/working reserve={reserve_tokens}, window={window_tokens}, "
                          f"deficit={self.deficit_tokens}, work room={work_room_tokens}, "
                          f"fixed/work-room deficit={self.work_room_deficit_tokens} tokens"
