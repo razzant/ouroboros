@@ -14,9 +14,9 @@ from ouroboros.gateway.attachment_contracts import ChatAttachmentView, QuizAnswe
 from ouroboros.gateway.reference_contracts import ChatReplyReference, HostNoticeField
 
 try:
-    from typing import Literal, Required, TypedDict
+    from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - Python 3.10 compatibility.
-    from typing_extensions import Literal, Required, TypedDict
+    from typing_extensions import Literal, NotRequired, Required, TypedDict  # type: ignore[assignment]
 
 
 class RequestedExecutorRoute(TypedDict):
@@ -275,7 +275,7 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     download_url_compat: str
     caption: str
     size_bytes: int
-    actions: List[Dict[str, str]]  # LinkAction rows: {label, url}
+    actions: List[Dict[str, str]]  # LinkAction rows: {label, url} or {label, place}
     title: str
     quiz: ChatHistoryQuiz
     card: ChatHistoryCard
@@ -436,10 +436,12 @@ class ChatSearchAttachment(TypedDict):
 
 
 class ChatSearchLink(TypedDict):
-    """A link button of a delivered links row: its label is shown, its address only decides whether it is."""
+    """A link button of a delivered links row: its label is shown; its address, or its place (a skill's sign-in card,
+    drawn as history draws it), only decides whether it is."""
 
     label: str
-    url: str
+    url: NotRequired[str]
+    place: NotRequired[str]
 
 
 class ChatSearchQuestion(TypedDict, total=False):
