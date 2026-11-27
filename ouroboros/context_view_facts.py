@@ -3,7 +3,8 @@
 A window's source and date, reserve, disagreement and retired history are shared by facts rows, Settings and size
 failures (``window_projection``); a size failure names its round's own refused request (``remember_size_refusal``).
 An integrating start's facts row also names the gate's shortest telling by kind (``start_facts``), its draw kept on
-the captured core."""
+the captured core. The view's largest parts by producer kind and its largest single part are one clause the facts row,
+the size terminal and the native room fact share (``largest_parts``)."""
 from __future__ import annotations
 
 import pathlib
@@ -63,6 +64,72 @@ def block_label(message, index, block, plan):
     if text.startswith("## DEVELOPMENT.md"):
         return "development book"
     return "core and books" if index == 0 else "runtime facts"
+
+
+def _producer_kind(messages, index, first_user):
+    """Who produced a transcript row, from its typed metadata only (never its text): the kind the size facts count."""
+    from ouroboros.context_budget import OWNER_WORDS_KIND
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, _review_index_identity
+
+    row = messages[index]
+    if _review_index_identity(row) is not None:
+        return "review decisions"
+    if row.get(REVIEW_HISTORY_MESSAGE_KEY):
+        return "recorded review disputes"
+    meta = _capsule_metadata(row)[1]
+    if meta:
+        return "my notes" if meta.get("authorship") == "actor" else "recovery address records"
+    kind = row.get(HOST_CONTEXT_KIND_KEY)
+    if kind:
+        return {OWNER_WORDS_KIND: "owner and principal words", "owner_dialogue": "my outward replies"}.get(kind, str(kind))
+    if row.get("role") == "tool" or row.get("tool_calls"):
+        return "tool calls and results"
+    if row.get("role") == "assistant":
+        return "my replies"
+    return "assignment" if index == first_user else "other delivered rows"
+
+
+def largest_parts(view, *, measured):
+    """The view's three largest parts by producer kind and its largest single part: one clause the facts row, the
+    size terminal and the native room fact each frame and calibrate as their own (``measured``: the view's measured
+    density, else raw estimates). Kinds come from typed metadata only (``_producer_kind``), system blocks keep their
+    block labels and the route's tool schemas are one part; ``kind ×N`` counts the transcript rows of a kind that
+    spans several. The single part is a unit's id (else its block or kind), said once: beside its kind when it is
+    that kind's only part, else after the kinds. Many small rows of one kind read as the one part they are, so a
+    resident kind that only grows is visible (BIBLE P1): facts, no advice (owner 09.10 5A)."""
+    from ouroboros.context_compaction import context_units
+    from ouroboros.context_measurement import estimate_context_prompt_tokens, tool_schema_tokens
+
+    density = float(view.accumulated_usage.get("_context_measurement_density") or 1.0) if measured else 1.0
+    messages, plan = view.messages, view.context_fit_plan
+    first_user = next((i for i, row in enumerate(messages) if row.get("role") == "user"), -1)
+    units = context_units(messages, scope="dialogue", measurement_density=density)
+    covered = {i for unit in units for i in range(unit.start, unit.end + 1)}
+    parts = [(_producer_kind(messages, unit.start, first_user), unit.unit_id, range(unit.start, unit.end + 1),
+              unit.context_size_tokens) for unit in units]  # (kind, its name, its rows, tokens)
+    for i, message in enumerate(messages):
+        if i in covered:
+            continue
+        content, system = message.get("content"), message.get("role") == "system"
+        for chunk in [{**message, "content": [block]} for block in content] if system and isinstance(content, list) else [message]:
+            block = chunk.get("content")
+            kind = (block_label(message, i, block[0] if isinstance(block, list) and block else block, plan) if system
+                    else _producer_kind(messages, i, first_user))
+            parts.append((kind, kind, (i,), int(estimate_context_prompt_tokens([chunk]) * density)))
+    parts.append(("tool schemas", "tool schemas", (), int(tool_schema_tokens(view.tool_schemas,
+        provider=getattr(plan, "provider", ""), reasoning_effort=getattr(view, "active_effort", "")) * density)))
+    kinds: Dict[str, list] = {}
+    for kind, _name, rows, tokens in parts:  # each kind's tokens, transcript rows and parts
+        total = kinds.setdefault(kind, [0, set(), 0])
+        total[0], total[2] = total[0] + tokens, total[2] + 1
+        total[1].update(rows)
+    top = sorted(kinds.items(), key=lambda item: item[1][0], reverse=True)[:3]
+    own_kind, name, _rows, tokens = max(parts, key=lambda part: part[3])
+    alone = kinds[own_kind][2] == 1 and own_kind in dict(top)  # the largest part is a named kind's only part
+    said = [kind + (f" ×{len(rows)}" if len(rows) > 1 else "") + (f" ({name})" if alone and kind == own_kind != name else "")
+            + f" ~{total:,}" for kind, (total, rows, _parts) in top]
+    return ", ".join(said) + ("" if alone else f"; largest single {name} ~{tokens:,}")
 
 
 def memory_facts(plan, mode, messages=()):
@@ -347,12 +414,13 @@ def _refused_request_text(slot):
 
 def refusal_frame_facts(usage, round_idx):
     """The size terminal's bracket: the smallest request the round's refusing model refused in this task (its own key,
-    never another model's) and the current view's largest parts, raw estimates (``context_renewal._cannot_help``)."""
+    never another model's) and the current view's largest parts by kind and its largest single part, raw estimates
+    (``largest_parts``, captured by ``context_renewal._cannot_help``)."""
     from ouroboros.context_anchor import REFUSED_INPUTS_KEY
 
     slot = size_refusal(usage, round_idx)
     refused = int((usage.get(REFUSED_INPUTS_KEY) or {}).get(slot.get("key") or "") or 0) if slot else 0
-    parts = ", ".join(f"{label} ~{int(tokens):,}" for label, tokens in usage.get("_context_refusal_frame") or [])
+    parts = usage.get("_context_refusal_frame") or ""
     return "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
                                        f"largest parts: {parts} by raw estimate of the current view" if parts else "") if fact)
 

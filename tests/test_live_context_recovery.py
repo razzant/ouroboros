@@ -258,6 +258,24 @@ def test_passive_room_fact_is_sent_once_and_counts_its_own_bytes(host_world):
     assert not evidence['recovery']
 
 
+def test_the_passive_room_fact_names_the_largest_unit_by_id(host_world):
+    """The native driver's fresh room fact names the view's kinds and its largest single unit by id, the one clause the
+    main facts row and the size terminal say (Astra rev1 C1, 27.11: it had named the kind alone, so the unit a native
+    mind could fold by id went unnamed)."""
+    from ouroboros import context_compaction as cc
+    from ouroboros.realtime_setup import session_candidate
+    from tests.test_context_attention_mind import _tool
+    host = host_world.host
+    host._session_opened = True
+    host.messages.extend(_tool('large', 'exact evidence ' * 8000))
+    session_candidate(host, host_world.provider['session'], LiveOptions())
+    fact = host.messages[-1]['content']
+    unit = next(u for u in cc.context_units(host.messages[:-1], scope='dialogue')
+                if (host.messages[u.start].get('tool_calls') or [{}])[0].get('id') == 'large')
+    assert 'Fresh view before this facts row:' in fact and 'Largest residents: ' in fact
+    assert unit.unit_id in fact and 'tool calls and results ×' in fact, fact
+
+
 def test_next_fresh_fit_retires_the_old_room_fact_before_memory(host_world):
     from ouroboros.context_budget import bound_host_row
     from ouroboros.realtime_setup import session_candidate

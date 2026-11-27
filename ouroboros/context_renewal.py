@@ -364,14 +364,13 @@ def physical_window_cut(messages, *, drive_root, task_id, measure, usable):
 
 def _cannot_help(limit_ctx: Any) -> bool:
     """Name the frame's largest parts for the named refusal (``loop_transport``), then decline."""
-    from ouroboros.loop_messages import _context_components
+    from ouroboros.context_view_facts import largest_parts
 
     view = SimpleNamespace(messages=limit_ctx.messages, tool_schemas=getattr(limit_ctx, "tool_schemas", None) or [],
                            accumulated_usage=limit_ctx.accumulated_usage,
                            context_fit_plan=getattr(limit_ctx, "context_fit_plan", None))
     try:
-        limit_ctx.accumulated_usage["_context_refusal_frame"] = [list(part) for part in _context_components(
-            view, measured=False)]
+        limit_ctx.accumulated_usage["_context_refusal_frame"] = largest_parts(view, measured=False)
     except Exception:  # the refusal text is facts only; an unreadable frame stays unnamed
         pass
     return False

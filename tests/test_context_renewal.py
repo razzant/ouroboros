@@ -145,6 +145,41 @@ def test_renewal_is_not_attempted_when_it_cannot_help_or_the_failure_is_not_size
     assert renew_after_refusal(ctx(only_host), tools) is False and only_host == before  # nothing substantive leaves
 
 
+def test_the_size_terminal_names_the_kinds_and_the_largest_unit_once(tmp_path):
+    """When renewal cannot help, the terminal names what fills the view by kind and its largest single unit by id,
+    as the facts row does (Astra rev1 C1, 27.11: the kinds alone dropped the unit base had named). Review decisions
+    never leave the window, so nothing here can leave; raw estimates, each part said once: after the kinds while its
+    kind holds other parts, beside its kind when it is the only one, and a uniquely named block not repeated."""
+    import hashlib
+    from ouroboros import loop_transport
+    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY
+
+    def review(n):
+        text = "[Current review decisions]\n" + json.dumps({"family": "commit", "current": {"pad": "e" * 12000}})
+        return {"role": "user", "content": text, REVIEW_CONTEXT_INDEX_KEY: {"family": "commit", "repo_root": f"/copy-{n}",
+                "sha256": format(n, "064x"), "visible_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}}
+
+    def terminal(messages):
+        usage = {"_last_llm_error_kind": "context_overflow", "_context_refusal_round": 3}
+        limit = SimpleNamespace(messages=messages, accumulated_usage=usage, drive_root=tmp_path, drive_logs=tmp_path / "logs",
+                                task_id="renewal", round_idx=3, event_queue=None, tool_schemas=[])
+        assert renew_after_refusal(limit, SimpleNamespace(_ctx=SimpleNamespace())) is False
+        return loop_transport.provider_terminal_fallback_text(usage, round_idx=3, is_context_overflow=True,
+                                                              is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False)
+
+    head = [{"role": "system", "content": "S"}, {"role": "user", "content": "go"}, *(review(n) for n in range(4))]
+    long_reply, short = {"role": "assistant", "content": "My long analysis. " * 1500}, {"role": "assistant", "content": "Short."}
+    unit = next(u for u in cc.context_units([*head, long_reply], scope="dialogue") if u.start == len(head))
+    text = terminal([*head, long_reply, short, _owner(OWNER_LATER)])
+    assert "could not make it fit (largest parts: review decisions ×4 ~" in text and ", my replies ×2 ~" in text
+    assert f"; largest single {unit.unit_id} ~{unit.context_size_tokens:,} by raw estimate of the current view)" in text
+    text = terminal([*head, long_reply, _owner(OWNER_LATER)])
+    assert f", my replies ({unit.unit_id}) ~{unit.context_size_tokens:,}" in text and "largest single" not in text
+    core = [{"role": "system", "content": "Complete required core. " * 6000}, *head[1:], _owner(OWNER_LATER)]
+    text = terminal(core)
+    assert "(largest parts: core and books ~" in text and "largest single" not in text and text.count("core and books") == 1
+
+
 def test_a_source_the_mind_restored_stays_whole_across_renewal(tmp_path):
     """Chosen sources stay, before or after a note; unasked work can still leave."""
     messages = _transcript()
@@ -191,7 +226,7 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
     from ouroboros.context_renewal import renewal_view
     from ouroboros.context_window import WindowLimit, WindowRecord
     from ouroboros.loop_model_call import _measure_round_main_fit
-    from ouroboros.loop_messages import _context_components
+    from ouroboros.context_view_facts import largest_parts
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
@@ -229,17 +264,18 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
     assert renew_after_refusal(ctx, tools)
     after = _measure_round_main_fit(ctx, automatic_pass_used=True).measurement
     cut = any(row.get(HOST_CONTEXT_KIND_KEY) == "context_physical_cut" for row in messages)
-    schema_fact = dict(_context_components(ctx, measured=True))["tool schemas"]
+    parts = largest_parts(ctx, measured=True)
     schema_shape = cf.tool_schema_tokens(schemas, provider=provider, reasoning_effort=effort)
     print("RENEWAL_PRESEND_SHAPE", {"provider": provider, "effort": effort,
         "canonical_seed": canonical(seed), "usable": usable, "actual_after": after.estimated_input_tokens,
         "deficit_after": after.capacity_deficit_tokens, "cut": cut,
-        "schema_fact": schema_fact, "schema_shape": schema_shape})
+        "parts": parts, "schema_shape": schema_shape})
     assert after.capacity_total_tokens == before.capacity_total_tokens
     assert after.response_reserve_tokens == before.response_reserve_tokens
     assert after.measurement_density == before.measurement_density == 1.0
     assert after.capacity_deficit_tokens == 0
-    assert schema_fact == schema_shape  # the diagnostic names only the catalog segment, in the same shape
+    import re  # the diagnostic names only the catalog segment, in the same shape
+    assert re.search(rf"tool schemas ~{schema_shape:,}(?!,?\d)", parts), parts
     assert cut is (provider == "openai" and effort == "high")
     assert [r["content"] for r in messages[:2]] == [r["content"] for r in original[:2]]
     assert original[-1]["content"] in [r.get("content") for r in messages]
