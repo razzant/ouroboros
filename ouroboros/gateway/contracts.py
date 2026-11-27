@@ -390,10 +390,12 @@ class DocumentOutbound(_MediaOutbound):
 
 
 class LinkAction(TypedDict):
-    """One validated HTTP(S) action in a structured links frame."""
+    """One validated action in a structured links frame: an HTTP(S) ``url``, or a ``place`` inside Ouroboros
+    (``skill-sign-in/<skill>/<service>``: that skill's card, where the owner signs in; ``ouroboros/link_actions.py``)."""
 
     label: str
-    url: str
+    url: NotRequired[str]
+    place: NotRequired[str]
 
 
 class LinksOutbound(ChatReferenceFields):

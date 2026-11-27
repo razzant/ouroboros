@@ -32,19 +32,25 @@ def _date(value: Any) -> str:
     return str(value or "")[:10] or "date not recorded"
 
 
+def _change_facts(change: Mapping[str, Any]) -> tuple:
+    """``(kind, basis)`` of one nested change: its signed act and what its citing edge recorded."""
+    event, revision = change["event"], change.get("revision")
+    basis = (f"cited revision {revision}; later change not in that source account" if revision else
+             "part member; member revision was not recorded")
+    return event["kind"] if event["kind"] == "correction" else "acceptance" if event["accepted"] else "rejection", basis
+
+
 def source_change_lines(src: Mapping[str, Any]) -> List[str]:
-    """Signed changes below a cited source; shared by the story and exact account reader.
+    """Signed changes below a cited source, as the exact account reader (``tools/chronicle``) prints them: each
+    change with its full chain and both readers. The story prints the same facts once each (``story_change_lines``).
 
     These facts do not rewrite any narrative. A part has no recorded member revision, unlike an
     account's frozen source edge, so its member changes carry no invented incorporation claim.
     """
     lines = []
     for change in src.get("nested_changes") or ():
-        event, ident = change["event"], change["source_id"]
-        revision = change.get("revision")
-        basis = (f"cited revision {revision}; later change not in that source account" if revision else
-                 "part member; member revision was not recorded")
-        kind = event["kind"] if event["kind"] == "correction" else "acceptance" if event["accepted"] else "rejection"
+        event, ident, revision = change["event"], change["source_id"], change.get("revision")
+        kind, basis = _change_facts(change)
         lines.append(f"- {kind} of nested source {change['kind']} {ident} (room {change['room_id']}) "
                      f"via {' -> '.join(change['via'])}; {basis}; original account text unchanged")
         lines.append(f"  {event['kind']} {event['id']} by mind ({draft_signer(event.get('author'))}) "
@@ -52,6 +58,32 @@ def source_change_lines(src: Mapping[str, Any]) -> List[str]:
         lines.append(indented(str(event.get("text") if event["kind"] == "correction" else event.get("reason") or "")))
         args = f", revision='{revision}'" if revision else ""
         lines.append(f"  source: memory_read(node_id='{ident}'{args})")
+    return lines
+
+
+def story_change_lines(src: Mapping[str, Any]) -> List[str]:
+    """The story's form of ``source_change_lines``: the same changes in the same order, every signed text, path,
+    signer, time and revision fact kept, with each id printed once. The two readers and "original account text
+    unchanged" are stated once for the source; a chain names the hops it shares with the chain before it by their
+    count. ``memory_read`` of the account prints the full form."""
+    changes = src.get("nested_changes") or ()
+    if not changes:
+        return []
+    lines = [f"- {len(changes)} later change{'' if len(changes) == 1 else 's'} inside its nested sources, original "
+             "account text unchanged; memory_read(node_id='<change id>') reads a change, memory_read(node_id='<nested "
+             "source id>', revision='<cited revision>') its nested source as cited (a part member without revision); "
+             "a chain's \"(first N as above)\" is the first N hops of the chain above it"]
+    above: List[str] = []
+    for change in changes:
+        via, event = [str(hop) for hop in change["via"]], change["event"]
+        shared = next((n for n, (mine, theirs) in enumerate(zip(via, above)) if mine != theirs), min(len(via), len(above)))
+        chain = " -> ".join(([f"(first {shared} as above)"] if shared else []) + via[shared:])
+        above = via
+        kind, basis = _change_facts(change)
+        lines.append(f"- {kind} of nested source {change['kind']} {change['source_id']} (room {change['room_id']}) "
+                     f"via {chain}; {basis}; {event['id']} by mind ({draft_signer(event.get('author'))}) "
+                     f"at {event.get('ts') or 'time not recorded'}")
+        lines.append(indented(str(event.get("text") if event["kind"] == "correction" else event.get("reason") or "")))
     return lines
 
 
@@ -80,7 +112,7 @@ def _source_lines(entry: Mapping[str, Any]) -> List[str]:
             lines.append(f"- its source {src['id']}, a draft then, I have since accepted")
         if src.get("folded_into"):
             lines.append(f"- its source {src['id']} has since been folded into part {src['folded_into']} (not in this account)")
-        lines.extend(source_change_lines(src))
+        lines.extend(story_change_lines(src))
     return lines
 
 

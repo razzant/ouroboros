@@ -31,6 +31,15 @@ def test_workflow_filters_cover_the_lane_and_request_builders():
                  "ouroboros/llm_ollama_guard.py", "tests/_ollama.py", "tests/test_local_tool_parsing.py"):
         assert any(fnmatchcase(path, pattern) for pattern in paths), path
     assert not any(fnmatchcase("web/styles.css", pattern) for pattern in paths)
+    # Owner, 27.11.2026: a pull request that changes only a live call's files runs the gate too; nothing wider.
+    for path in ("supervisor/inline_carrier.py", "ouroboros/realtime_setup.py", "ouroboros/live_tool_lane.py",
+                 "ouroboros/live_works.py", "ouroboros/host_notice.py", "skills/live_conversation/ui/call.js",
+                 "skills/live_conversation/plugin.py", "tests/_memory_scale_fixture.py", "tests/_live_works_fixture.py",
+                 # the engines' adapters serialize the call's request (pr2rev1 G20a)
+                 "skills/openai_realtime/plugin.py", "skills/gemini_live/plugin.py", "skills/grok_realtime/plugin.py"):
+        assert any(fnmatchcase(path, pattern) for pattern in paths), path
+    assert not any(fnmatchcase("skills/weather/plugin.py", pattern) for pattern in paths)
+    assert text.startswith("# Owner exception, 2026-11-15:") and "Second exception, 2026-11-27:" in text
     assert workflow["permissions"] == {"contents": "read"}
     jobs = list(workflow["jobs"].values())
     assert len(jobs) == 1 and jobs[0]["runs-on"] == "ubuntu-latest"

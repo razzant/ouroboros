@@ -434,14 +434,14 @@ def test_every_descriptor_matches_the_live_repo_exactly_once():
     readme_spans = carrier_spans_for("README.md")
     assert {span.carrier_id for span in readme_spans} == {
         "readme_badge", "readme_history", "readme_download_refs",
+        "readme_windows_badge", "readme_windows_links", "readme_windows_quickstart",
     }
     # The span set is cut from THIS tree's carrier inventory (everything
     # sync_release_metadata writes / version_carrier_desyncs checks): the 7
-    # ratified carriers + README-history, the README direct-download reference
-    # block, the uv.lock root-package mirror, the web/package-lock.json header
-    # (both root version entries in one span), and 8 release-download anchors on
-    # each of the two public install pages (macos-arm64 appears twice there).
-    assert len(VERSION_CARRIER_SPANS) == 26
+    # ratified carriers + README-history, README direct-download refs & Windows
+    # projection spans, uv.lock root-package mirror, web/package-lock.json header,
+    # and 8 release-download anchors on each of the two public install pages.
+    assert len(VERSION_CARRIER_SPANS) == 29
     assert {s.carrier_id for s in VERSION_CARRIER_SPANS} >= {
         "uv_lock_root_package", "web_package_lock_version", "readme_download_refs",
         "site_install_download_macos-arm64_button",
@@ -739,3 +739,219 @@ def test_the_marker_target_conflict_inventory_keeps_the_official_side_inside_the
     assert ok, (note, error)
     assert _links_in_tree(repo) == ("7.9.0", "7.9.0", "7.9.0")
     assert "| 7.10.0-alpha.0 |" not in (repo / "README.md").read_text(encoding="utf-8")
+
+
+def _seed_real_windows_repo(tmp_path, version: str, history_row: str, *, with_setup: bool):
+    repo, head = tua._init_repo(tmp_path)
+    (repo / ".gitattributes").write_bytes((REPO_ROOT / ".gitattributes").read_bytes())
+    for rel in (
+        "VERSION", "pyproject.toml", "uv.lock", "web/package.json", "web/package-lock.json",
+        "web/modules/api_types.js", "README.md", "docs/ARCHITECTURE.md",
+        "site/install/index.html", "docs/install/index.html",
+    ):
+        dest = repo / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        if rel == "README.md":
+            start, end = locate_carrier_span(text, carrier_spans_for("README.md")[1])[1]
+            text = f"{text[:start]}{history_row}\n{text[end:]}"
+        dest.write_text(text, encoding="utf-8", newline="\n")
+    (repo / "build_windows.ps1").write_text("# zip build\n", encoding="utf-8", newline="\n")
+    if with_setup:
+        (repo / "scripts").mkdir(exist_ok=True)
+        (repo / "scripts" / "pack_windows_setup.ps1").write_text("# setup build\n", encoding="utf-8", newline="\n")
+    (repo / "VERSION").write_text(f"{version}\n", encoding="utf-8", newline="\n")
+    sync_release_metadata(str(repo))
+    return repo, head
+
+
+def test_real_install_pages_and_readme_cross_windows_installer_boundary_cleanly(tmp_path, monkeypatch):
+    """Managed updates cross ZIP-only <-> setup + ZIP cleanly in both directions,
+    preserve local edits inside the Windows card and quick start, and honor an
+    intervening ZIP-only hotfix above 7.12.1 from the target README."""
+    from ouroboros.tools.release_sync import (
+        CARRIER_SPAN_PATHS,
+        WINDOWS_SETUP_PROOF_ID,
+        carrier_only_change,
+        release_asset_download_url,
+        release_metadata_findings,
+        resolve_release_windows_installer,
+    )
+
+    repo, head = _seed_real_windows_repo(
+        tmp_path, "7.12.1", "| 7.12.1 | 2026-11-26 | Published ZIP-only release. |", with_setup=False,
+    )
+    assert check_worktree_version_sync(repo) == ""
+    assert release_metadata_findings(
+        {p: (repo / p).read_text(encoding="utf-8") for p in CARRIER_SPAN_PATHS if (repo / p).exists()},
+        windows_installer=resolve_release_windows_installer(repo, "7.12.1"),
+    ) == []
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "published 7.12.1 ZIP-only")
+    _git(repo, "tag", "v7.12.1")
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    site_7121 = (repo / "site/install/index.html").read_text(encoding="utf-8")
+    readme_7121 = (repo / "README.md").read_text(encoding="utf-8")
+
+    # Official cuts 7.12.2 (adds signed per-user Windows installer beside portable ZIP).
+    _git(repo, "checkout", "-q", "-b", "remote-sim")
+    (repo / "scripts").mkdir(exist_ok=True)
+    (repo / "scripts" / "pack_windows_setup.ps1").write_text("# setup build\n", encoding="utf-8", newline="\n")
+    (repo / "VERSION").write_text("7.12.2\n", encoding="utf-8", newline="\n")
+    (repo / "README.md").write_text(
+        readme_7121.replace("| 7.12.1 |", "| 7.12.2 | 2026-11-27 | Windows installer. |\n| 7.12.1 |", 1),
+        encoding="utf-8", newline="\n",
+    )
+    sync_release_metadata(str(repo))
+    site_7122 = (repo / "site/install/index.html").read_text(encoding="utf-8")
+    readme_7122 = (repo / "README.md").read_text(encoding="utf-8")
+    assert carrier_only_change(site_7121, site_7122, "site/install/index.html") is True
+    assert carrier_only_change(readme_7121, readme_7122, "README.md") is True
+    for span in (*carrier_spans_for("site/install/index.html"), *carrier_spans_for("README.md")):
+        target_text = site_7122 if span.path == "site/install/index.html" else readme_7122
+        assert locate_carrier_span(target_text, span)[0] == "ok", span.carrier_id
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "official 7.12.2 setup+zip")
+
+    # Fork adds a local note INSIDE <article id="windows"> and INSIDE ### Windows quick start.
+    _git(repo, "checkout", "-q", head)
+    (repo / "VERSION").write_text("7.12.2-alpha.0\n", encoding="utf-8", newline="\n")
+    fork_site = site_7121.replace(
+        "      </article>\n      <article id=\"linux\">",
+        '        <p class="local-note">FORK_WINDOWS_CARD_NOTE</p>\n      </article>\n      <article id="linux">',
+        1,
+    )
+    assert carrier_only_change(site_7121, fork_site, "site/install/index.html") is False
+    (repo / "site/install/index.html").write_text(fork_site, encoding="utf-8", newline="\n")
+    (repo / "README.md").write_text(
+        readme_7121.replace("### Linux quick start", "\nFORK_WINDOWS_QUICKSTART_NOTE\n\n### Linux quick start", 1),
+        encoding="utf-8", newline="\n",
+    )
+    sync_release_metadata(str(repo))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fork marker + local Windows card & quick-start notes")
+    _point_at(monkeypatch, tmp_path, repo, head)
+
+    plan = update_merge.plan_managed_update_merge(fetch=False, build=True)
+    assert plan["kind"] == "clean", plan
+    ok, message = update_merge.apply_managed_merge_update(head, plan["merge_commit"])
+    assert ok, message
+    merged_site = (repo / "site/install/index.html").read_text(encoding="utf-8")
+    merged_readme = (repo / "README.md").read_text(encoding="utf-8")
+    assert "FORK_WINDOWS_CARD_NOTE" in merged_site
+    assert "FORK_WINDOWS_QUICKSTART_NOTE" in merged_readme
+    assert release_asset_download_url(WINDOWS_SETUP_PROOF_ID, "7.12.2") in merged_site
+    assert "Run the signed per-user installer" in merged_site
+    assert "Download for Windows (.exe)" in merged_readme
+    assert check_worktree_version_sync(repo) == ""
+
+    # Reverse direction onto an intervening ZIP-only hotfix 7.12.2 under marker 7.13.0-alpha.0:
+    # target_readme has NO windows-setup-x64 even though 7.12.2 > 7.12.1.
+    _git(repo, "checkout", "-q", "-b", "official-zip-hotfix-marker", base_sha)
+    (repo / "VERSION").write_text("7.13.0-alpha.0\n", encoding="utf-8", newline="\n")
+    (repo / "README.md").write_text(
+        readme_7121.replace("| 7.12.1 |", "| 7.12.2 | 2026-11-27 | ZIP-only hotfix. |\n| 7.12.1 |", 1),
+        encoding="utf-8", newline="\n",
+    )
+    sync_release_metadata(str(repo), published_version="7.12.2", windows_installer=False)
+    (repo / "official-note.txt").write_text("hotfix cycle\n", encoding="utf-8", newline="\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "official marker pointing to ZIP-only 7.12.2 hotfix")
+    hotfix_marker_target = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git(repo, "checkout", "-q", head)
+    _git(repo, "merge", "--no-commit", "--no-ff", hotfix_marker_target)
+    conflicted = _git(repo, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    assert update_carriers.resolve_carrier_conflicts(str(repo), conflicted, prefer="theirs")["kept"] == {}
+    ok, note, error = update_candidate.project_version_carriers(hotfix_marker_target)
+    assert ok, (note, error)
+    assert _links_in_tree(repo) == ("7.12.2", "7.12.2", "7.12.2")
+    final_readme = (repo / "README.md").read_text(encoding="utf-8")
+    final_site = (repo / "site/install/index.html").read_text(encoding="utf-8")
+    assert WINDOWS_SETUP_PROOF_ID not in final_readme
+    assert WINDOWS_SETUP_PROOF_ID not in final_site
+    assert "Extract the ZIP to a permanent folder" in final_site
+    assert "installer" not in final_site.split('<article id="windows">', 1)[1].split("</article>", 1)[0].lower()
+    final_qs = final_readme.split("### Windows quick start", 1)[1].split("### Linux quick start", 1)[0]
+    assert "(.exe)" not in final_qs and "installer" not in final_qs.lower()
+    assert "FORK_WINDOWS_CARD_NOTE" in final_site
+    assert "FORK_WINDOWS_QUICKSTART_NOTE" in final_readme
+    assert check_worktree_version_sync(repo) == ""
+
+
+def test_managed_update_preserves_custom_captions_and_uses_numbered_target_build_inventory(tmp_path, monkeypatch):
+    """Custom captions (including case-only variants) stay outside the replaceable span,
+    and project_version_carriers resolves a numbered target from its build inventory rather
+    than trusting a wrongly ZIP-only README."""
+    from ouroboros.tools.release_sync import WINDOWS_SETUP_PROOF_ID, WINDOWS_ZIP_PROOF_ID, carrier_only_change, release_asset_download_url
+
+    repo, head = _seed_real_windows_repo(
+        tmp_path, "7.12.2", "| 7.12.2 | 2026-11-27 | Windows installer. |", with_setup=True,
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "published 7.12.2 setup+zip")
+    base_site = (repo / "site/install/index.html").read_text(encoding="utf-8")
+    readme_7122 = (repo / "README.md").read_text(encoding="utf-8")
+
+    # Official: marker 7.12.3-alpha.0 + numbered 7.12.3 with Setup build but wrongly ZIP-only README.
+    _git(repo, "checkout", "-q", "-b", "remote-sim")
+    (repo / "VERSION").write_text("7.12.3-alpha.0\n", encoding="utf-8", newline="\n")
+    sync_release_metadata(str(repo))
+    (repo / "marker-note.txt").write_text("marker\n", encoding="utf-8", newline="\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "official 7.12.3-alpha.0 marker")
+    marker_target = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    (repo / "VERSION").write_text("7.12.3\n", encoding="utf-8", newline="\n")
+    (repo / "README.md").write_text(
+        readme_7122.replace("| 7.12.2 |", "| 7.12.3 | 2026-11-28 | Next cut. |\n| 7.12.2 |", 1),
+        encoding="utf-8", newline="\n",
+    )
+    sync_release_metadata(str(repo), windows_installer=False)  # broken ZIP-only README on Setup build
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "official 7.12.3 setup build with wrong zip-only readme")
+    broken_numbered_target = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Fork customizes the Windows installer caption (case-only variant) on site/install/index.html.
+    _git(repo, "checkout", "-q", head)
+    custom_caption = "DOWNLOAD FOR WINDOWS (.exe)"
+    fork_site = base_site.replace(">Download for Windows (.exe)</a>", f">{custom_caption}</a>", 1)
+    assert carrier_only_change(base_site, fork_site, "site/install/index.html") is False
+    (repo / "site/install/index.html").write_text(fork_site, encoding="utf-8", newline="\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fork case-only custom Windows button caption")
+    _point_at(monkeypatch, tmp_path, repo, head)
+
+    # 1. Conflicting release degrades cleanly instead of overwriting the custom caption.
+    _git(repo, "merge", "--no-commit", "--no-ff", broken_numbered_target)
+    conflicted = _git(repo, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    resolved = update_carriers.resolve_carrier_conflicts(str(repo), conflicted, prefer="theirs")
+    assert resolved["kept"]["site/install/index.html"].startswith("malformed_anchor:site_install_download_windows-x64")
+    assert custom_caption in (repo / "site/install/index.html").read_text(encoding="utf-8")
+    _git(repo, "merge", "--abort")
+
+    # 2. Non-conflicting marker adoption updates hrefs while preserving the case-only caption.
+    _git(repo, "merge", "--no-commit", "--no-ff", marker_target)
+    conflicted_m = _git(repo, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    assert update_carriers.resolve_carrier_conflicts(str(repo), conflicted_m, prefer="theirs")["kept"] == {}
+    ok, note, error = update_candidate.project_version_carriers(marker_target)
+    assert ok, (note, error)
+    adopted_site = (repo / "site/install/index.html").read_text(encoding="utf-8")
+    assert f">{custom_caption}</a>" in adopted_site
+    assert release_asset_download_url(WINDOWS_SETUP_PROOF_ID, "7.12.2") in adopted_site
+    assert release_asset_download_url(WINDOWS_ZIP_PROOF_ID, "7.12.2") in adopted_site
+    _git(repo, "merge", "--abort")
+
+    # 3. project_version_carriers on a numbered Setup-build target with wrong ZIP-only README
+    # uses target build inventory (Setup + ZIP), NOT the target's wrong README.
+    (repo / "site/install/index.html").write_text(base_site, encoding="utf-8", newline="\n")
+    _git(repo, "add", "site/install/index.html")
+    _git(repo, "commit", "-q", "-m", "restore canonical caption")
+    _git(repo, "merge", "--no-commit", "--no-ff", broken_numbered_target)
+    conflicted_n = _git(repo, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    assert update_carriers.resolve_carrier_conflicts(str(repo), conflicted_n, prefer="theirs")["kept"] == {}
+    ok, note, error = update_candidate.project_version_carriers(broken_numbered_target)
+    assert ok, (note, error)
+    assert release_asset_download_url(WINDOWS_SETUP_PROOF_ID, "7.12.3") in (repo / "README.md").read_text(encoding="utf-8")
+    assert release_asset_download_url(WINDOWS_SETUP_PROOF_ID, "7.12.3") in (repo / "site/install/index.html").read_text(encoding="utf-8")
+    assert check_worktree_version_sync(repo) == ""

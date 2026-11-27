@@ -26,9 +26,11 @@ An answer taken beside the build never refuses by itself (owner, 12.11): the sam
 point and only a second refusal stands. Any failure inside the bound other than its refusal means no bound; the start
 goes on to the full fit unchanged.
 
-Where it applies: a resolver asked without fetching (a call's route, ``turn.resolve_route``) and a ``RouteQuestion``
-whose answer has arrived (a Claudexor text start). A text start whose question has no key (every other provider) gets
-no early bound: the full fit decides.
+Where it applies: a resolver asked without fetching (a call's route, ``turn.resolve_route``), a ``RouteQuestion``
+whose answer has arrived (a Claudexor text start), and a question with no key (every other text route), whose resolver
+is read without fetching (cached facts, never the network). For that one a refusal stands only on its second answer,
+the fit's own read of the route (``RouteQuestion.__call__``, a network read only where the fit makes it), so a cached
+or declared window only triggers the question: the number the full fit would use decides.
 
 The refusal is ``context_fit.MinimumViewUnfit`` with ``memory_measured`` False and the frame's named ``parts``;
 ``context_view_facts.refusal_parts`` names the parts of the fitter's own refusals the same way. Those name core, assignment, control-tool
@@ -49,7 +51,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.context_fit import DENSITY_VIEW_KINDS, MinimumViewUnfit, RouteQuestion, _frame_choices, route_window
 from ouroboros.context_measurement import tool_schema_tokens
-from ouroboros.context_view_facts import _largest_first
+from ouroboros.context_view_facts import _largest_first, refusal_route
 from ouroboros.contracts.task_contract import task_input_sources
 from ouroboros.memory_view import json_chars
 
@@ -84,8 +86,10 @@ def _refusal(task, ctx, spec, frame_texts, resolver, *, tool_schemas, nano_base,
     preferred = str(preferred or "max").strip().lower()
     preferred = preferred if preferred in {"low", "max", "nano"} else "max"
     peek = getattr(resolver, "peek", None)
-    first = _route_frame(peek() if callable(peek) else resolver(task, allow_fetch=False), task, tool_schemas=tool_schemas,
-                         nano_base=nano_base, effort=effort, preferred=preferred)
+    keyless = isinstance(resolver, RouteQuestion) and resolver.key is None  # a route no engine is asked about
+    answer = (resolver.resolver({**task, **resolver.route_fields}, allow_fetch=False) if keyless
+              else peek() if callable(peek) else resolver(task, allow_fetch=False))
+    first = _route_frame(answer, task, tool_schemas=tool_schemas, nano_base=nano_base, effort=effort, preferred=preferred)
     if first is None:  # no known window: nothing of the start is read here
         return None
     view = spec()
@@ -96,22 +100,25 @@ def _refusal(task, ctx, spec, frame_texts, resolver, *, tool_schemas, nano_base,
     if not _refuses(chars, first):
         return None
     # An answer taken beside the build never refuses by itself: the same question at the usual point decides.
-    again = resolver.again(task) if isinstance(resolver, RouteQuestion) else resolver(task, allow_fetch=True)
+    # A key-less question's second answer is the fit's own read (``RouteQuestion.__call__``): that number decides.
+    again = (resolver.again(task) if isinstance(resolver, RouteQuestion) and not keyless
+             else resolver(task, allow_fetch=True))
     second = _route_frame(again, task, tool_schemas=tool_schemas, nano_base=nano_base, effort=effort, preferred=preferred)
     if second is None or not _refuses(chars, second):
         return None
-    reserve, window, ratio, schemas = second
+    reserve, window, ratio, schemas, record = second
     frame = chars // 4 + schemas
     parts = [(name, json_chars(text) // 4) for name, text in texts] + [("tool schemas", schemas)]
-    return MinimumViewUnfit("Core, resident tools and reserve cannot fit before memory", fixed_tokens=frame,
-                            memory_tokens=0, reserve_tokens=reserve, window_tokens=window, ratio=ratio,
-                            work_room_tokens=0, memory_measured=False, parts=_largest_first(parts))
+    refusal = MinimumViewUnfit("Core, resident tools and reserve cannot fit before memory", fixed_tokens=frame,
+                               memory_tokens=0, reserve_tokens=reserve, window_tokens=window, ratio=ratio,
+                               work_room_tokens=0, memory_measured=False, parts=_largest_first(parts))
+    return refusal_route(refusal, again[0], record)  # the serving program and window the fit's refusal names
 
 
 def _route_frame(answer: Any, task: Mapping[str, Any], *, tool_schemas, nano_base, effort: str,
-                 preferred: str) -> Optional[Tuple[int, int, float, int]]:
-    """``(Nano reserve, Nano window, density, Nano tool-schema tokens)`` of one route answer, or None without a
-    known window or a readable density."""
+                 preferred: str) -> Optional[Tuple[int, int, float, int, Any]]:
+    """``(Nano reserve, Nano window, density, Nano tool-schema tokens, the route's window record at Nano's reserve)``
+    of one route answer, or None without a known window or a readable density."""
     if answer is None:
         return None
     route, evidence = answer
@@ -122,13 +129,13 @@ def _route_frame(answer: Any, task: Mapping[str, Any], *, tool_schemas, nano_bas
                                        nano_tools=None, tool_frames=None, window_record=record,
                                        window_tokens=record.total_equivalent, admitted=False, preferred=preferred,
                                        output_reserve=output_reserve, working_reserve_tokens=working_reserve)
-    _target, reserve, window, _record = limits("nano")
+    _target, reserve, window, nano_record = limits("nano")  # the record of the mode that binds: Nano's reserve
     ratio = 1.0 if basis == "estimator" else _lowest_density(task, route, evidence)
     if ratio is None:
         return None
     schemas = tool_schema_tokens(list(tools_for("nano").schemas), provider=str(route.get("provider") or ""),
                                  reasoning_effort=effort)
-    return reserve, window, ratio, schemas
+    return reserve, window, ratio, schemas, nano_record
 
 
 def _lowest_density(task: Mapping[str, Any], route: Mapping[str, Any], evidence: Any) -> Optional[float]:
@@ -142,6 +149,6 @@ def _lowest_density(task: Mapping[str, Any], route: Mapping[str, Any], evidence:
                                      view_kind=DENSITY_VIEW_KINDS.get(role, role))
 
 
-def _refuses(chars: int, frame: Tuple[int, int, float, int]) -> bool:
-    reserve, window, ratio, schemas = frame
+def _refuses(chars: int, frame: Tuple[int, int, float, int, Any]) -> bool:
+    reserve, window, ratio, schemas, _record = frame
     return math.ceil((chars // 4 + schemas) * ratio) + reserve > window

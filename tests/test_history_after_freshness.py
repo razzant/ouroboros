@@ -246,3 +246,34 @@ def test_a_page_that_could_not_read_a_shown_task_carries_no_after_cursor(tmp_pat
     switch["on"] = False
     status, page = _read(tmp_path)
     assert status == 200 and "done" in _cursor(page["after_cursor"])["tasks"]
+
+
+def test_a_newest_page_the_task_store_cannot_answer_declares_its_gap(tmp_path, monkeypatch):
+    """No question row fails the chat projection here: every row is shown, none with its task's truth, so the page
+    declares the gap (``*_projection_failed``, which a window owes a whole read for) and names no arrivals cursor.
+    A batch the store could not answer whose retry it does leaves nothing unread: no gap."""
+    from ouroboros import task_store
+
+    _task(tmp_path, "done", "completed", 0)
+    _answered(tmp_path, "done", 0)
+    status, whole = _read(tmp_path)
+    assert status == 200 and whole["window"]["complete"] and whole["after_cursor"]
+    documents, failing = task_store.display_documents, {"left": float("inf")}  # persistent
+
+    def stored(*args, **kwargs):
+        if failing["left"] > 0:
+            failing["left"] -= 1
+            raise OSError("task store unavailable")
+        return documents(*args, **kwargs)
+    monkeypatch.setattr(task_store, "display_documents", stored)
+    status, failed = _read(tmp_path)
+    assert status == 200 and "after_cursor" not in failed
+    assert [row["text"] for row in failed["messages"]] == [row["text"] for row in whole["messages"]]  # no row is lost
+    assert not any(row.get("task_terminal_status") for row in failed["messages"])
+    assert {"chat_projection_failed", "progress_projection_failed"} <= set(failed["window"]["truncated_by"])
+    assert failed["window"]["complete"] is False
+    assert all("projection_failed" in span["gaps"] for span in failed["coverage"]["spans"].values())
+    failing["left"] = 1  # one batch fails, its retry answers
+    status, retried = _read(tmp_path)
+    assert status == 200 and retried["window"]["truncated_by"] == [] and "after_cursor" not in retried
+    assert retried["messages"] == whole["messages"]

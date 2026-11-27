@@ -1062,7 +1062,8 @@ Transport/control skills are first-class local-UI replacements: every owner comm
 polling and justified owner-event mirroring. Their review and runtime obligations belong to [CHECKLISTS](CHECKLISTS.md#transport-and-control-skills-are-first-class-binding-for-all-reviewers).
 
 `POST /chat/inject` treats text beginning with `/panic` (case-insensitive, surrounding whitespace ignored,
-trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop.
+trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop, or, while no
+pair is bound yet (a slot read as positively free), a positive private sender: the bridge decides who that is.
 Unavailable or unauthorized Panic returns `503 {ok:false,error}` and never falls through to ordinary
 chat; this refusal of command-looking text is intentional. Accepted Panic returns `202 {ok:true,status:"accepted"}`,
 without a correlated operation or delivery replay, even with `client_message_id`. Telegram exposes owner
@@ -2282,7 +2283,9 @@ The Host Service routes take the skill from `x-skill-token`, never from the body
   expects, any other or none being `409 connection_changed`; `consent`: below) → `200 {ok, access_token,
   token_type, expires_at (epoch seconds), scope, account: {key, label}, connection_id?, consent?}`; `409 {ok: false, code: "SIGN_IN_REQUIRED",
   reason, service, account, note, hint}` (hand `hint` to the mind; `note` is your `refresh_rejected` text when that is
-  the reason); `503 SIGN_IN_UNAVAILABLE` (the provider did not answer; the grant is kept); `404 {ok: false, error, reason, hint}`
+  the reason; reason `provider_refused`: the provider answered the renewal with its own refusal, such as
+  `admin_policy_enforced`, named in `error` with your `refused` note; the grant is kept and repeating will not help);
+  `503 SIGN_IN_UNAVAILABLE` (the provider did not answer, or answered 429/5xx; the grant is kept); `404 {ok: false, error, reason, hint}`
   with no account to use (`unknown_service`, `unknown_account`, `account_required`, `not_signed_in`, `no_usable_account`; hand `hint` to the mind); `403` the token floor. Cache the token until `expires_at`; never log it.
 - `consent` is an opaque account-row reference: a refresh keeps it, a new sign-in or transfer replaces it, and it is never a pass. To bind a new write, take `key`, `connection_id` and `consent` from one current `GET /sign-in/accounts` row, send them as `account`, `connection_id` and `consent` to `/sign-in/token`, and accept the bearer only when the answer repeats that `consent`: a host without the v2 field ignores it and repeats nothing. A replaced consent returns `409 consent_changed` without a token or a provider request. A receipt records what happened to the transfer. It does not authorize an earlier write to continue under a new consent; do not replace that write's expected value.
 - `POST /sign-in/handover` `{service, recover?, clients: [{client_id, client_secret?, label_hint, return_hint: "loopback" |

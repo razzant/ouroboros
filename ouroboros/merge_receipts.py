@@ -695,6 +695,8 @@ def coverage_reading(receipt: Dict[str, Any]) -> Tuple[str, str]:
     if reading is None and task:
         reading = _UNKNOWN, f"A named review task did not complete ({task.removeprefix('review_task_')})."
     label, sentence = reading or (_UNKNOWN, "Whether the review covers {what} is not recorded.")
+    if verdict == "FAIL" and label != _REJECTED:  # a merge over a failed panel stays loud on the card head (BIBLE P3)
+        label = f"{label} · FAIL"
     return label, sentence.format(what=what)
 
 

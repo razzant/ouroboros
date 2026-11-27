@@ -10,7 +10,7 @@ import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
 import { roomCovered, roomNotice, watchRoomCover } from './room_notice.js';
 import { ORIGIN_ADDRESSED_NOTICE_TYPES, lineReplyFields, childRowPlacement, placedCardRow, createPlacedCardAnchors, replayConcludesTask } from './chat_row_placement.js';
-import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
+import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
 import { createTaskEpisodes } from './task_episodes.js';
 import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
@@ -39,7 +39,7 @@ import { onRefit } from './text_fit.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
 import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset, readBand } from './project_read_state.js';
 import { createSharedReadTracker } from './read_ahead.js';
-import { adoptsRetainedCopy, createReplayKeys, livePriorBubble, messageIdentity, priorHistoryBubble, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
+import { createReplayKeys, findPriorBubble, messageIdentity, priorHistoryBubble, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
 import { apiClient, apiFetch, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
@@ -69,7 +69,6 @@ import {
 } from './task_control_menu.js';
 import { composerMarkup, createComposer } from './composer.js';
 import { composerHeightAtRest, syncShortRoom } from './composer_fold.js';
-import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import { createChatReplies } from './chat_reply.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
@@ -165,6 +164,7 @@ import {
     ensureLiveActionsEl,
     dockChildReviewDoor,
     cardRowEvidenceRef,
+    createSubagentCardSummarizer,
     refitCollapsedActivity,
 } from './chat_activity.js';
 
@@ -198,8 +198,10 @@ export function createChatInstance({
     const roomProfile = createRoomProfileLifecycle({
         ws, doc: document, chatId, isMain, isProjectOpening,
         isDestroyed: () => destroyed, isLeaving: () => leaving,
-        readHistory: args => apiClient.chatHistory(args), nextRecentVersion: () => ++recentRequest,
-        syncHistory, loadUiPreferences, getPreview: () => preview, reconcileSavedSends, kept: () => unconfirmed,
+        readHistory: args => apiClient.chatHistory(args), nextReadVersion: newest => catchUp.stampRead(newest),
+        syncHistory, loadPreferences: () => apiClient.uiPreferences(),
+        onPreferences: applyUiPreferences,
+        getPreview: () => preview, reconcileSavedSends, kept: () => unconfirmed,
         onPreviewShown: () => { updateMessagesPadding(); reading.followAfterLayout(true); },
     });
     const { storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow } = roomProfile;
@@ -238,7 +240,8 @@ export function createChatInstance({
     const input = byId('input');
     const inputArea = byId('input-area');
     const statusBadge = byId('status');
-    const pageHeader = page.querySelector('.chat-page-header') || (asPanel ? container?.closest?.('.project-panel')?.querySelector?.('.project-panel-bar') : null);
+    const focusPanel = asPanel ? container.closest?.('.project-panel') : null;
+    const pageHeader = page.querySelector('.chat-page-header') || (asPanel ? focusPanel?.querySelector?.('.project-panel-bar') : null);
     const scrollBottomBtn = byId('scroll-bottom');
     const scrollActivityDot = scrollBottomBtn?.querySelector('.chat-scroll-activity-dot');
     let nestedSubagentsExpanded = false;
@@ -251,6 +254,9 @@ export function createChatInstance({
     // Every ws.on subscription's disposer, released together in destroy().
     const wsDisposers = [];
     const onWs = (event, fn) => wsDisposers.push(ws.on(event, fn));
+    const wsUp = () => ws.isConnected?.() !== false;
+    let wsHasConnectedOnce = false, closedSinceOpen = false, wsSeen = wsUp();
+    const unopened = () => !wsSeen && ws.previouslyConnected?.() === false;
     const replies = createChatReplies({ chatId, feed: messagesDiv, input, composerArea: inputArea, key: storeKey('ouro_chat_reply'),
         reading: () => reading, onDomWrite: withStableViewport, history: () => historyReveal,
         navigate: revealQuotedSource, present: () => !destroyed && isInstanceVisible(), onDraftChange: () => composer?.invalidateDraft() });
@@ -265,7 +271,7 @@ export function createChatInstance({
     });
     // A text row as its bubble and doors (chat_text_bubble.js); addMessage keeps its identity and its place.
     const drawTextBubble = createTextBubbles({ chatMedia, replies, feed: messagesDiv, isMain, ownProjectId: projectId,
-        onDomWrite: withStableViewport });
+        onDomWrite: withStableViewport, enhanceMarkdown: enhanceMountedMarkdown });
     const mainWaiting = isMain ? createMainWaiting({ page, messagesDiv, insertMessageNode, stampNodeTimestamp,
         openSettings, refresh: refreshHeaderControlState, mutate: withStableViewport,
         decision: () => chatDecision, revealQuestion: (...a) => revealQuestion(...a), reading: () => reading, noticeVisible: () => historyVisible() }) : null;
@@ -287,17 +293,6 @@ export function createChatInstance({
             { excludeAnchorNode: node }),
         focusAfterRemoval: () => input?.focus?.({ preventScroll: true }),
     });
-
-    async function loadUiPreferences() {
-        try {
-            const prefs = await apiClient.uiPreferences();
-            if (destroyed) return;
-            nestedSubagentsExpanded = prefs?.nested_subagents_expanded === true;
-            emptyWelcome?.setPreference(prefs?.welcome);
-        } catch {
-            nestedSubagentsExpanded = false;
-        }
-    }
 
     // Sent attachment messages not yet confirmed saved: "Send again" with one id, kept by this tab across a reload.
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
@@ -481,7 +476,8 @@ export function createChatInstance({
     let activeLiveGroupId = '';
     // A return's or reconnect's read: status once out past its bound, ↓ Retry once it ends unconfirmed (shown only,
     // as a hidden feed reads as at its end).
-    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); });
+    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); }, 300, pendingSubmissions,
+        () => ({ chatId, sessionId: chatSessionId, localOwnerRow }));
     let pendingRestartNotice = '';
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
@@ -513,7 +509,7 @@ export function createChatInstance({
 
     // Main: a moved work's card is its portal (work_portal.js); Continue episodes share a card (task_episodes.js).
     const portals = createWorkPortals({ isMain, feed: messagesDiv, records: liveCardRecords, onDomWrite: withStableViewport,
-        isConnected: () => ws.isConnected?.() !== false, onConverted: () => composer?.signalFreed(), remember: rememberMessageKey,
+        isConnected: wsUp, onConverted: () => composer?.signalFreed(), remember: rememberMessageKey,
         append: (msg, text, opts) => appendProjectRow(addMessage, msg, text, opts), actionsOf: ensureLiveActionsEl,
         card: { get: getLiveCardRecord, show: ensureLiveCardVisible, reanchor: reanchorTaskCard,
             restore: (r, hold) => { const changed = restoreCardActivity(r, hold); return markReviewAnchor(r) || changed; },
@@ -546,7 +542,7 @@ export function createChatInstance({
                     if (task && 'project_admission_hold' in task) {
                         missingManagedTaskIds.delete(record.groupId);
                         restoreCardActivity(record, task.project_admission_hold);
-                        if (ws.isConnected?.() !== false) {
+                        if (wsUp()) {
                             // A fresh connected read releases the park this client set when it lost the connection.
                             const offline = record.parkedOffline;
                             record.parkedOffline = false;
@@ -568,7 +564,7 @@ export function createChatInstance({
         if (destroyed || leaving) return;
         if (data) void refreshChildProjectHolds();
         const before = workState;
-        workState = reconcileWorkState(workState, data, chatId, ws.isConnected?.() !== false, snapshotRequestedAt);
+        workState = reconcileWorkState(workState, data, chatId, wsUp(), snapshotRequestedAt);
         if (Array.isArray(data?.works)) settleAbsentChildren(snapshotRequestedAt);
         withStableViewport(() => applyCardWorkViews(liveCardRecords, workState));
         chatDecision.syncWorks(workState);
@@ -1422,6 +1418,24 @@ export function createChatInstance({
         return record?.root?.isConnected ? withStableViewport(mutate) : mutate();
     }
 
+    function applyUiPreferences(prefs) {
+        nestedSubagentsExpanded = prefs?.nested_subagents_expanded === true;
+        if (prefs) emptyWelcome?.setPreference(prefs.welcome);
+        const value = nestedSubagentsExpanded ? '1' : '0';
+        const cards = [...liveCardRecords.values()].filter(r => r.isSubagent
+            && !explicitCardExpansion.has(r.groupId) && r.root?.dataset?.expanded !== value);
+        if (!cards.length) return;
+        withStableViewport(() => {
+            let changed = false;
+            for (const record of cards) {
+                if (!setLiveCardExpanded(record, nestedSubagentsExpanded)) continue;
+                changed = true;
+                if (nestedSubagentsExpanded && !leaving) hydrateOpenSettledChild(record, hydrateCardReviews);
+            }
+            return changed;
+        });
+    }
+
     // A window shown again keeps the reading intent (data readiness positions it); hidden, it ends an unread opening
     // still owed; a room away stays put (its return: `resume`).
     const handleVisibility = () => {
@@ -1484,7 +1498,7 @@ export function createChatInstance({
     const historyResyncScheduler = createHistoryResyncScheduler({
         isReplayActive: () => _historyReplayActive,
         // Re-arm if the joined sync fetched its window before the arm.
-        run: tags => historyPager.read({ ...tags }).catch(() => {}).then(() => {
+        run: tags => historyPager.read({ ...tags, current: () => !closedSinceOpen && wsUp() }).catch(() => {}).then(() => {
             if (!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound.isArmed()) scheduleHistorySync('bound_recheck');
         }),
     });
@@ -1737,6 +1751,9 @@ export function createChatInstance({
     const evidencedTaskIds = new Set();
     // Late progress must not revive a terminal child.
     const subagentTerminalChildren = new Set();
+    const summarizeSubagentCardFrame = createSubagentCardSummarizer(
+        id => subagentChildParents.get(id), id => liveCardRecords.get(id)?.requestedExecutor,
+    );
 
     function renderLiveCardMeta(record, costProjection = null) {
         if (record && costProjection) record.costMeta = mergeStickyCostMeta(record.costMeta, costProjection);
@@ -1781,23 +1798,6 @@ export function createChatInstance({
         const replayTerminal = msg.task_terminal_status && taskDoneIsTerminal(msg);
         if (replayTerminal || TERMINAL_SUBAGENT_EVENTS.has(event)) subagentTerminalChildren.add(child.childId);
         return child.childId;
-    }
-
-    function summarizeSubagentCardFrame(evt, childId, overrides = {}, rawTs = '') {
-        const { parentId = '', role = '', model = '' } = subagentChildParents.get(childId) || {};
-        const summary = summarizeChatLiveEvent({
-            ...evt,
-            type: 'send_message',
-            is_progress: true,
-            delegation_role: 'subagent',
-            subagent_task_id: childId,
-            parent_task_id: parentId,
-            subagent_role: role,
-            model,
-            ...overrides,
-        }, liveCardRecords.get(childId)?.requestedExecutor);  // its kept selection, for a frame that repeats none
-        // The child's effort fact rides every frame that states a level (live, terminal, replay).
-        return summary ? withTaskCostMeta({ ...summary, ...(evt.effort_level ? { effort: effortFact(evt) } : {}) }, evt, { rawTs }) : null;
     }
 
     // A child's title is its lineage identity plus, for twins (one displayed identity under
@@ -2013,28 +2013,28 @@ export function createChatInstance({
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
         const delivered = deliveryKey && seenMessageKeys.has(deliveryKey) && bubbles().find(node => node.dataset.deliveryId === opts.deliveryId);
         if (delivered) return recordBubble(delivered);
-        const prior = opts.historyId
-            ? (replayKeys && !replayKeys.history.has(opts.historyId) ? null
-                : historyNodes(opts.historyId).find(node => node.classList.contains('chat-bubble')))
-            : livePriorBubble(bubbles, opts, replayKeys, legacyKey, chatId);
+        const prior = findPriorBubble(bubbles, historyNodes, opts, replayKeys, legacyKey, chatId);
         if (prior && (opts.historyId || _historyReplayActive)) {
             rememberMessageKey(messageKey);
-            const originChanged = syncSavedProjectContext(prior, opts.originProjected, opts.originId);
-            const quoteChanged = replies.syncDerivedQuestion(prior, opts.reply, { authoritative: true });
+            const changed = drawTextBubble.reconcile(prior, text, role, { markdown, isProgress, meta, legacyKey, opts });
             noteBubbleKeys(prior);
-            return chatDecision.renderRoutingDecision(prior, opts.chatAnnotation) || originChanged || quoteChanged;
+            return chatDecision.renderRoutingDecision(prior, opts.chatAnnotation) || changed;
         }
-        if (prior || (messageKey && seenMessageKeys.has(messageKey))) return false;
+        if (prior) {
+            const revised = drawTextBubble.revise(prior, text, role, { markdown, isProgress, meta, legacyKey, opts });
+            if (revised) { rememberMessageKey(messageKey); noteBubbleKeys(prior); }
+            return revised;
+        }
+        if (messageKey && seenMessageKeys.has(messageKey)) return false;
         const address = role === 'assistant' && !opts.originProjected && opts.reply?.row_address;
         const existing = opts.historyId && earlyRows.get(address);
         const matched = opts.historyId && !existing && priorHistoryBubble(bubbles, opts, replayKeys, legacyKey, chatId);
         if (matched) {
             const placed = recordBubble(matched);
             chatDecision.renderRoutingDecision(matched, opts.chatAnnotation);
-            const adopted = adoptsRetainedCopy(matched, opts) && replies.adopt(opts.reply, matched);
-            const quoteChanged = replies.syncDerivedQuestion(matched, opts.reply, { authoritative: true });
-            const restored = syncSavedProjectContext(matched, opts.originProjected, opts.originId);
-            return placed || restored || adopted || quoteChanged;
+            const changed = drawTextBubble.reconcile(matched, text, role, { markdown, isProgress, meta, legacyKey, opts, adopt: true });
+            noteBubbleKeys(matched);
+            return placed || changed;
         }
         if (existing) earlyRows.delete(address);
         const { bubble, rich } = drawTextBubble(text, role, { markdown, ts, isProgress, meta, legacyKey, opts, existing });
@@ -2042,7 +2042,7 @@ export function createChatInstance({
         if (rich) enhanceMountedMarkdown(bubble);
         chatDecision.renderRoutingDecision(bubble, opts.chatAnnotation);
         if (isMain) reconcilePortalNotes(messagesDiv, bubble);
-        rememberMessageKey(messageKey);
+        rememberMessageKey(messageKey); noteBubbleKeys(bubble);
         if (deliveryKey) rememberMessageKey(deliveryKey);
         if (opts.pending && meta.clientMessageId) pendingUserBubbles.set(meta.clientMessageId, bubble);
         return bubble;
@@ -2056,6 +2056,7 @@ export function createChatInstance({
     }
 
     const localOwnerRow = row => !row.origin_projected && ownerRowRoom(row, chatId) === chatId;
+    const ownerIds = rows => rows.filter((m) => m.role === 'user' && m.client_message_id && localOwnerRow(m)).map((m) => String(m.client_message_id));
 
     function confirmOwnerRow(row) {
         const bubble = ownerMessageBubble(messagesDiv, row, chatId);
@@ -2105,8 +2106,7 @@ export function createChatInstance({
         }
     }
     // `requestedAt` dates the question records in these rows.
-    function applyHistoryMessages(messages, { fromReconnect = false, archived = false, direction = '', anchor = null,
-        requestedAt, window, hasMore, newest = direction === 'recent' || direction === 'latest' } = {}) {
+    function applyHistoryMessages(messages, { archived = false, direction = '', anchor = null, requestedAt, readOrder, quiet } = {}) {
         const sourceRows = messages;  // even rows withheld from replay carry their exact identity
         // ↓ hears only new words, not an older page or an adopted identity.
         const reportActivity = historyLoaded && !archived;
@@ -2141,9 +2141,7 @@ export function createChatInstance({
                     return true;
                 });
                 // Retire only local echoes this source snapshot confirms.
-                const localEcho = partitionLocalEchoJournal(localEchoJournal, new Set(messages
-                    .filter((m) => m.role === 'user' && m.client_message_id && localOwnerRow(m))
-                    .map((m) => String(m.client_message_id))));
+                const localEcho = partitionLocalEchoJournal(localEchoJournal, new Set(ownerIds(messages)));
                 for (const entry of localEcho.confirmed) {
                     localEchoJournal.delete(entry.clientMessageId);
                 }
@@ -2218,7 +2216,7 @@ export function createChatInstance({
                     historyId: msg.history_id, historyPosition: msg.history_position,
                     systemType: msg.system_type || '', narration: msg.narration, taskId,
                     source: msg.source || '', initiator: msg.initiator || '',
-                    senderLabel: msg.sender_label || '', senderSessionId: msg.sender_session_id || '', reply: msg,
+                    senderLabel: msg.sender_label || '', senderSessionId: msg.sender_session_id || '', reply: msg, requestedAt, readOrder,
                     ...extra,
                 });
                 for (const msg of messages) {
@@ -2236,10 +2234,6 @@ export function createChatInstance({
                     if (placedCardRow(msg)) {
                         addStoredRow(msg, taskId, { evidenceRef: cardRowEvidenceRef(msg) });
                         continue;
-                    }
-                    // History clears Sending; census re-links live turns.
-                    if (fromReconnect && msg.role === 'user' && localOwnerRow(msg) && msg.client_message_id) {
-                        pendingSubmissions.delete(String(msg.client_message_id));
                     }
                     if (letterRow(msg, messagesDiv, addMessage)) continue;
                     if (msg.is_progress) {
@@ -2287,9 +2281,7 @@ export function createChatInstance({
                     });
                     if (msg.role === 'user') confirmOwnerRow(msg);
                 }
-                const settled = newest && !catchUp.owed;
-                earlyRows.clear(sourceRows, settled && (window?.complete === true && hasMore === false ? 'complete' : 'bounded'));
-                if (settled) windowReturn.settle(earlyRows.get);
+                earlyRows.clear(sourceRows, false);
                 _historyRow = null;
                 for (const [tid, ending] of endings) {
                     if (!ending) continue;
@@ -2335,6 +2327,7 @@ export function createChatInstance({
                 return reportActivity && ([...messagesDiv.children].some(node => node.classList.contains('chat-bubble') && !knownRows.has(node))
                     || [...liveCardRecords].some(([id, record]) => {
                         const before = knownCards.get(id);
+                        if (quiet?.has(id)) return false;  // repaired only
                         // Reconciliation can change liveness or placement of words already seen; that is no arrival.
                         return record.root?.isConnected && (record.items.length > (before?.items || 0)
                             || (!before?.projection || isoMicros(record.latestSourceTs) > isoMicros(before.source))
@@ -2370,23 +2363,27 @@ export function createChatInstance({
                 if (historyControls.beginRecent()) syncLoadOlderControl();
                 const data = await fetchHistory(null, { signal: abort.signal, tags: { ...tags, mode: 'newest' } });
                 // A closed, left or superseded room takes no late response.
-                if (destroyed || startedVisit !== visit || foreignProfile()) {
-                    lastHistorySyncSucceeded = false;
+                if (destroyed || startedVisit !== visit || abort.signal.aborted || foreignProfile()) {
+                    if (!abort.signal.aborted) lastHistorySyncSucceeded = false;
                     roomProfile.resetInitialHydration();
                     return false;
                 }
                 if (data.recentVersion < recentApplied) return lastHistorySyncSucceeded;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
                 const oldRecentIds = retainedRecentIds();
-                const admitted = acceptRecentWindow(data, messages);
+                const admitting = data.recentVersion > recentApplied, nextIds = new Set(messages.flatMap(historyRowIds));
                 const pagerBeforeRecent = historyPager.getState();
                 const reader = readingHistory(), returning = reading.returning;
-                const rechainRecent = admitted && !catchUp.owed && (!reader || returning) && pagerBeforeRecent.initialized
+                const rechainRecent = admitting && catchUp.wouldConfirm(data) && (!reader || returning) && pagerBeforeRecent.initialized
                     && (returning || pagerBeforeRecent.away && (fromReconnect || recovering || pagerBeforeRecent.retryReturn)
-                        || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id)));
-                const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect });
-                if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect, newest: admitted,
-                    requestedAt: data.requestedAt, window: data.window, hasMore: data.has_more });
+                        || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !nextIds.has(id)));
+                let admitted = false;
+                const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect }, () => {
+                    applyHistoryMessages(messages, { requestedAt: data.requestedAt, readOrder: data.readOrder });
+                    admitted = acceptRecentWindow(data, messages);
+                });
+                if (result.drawFailed) throw result.error;
+                if (result.status === 'applied') admitted = admitting;
                 withStableViewport(() => releaseHistoryIds(!admitted || rechainRecent || reader
                     || historyPager.getState().canNewer ? [] : oldRecentIds));
                 // Arrivals that landed meanwhile may lie past this page: read them again.
@@ -2425,7 +2422,7 @@ export function createChatInstance({
                 roomProfile.noteCanonicalHistory(wasFirstLoad);
                 return messages.length > 0;
             } catch (err) {
-                if (destroyed || startedVisit !== visit) { roomProfile.resetInitialHydration(); return false; }
+                if (destroyed || startedVisit !== visit || abort.signal.aborted) { roomProfile.resetInitialHydration(); return false; }
                 lastHistorySyncSucceeded = false;
                 preview.failed(err);
                 emptyWelcome?.historyRead(false);
@@ -2454,10 +2451,10 @@ export function createChatInstance({
     const sharedRead = createSharedReadTracker({ chatId, feed: messagesDiv, band,
         shown: () => !destroyed && !leaving && !page.hidden && isInstanceVisible() });
     const RECEIPT = { reason: 'read_receipt' };  // its reads and the pages its opening walks
-    const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
-        read: async (fresh, whole, why) => {
-            await (!fresh && (catchUp.reading || !catchUp.owed && roomProfile.initialHydration)
-                || historyPager.read({ whole, ...RECEIPT, ...why, decision: whole && 'latest_unknown' }));
+    const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample, isConnected: wsUp, isUnopened: unopened,
+        read: async (fresh, whole, why, current) => {
+            await (!fresh && (catchUp.wait || !catchUp.owed && roomProfile.initialHydration)
+                || historyPager.read({ whole, ...RECEIPT, ...why, current, decision: 'latest_unknown' }));
             return lastHistorySyncSucceeded && !catchUp.owed;
         },
         // A destroyed page reports hidden===false, hence the lifecycle flag.
@@ -2512,10 +2509,7 @@ export function createChatInstance({
         // Chat sends carry their minted client_message_id.
         const pendingId = result?.clientMessageId || '';
         if (pendingId) {
-            pendingSubmissions.set(pendingId, {
-                clientMessageId: pendingId,
-                timestamp: Date.now(),
-            });
+            catchUp.trackSend(pendingId, result?.status === 'queued');
             recordLocalEcho(pendingId, text, sentTs);
         }
         syncChatStatus();
@@ -2570,14 +2564,14 @@ export function createChatInstance({
             reading.followAfterLayout();
             historyControls.showNotice();
         };
-        reading.wait(current, needed);
         if (!arrive || !needed) follow();
-        if (!needed) return;
+        if (!needed || !wsUp() && !unopened()) return;
+        reading.wait(current, true);
         try {
-            const shared = catchUp.reading || historySyncPromise || !historyLoaded && opening.then(awaitInitialHydration);
+            const shared = catchUp.wait || historySyncPromise || !historyLoaded && opening.then(awaitInitialHydration);
             await shared;
             await catchUp.settled(current);
-            if (!current() || shared && !lastHistorySyncSucceeded) return;
+            if (!current() || !wsUp() && !unopened() || shared && !lastHistorySyncSucceeded) return;
             if (!presentHeld() && (await historyPager.latest(current, { reason })).status !== 'applied') return;
             await catchUp.settled(current);  // a reconnect during that read still owes feedback
             if (current() && !catchUp.owed && arrive) follow();
@@ -2668,7 +2662,6 @@ export function createChatInstance({
     // Open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners
     // (style.css): a pointer in panel quiets them; any key restores them (Back to reading from the
     // composer too) but lone modifiers and non-scrolling shortcuts (Cmd+C, Cmd+Shift+4).
-    const focusPanel = asPanel ? container.closest?.('.project-panel') : null;
     const quietFocus = () => messagesDiv.classList.add('is-quiet-focus');
     const showFocus = ({ key, metaKey, ctrlKey, altKey }) => {
         if (metaKey || ctrlKey || altKey ? /^(Arrow|Page|Home$|End$| $)/.test(key)
@@ -2704,22 +2697,24 @@ export function createChatInstance({
     let recentHistoryIds = new Set();
     let beforePartialIds = null;
     const retainedRecentIds = () => new Set([...recentHistoryIds, ...(beforePartialIds || [])]);
-    let recentRequest = 0, recentApplied = 0;
-    // Admit each newest response once, including ↓; the preview follows it.
+    let recentApplied = 0;
+    // Commit a drawn newest response once, including ↓; the preview follows it.
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
         recentApplied = data.recentVersion;
-        const whole = catchUp.confirmWindow(data);
+        const whole = catchUp.confirmWindow(data, messages);
+        if (!catchUp.owed) withStableViewport(() => { const c = earlyRows.clear(messages,
+            data.window?.complete === true && (data.has_more ?? data.hasMore) === false ? 'complete' : 'bounded'); windowReturn.settle(earlyRows.get); return c; });
         preview.save(messages, data);
-        // The newest admitted window (↓ too) owns the failure note.
         historyControls.endRecent(whole ? null : new Error('Some saved history could not be loaded.'), Boolean(data.page_cursor), data);
         recentCoverage = data.coverage ?? null;
         recentHasOrigins = messages.some(row => row.origin_projected);
         readReceipt.recent(data);
-        // Keep the rows held before the fault across a rechain; repeated partial windows replace one another.
         if (whole) beforePartialIds = null;
         else beforePartialIds ??= retainedHistoryIds();
         recentHistoryIds = new Set(messages.flatMap(historyRowIds));
+        syncChatStatus();
+        if (isInstanceVisible()) updateScrollButton();
         return true;
     }
     const pendingHistoryEvictions = new Set();
@@ -2804,16 +2799,15 @@ export function createChatInstance({
     }
 
     // A room's news waits until it is the room shown and leaves when it is covered or left (room_notice.js).
-    const historyCovered = roomCovered(asPanel ? container?.closest?.('.project-panel') : pageHeader, pageHeader);
+    const historyCovered = roomCovered(asPanel ? focusPanel : pageHeader, pageHeader);
     const historyVisible = () => isInstanceVisible() && !messagesDiv.closest('[inert]') && !historyCovered()
         && !document.body?.classList.contains('nav-drawer-open') && (asPanel || (!isProjectOpening?.()
         && !document.body?.classList.contains('project-panel-open')));
     const archive = isMain && !asPanel ? archiveDoor({ returnFocus: messagesDiv,
         readReceipt, syncHistory, isVisible: historyVisible }) : null;
     const historyControls = createHistoryControls(messagesDiv, { notify: roomNotice, archive, others: [mainWaiting?.notice], isVisible: historyVisible });
-    const coverWatch = watchRoomCover(asPanel ? container?.closest?.('.project-panel') : pageHeader, pageHeader,
+    const coverWatch = watchRoomCover(asPanel ? focusPanel : pageHeader, pageHeader,
         () => (historyVisible() ? historyControls.showNotice() : historyControls.hideNotice()));
-    const { olderButton: loadOlderBtn } = historyControls;
 
     // The first gate closed to arrivals ('' none: a hydrated, healthy window that needs no rebuild).
     const arrivalGate = () => (!historyLoaded ? 'not_loaded' : !lastHistorySyncSucceeded ? 'prior_failed'
@@ -2824,18 +2818,20 @@ export function createChatInstance({
         applyPage: (messages, descriptor) => {
             if (foreignProfile()) return;  // another profile's history rows never paint here (#3294)
             const oldRecentIds = retainedRecentIds();
-            const admitted = descriptor.direction === 'latest' && (acceptRecentWindow(descriptor, messages) || descriptor.rechained);
+            const isRecent = descriptor.direction === 'recent' || descriptor.direction === 'latest';
+            applyHistoryMessages(messages, { ...descriptor, archived: !isRecent });
+            const admitted = isRecent && acceptRecentWindow(descriptor, messages);
             pageHistoryIds.set(descriptor.id, new Set(messages.flatMap(historyRowIds)));
-            const archived = descriptor.direction !== 'recent' && descriptor.direction !== 'latest';
-            if (!archived) pagerRecent = descriptor;
-            applyHistoryMessages(messages, { ...descriptor, archived });
-            // The present re-anchors the chain: rows no page or window owns any more
-            // (windows kept while the reader was in older history) go with it.
-            if (admitted) withStableViewport(() => releaseHistoryIds(new Set([...oldRecentIds,
-                ...historyStamps(messagesDiv).map(([id]) => id)])));
-            // An older page drawn can show, or name, the newest arrival without a scroll.
-            if (admitted) readReceipt.settle();
-            else if (archived) readReceipt.page(descriptor);
+            if (isRecent) pagerRecent = descriptor;
+            if (descriptor.direction === 'latest' && admitted) {
+                if (historyLoaded) lastHistorySyncSucceeded = true;
+                withStableViewport(() => releaseHistoryIds(new Set([...oldRecentIds,
+                    ...historyStamps(messagesDiv).map(([id]) => id)])));
+                readReceipt.settle();
+            } else if (!isRecent) {
+                readReceipt.page(descriptor);
+                catchUp.confirmPage(descriptor, messages);
+            }
         },
         releasePage: descriptor => {
             const ids = pageHistoryIds.get(descriptor.id) || [];
@@ -2843,14 +2839,14 @@ export function createChatInstance({
             withStableViewport(() => releaseHistoryIds(ids));
         },
         // Rows stored since the newest read join its window (and the saved preview).
-        applyArrivals: (messages, { window, fromReconnect, requestedAt }) => {
+        applyArrivals: (messages, { window, requestedAt, readOrder, repairs, quiet }) => {
             if (foreignProfile()) return;
+            applyHistoryMessages([...repairs, ...messages], { requestedAt, readOrder, quiet });
             preview.append(messages);
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
-            applyHistoryMessages(messages, { fromReconnect, requestedAt });
             readReceipt.arrived(window);
         },
-        readNewest: syncHistory, newestInFlight: () => historySyncPromise,
+        readNewest: syncHistory, newestInFlight: () => historySyncPromise, newestRead: () => [catchUp.newestRequest, recentApplied], catchingUp: () => catchUp.reconnecting,
         canArrive: () => !arrivalGate(), arrivalGate,
         rebaseOlderEdge: ({ canNewer, canOlder }) => historyWindow?.horizonGap && !canNewer && !(canOlder && readingHistory()),
         isPageProtected: isHistoryPageProtected,
@@ -2890,7 +2886,7 @@ export function createChatInstance({
         }
         return snapshot.error ? historyPager.retry() : historyPager.edge('older');
     }
-    loadOlderBtn.addEventListener('click', loadOlderHistory);
+    historyControls.olderButton.addEventListener('click', loadOlderHistory);
 
     function settleHistoryViewport() {
         if (destroyed || reading.pending || !historyLoaded || !isInstanceVisible()) return;
@@ -3270,6 +3266,7 @@ export function createChatInstance({
     onWs('outbound_sent', (evt) => {
         const cid = evt?.clientMessageId || '';
         if (cid) {
+            catchUp.flushSend(cid);
             unconfirmed.flushed(cid);
             // A socket write is not durable acceptance (2A): settle the
             // bubble only; `Sending...` retires on authoritative evidence.
@@ -3294,10 +3291,8 @@ export function createChatInstance({
         onQuestionFrame: reread,
     });
 
-    let wsHasConnectedOnce = false, closedSinceOpen = false;
-
     onWs('open', (msg) => {
-        const openedVisit = visit, readOnOpen = recentRequest;
+        const openedVisit = visit, readOnOpen = catchUp.newestRequest;
         // A return across a close it heard (shown or away) is a reconnect.
         const reason = msg?.resumed && !closedSinceOpen ? 'resume' : 'reconnect';
         closedSinceOpen = false;
@@ -3307,14 +3302,14 @@ export function createChatInstance({
             ? msg.previouslyConnected
             : wsHasConnectedOnce;
         // A body polled during a real outage may predate the restart.
-        if (isReconnect && !msg?.resumed) hostStart.forget();
+        if (isReconnect && reason === 'reconnect') hostStart.forget();
         mainWaiting?.setConnected(true);
         refreshHeaderControlState();
         syncChatStatus();
         // Main owes a changed-code notice even if away at first open; a Project mounted later owes none.
         if (isReconnect && !wsHasConnectedOnce && !isMain) pendingRestartNotice = '';
         const restartNotice = pendingRestartNotice;
-        wsHasConnectedOnce = true;
+        wsHasConnectedOnce = wsSeen = true;
         updateMessagesPadding();
         const settled = () => {
             if (destroyed || openedVisit !== visit) return;  // left meanwhile: a return opens again
@@ -3325,23 +3320,23 @@ export function createChatInstance({
             }
             clearReloadParams();
         };
-        const read = loadUiPreferences()
-            // A return shares its paint receipt's newest read during preferences, even a refusal; a real reconnect owes
-            // a read newer than any it interrupted.
-            .then(() => (destroyed || openedVisit !== visit ? false
-                : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
-                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
-                    : waitForHydrationWindow().then(awaitInitialHydration)))
+        const read = roomProfile.openHistory(() => (openedVisit !== visit || closedSinceOpen || !wsUp() ? false
+            : reason === 'resume' && catchUp.newestRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
+            : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
+                : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
-        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen);
+        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, undefined, reason === 'reconnect');
     });
 
     // A disconnect: written sends not yet saved say so and the room shows the outage; away, which sends it doubts is
     // decided now (custody) and both are drawn on its return (`stay`).
     onWs('close', () => {
         forgetWindowReturn();
-        closedSinceOpen = true;
-        catchUp.cancel(recentRequest);
+        if (!unopened()) {
+            closedSinceOpen = true; catchUp.cancel(undefined, true);
+            historyReadAbort?.abort(); historyPager.cancelArrivals();
+        }
+        historyResyncScheduler.cancel();
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
     });
@@ -3424,10 +3419,10 @@ export function createChatInstance({
             if (leaving) return;
             if (windowHidden) windowReturn.hold(windowFollower() && reading.nearBottom(), presentHeld());
             roomProfile.left();  // copies shown on the core's word leave the feed, kept (chat_preview.js)
-            catchUp.cancel(recentRequest);  // its return reads, and says so, anew
+            catchUp.cancel();  // its return reads, and says so, anew
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
             // readiness polled meanwhile. Before the first open there is none: that open keeps the boot read.
-            if (ws.isConnected?.() === false && ws.previouslyConnected?.()) hostStart.forget();
+            if (!wsUp() && ws.previouslyConnected?.()) hostStart.forget();
             roomWork?.leave(); keepPlace(); leaving = true; visit += 1; historyControls.hideNotice();
             readReceipt.cancel(); historyReadAbort?.abort(); historyPager.suspend(); historyResyncScheduler.cancel();
             rowSleep.destroy(); chatResizeObserver?.disconnect(); reviewHydrator.suspend(); replies.search.close();

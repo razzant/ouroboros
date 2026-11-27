@@ -73,13 +73,18 @@ export function createChatRowMenu({ feed, replies, cardOf, readControls, afterAc
 
     function bubbleItems(row, point, touch) {
         const items = [];
-        const copy = row.querySelector(':scope > .chat-message-copy, :scope > .chat-message-actions > .chat-message-copy');
-        if (copy) items.push(['copy', tr('code.copy', 'Copy'), () => copy.click(), true]);
+        // A revision under the open menu (a spoken line's words, chat_text_bubble.js) replaces the row's Copy, so the
+        // item presses the one this row holds at the press.
+        const copy = () => row.querySelector(':scope > .chat-message-copy, :scope > .chat-message-actions > .chat-message-copy');
+        if (copy()) items.push(['copy', tr('code.copy', 'Copy'), () => copy()?.click(), true]);
         if (touch && replies.canSelect?.(row, point)) items.push(['select-text', tr('chat.reply.select_text', 'Select text'),
             () => { tail.disarm(); replies.selectText(row, point); }]);
         const view = row.matches('.chat-bubble') ? messageRow(row) : null;
         for (const action of view ? actions.actionsFor(view) : []) {
-            items.push([action.key, presentAction(action, view).label, () => runMessageAction(action, view, { anchor: row }), true]);
+            // Registered actions read the row as it is at the press, like the row's own buttons do: a revision under
+            // the open menu (chat_text_bubble.js) must not leave them the words or address it replaced.
+            items.push([action.key, presentAction(action, view).label,
+                () => { const now = messageRow(row); if (now) runMessageAction(action, now, { anchor: row }); }, true]);
         }
         return items;
     }
@@ -109,7 +114,10 @@ export function createChatRowMenu({ feed, replies, cardOf, readControls, afterAc
         const record = recordOf(row);
         const items = record ? cardItems(record) : bubbleItems(row, point, touch);
         const ref = row === target ? replyRef(row, record) : null;
-        if (ref) items.unshift(['reply', tr('chat.reply.reply', 'Reply'), () => replies.start(ref)]);
+        // A bubble's words and address can be revised under the open menu: like its own Reply, the item reads them at
+        // the press.
+        if (ref) items.unshift(['reply', tr('chat.reply.reply', 'Reply'),
+            () => replies.start(row.matches('.chat-bubble') ? replyRef(row) : ref)]);
         // The row's own Project reference (a portal's footer, the reference under an answer or a receipt), where Reply
         // and Copy end: a card pressed through a line has no Reply, so it follows Copy.
         const reference = [...row.querySelectorAll('[data-intent="open-project"]')]

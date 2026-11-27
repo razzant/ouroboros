@@ -681,8 +681,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
                 if (entry.deliveryUnknown) {
                     entry.deliveryUnknown = false;
                     persist();
-                    if (bubble) onDomWrite(() => clearDoubt(bubble));
                 }
+                if (bubble) onDomWrite(() => clearDoubt(bubble));
             } else {
                 // A saved row of an ended host is a fact of the receipt, kept with the frame whether or not its bubble is in
                 // the feed now. Drawn on the bubble when there is one; without it the frame stays `restored` (a kept copy

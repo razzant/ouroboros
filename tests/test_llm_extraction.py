@@ -293,7 +293,7 @@ def test_native_ollama_imports_do_not_cycle_back_to_the_router():
     edges = {}
     for module in _LEAVES:
         name = module.__name__.split(".")[-1]
-        tree = ast.parse(pathlib.Path(module.__file__).read_text())
+        tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
         edges[name] = {n.module.split(".")[-1] for n in ast.walk(tree)
                        if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("ouroboros.llm_")}
     def walk(node, stack):

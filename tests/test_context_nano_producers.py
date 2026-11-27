@@ -75,11 +75,13 @@ def test_runtime_shortens_declared_history_but_preserves_authority_unknowns_and_
     source = shape.runtime_data()
     before = copy.deepcopy(source)
     part = context_sections.runtime_host_section(source)
-    projected = json.loads(part.operative_view.split('\n\n', 1)[1])
+    projected, end = json.JSONDecoder().raw_decode(part.operative_view.split('\n\n', 1)[1])
     assert source == before and json.loads(part.full_text.split('\n\n', 1)[1]) == source
     for key in ('task_authority_origin', 'roots', 'budget', 'unknown_observation', 'vitals'):
         assert projected[key] == source[key]
-    assert projected['live_works_present']['works'] == source['live_works_present']['works']
+    # Each running work is one line after the object, every fact of its row kept (tests/test_live_works_line_form.py).
+    assert projected['live_works_present']['works'] == "one line per work, after this object"
+    assert part.operative_view.split('\n\n', 1)[1][end:].splitlines()[-1] == '- own-root state="running"'
     foreign = projected['live_works_present']['other_live_work']
     assert foreign['count'] == 12 and foreign['counted_root_statuses'] == {'failed': 10, 'running': 2}
     for n in range(2):
@@ -93,7 +95,7 @@ def test_runtime_shortens_declared_history_but_preserves_authority_unknowns_and_
     # A producer has not declared a meaning for new fields: no generic JSON clipping.
     source['live_works_present']['other_live_work'][0]['future_authority'] = ['whole']
     source['official_update']['letter']['qualification']['commits'][0]['future_evidence'] = 'whole'
-    new = json.loads(context_sections.runtime_host_section(source).operative_view.split('\n\n', 1)[1])
+    new = json.JSONDecoder().raw_decode(context_sections.runtime_host_section(source).operative_view.split('\n\n', 1)[1])[0]
     assert new['live_works_present']['other_live_work']['unabridged'][0] == source['live_works_present']['other_live_work'][0]
     assert new['official_update']['letter']['qualification']['commits']['unabridged'][0] == source['official_update']['letter']['qualification']['commits'][0]
 
