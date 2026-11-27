@@ -380,6 +380,7 @@ def test_stale_prepared_successor_then_replacement_open(host_world, monkeypatch,
         assert live.result[1]['reason_code'] == ('finished' if failure == 'none' else 'reconnect_failed')
         if failure == 'none':  # the owner ended a call that opened: its transcript is in the room
             assert live.result[0] == 'Call ended. Its transcript is in this room.'
+            assert live.host.hub._state['reason'] == 'finished' and not live.host.hub._state.get('detail')
 
     asyncio.run(scenario())
 
@@ -470,4 +471,30 @@ def test_end_pressed_before_the_engine_opened_is_the_ordinary_ending(host_world,
     words, usage, host, state = _run_call(host_world, monkeypatch, drive)
     assert (words, usage) == call_ending('finished', 'ok', opened=False) and state['reason'] == 'finished'
     assert words == 'Call ended before it started.'
+    assert state['detail'] == words and not state.get('action')  # every connected sheet reads the same ending
     assert not host._session_opened and not host_world.sessions
+
+
+def test_end_during_the_session_candidate_stays_the_owners_end(host_world, monkeypatch):
+    """Path 2 with the owner's bye delivered while the refusing candidate is measured: the owner's End stands, as on
+    path 1 (``tests/test_live_preparation_fit_refusal.py``); the refusal's measurement stays in the journal. The other
+    direction (no bye: the refusal) is ``test_a_session_setup_refusal_before_the_first_connection_...``."""
+    from ouroboros import realtime_setup
+    from ouroboros.realtime_setup import call_ending
+
+    hub = host_world.host.hub
+    hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
+    original = realtime_setup.measure_session_wire
+
+    def bye_while_measuring(*args, **kwargs):
+        if not hub.ended_by_owner:
+            hub.receive_control('owner', {'type': 'bye'})
+        return original(*args, **kwargs)
+    monkeypatch.setattr(realtime_setup, 'measure_session_wire', bye_while_measuring)
+    words, usage, host, state = _run_call(host_world, monkeypatch, _refusing_handler(host_world, opened=False),
+                                          window=11_000)
+    assert hub.ended_by_owner and not host._session_opened
+    assert (words, usage) == call_ending('finished', 'ok', opened=False) and 'host_notice_row' not in usage
+    assert state['reason'] == 'finished' and state['detail'] == 'Call ended before it started.'
+    assert not state.get('action')
+    assert 'fit_refusal' in host.trace

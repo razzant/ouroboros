@@ -175,7 +175,8 @@ def test_end_pressed_during_preparation_stays_the_owners_end(direct_call, tmp_pa
     words, usage = call_ending("finished", "ok", opened=False)
     assert words == "Call ended before it started."  # owner 26.11: no transcript for a call that never opened
     seen = _prepare_call(world, tmp_path, monkeypatch, True, "memory")
-    assert world.hub.closed and world.hub._state["reason"] == usage["reason_code"] and "detail" not in world.hub._state
+    assert world.hub.closed and world.hub._state["reason"] == usage["reason_code"]
+    assert world.hub._state.get("detail") == words and not world.hub._state.get("action")  # every sheet: unstarted
     assert [event["reason"] for event in seen.finished] == [usage["reason_code"]]
     assert seen.answers and {row["text"] for row in seen.answers} == {words}
     stored = load_task_result(tmp_path, seen.task_id)

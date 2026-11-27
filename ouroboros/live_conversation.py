@@ -20,7 +20,8 @@ from dataclasses import replace
 
 from ouroboros.contracts.live_conversation import LiveConfig, LiveOptions
 from ouroboros.contracts.realtime import RealtimeSetupError, canonical_json
-from ouroboros.realtime_setup import _LoopWork, call_ending, loaded_provider, rows_for_engine, session_refusal_notice
+from ouroboros.realtime_setup import (CALL_ENDED_UNSTARTED, _LoopWork, call_ending, loaded_provider, rows_for_engine,
+                                      session_refusal_notice)
 from ouroboros.realtime_session import joined
 from ouroboros.realtime_turn import RealtimeTurn
 
@@ -227,7 +228,10 @@ class LiveConversationTurn(RealtimeTurn):
                               for frame in frames],
                 }).value
                 detail = "An unexpected error ended the call."
-            if reason == "context_capacity" and host is not None and (notice := session_refusal_notice(host)):
+            if (reason == "context_capacity" and not (host is not None and host._session_opened)
+                    and hub is not None and hub.ended_by_owner):  # the owner's End came first: it stays the owner's
+                reason, status, detail = "finished", "ok", ""
+            elif reason == "context_capacity" and host is not None and (notice := session_refusal_notice(host)):
                 detail = notice["text"]  # never opened: the refusal's one line, not "Call ended"
             if host is not None:
                 if failure is not None:
@@ -242,8 +246,10 @@ class LiveConversationTurn(RealtimeTurn):
             finally:
                 with self._lock:
                     self._closed = True
-                try:
-                    close_hub(self.spec.call_id, reason, detail=detail, **({"action": "settings"} if notice else {}))
+                opened = host is not None and host._session_opened
+                try:  # an End before any session opened has no transcript: every sheet reads it as unstarted
+                    close_hub(self.spec.call_id, reason, detail=CALL_ENDED_UNSTARTED if reason == "finished" and not opened
+                              else detail, **({"action": "settings"} if notice else {}))
                     if host is not None:
                         host.observe("host", canonical_json({"type": "call.input_audio",
                             **hub.input_audio_evidence()}))
@@ -252,7 +258,7 @@ class LiveConversationTurn(RealtimeTurn):
                         host.wire.close()  # the call's last records are on disk before it reports finished
                     self.publish({"type": "conversation_finished", "chat_id": self.spec.chat_id,
                                   "call_id": self.spec.call_id, "task_id": ctx.task_id, "reason": reason})
-        words, usage = call_ending(reason, status, detail, notice, opened=host is not None and host._session_opened)
+        words, usage = call_ending(reason, status, detail, notice, opened=opened)
         return words, {**usage, **({"failure": failure} if failure is not None else {})}, (
             host.trace if host is not None else {"reasoning_notes": [], "tool_calls": []})
 

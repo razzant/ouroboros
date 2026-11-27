@@ -442,7 +442,7 @@ def _close_failed_call(admitted: Dict[str, Any], e: BaseException):
         from ouroboros.call_peers import close_hub, get_hub
         from ouroboros.context_fit import MinimumViewUnfit
         from ouroboros.live_conversation import LiveConversationTurn
-        from ouroboros.realtime_setup import call_ending, preparation_refusal_notice
+        from ouroboros.realtime_setup import CALL_ENDED_UNSTARTED, call_ending, preparation_refusal_notice
         from ouroboros.store import StoreBusy
 
         turn = admitted["realtime_turn"]
@@ -454,7 +454,7 @@ def _close_failed_call(admitted: Dict[str, Any], e: BaseException):
                 with turn._lock:
                     already_closed, turn._closed = turn._closed, True
                 if hub is not None and hub.ended_by_owner:  # the owner's End came first: it stays the owner's
-                    reason, notice, words = "finished", None, {}
+                    reason, notice, words = "finished", None, {"detail": CALL_ENDED_UNSTARTED}  # no transcript
                     ending = call_ending(reason, "ok", opened=False)
                 else:
                     reason, notice = "context_capacity", preparation_refusal_notice(turn, e)

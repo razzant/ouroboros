@@ -112,6 +112,10 @@ test('a reasonless or unknown ending still shows the capsule: the call ended, an
         const p = callPresentation(ended(code));
         assert.deepEqual([p.mode, p.title, p.sub, p.small, p.actions], ['sheet', 'The call ended', 'The room has its transcript', '', []]);
     }
+    // The owner's End before the call opened: the server's own sentence, calm, and no transcript claimed.
+    const unstarted = callPresentation(ended('finished', { detail: 'Call ended before it started.' }));
+    assert.deepEqual([unstarted.mode, unstarted.title, unstarted.sub, unstarted.actions, unstarted.tone, unstarted.light],
+        ['sheet', 'Call ended before it started.', '', [], '', 'still']);
     const unknown = callPresentation(ended('a_code_from_the_future'));
     assert.deepEqual([unknown.mode, unknown.title, unknown.small], ['sheet', 'The call ended', '']);
     // Ending codes stay internal; the owner sees words.
@@ -653,11 +657,14 @@ test('unknown ending codes show the server sentence and never the raw code', () 
 test('a call that could not start for lack of room is a calm fact with the Calls settings, never amber or a raw code', () => {
     // The numbers are the room's System line (translated there from its template); the sheet carries none.
     const sentence = 'The call could not start on voice-test: this room needs 90,123 tokens of input.';
-    const bare = callPresentation(ended('context_capacity'));
-    for (const shown of [callPresentation(ended('context_capacity', { detail: sentence, action: 'settings' })), bare]) {
+    const refused = callPresentation(ended('context_capacity', { detail: sentence, action: 'settings' }));
+    // A serving call that could not renew leaves no numbered row: its sheet does not point at one.
+    const renewal = callPresentation(ended('context_capacity', { detail: 'This room no longer fits.' }));
+    assert.match(refused.title, /numbers/);
+    assert.doesNotMatch(renewal.title, /numbers/);
+    for (const shown of [refused, renewal, callPresentation(ended('context_capacity'))]) {
         assert.equal(shown.tone, '');
         assert.equal(shown.light, 'still');
-        assert.equal(shown.title, bare.title);
         assert.ok(shown.title && !shown.title.includes('context_capacity') && !shown.title.includes('90,123'));
         assert.equal(shown.actions[0].kind, 'settings');
         assert.equal(shown.actions[0].path, 'skill/live_conversation');
