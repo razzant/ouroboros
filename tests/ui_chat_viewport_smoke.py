@@ -128,7 +128,10 @@ def wait_drawer_closed(page, timeout=None):
 def _emit_ws_frame(page, frame):
     page.evaluate(
         """frame => {
-            const socket = window.__testSockets?.[0];
+            // The page's current socket: after a reconnect the first one is retired and its frames are dropped
+            // (ws.js onmessage, #4149), as are the frames of a socket that is not the page's own.
+            const sockets = window.__testSockets || [];
+            const socket = [...sockets].reverse().find((each) => each.readyState === WebSocket.OPEN) || sockets[0];
             if (!socket) throw new Error('test socket not captured');
             socket.dispatchEvent(new MessageEvent('message', {data: JSON.stringify(frame)}));
         }""",
