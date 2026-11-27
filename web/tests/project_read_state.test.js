@@ -528,15 +528,22 @@ test('the read band is the viewport less the header above and the composer below
     assert.equal(ends(69.5, { ...chrome, header: scaled }), true, 'the edge is measured in the page\'s scale');
     assert.equal(ends(69, { ...chrome, header: scaled }), false, 'and still hides what lies under it');
     // WebKit before 16.4 has no @property: the typing reach (style.css, a clamp over --vvh) reads back as its tokens. The
-    // edge material's own box (`::before`, the bar's padding box plus the reach) is measured instead.
-    const drawn = (height) => ({ getComputedStyle: (node, pseudo) => (pseudo === '::before' ? { height } : {
-        getPropertyValue: (name) => (name === '--edge-reach' ? 'clamp(0px, 508px - 47px - 250px, 32px)' : '') }) });
-    const typing = (height) => Object.assign(el(0, 40), { clientHeight: 40, ownerDocument: { defaultView: drawn(height) } });
+    // edge's own box (its tint node, the bar's padding box plus the reach) is measured instead; a bar's pseudo-element is
+    // not the edge and never vouches for it.
+    const TINT = ':scope > .room-edge[data-edge="tint"]';
+    const tint = { tint: true };
+    const drawn = (height) => ({ getComputedStyle: (node, pseudo) => (node === tint ? { height } : pseudo === '::before'
+        ? { height: '72px' } : { getPropertyValue: (name) => (name === '--edge-reach' ? 'clamp(0px, 508px - 47px - 250px, 32px)' : '') }) });
+    const typing = (height, edge = tint) => Object.assign(el(0, 40), { clientHeight: 40,
+        querySelector: (selector) => (selector === TINT ? edge : null), ownerDocument: { defaultView: drawn(height) } });
     assert.equal(at(50, { ...chrome, header: typing('72px') }), false, 'under the drawn edge, its reach unresolved');
     assert.equal(at(80, { ...chrome, header: typing('72px') }), true, 'below it');
     assert.equal(at(50, { ...chrome, header: typing('40px') }), true, 'a low typing room gives the edge up');
     assert.equal(at(50, { ...chrome, header: typing('auto') }), true, 'no drawn edge and no resolved reach: the bar alone');
-    const scaledTyping = { ...scaled, clientHeight: 40, ownerDocument: { defaultView: drawn('72px') } };
+    assert.equal(at(50, { ...chrome, header: typing('72px', null) }), true,
+        'a bar without the edge\'s node has no edge, whatever its ::before measures');
+    const scaledTyping = { ...scaled, clientHeight: 40, querySelector: (selector) => (selector === TINT ? tint : null),
+        ownerDocument: { defaultView: drawn('72px') } };
     assert.deepEqual([ends(69.5, { ...chrome, header: scaledTyping }), ends(69, { ...chrome, header: scaledTyping })],
         [true, false], 'the drawn edge in the drawer\'s scale');
 });
