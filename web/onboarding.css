@@ -1625,6 +1625,9 @@ textarea:not(.ui-control):not(.ui-checkbox):not(.ui-radio):focus {
     .skills-connection-qr, [data-connection-qr-hint], [data-connection-this-device] { display: none; }
   }
 }
+@media (pointer: coarse) and (max-height: 30rem) {  /* the same phone turned sideways */
+  .skills-connection-qr, [data-connection-qr-hint], [data-connection-this-device] { display: none; }
+}
 .skills-connection-facts { display: grid; gap: var(--space-1); min-width: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .skills-connection-facts strong { color: var(--text-primary); font-size: var(--type-body); }
 .skills-connection-facts a { color: var(--text-primary); font-weight: 600; }

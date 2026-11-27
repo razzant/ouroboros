@@ -496,8 +496,10 @@ test('Connect opens the skill’s steps and its token field; a checked token sho
     // On the phone itself the QR, its scan hint and «On this device?» step aside and the link alone stays (owner, 27.11).
     assert.match(card, /<span data-connection-qr-hint>Scan it with your phone’s camera/);
     assert.match(card, /<span data-connection-this-device>On this device\?<\/span>/);
-    assert.match(readFileSync(new URL('../onboarding.css', import.meta.url), 'utf8'),
-        /@media \(pointer: coarse\) \{\s*@container skillsstep \(max-width: 35rem\) \{\s*\.skills-connection-qr, \[data-connection-qr-hint\], \[data-connection-this-device\] \{ display: none; \}/);
+    const css = readFileSync(new URL('../onboarding.css', import.meta.url), 'utf8');
+    assert.match(css, /@media \(pointer: coarse\) \{\s*@container skillsstep \(max-width: 35rem\) \{\s*\.skills-connection-qr, \[data-connection-qr-hint\], \[data-connection-this-device\] \{ display: none; \}/);
+    assert.match(css, /@media \(pointer: coarse\) and \(max-height: 30rem\) \{[^{}]*\n\s*\.skills-connection-qr, \[data-connection-qr-hint\], \[data-connection-this-device\] \{ display: none; \}/,
+        'the same phone turned sideways keeps the link alone');
     assert.match(card, /data-connection-option="TELEGRAM_NOTIFY_TASKS" checked/, 'on for a new connection');
     assert.equal(card.split(TOKEN).length - 1, 1, 'the token is the field’s own value only: never in the QR or a link');
     // The code is made once: hiding and opening again, or checking again, keeps it.
