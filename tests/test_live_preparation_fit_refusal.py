@@ -115,7 +115,7 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
         assert row["text"] == state["detail"] and "context_capacity" not in row["text"]
         for fact in ("92,000", "10,000", f"{error.estimated_input_tokens:,}", FACTS.source):
             assert fact in notice["details"], (fact, notice["details"])
-        assert ("memory was not measured" in notice["details"]) is (getattr(error, "memory_measured", True) is False)
+        assert (f"fixed part {error.fixed_input_tokens:,}" in notice["details"]) is getattr(error, "memory_measured", True)
     done, = [row for row in emitted if row["type"] == "task_done"]
     assert done["status"] == "failed" and done["reason_code"] == "context_capacity"
     assert done["chat_id"] == 1 and done["task_id"] == task_id
@@ -152,13 +152,17 @@ def test_a_refusal_carries_parts_and_says_when_memory_was_not_measured(direct_ca
         exc.memory_measured = False
         exc.parts = (("identity", 100_000), ("system prompt", 1_234))
 
+    # The engine as the call's opening row names it; the model id in Details.
+    direct_call.turn.engine, direct_call.turn.native_model = "Synthetic · Voice", "synthetic-voice-1"
     seen = _prepare_call(direct_call, tmp_path, monkeypatch, True, "fixed", refine=unmeasured)
     assert seen.answers
     for row in seen.answers:
         notice = row["progress_meta"]["notice"]
         assert notice["template"] == _NEEDS[False] and notice["values"]["need"] == f"{seen.errors[0].estimated_input_tokens:,}"
+        assert notice["values"]["engine"] == "Synthetic · Voice" and row["text"].count("Synthetic · Voice") == 1
+        assert "synthetic-voice-1" in notice["details"] and "synthetic-voice-1" not in row["text"]
         assert "identity 100,000" in notice["details"] and "system prompt 1,234" in notice["details"]
-        assert "memory was not measured" in notice["details"] and "memory 0" not in notice["details"]
+        assert "memory 0" not in notice["details"] and "fixed part" not in notice["details"]
     refusal, = [row for row in seen.rows if row["type"] == "call.fit_refused"]
     assert refusal["fit"]["measurement"]["memory_measured"] is False
 
@@ -219,5 +223,5 @@ def test_a_start_the_early_bound_refuses_reaches_the_call_as_its_notice(direct_c
     for row in seen.answers:
         notice = row["progress_meta"]["notice"]
         assert notice["template"] == _NEEDS[False] and notice["values"]["need"] == f"{error.estimated_input_tokens:,}"
-        assert "memory was not measured" in notice["details"] and "25,000" in notice["details"]
+        assert "memory 0" not in notice["details"] and "25,000" in notice["details"]
         assert all(f"{name} {size:,}" in notice["details"] for name, size in error.parts)

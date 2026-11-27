@@ -429,6 +429,9 @@ def test_a_session_setup_refusal_before_the_first_connection_says_the_call_did_n
     assert usage['reason_code'] == 'context_capacity' and usage['execution_status'] == 'infra_failed'
     assert row['notice']['code'] == 'context_capacity' and row['notice']['step'] == 'open_calls'
     assert words == row['record'] and 'transcript' not in words and 'context_capacity' not in words
+    # The engine as the call's opening row names it, once; the model id in Details.
+    assert row['notice']['values']['engine'] == host.turn.engine and f'Engine: {host.turn.engine},' in host.turn.opening
+    assert row['text'].count(host.turn.engine) == 1 and host.turn.native_model in row['notice']['details']
     takes = measured['capacity_total_tokens'] - measured['response_reserve_tokens']
     assert row['notice']['values']['need'] == f"{measured['estimated_input_tokens']:,}"
     assert row['notice']['values']['takes'] == f'{takes:,}'

@@ -565,3 +565,33 @@ def test_a_call_that_could_not_start_names_its_step_and_the_mind_reads_its_numbe
     for fact in ("85,000", "8,000", "77,000", "90,123", "characters / 4", "documented window", "2026-11-26"):
         assert fact in read, fact
     assert said["notice"]["values"] == {"engine": "voice-test", "need": "90,123", "takes": "77,000"}
+
+
+def test_a_refused_calls_window_line_credits_the_catalogue_only_for_its_own_number():
+    """When the window in effect differs from the catalogue's declaration (an accepted input raised it), Details name
+    both numbers and credit the catalogue's source and date to its own declaration; an equal window reads as one."""
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+
+    facts = RouteFacts(133_554, 150_000, 10_000, "provider", "catalogue declaration", "2026-10-20")
+    window_line = lambda said: next(line for line in said["notice"]["details"].splitlines() if line.startswith("Window"))
+    raised = window_line(capacity_notice("Voice", facts, stage="session_candidate", need=170_000, measured=True,
+                                         reserve=10_000, window=168_000))
+    assert "168,000" in raised and "133,554" in raised
+    assert raised.index("133,554") < raised.index("catalogue declaration")  # the credit follows its own number
+    assert raised.index("168,000") < raised.index("133,554")
+    equal = window_line(capacity_notice("Voice", facts, stage="session_candidate", need=170_000, measured=True,
+                                        reserve=10_000, window=133_554))
+    assert equal.count("133,554") == 1 and "catalogue declaration" in equal and "2026-10-20" in equal
+
+
+def test_an_unmeasured_call_refusal_lists_its_parts_and_does_not_call_them_the_fixed_part_alone():
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+
+    facts = RouteFacts(80_000, None, 10_000, "estimator", "catalogue", "2026-10-21")
+    said = capacity_notice("Voice", facts, stage="task_preparation", need=94_000, measured=False, reserve=10_000,
+                           window=80_000, parts=(("marks", 37_935), ("identity", 20_000)), model="voice-1")
+    details = said["notice"]["details"]
+    assert "marks 37,935" in details and "identity 20,000" in details and "at least 94,000" in details
+    assert "fixed part alone" not in details and "voice-1" in details and "voice-1" not in said["text"]

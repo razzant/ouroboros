@@ -105,13 +105,13 @@ class LiveConversationTurn(RealtimeTurn):
         self.route, self._generation = provider["route"], provider["extension_generation"]
         self.native_model = self.catalog_model.id
         self.model = self.route.model_prefix + self.native_model
-        self.spec = replace(spec, model=self.native_model)
+        self.spec, self.engine = replace(spec, model=self.native_model), provider["catalog"].label  # its owner-facing name
         # The call's first owner-visible chat row: the cue plus one owner-facing "Engine:" sentence that the
         # room's call card shows as its engine line (owner's choice 27.10). The model's own senses reach it
         # through the call instructions (skills/live_conversation/driver.py).
         self.opening = (("This call is now live: the other side can hear you." if spec.opened_by == "skill"
                          else "The owner has just opened this call and can hear you now.")
-                        + f" Engine: {provider['catalog'].label}, {self.catalog_model.label or self.native_model}; "
+                        + f" Engine: {self.engine}, {self.catalog_model.label or self.native_model}; "
                         + ("sees the shared screen." if self.catalog_model.vision else "no screen vision."))
         self.request = {"kind": "live_conversation", "feature": feature["key"], "provider": self.provider,
                         "model": self.native_model, "call_id": spec.call_id}

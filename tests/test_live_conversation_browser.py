@@ -777,11 +777,11 @@ def seed_refused_call(root):
     from supervisor.message_ingress import _chat_record
 
     call, task = "c" * 32, "t-refused"
-    said = capacity_notice("grok-voice", {"basis": "estimator", "source": "the engine's catalogue",
+    said = capacity_notice("Grok · xAI", {"basis": "estimator", "source": "the engine's catalogue",
                                           "observed": "2026-11-26"}, stage="task_preparation", need=93_857,
-                           measured=False, reserve=12_000, window=80_000,
+                           measured=False, reserve=12_000, window=80_000, model="grok-voice-3.0",
                            parts=(("marks", 37_935), ("constitution", 12_061), ("identity", 11_622)))
-    _root, opening = _chat_record("in", 1, 0, "The owner opened this call. Engine: Grok; no screen vision.",
+    _root, opening = _chat_record("in", 1, 0, "The owner opened this call. Engine: Grok · xAI, grok-voice-3.0; no screen vision.",
                                   ts="2026-11-26T09:00:00+00:00", client_message_id=f"call:{call}:open", task_id=task,
                                   drive_root=root, message_meta={"role": "system", "system_type": "call_open",
                                                                  "host_fact": {"kind": "call_open", "call_id": call}})
@@ -820,7 +820,7 @@ def test_a_call_that_could_not_start_shows_one_line_whose_details_open(subscript
     details.locator("summary").click()
     shown = details.locator("pre")
     expect(shown).to_be_visible()
-    for fact in ("80,000", "12,000", "marks 37,935", "memory was not measured"):
+    for fact in ("80,000", "12,000", "marks 37,935", "at least 93,857", "grok-voice-3.0"):
         expect(shown).to_contain_text(fact)
     voice.no_page_scroll(page)
     browser.capture(page, f"refused-call-details-{width}")

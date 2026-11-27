@@ -125,17 +125,19 @@ def text_input_estimate(messages, tools):
 CONTEXT_CAPACITY_DETAIL = "This room's context and working reserve do not fit this engine's window."
 CALL_ENDED = "Call ended. Its transcript is in this room."
 CALL_ENDED_UNSTARTED = "Call ended before it started."  # the owner's End during preparation: there is no transcript
-_NEEDS = {True: "The call could not start on {engine}: this room needs {need} tokens of input, and {engine} takes {takes} "
-                "on this route today.",
-          False: "The call could not start on {engine}: this room needs at least {need} tokens of input, and {engine} "
-                 "takes {takes} on this route today."}
-_STAGES = {"task_preparation": "Stage: this room's ordinary context was built for the call, before the engine was reached.",
+_NEEDS = {True: "The call could not start on {engine}: this room needs {need} tokens of input, and the selected model takes "
+                "{takes} on this route today.",
+          False: "The call could not start on {engine}: this room needs at least {need} tokens of input, and the selected "
+                 "model takes {takes} on this route today."}
+_STAGES = {"task_preparation": "Stage: before the engine was reached, while this room's context was prepared for the call.",
            "session_candidate": "Stage: the call's own instructions and tools were added to the room's context, before the "
                                 "session opened."}
 
 
-def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fixed=None, parts=(), extra=""):
+def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fixed=None, parts=(), extra="", model=""):
     """The one System line a call that could not start for lack of room leaves, with its step and Details.
+
+    ``engine`` is the engine's name as the call's opening row says it; ``model`` the model id, named in Details.
 
     ``need`` is the input this room needs (a lower bound when ``measured`` is false: memory was not priced); what the
     engine takes is the window minus the reserve, in the same units. ``facts`` are the route's ``RouteFacts`` (or
@@ -145,17 +147,19 @@ def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fi
     def fact(name):
         return facts.get(name) if isinstance(facts, dict) else getattr(facts, name, None)
 
-    takes = max(0, window - reserve)
+    takes, declared = max(0, window - reserve), fact("conversation_window_tokens")
     unit = ("estimated tokens (characters / 4)" if fact("basis") == "estimator"
-            else "tokens, the provider's count through this route's calibration")
-    lines = [_STAGES.get(stage, f"Stage: {stage}."),
-             f"Window: {window:,} {unit}; source: {fact('source') or 'not stated'}; observed: "
-             f"{fact('observed') or 'not stated'}.",
+            else "tokens, an estimate in the provider's units")
+    credit = f"source: {fact('source') or 'not stated'}; observed: {fact('observed') or 'not stated'}"
+    lines = [_STAGES.get(stage, f"Stage: {stage}."), *([f"Model: {model}."] if model else []),
+             f"Window: {window:,} {unit}; {credit}." if declared in (None, window) else
+             f"Window: {window:,} {unit}, the window in effect on this route; the catalogue declares {declared:,} "
+             f"({credit}).",
              f"Reserve for the reply and the call's working room: {reserve:,} tokens.",
-             f"{engine} takes {takes:,} tokens of input on this route today: the window minus the reserve.",
+             f"The selected model takes {takes:,} tokens of input on this route today: the window minus the reserve.",
              (f"Input this room needs: {need:,} tokens" + (f" (fixed part {fixed:,}, memory {need - fixed:,})."
               if fixed is not None else ", measured whole with the call's instructions and tools.")) if measured else
-             f"Input this room needs: at least {need:,} tokens, its fixed part alone; memory was not measured."]
+             f"Input this room needs: at least {need:,} tokens (the parts below); memory beyond them was not measured."]
     if parts:
         lines.append("Parts, largest first (estimated tokens): " + "; ".join(f"{name} {size:,}" for name, size in parts) + ".")
     if extra:
@@ -169,7 +173,8 @@ def preparation_refusal_notice(turn, unfit):
     """Path 1: the ordinary build refused (``MinimumViewUnfit``) before any call host existed."""
     measured = getattr(unfit, "memory_measured", True)
     book = getattr(unfit, "required_book_tokens", 0)
-    return capacity_notice(getattr(turn, "native_model", "") or turn.spec.model, turn.catalog_model.facts,
+    model = getattr(turn, "native_model", "") or turn.spec.model
+    return capacity_notice(getattr(turn, "engine", "") or model, turn.catalog_model.facts, model=model,
         stage="task_preparation", need=unfit.estimated_input_tokens, measured=measured,
         reserve=unfit.response_reserve_tokens, window=unfit.window_tokens,
         fixed=unfit.fixed_input_tokens if measured else None, parts=tuple(getattr(unfit, "parts", ()) or ()),
@@ -182,7 +187,8 @@ def session_refusal_notice(host):
     measurement = (refusal.get("fit") or {}).get("measurement") or {}
     if host._session_opened or measurement.get("capacity_total_tokens") is None:
         return None
-    return capacity_notice(host.turn.native_model, refusal.get("route_facts") or {}, stage="session_candidate",
+    return capacity_notice(getattr(host.turn, "engine", "") or host.turn.native_model, refusal.get("route_facts") or {},
+        model=host.turn.native_model, stage="session_candidate",
         need=measurement["estimated_input_tokens"], measured=True, reserve=measurement["response_reserve_tokens"],
         window=measurement["capacity_total_tokens"], extra=str(refusal.get("detail") or ""))
 
