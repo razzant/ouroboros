@@ -498,7 +498,11 @@ test('a selected reply queued offline frees the field, says so on its own bubble
         assert.equal(f.frames.length, 1, 'nothing is queued twice');
         f.fire('close');
         assert.deepEqual(f.actions(bubble), [], 'the queue will write it: nothing is offered twice');
-        assert.deepEqual(toasts().filter((toast) => !before.includes(toast)), [], 'no toast stands in for the bubble');
+        // The room's own history notice may be told again when a read of it ends and a later one fails (a new episode):
+        // only a toast about the message counts here.
+        const history = (toast) => toast.children?.[0]?.textContent === 'Some saved history could not be loaded.';
+        assert.deepEqual(toasts().filter((toast) => !before.includes(toast) && !history(toast)), [],
+            'no toast stands in for the bubble');
         assert.deepEqual(f.kept().at(-1).frame.reply_excerpt, reply.excerpt, 'a reload still finds it kept');
         f.fire('outbound_sent', { clientMessageId: 'cm-1', queued: true });
         assert.equal(bubble.classList.contains('pending'), false, 'written: the queued note leaves');
