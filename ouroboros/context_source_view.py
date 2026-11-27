@@ -234,7 +234,9 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit, *, err
     lines, texts = [f"Unit {unit.unit_id}: tool, {unit.context_size_tokens} tokens estimated"], []
     results = {str(row.get("tool_call_id") or ""): row for row in rows if str(row.get("role") or "") == "tool"}
     for call in rows[0].get("tool_calls") or []:
-        function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+        if not (isinstance(call, Mapping) and isinstance(call.get("function"), Mapping)):
+            continue  # no call the unit scanner would accept (a departing physical exchange may hold one)
+        function = call["function"]
         call_id, arguments = str(call.get("id") or ""), str(function.get("arguments") or "")
         shown = (arguments if len(arguments) <= _FACT_ARGUMENTS_CHARS
                  else f"<arguments {len(arguments)} chars, sha256 {compaction._sha256(arguments)[:16]}>")
@@ -296,9 +298,12 @@ def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
 
 def chosen_read_rows(messages, spans, *, usable_input=None, density=1.0) -> set[int]:
     """Every row of each physical exchange in ``spans`` (``{call row: last result row}``, whether or not the mind may
-    fold it) that holds an explicitly chosen body, by ``chosen_read_units``' rules, at its original positions."""
-    return {i for start, end in spans.items()
-            if _holds_chosen_read(messages, start, end, usable_input=usable_input, density=density)
+    fold it) that holds an explicitly chosen body, at its original positions, when the whole exchange fits known usable
+    input alone (any size when that is unknown): its rows stay or leave together, so a small chosen read never holds a
+    large sibling the window cannot fit."""
+    return {i for start, end in spans.items() if _holds_chosen_read(messages, start, end) and (
+                usable_input is None
+                or compaction._context_tokens_for_messages(messages[start:end + 1], density) <= usable_input)
             for i in range(start, end + 1)}
 
 

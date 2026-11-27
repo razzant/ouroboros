@@ -657,13 +657,14 @@ def session_candidate(host, factory, options, *, observation_fp=None):
                     if not goal or ordinary_free >= 0 and (not running or after > physical_window.usable):
                         break
                 continue
-            elif rung == "seed":
+            elif rung == "seed":  # a chosen read's fit is priced in the same measured tokens as the window
                 current, receipt = renewal_view(current,
                     observation=getattr(host.ctx, '_last_context_observation', None),
-                    drive_root=host.ctx.drive_root, task_id=host.ctx.task_id, measure=measure)
+                    drive_root=host.ctx.drive_root, task_id=host.ctx.task_id, measure=measure,
+                    usable_input=usable, density=ratio)
             elif rung == "physical_cut":
                 current, receipt = physical_window_cut(current, drive_root=host.ctx.drive_root,
-                    task_id=host.ctx.task_id, measure=measure, usable=usable)
+                    task_id=host.ctx.task_id, measure=measure, usable=usable, density=ratio)
             else:
                 reclaim = ContextReclaimRequest(route_fp=plan.route_fp,
                     round_id=f"{host.ctx.task_id}:call:{host.connection_number}",

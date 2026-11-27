@@ -137,6 +137,53 @@ def test_fresh_candidates_outgrow_window_then_continue_by_exact_physical_cut(hos
     assert remaining == original[len(original)-len(remaining):]
 
 
+@pytest.mark.parametrize('shape,ratio,stays', [('plain', 0.75, True), ('interleaved', 1.6, False)])
+def test_a_fresh_call_prices_a_chosen_read_in_the_windows_measured_tokens(host_world, shape, ratio, stays):
+    """A call's seed and physical cut judge whether a chosen read's exchange fits alone in the route's measured tokens,
+    the window's own unit: below a density of one a range whose raw estimate exceeds the window but whose measured
+    price fits stays (the capacity limit is named, the range not dropped); above one an image batch whose raw estimate
+    fits but whose measured price does not leaves the seed whole and the call starts."""
+    from ouroboros import context_compaction as cc
+    from ouroboros.capability_evidence import MAIN_DENSITY_BASIS, record_token_density
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.realtime_setup import RealtimeSetupError, measure_session_wire, session_candidate
+    from tests._context_source_fixtures import _tool
+    host, factory, options = host_world.host, host_world.provider['session'], LiveOptions()
+    host._session_opened = True
+    call, result = _tool('r', invocation='read-range', text='Requested range. ' * 5200)
+    call['tool_calls'][0]['function'] = {'name': 'read_file', 'arguments': json.dumps(
+        {'path': 'evidence.txt', 'start_line': 1, 'max_chars': 92000})}
+    rows = [bound_host_row('owner_words', 'Read this range.'), call, result]
+    if shape == 'interleaved':  # the viewing call's image arrives before the results
+        call['tool_calls'].append({'id': 'v', 'type': 'function', 'function': {'name': 'view_image',
+                                                                              'arguments': '{"path": "x.png"}'}})
+        rows[2:2] = [{'role': 'user', 'content': [{'type': 'text', 'text': '[image: x.png]'}, {
+            'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,iVBORw0KGgo='},
+            '_source_path': '/synthetic/x.png', '_caption': '[image: x.png]'}]}]
+        rows.append({'role': 'tool', 'tool_call_id': 'v', 'content': 'Image attached.'})
+    host.messages.extend([*rows, {'role': 'assistant', 'content': 'Continue the work.'}])
+
+    def measured():
+        return measure_session_wire(host, host.plan, host.messages, host.schemas, factory, options)[2]['fit'][
+            'measurement']
+    raw = measured()['raw_input_tokens']
+    record_token_density(host.ctx.drive_root, host.plan.model, prompt_chars=4 * raw, prompt_tokens=round(raw * ratio),
+                         route_fp=host.plan.route_fp, view_kind=host.plan.view_kind, basis=MAIN_DENSITY_BASIS)
+    body = cc._context_tokens_for_messages([result], 1.0) - cc._context_tokens_for_messages(
+        [{**result, 'content': ''}], 1.0)
+    # The usable input lies between the raw body and its measured price.
+    window = round(body * (0.86 if ratio < 1 else 1.28)) + host.model.facts.working_reserve_tokens
+    host.model = replace(host.model, facts=replace(host.model.facts, conversation_window_tokens=window))
+    assert abs(measured()['measurement_density'] - ratio) < 0.01
+    try:
+        session_candidate(host, factory, options)
+    except RealtimeSetupError as error:
+        assert stays and error.code == 'context_capacity', error
+    else:
+        assert not stays, 'the measured window holds this range alone: it is not dropped'
+    assert (result in host.messages) is stays
+
+
 def test_speculative_capacity_failure_is_not_ready_and_retries_only_changed_view(host_world):
     from skills.live_conversation.driver import _Call
     from ouroboros.contracts.realtime import RealtimeSetupError

@@ -14,8 +14,9 @@ any row written before host state was bound to its text, which may hold merged o
 Ouroboros's outward dialogue; the mind's authored notes (actor capsules) and a predecessor's
 notes; the current review decisions; the address records the refusal passes wrote since the
 newest note; and the mind's own prose since its newest note, including the visible text it wrote
-beside a tool call. Chosen reads (their whole exchange) and explicitly restored sources stay whole. The record lists
-each removed tool unit since the newest note with its typed facts, shown or never shown. Unasked tool units, replies
+beside a tool call. Chosen reads (their whole exchange, when it fits known usable input alone) and explicitly restored
+sources stay whole; what a leaving batch attached before its results leaves with it. The record lists each removed
+tool exchange since the newest note with its typed facts, shown or never shown. Unasked tool units, replies
 the notes already cover, host state the host sends afresh (facts, clock, roster and skill snapshots,
 bound and unchanged), superseded review copies and earlier address records leave the view;
 one host record names the checkpoint that holds them exactly. Owner 29.10 Q1=A:
@@ -75,34 +76,54 @@ def restored_sources(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 def units_since_note(messages: Sequence[Dict[str, Any]], observation: Any, *, usable_input: Any = None,
                      density: float = 1.0) -> str:
-    """Typed facts of every tool unit after the newest note, each named shown or never shown to me.
+    """Typed facts of every tool exchange that leaves the view after the newest note, each named shown or never shown
+    to me.
 
     Plan item 16 (review r1, 17.10): the record indexes what left the view since the newest note, so a
     renewal never hides which calls ran (a child started, a commit attempted) or which results the mind
-    never saw. The facts are ``context_source_view._unit_facts`` without error texts (the physical floor stays
-    lean; each reader keeps them one read away); exposure is the usable-send evidence
+    never saw. Every physical exchange the seed lets go is named (``_protocol_spans``, with the seed's chosen-read
+    rule), also one the mind may not fold (an image its viewing call attached before the results), by the same
+    positional, hash-bound address as a unit. The facts are ``context_source_view._unit_facts`` without error texts
+    (the physical floor stays lean; each reader keeps them one read away); exposure is the usable-send evidence
     (``_exposed_units``); unknown exposure reads as never shown.
     """
-    from ouroboros import context_compaction as compaction
-    from ouroboros.context_source_view import _exposed_units, _unit_facts
+    from ouroboros.context_source_view import _exposed_units, _unit_facts, chosen_read_rows
 
     newest = _newest_note(messages)
-    units = [unit for unit in compaction.context_units(list(messages), scope="tool")
-             if unit.start > newest and compaction.unit_kind(messages, unit) == "tool"]  # calls, not records
-    from ouroboros.context_source_view import chosen_read_units
-    retained = chosen_read_units(messages, units, usable_input=usable_input, density=density)
-    units = [unit for unit in units if unit.unit_id not in retained]
+    spans = {start: end for start, end in _protocol_spans(messages).items() if start > newest}
+    kept = chosen_read_rows(messages, spans, usable_input=usable_input, density=density)
+    units = [_exchange_unit(messages, start, end) for start, end in spans.items() if start not in kept]
     shown = _exposed_units(list(messages), units, observation if isinstance(observation, dict) else {})
     return "\n".join(f"{_unit_facts(messages, unit, error_text=False)}\n  {'shown to me' if unit.unit_id in shown else 'never shown to me'}"
                      for unit in units)
 
 
+def _exchange_unit(messages, start, end):
+    """The exchange from call row ``start`` to ``end`` as a unit (``context_units`` builds the same one when the mind
+    may fold it); an image without a textual descriptor or embedded image data keeps the address without a source
+    projection."""
+    from ouroboros import context_compaction as compaction
+    from ouroboros.context_budget import _AtomicUnit
+
+    unit = compaction._unit_from_slice(messages, start, end, trace_refs_by_tool_call_id={})
+    if unit is None:
+        rows = list(messages[start:end + 1])
+        raw = compaction._canonical_bytes(rows)
+        sha = compaction._sha256(raw)
+        unit = _AtomicUnit(unit_id=f"unit:{start}:{end}:{sha[:16]}", start=start, end=end, raw_sha256=sha,
+                           raw_size_bytes=len(raw), source_text="", source_sha256="", predicted_reclaim_tokens=0,
+                           context_size_tokens=compaction._context_tokens_for_messages(rows, 1.0), generation=0,
+                           lineage_hashes=(sha,), source_refs=())
+    return unit
+
+
 def renewal_seed(messages: Sequence[Dict[str, Any]], *, usable_input: Any = None,
                  density: float = 1.0) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """``(kept rows in order, counts of the rows that leave the view)``; pure, no I/O. A chosen read stays when it fits
-    known usable input alone (every chosen read when that is unknown), as at the address rungs."""
+    """``(kept rows in order, counts of the rows that leave the view)``; pure, no I/O. A chosen read's exchange stays
+    when it fits known usable input alone (any size when that is unknown); what a leaving exchange attached between its
+    call and its results (a viewing call's image) leaves with it, while a typed human row there stays."""
     from ouroboros.anthropic_native_custody import custody_private_key
-    from ouroboros.context_budget import host_row_intact
+    from ouroboros.context_budget import REPLY_CITATION_KIND, RETURN_FACTS_KIND, host_row_intact
     from ouroboros.context_compaction import _capsule_metadata
     from ouroboros.llm_messages import DISPLAY_KEY, shown_content
     from ouroboros.loop_messages import _visible_round_text
@@ -112,7 +133,11 @@ def renewal_seed(messages: Sequence[Dict[str, Any]], *, usable_input: Any = None
     from ouroboros.context_view_facts import CONTEXT_FACTS_NAME
     from ouroboros.send_clock import CLOCK_ROW_NAME
 
-    keep_read = chosen_read_rows(messages, _protocol_spans(messages), usable_input=usable_input, density=density)
+    spans = _protocol_spans(messages)
+    keep_read = chosen_read_rows(messages, spans, usable_input=usable_input, density=density)
+    words = OWNER_ROW_KINDS | {REPLY_CITATION_KIND, RETURN_FACTS_KIND}
+    attached = {i for start, end in spans.items() if start not in keep_read for i in range(start + 1, end)
+                if messages[i].get("role") != "tool" and messages[i].get(HOST_CONTEXT_KIND_KEY) not in words}
     resent = _restated_host_kinds() | {CONTEXT_FACTS_NAME, CLOCK_ROW_NAME, RENEWAL_RECORD_NAME}
 
     note = _is_note
@@ -143,6 +168,8 @@ def renewal_seed(messages: Sequence[Dict[str, Any]], *, usable_input: Any = None
             left["host_rows"] += 1  # older addresses, superseded review copies, state the host sends afresh
         elif role == "assistant" and i <= newest_note:
             left["covered_replies"] += 1
+        elif i in attached:
+            left["tool_rows"] += 1  # what a leaving batch attached before its results (a viewing call's image)
         else:
             kept.append(row)  # every delivered message and my replies since my newest note
     return kept, left
@@ -313,11 +340,11 @@ def _cut_units(messages, *, usable_input=None, density=1.0):
     """Eligible whole units in the order a physical cut spends them (``_cut_tier``), oldest first within a tier.
 
     Protected: the core and assignment, the mind's and a predecessor's notes, chosen reads with their whole exchange
-    (when they fit known usable input alone) and restored reads, current review decisions and feedback, current host
-    state its producer would send again unchanged (the roster chain, skill snapshots and mark changes no later row
-    states anew: cutting them frees nothing; an earlier facts row or clock pays, the next request samples its own),
-    earlier cut records (folded into the new one), the newest owner turn with the citation and return context beside
-    it, the newest exchange (the span holding the mind's last reply or tool result, or the batch the host's bound
+    (when that exchange fits known usable input alone) and restored reads, current review decisions and feedback,
+    current host state its producer would send again unchanged (the roster chain, skill snapshots and mark changes no
+    later row states anew: cutting them frees nothing; an earlier facts row or clock pays, the next request samples its
+    own), earlier cut records (folded into the new one), the newest owner turn with the citation and return context
+    beside it, the newest exchange (the span holding the mind's last reply or tool result, or the batch the host's bound
     record of an outward message closed) and every row after that act, a batch nobody answered yet even when the owner
     spoke after it; before any act, every row after the newest owner turn (with no owner turn either, the last row).
     A call and all its results, complete or not, are one unit (``_protocol_spans``), and an exchange whose native
@@ -352,14 +379,17 @@ def _cut_units(messages, *, usable_input=None, density=1.0):
     if acts:
         since = next((start for start, end in spans.items() if start <= acts[-1] <= end), acts[-1])
         unanswered = messages[acts[-1]].get('role') == 'tool'  # no reply of the mind after its batch's results yet
-        if (since == acts[-1] and messages[since].get(HOST_CONTEXT_KIND_KEY) == 'owner_dialogue'
-                and host_row_intact(messages[since])):
+
+        def outward_record(row):
+            return row.get(HOST_CONTEXT_KIND_KEY) == 'owner_dialogue' and host_row_intact(row)
+        if since == acts[-1] and outward_record(messages[since]):
             # After a batch's results the host appends its own rows before any new reply: review updates, then the
             # record of an outward message (role assistant, bound to its text at ``tools/owner_delivery``), which
             # answers none of those results; so the batch it closes belongs to the newest exchange too. Completed
-            # speech in a call carries no binding: it is the mind's answer, and the batch before it is older work.
+            # speech in a call carries no binding: it is the mind's answer, so the walk stops there and the batch
+            # before it is older work.
             cursor = since
-            while cursor - 1 > first and (messages[cursor - 1].get(HOST_CONTEXT_KIND_KEY) == 'owner_dialogue'
+            while cursor - 1 > first and (outward_record(messages[cursor - 1])
                                           or messages[cursor - 1].get(REVIEW_CONTEXT_INDEX_KEY)
                                           or messages[cursor - 1].get(REVIEW_HISTORY_MESSAGE_KEY)):
                 cursor -= 1
