@@ -419,19 +419,19 @@ def _admitted_reader(ctx: Any, task: Dict[str, Any]) -> Any:
 
 def _validate_external_workspace(ctx, path: str) -> str:
     """Use the same ordinary-folder/Git geometry admission as project tasks."""
-    from ouroboros.workspace_admission import WorkspaceRootError, child_source_refusal, validate_workspace_root
+    from ouroboros.workspace_admission import WorkspaceRootError, child_source_hint, validate_workspace_root
     from ouroboros.config import DATA_DIR
     from ouroboros.tools.tool_resolution import system_repo_dir_for
 
-    repo = getattr(ctx, "REPO_DIR", None) or system_repo_dir_for(ctx)
-    drive = getattr(ctx, "DRIVE_ROOT", None) or getattr(ctx, "drive_root", None) or DATA_DIR
     try:
-        root = validate_workspace_root(path, system_repo_dir=repo, drive_root=drive)
+        root = validate_workspace_root(
+            path, system_repo_dir=getattr(ctx, "REPO_DIR", None) or system_repo_dir_for(ctx),
+            drive_root=getattr(ctx, "DRIVE_ROOT", None) or getattr(ctx, "drive_root", None) or DATA_DIR,
+        )
         if root is None:
             return "Subagent rejected: external_workspace path is required."
     except (WorkspaceRootError, OSError, ValueError) as exc:
-        refusal = child_source_refusal(path, exc, system_repo_dir=repo, drive_root=drive)
-        return f"Subagent rejected: invalid external workspace: {refusal}"
+        return f"Subagent rejected: invalid external workspace: {exc}{child_source_hint(exc)}"
     return ""
 
 

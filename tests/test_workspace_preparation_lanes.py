@@ -12,6 +12,7 @@ import pathlib
 import threading
 import time
 
+import pytest
 
 from ouroboros import subagent_worktrees as trees
 from ouroboros.task_results import STATUS_REQUESTED, STATUS_SCHEDULED
@@ -209,34 +210,71 @@ def test_stop_while_a_task_copy_is_still_provisioning_frees_it_only_after_it_ret
     assert not copy.exists() and not [e for e in trees.list_worktrees() if e.get("task_id") == "half1"]
 
 
-def test_a_writing_child_from_a_task_drive_copy_is_refused_with_the_two_arrangements_that_work(tmp_path):
-    """The overlap guard still refuses a writing child's source inside runtime data (its Git store would be written
-    there), and the refusal names what works instead (C11, 27.11: three fixers died on the bare overlap message):
-    the work's own candidate outside runtime data, or exact files for a read-only child. A source overlapping the
-    system repository keeps its plain refusal, and an ordinary folder outside both is admitted."""
-    from types import SimpleNamespace
-
-    data, repo, outside = tmp_path / "data", tmp_path / "repo", tmp_path / "work"
+def _overlapping_sources(tmp_path):
+    """A data drive inside a runtime folder, a task drive copy in it, the system repository and an ordinary folder."""
+    runtime, repo, outside = tmp_path / "runtime", tmp_path / "repo", tmp_path / "work"
+    data = runtime / "data"
     copy_ = data / "task_drives" / "root-task" / "candidate"
     for folder in (copy_, repo, outside):
         folder.mkdir(parents=True)
+    return runtime, data, copy_, repo, outside
+
+
+def test_a_native_writing_child_source_in_runtime_data_hears_what_works_in_the_guards_own_geometry(tmp_path, monkeypatch):
+    """The overlap guard still refuses a writing child's source that lies in runtime data or holds it, and the refusal
+    names what works instead (C11, 27.11: three fixers died on the bare overlap message), worded for the guard's own
+    geometry and carried by its typed reason, never by reading the path again (Astra rev1 C2): an address the
+    validator cannot resolve keeps its structured refusal, surrounding spaces keep the hint, a source overlapping the
+    system repository keeps its plain refusal, and an ordinary folder outside both is admitted."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "1")
+    runtime, data, copy_, repo, outside = _overlapping_sources(tmp_path)
     ctx = SimpleNamespace(REPO_DIR=repo, DRIVE_ROOT=data)
-    refusal = admission._validate_external_workspace(ctx, str(copy_))
-    assert "overlap the Ouroboros data drive" in refusal
-    assert "prepare_self_change" in refusal and "input_files" in refusal
-    plain = admission._validate_external_workspace(ctx, str(repo / "sub"))
-    assert "overlap the Ouroboros system repo" in plain and "input_files" not in plain
-    assert admission._validate_external_workspace(ctx, str(outside)) == ""
+
+    def refusal(surface, path):
+        return admission._resolve_subagent_constraint(
+            ctx, tid="child", requested_constraint={"mode": "acting_subagent", "surface": surface,
+                                                    "write_root": path if surface == "external_workspace" else ""},
+            workspace_root=path if surface == "self_worktree" else "", workspace_mode="", base_sha="",
+            parent_task_id="parent")[3]
+
+    assert refusal("external_workspace", f"{tmp_path}/bad\x00name") == (
+        "Subagent rejected: invalid external workspace: embedded null byte")
+    spaced = admission._validate_external_workspace(ctx, f"  {copy_}  ")  # the validator strips them: so does the hint
+    assert "input_files" in spaced and spaced == admission._validate_external_workspace(ctx, str(copy_))
+    assert admission._validate_external_workspace(ctx, str(runtime)) != spaced  # a folder holding the drive: its own words
+    inside = refusal("self_worktree", str(copy_))  # the C11 fixers' own path
+    around = refusal("external_workspace", str(runtime))
+    assert "overlap the Ouroboros data drive. A folder in runtime data (a task drive copy" in inside
+    assert "prepare_self_change" in inside and "input_files" in inside
+    assert "overlap the Ouroboros data drive. A folder that holds runtime data" in around and "input_files" in around
+    assert refusal("external_workspace", str(repo / "sub")) == (
+        "Subagent rejected: invalid external workspace: workspace_root must not overlap the Ouroboros system repo")
+    assert refusal("external_workspace", str(outside)) == ""
 
 
-def test_the_child_source_refusal_names_the_working_arrangements_only_for_runtime_data(tmp_path):
-    """One wording for both child entries (native self_worktree and delegated directory runs): a source inside runtime
-    data gets the two arrangements that work; a source overlapping the system repository keeps its plain refusal."""
-    from ouroboros.workspace_admission import CHILD_SOURCE_IN_DATA_HINT, child_source_refusal
+def test_a_delegated_writer_hears_what_works_and_an_investigation_keeps_its_readonly_repair(tmp_path):
+    """The delegated folder entry refuses the same sources with the same words for a writer, in the guard's own
+    geometry; an evidence-only investigation keeps its one repair, the explicit readonly lowering."""
+    from types import SimpleNamespace
 
-    data, repo = tmp_path / "data", tmp_path / "repo"
-    error = ValueError("workspace_root must not overlap the Ouroboros data drive")
-    inside = child_source_refusal(data / "task_drives" / "t" / "c", error, system_repo_dir=repo, drive_root=data)
-    assert inside.startswith(str(error)) and inside.endswith(CHILD_SOURCE_IN_DATA_HINT)
-    plain = ValueError("workspace_root must not overlap the Ouroboros system repo")
-    assert child_source_refusal(repo / "sub", plain, system_repo_dir=repo, drive_root=data) == str(plain)
+    from ouroboros.delegate_directory import prepare_directory_execution
+
+    runtime, data, copy_, repo, _outside = _overlapping_sources(tmp_path)
+    ctx = SimpleNamespace(repo_dir=repo, drive_root=data, budget_drive_root=data)
+
+    def refusal(path, *, investigation=False):
+        with pytest.raises(ValueError) as refused:
+            prepare_directory_execution(ctx, None, str(path), SimpleNamespace(mode="execute", investigation=investigation),
+                                        None, None)
+        return str(refused.value)
+
+    assert refusal(f" {copy_} ") == refusal(copy_) and "input_files" in refusal(copy_)
+    assert refusal(runtime) != refusal(copy_)  # its own geometry: a folder holding the drive is not a copy kept in it
+    assert refusal(copy_).startswith("workspace_root must not overlap the Ouroboros data drive. A folder in runtime data")
+    assert refusal(runtime).startswith("workspace_root must not overlap the Ouroboros data drive. A folder that holds")
+    assert refusal(copy_, investigation=True) == (
+        "workspace_root must not overlap the Ouroboros data drive; an evidence-only investigation has no private copy "
+        "for this folder, so lower this call with access='readonly' to read it in place")
+    assert refusal(repo / "sub") == "workspace_root must not overlap the Ouroboros system repo"

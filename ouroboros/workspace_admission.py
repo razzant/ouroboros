@@ -40,7 +40,13 @@ log = logging.getLogger(__name__)
 
 
 class WorkspaceRootError(ValueError):
-    """A workspace_root that is missing, overlapping, or has invalid Git geometry."""
+    """A workspace_root that is missing, overlapping, or has invalid Git geometry. An overlap refusal keeps the guard's
+    own reason (``overlap``): the Ouroboros root it overlaps and whether the path lies ``inside`` it or holds it
+    (``around``), so a caller names what works instead without resolving the path again (``child_source_hint``)."""
+
+    def __init__(self, message: str, *, overlap: tuple[str, str] = ("", "")) -> None:
+        super().__init__(message)
+        self.overlap = overlap
 
 
 def has_git_metadata(root: pathlib.Path, *, mount_boundary: Optional[pathlib.Path] = None) -> bool:
@@ -158,50 +164,61 @@ def kept_path(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
-def folders_overlap(folder: pathlib.Path, target: pathlib.Path) -> bool:
-    """Whether two paths name one folder or hold one another, in either direction: resolved,
-    compared case-folded as tool access compares spellings, and as one physical folder however
-    the volume keeps it (``kept_path``: case, Unicode form, firmlink). This is the geometry
-    ``protected_overlap`` applies to Ouroboros's own roots, as one predicate for any pair; a
-    spelling that agrees is never read as proof of an alias the volume does not confirm."""
-    from ouroboros.tool_access import paths_overlap_casefold
+def folders_overlap(folder: pathlib.Path, target: pathlib.Path) -> str:
+    """Whether two paths name one folder or hold one another, in either direction, and how: ``"inside"`` when
+    ``folder`` is ``target`` or lies in it, ``"around"`` when it holds ``target``, else ``""``. Resolved, compared
+    case-folded as tool access compares spellings, and as one physical folder however the volume keeps it
+    (``kept_path``: case, Unicode form, firmlink). This is the geometry ``protected_overlap`` applies to Ouroboros's
+    own roots, as one predicate for any pair; a spelling that agrees is never read as proof of an alias the volume
+    does not confirm."""
+    from ouroboros.tool_access_paths import _path_is_relative_to_casefold as within
 
     left = pathlib.Path(folder).expanduser().resolve(strict=False)
     right = pathlib.Path(target).expanduser().resolve(strict=False)
     kept, guard = kept_path(left), kept_path(right)
-    return paths_overlap_casefold(left, right) or kept.is_relative_to(guard) or guard.is_relative_to(kept)
+    if within(left, right) or kept.is_relative_to(guard):
+        return "inside"
+    return "around" if within(right, left) or guard.is_relative_to(kept) else ""
 
 
-# What works instead when a writing child's or delegated run's source is a copy inside runtime data: provisioning
-# writes objects, refs and worktree records into that copy's Git store, so the overlap refusal stands.
-CHILD_SOURCE_IN_DATA_HINT = (
-    "A copy kept in runtime data (a task drive) cannot be a writing child's source, since its Git store would be "
-    "written there: put the exact revision in this work's own candidate outside runtime data (prepare_self_change for "
-    "Ouroboros's body, the project's own folder for another repository) and start the child from it, or give a "
-    "read-only child the exact files as input_files.")
+# What works instead when a writing child's source overlaps runtime data, in the guard's own geometry
+# (``WorkspaceRootError.overlap``); the refusal stands, as the child's writes would land in or around runtime data.
+_CHILD_SOURCE_IN_DATA = {
+    "inside": "A folder in runtime data (a task drive copy, for one) cannot be a writing child's source, since the "
+              "child's writes and Git records would land in runtime data",
+    "around": "A folder that holds runtime data cannot be a writing child's source, since runtime data would sit "
+              "inside the folder the child writes"}
 
 
-def child_source_refusal(path: Any, exc: Exception, *, system_repo_dir: Any, drive_root: Any) -> str:
-    """The refusal of a child's source path, naming what works when the path lies in runtime data."""
-    root = pathlib.Path(str(path)).expanduser().resolve(strict=False)
-    inside = protected_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root) == "Ouroboros data drive"
-    return f"{exc}" + (f". {CHILD_SOURCE_IN_DATA_HINT}" if inside else "")
+def child_source_hint(exc: BaseException) -> str:
+    """What works instead for a writing child's source the guard refused for overlapping runtime data, worded for its
+    geometry (``WorkspaceRootError.overlap``), else ``""``: every other refusal keeps its own text."""
+    label, side = getattr(exc, "overlap", ("", ""))
+    if label != "Ouroboros data drive" or side not in _CHILD_SOURCE_IN_DATA:
+        return ""
+    return (f". {_CHILD_SOURCE_IN_DATA[side]}: put the exact revision in this work's own candidate that does not "
+            "overlap runtime data (prepare_self_change for Ouroboros's body, the project's own folder for another "
+            "repository) and start the child from it, or give a read-only child the exact files as input_files.")
+
+
+def _own_root_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> tuple[str, str]:
+    for value, label in ((system_repo_dir, "Ouroboros system repo"), (drive_root, "Ouroboros data drive")):
+        if side := folders_overlap(root, value):
+            return label, side
+    return "", ""
 
 
 def protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> str:
     """Which of Ouroboros's own roots ``root`` (resolved) is inside or around, else ``""``: its system repo or
     data drive, by the one two-way geometry this module owns (``folders_overlap``: case-folded
     spellings and the volume's kept spelling). Attach applies it before ``init_git`` writes anything."""
-    for value, label in ((system_repo_dir, "Ouroboros system repo"), (drive_root, "Ouroboros data drive")):
-        if folders_overlap(root, value):
-            return label
-    return ""
+    return _own_root_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root)[0]
 
 
 def _refuse_protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> None:
-    label = protected_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root)
+    label, side = _own_root_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root)
     if label:
-        raise WorkspaceRootError(f"workspace_root must not overlap the {label}")
+        raise WorkspaceRootError(f"workspace_root must not overlap the {label}", overlap=(label, side))
 
 
 def unavailable_workspace_address(value: Any, *, system_repo_dir: Any, drive_root: Any) -> str:
