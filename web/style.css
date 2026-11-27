@@ -138,35 +138,70 @@ html[data-layout="stack"] .shell-icon-control {
 /* Back (page_header.js renderBackControl; DESIGN "Page header"): the app's one Back, the shell's round icon control
    holding the chevron-left alone, its stroke centred in the circle (the glyph sits 0.75px left on its canvas); where
    it leads is its tooltip and accessible name. It stands first in a header's row, 8px before the place's name, tabs
-   or capsules, and never shrinks. A return to another place says where it leads (owner 27.11.2026): on a desk the
-   same capsule holds the chevron and the destination's words (`‹ Settings`), a long one ending in an ellipsis; the
-   stack layout keeps the circle, its words in its name. */
-.shell-back { flex: none; }
-.shell-back > svg { translate: 0.75px 0; }
+   or capsules, and never shrinks. A return to another place says where it leads on a desk: the same capsule holds the
+   chevron and the destination's words (`‹ Settings`), 12px before the page's name. The page's own name and controls
+   win: the return takes at most a share of the header's row, yields first (its words end in an ellipsis) and stays the
+   circle where that row is narrow. The row is the header's own: the page column of a section, the title block of any
+   other page, the whole bar of a room (whose title block is as wide as its words); the stack layout keeps the circle,
+   its words in its name. The queries only lend the capsule its values (--return-*). */
+.shell-back { flex: none; --back-nudge: 0.75px 0; }
+.shell-back > svg { translate: var(--back-nudge); }
+/* Back points to the inline start in both directions: mirrored in a right-to-left interface, its nudge with it. */
+:root[dir="rtl"] .shell-back { --back-nudge: -0.75px 0; }
+:root[dir="rtl"] .shell-back > svg { scale: -1 1; }
 .shell-back-label { display: none; }
+.shell-back-label > span + span::before { content: " › "; }
 html[data-layout="docked"] .shell-back[data-named] {
-    width: auto;
-    max-width: min(16rem, 100%);
-    padding-inline: var(--space-1) var(--space-3);
+    width: var(--return-width, var(--control-h-float));
+    min-width: var(--control-h-float);
+    max-width: var(--return-cap, none);
+    padding-inline: var(--return-pad, 0);
     gap: var(--space-1);
+    flex: 0 1 auto;
     font-size: var(--type-meta);
     font-weight: 600;
 }
-html[data-layout="docked"] .shell-back[data-named] > svg { flex: none; translate: none; }
+html[data-layout="docked"] .shell-back[data-named] > svg { flex: none; translate: var(--return-nudge, var(--back-nudge)); }
 html[data-layout="docked"] .shell-back[data-named] > .shell-back-label {
-    display: block;
+    display: var(--return-words, none);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.shell-back-label > span + span::before { content: " › "; }
-/* A place's box too narrow for its widest band (the capsule, the page's name and two actions: about 22rem) keeps the
-   circle; its words stay in its name. */
-@container sectionplace (max-width: calc(22rem - 0.02px)) {
-    html[data-layout="docked"] .shell-back[data-named] { width: var(--control-h-float); padding-inline: 0; }
-    html[data-layout="docked"] .shell-back[data-named] > .shell-back-label { display: none; }
-    html[data-layout="docked"] .shell-back[data-named] > svg { translate: 0.75px 0; }
+/* Only on a desk outside Telegram's fullscreen (whose row positions its titles itself): no capsule draws anywhere else,
+   and a container also holds its positioned children. */
+html[data-layout="docked"]:not([data-telegram-fullscreen="active"]) :is(:not(.section-place) > .app-page-header:not(.chat-page-header, .project-panel-bar) > .app-page-title-block, .section-lead-page) {
+    container: pagereturn / inline-size;
+}
+html[data-layout="docked"]:not([data-telegram-fullscreen="active"]) :is(.chat-page-header, .project-panel-bar) {
+    container: roomreturn / inline-size;
+}
+/* A page row from 20rem holds the capsule (at most 40 % of it) beside the page's name and controls; a room's bar from
+   40rem holds it (at most a quarter) beside the room's name, its status, Panic and ×. The slot yields first. */
+@container pagereturn (min-width: 20rem) {
+    html[data-layout="docked"] .app-page-header[data-return-named] .app-page-return {
+        --return-words: block;
+        --return-width: auto;
+        --return-pad: var(--space-1) var(--space-3);
+        --return-nudge: none;
+        --return-cap: min(16rem, 40cqi);
+        flex: 0 1000 auto;
+        min-width: 0;
+        margin-inline-end: var(--space-1);
+    }
+}
+@container roomreturn (min-width: 40rem) {
+    html[data-layout="docked"] .app-page-header[data-return-named] .app-page-return {
+        --return-words: block;
+        --return-width: auto;
+        --return-pad: var(--space-1) var(--space-3);
+        --return-nudge: none;
+        --return-cap: min(16rem, 25cqi);
+        flex: 0 1000 auto;
+        min-width: 0;
+        margin-inline-end: var(--space-1);
+    }
 }
 
 /* A desk has a docked sidebar: no ☰ in the headers (the stack layout shows it) and no drawer × (.nav-rail). */
@@ -1573,7 +1608,8 @@ html[data-layout="docked"] .section-place > .app-page-header:not([data-sidebar-n
    name needs, where it drew no row before; in the macOS window the band is the window's height, as Circles'. */
 :root:not([data-window-chrome="integrated"])[data-layout="docked"] #page-widgets > .app-page-header[data-lead] {
     min-height: 0;
-    padding-block: var(--page-header-padding-y) 0;
+    padding-block: var(--page-header-padding-y) var(--space-2);
+    overflow: visible;  /* nothing scrolls sideways in a name and a return: the return's shadow stays whole */
 }
 /* One column holding a page: Back and the page's name take the row; the place's name stays for readers. */
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
@@ -1670,8 +1706,6 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
 .app-page-return { display: flex; align-items: center; flex: none; order: -1; }
 .app-page-return:empty { display: none; }
 html[data-telegram-back="back"] .app-page-return { display: none; }
-/* A named return yields its width before the page's name does: its words end in an ellipsis. */
-.app-page-header[data-return-named] .app-page-return { flex-shrink: 1; min-width: 0; }
 .app-page-header[data-return] > .app-page-title-block { display: flex; align-items: center; gap: var(--space-2); }
 .app-page-header[data-return="column"] > .app-page-title-block { display: block; }
 .app-page-header[data-return] .app-page-lead { flex: 1; }
@@ -7192,25 +7226,8 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
         margin: 0;
         clip-path: none;
     }
-    /* Two panes whose band holds nothing (the open page has no controls, no return is owed; dashboard.js writes
-       data-controls): on a desk the header lies over the page as the band, the macOS window's handle where it has one,
-       and the rail and the page start below it, where they start under Logs' controls, so neither moves between pages
-       or when a return is spent, in any window (as Settings', settings.css). A touch window keeps ☰ alone in its row. */
-    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) {
-        position: absolute;
-        inset: 0 6px auto 0;
-        z-index: 2;
-        height: var(--page-header-row-h);
-        margin: 0;
-        padding: 0;
-        overflow: hidden;
-    }
-    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) ~ .section-shell :is(.section-rail, .dashboard-body) {
-        padding-top: calc(var(--page-header-row-h) + var(--space-4));
-    }
-    html[data-layout="docked"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) ~ .section-shell > .section-rail {
-        padding-top: calc(var(--page-header-row-h) + var(--space-3));
-    }
+    /* A touch window's list keeps ☰ alone in its row while no page control or return stands in the band. On a desk
+       the band always holds the Dashboard's name over its list, so it stays in flow on every page. */
     html[data-layout="stack"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) { grid-template-areas: "leading title toolbar"; }
     html[data-layout="stack"] #page-dashboard > .app-page-header:not([data-controls]):not([data-return]) .app-page-lead {
         position: absolute;

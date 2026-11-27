@@ -884,3 +884,151 @@ def test_answered_question_keeps_its_choice_and_words_after_reload_without_the_h
         setup_browser.capture(page, f'question-answered-{engine_ui["engine"]}-{width}-{theme}')
     finally:
         page.close()
+
+
+# What a header paints after a return: its Back's form, whether the destination's words show, the page's own name and
+# controls. `root` is the header; `name` its own title.
+RETURN_PAINT = """([root, name, control]) => {
+    const header = document.querySelector(root), back = header.querySelector('[data-shell-back]');
+    const box = (el) => { if (!el || !el.getClientRects().length) return null; const r = el.getBoundingClientRect(); return {x: r.x, w: r.width, h: r.height, right: r.right}; };
+    const words = back.querySelector('.shell-back-label');
+    const title = header.querySelector(name), act = control ? header.querySelector(control) : null;
+    const actBox = box(act);
+    return {back: box(back), words: words && getComputedStyle(words).display !== 'none' ? words.textContent : '',
+        title: box(title), titleWhole: title ? title.scrollWidth <= title.clientWidth + 0.5 : null, control: actBox,
+        right: header.getBoundingClientRect().right};
+}"""
+BETA = {**PROJECT, 'id': 'proj-beta', 'name': 'Beta', 'chat_id': 43}
+
+
+def _two_projects(page):
+    _seed(page)
+    page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [PROJECT, BETA]}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [PROJECT, BETA]))
+
+
+def _project(page, project):
+    page.evaluate("p => window.dispatchEvent(new CustomEvent('ouro:project-created', {detail: {project: p}}))", project)
+    page.wait_for_function("name => document.querySelector('.project-panel.open #project-panel-title')?.textContent === name",
+                           arg=project['name'])
+
+
+def test_a_named_return_yields_to_the_pages_own_name_and_controls(engine_ui):
+    """A return from a long-named Project (owner 27.11.2026: the return names where it leads; the page's own name and
+    controls win): on each side of the header's own width, for a section page (Dashboard › Logs, its filters and
+    Clear), a name-only header (Circles) and a room header (a Project opened from it), which Back form paints, whether
+    the destination's words show, and that the page's own name stays whole and its controls stay in the window."""
+    page = _open(engine_ui, 1280, 801, seed=_two_projects)
+    try:
+        _band(page, 66)
+        seen = {}
+        settle = '() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))'
+
+        def from_long_project(event, wait):
+            # A fresh start each time: Main by its sidebar row (a sidebar choice clears every return), the long Project.
+            page.locator('[data-nav-page="chat"]').click()
+            _project(page, PROJECT)
+            page.evaluate(event)
+            page.wait_for_function(wait)
+            page.evaluate(settle)
+
+        for width, sidebar in ((1280, ''), (1110, ''), (860, '600px')):  # the last: the room's 320px minimum column
+            page.set_viewport_size({'width': width, 'height': 801})
+            page.evaluate("w => w ? document.documentElement.style.setProperty('--sidebar-width', w) : null", sidebar)
+            from_long_project("() => window.dispatchEvent(new CustomEvent('ouro:open-dashboard', {detail: {tab: 'logs'}}))",
+                              "() => document.querySelector('#page-dashboard.active [data-shell-back]')")
+            logs = page.evaluate(RETURN_PAINT, ['#page-dashboard > .app-page-header', '[data-dashboard-lead-name]', '.logs-kinds button'])
+            logs['filters'] = page.evaluate("() => document.querySelector('#page-dashboard .logs-kinds').getBoundingClientRect().width")
+            logs['clear'] = page.evaluate("() => document.querySelector('#page-dashboard .logs-clear-list').getBoundingClientRect().right")
+            logs['content'] = page.evaluate("() => document.getElementById('content').getBoundingClientRect().width")
+            from_long_project("() => window.dispatchEvent(new CustomEvent('ouro:open-circles'))",
+                              "() => document.querySelector('#page-circles.active [data-shell-back]')")
+            circles = page.evaluate(RETURN_PAINT, ['#page-circles > .app-page-header', '.app-page-title', '.app-page-toolbar button'])
+            from_long_project(f"() => window.dispatchEvent(new CustomEvent('ouro:open-project', {{detail: {{project: {json.dumps(BETA)}}}}}))",
+                              "() => document.querySelector('.project-panel.open #project-panel-title')?.textContent === 'Beta'")
+            room = page.evaluate(RETURN_PAINT, ['.project-panel.open .project-panel-bar', '#project-panel-title', '[data-chat-command="panic"]'])
+            seen[width] = {'logs': logs, 'circles': circles, 'room': room}
+        # A room's bar wide enough for the capsule (a wide window, a wide panel): the return names the room it leads to,
+        # and the opened room's own name still reads whole.
+        page.set_viewport_size({'width': 1600, 'height': 801})
+        page.evaluate("() => { const s = document.documentElement.style; s.removeProperty('--sidebar-width'); s.setProperty('--project-panel-width', '760px'); }")
+        from_long_project(f"() => window.dispatchEvent(new CustomEvent('ouro:open-project', {{detail: {{project: {json.dumps(BETA)}}}}}))",
+                          "() => document.querySelector('.project-panel.open #project-panel-title')?.textContent === 'Beta'")
+        seen['room-wide'] = page.evaluate(RETURN_PAINT, ['.project-panel.open .project-panel-bar', '#project-panel-title', '[data-chat-command="panic"]'])
+        print(json.dumps({'named_return_paint': seen, 'engine': engine_ui['engine']}))
+        setup_browser.capture(page, f'named-return-yields-{engine_ui["engine"]}')
+        wide_room = seen.pop('room-wide')
+        for width, places in seen.items():
+            for where, paint in places.items():
+                # Always: the page's own name whole, its controls inside the window, the return never wider than 16rem.
+                assert paint['title'] and paint['title']['w'] > 1 and paint['titleWhole'], (width, where, paint)
+                assert paint['back']['w'] <= 256.5 and paint['control']['right'] <= paint['right'] + 0.5, (width, where, paint)
+            assert seen[width]['logs']['filters'] >= 60 and seen[width]['logs']['clear'] <= width, (width, seen[width]['logs'])
+        # The wide side names where the return leads; the narrow side keeps the circle, its words gone.
+        wide, narrow = seen[1280], seen[860]
+        assert wide['logs']['words'].startswith('Notifications') and wide['circles']['words'].startswith('Notifications'), wide
+        assert narrow['logs']['content'] <= 330, narrow['logs']  # the room's minimum column
+        assert wide['logs']['back']['w'] > wide['logs']['back']['h'], wide
+        for where in ('logs', 'circles', 'room'):
+            assert narrow[where]['words'] == '' and abs(narrow[where]['back']['w'] - narrow[where]['back']['h']) < 1, (where, narrow)
+        assert wide_room['words'].startswith('Notifications') and wide_room['titleWhole'], wide_room
+        assert wide_room['back']['w'] <= wide_room['right'] and wide_room['control']['right'] <= wide_room['right'] + 0.5, wide_room
+    finally:
+        page.close()
+
+
+DASHBOARD_PLACE = """() => {
+    const page = document.querySelector('#page-dashboard'), header = page.querySelector(':scope > .app-page-header');
+    const title = header.querySelector('.app-page-title').getBoundingClientRect(), rail = page.querySelector('.section-rail');
+    const row = rail.querySelector('.section-row').getBoundingClientRect(), body = page.querySelector('.dashboard-panel:not([hidden])');
+    return {titleX: title.x, titleY: title.y, headerBottom: header.getBoundingClientRect().bottom, position: getComputedStyle(header).position,
+        railTop: rail.getBoundingClientRect().top, row: row.top, panel: body ? body.getBoundingClientRect().top : null};
+}"""
+
+
+@pytest.mark.parametrize('band', [66, 0], ids=['mac-band', 'browser'])
+def test_dashboard_heading_stays_put_on_every_page(engine_ui, band):
+    """The Dashboard's name over its list (owner 27.11.2026) stands still while the chosen page changes, on all seven
+    pages, and the band is a row of the page (never laid over the rail, so a short window's scrolled rows never pass
+    behind the name)."""
+    page = _open(engine_ui, 1230, 520)
+    try:
+        if band:
+            _band(page, band)
+        _goto(page, 'dashboard')
+        tabs = page.locator('#page-dashboard [data-dashboard-tab]').evaluate_all('els => els.map(e => e.dataset.dashboardTab)')
+        assert len(tabs) == 7, tabs
+        seen = {}
+        for tab in tabs:
+            page.locator(f'#page-dashboard [data-dashboard-tab="{tab}"]').click()
+            page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+            seen[tab] = page.evaluate(DASHBOARD_PLACE)
+        page.locator('#page-dashboard .section-rail').evaluate('el => { el.scrollTop = el.scrollHeight; }')
+        scrolled = page.evaluate(DASHBOARD_PLACE)
+        print(json.dumps({'dashboard_place': seen, 'scrolled': scrolled, 'band': band, 'engine': engine_ui['engine']}))
+        first = next(iter(seen.values()))
+        for tab, place in seen.items():
+            assert place['position'] != 'absolute', (tab, place)
+            assert abs(place['titleX'] - first['titleX']) < 0.5 and abs(place['titleY'] - first['titleY']) < 0.5, (tab, seen)
+            assert abs(place['railTop'] - first['railTop']) < 0.5 and place['railTop'] >= place['headerBottom'] - 0.5, (tab, place)
+        assert scrolled['railTop'] >= scrolled['headerBottom'] - 0.5, scrolled
+    finally:
+        page.close()
+
+
+def test_widgets_named_row_in_a_browser_keeps_a_clearance_under_its_name(engine_ui):
+    """Without the macOS band Widgets' row is as low as its name needs plus a step of the spacing scale (owner
+    27.11.2026 named the place; its cards are not cut against the name's descenders)."""
+    page = _open(engine_ui, 1100, 750)
+    try:
+        _goto(page, 'widgets')
+        row = page.evaluate("""() => { const h = document.querySelector('#page-widgets > .app-page-header');
+            const t = h.querySelector('.app-page-title').getBoundingClientRect(), b = h.getBoundingClientRect();
+            const list = document.querySelector('#page-widgets .widgets-scroll').getBoundingClientRect();
+            return {titleBottom: t.bottom, headerBottom: b.bottom, height: b.height, listTop: list.top,
+                overflow: getComputedStyle(h).overflowY}; }""")
+        print(json.dumps({'widgets_browser_row': row, 'engine': engine_ui['engine']}))
+        assert row['listTop'] - row['titleBottom'] >= 8 - 0.5, row
+        assert row['height'] < 52 and row['overflow'] == 'visible', row
+    finally:
+        page.close()

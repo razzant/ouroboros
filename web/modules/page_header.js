@@ -4,6 +4,7 @@ import { SHELL_ICONS } from './page_icons.js';
 import { pageLabel } from './pages.js';
 import { statusMarkHtml } from './status_mark.js';
 import { currentLayout, onLayoutChange } from './layout.js';
+import { fmt, translateString } from './i18n.js';
 
 function classAttr(parts) {
     return parts.filter(Boolean).join(' ');
@@ -100,11 +101,11 @@ export function renderBackControl({ to = '', title = to, attrs = '' } = {}) {
 // `project:b` two (the keys page_navigation.js writes).
 const placeOf = (key) => (String(key).startsWith('project:') ? String(key) : String(key).split(':')[0]);
 
-/** The destination's words in the capsule, each step its own node so the interface's language reaches it (the i18n.js
- * overlay; style.css draws the › between steps). A Project's name is the owner's and stays as written. */
-function nameBack(button, words, own, doc) {
+/** The destination's localized steps in the capsule, one node each (style.css draws the › between them). A Project's
+ * name is the owner's: written as it is, in its own direction. */
+function nameBack(button, steps, own, doc) {
     let label = button.querySelector('.shell-back-label');
-    if (!words) {
+    if (!steps) {
         label?.remove();
         button.removeAttribute('data-named');
         return;
@@ -114,12 +115,12 @@ function nameBack(button, words, own, doc) {
         label.className = 'shell-back-label';
         button.append(label);
     }
-    label.replaceChildren(...words.split(' › ').map((part) => {
+    label.replaceChildren(...steps.map((part) => {
         const step = doc.createElement('span');
         step.textContent = part;
         return step;
     }));
-    if (own) label.setAttribute('data-i18n-skip', ''); else label.removeAttribute('data-i18n-skip');
+    if (own) label.setAttribute('dir', 'auto'); else label.removeAttribute('dir');
     button.setAttribute('data-named', '');
 }
 
@@ -157,15 +158,21 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
             button.addEventListener('click', event => layers.back(event.detail ? 'pointer' : 'keyboard', button.dataset.pageLayer));
         }
         button.dataset.pageLayer = primary.id;
-        const words = back.title || back.label;
-        button.setAttribute('aria-label', `Back to ${words}`);
-        button.title = `Back to ${words}`;
-        nameBack(button, crossing ? words : '', String(from).startsWith('project:'), doc);
+        // One localized destination for the words, the accessible name and the tooltip; the overlay leaves the control
+        // alone (data-i18n-fmt), so the three cannot disagree. A Project's name stays as its owner wrote it.
+        const own = String(from).startsWith('project:');
+        const steps = String(back.title || back.label).split(' › ').map((part) => (own ? part : translateString(part)));
+        const name = fmt('Back to {place}', { place: steps.join(' › ') });
+        button.dataset.i18nFmt = 'Back to {place}';
+        button.setAttribute('aria-label', name);
+        button.title = name;
+        nameBack(button, crossing ? steps : null, own, doc);
     }
     const off = layers.onChange(paint);
     win.addEventListener('ouro:page-shown', paint);
+    win.addEventListener('ouro:language-changed', paint);
     paint();
-    return () => { off(); win.removeEventListener('ouro:page-shown', paint); };
+    return () => { off(); win.removeEventListener('ouro:page-shown', paint); win.removeEventListener('ouro:language-changed', paint); };
 }
 
 /**

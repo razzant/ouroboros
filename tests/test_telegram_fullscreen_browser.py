@@ -415,7 +415,10 @@ BAND_WORDS = """() => {
     const header = page.querySelector(':scope > .app-page-header');
     return {page: page.id, titles: [...header.querySelectorAll('.app-page-title, .app-page-lead-title')].filter(shown)
         .map((el) => el.textContent.trim()), backs: [...header.querySelectorAll('[data-shell-back]')].filter(shown).length,
-        telegramBack: document.documentElement.dataset.telegramBack || null};
+        telegramBack: document.documentElement.dataset.telegramBack || null,
+        // Under the band the page and the list start where the band ends: no void between them.
+        below: page.id === 'page-dashboard' ? Math.min(...[...page.querySelectorAll('.section-rail, .dashboard-panel:not([hidden])')]
+            .filter((el) => el.getClientRects().length).map((el) => el.getBoundingClientRect().top)) - header.getBoundingClientRect().bottom : null};
 }"""
 
 
@@ -433,6 +436,13 @@ def test_a_telegram_tablet_band_shows_one_title_and_telegrams_back_alone(shell_u
         open_nav(page, name)
         rest(page)
         seen[name] = page.evaluate(BAND_WORDS)
+    # A Dashboard page other than Logs, chosen from its list.
+    open_nav(page, 'dashboard')
+    page.locator('#page-dashboard [data-dashboard-tab="activity"]').click()
+    rest(page)
+    seen['dashboard-activity'] = page.evaluate(BAND_WORDS)
+    open_nav(page, 'settings')
+    rest(page)
     # A jump from Settings into Dashboard › Costs: the return is owed, Telegram draws its Back.
     page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-dashboard', { detail: { tab: 'costs' } }))")
     page.wait_for_function("() => document.querySelector('#page-dashboard.active > .app-page-header[data-return]')")
@@ -441,5 +451,16 @@ def test_a_telegram_tablet_band_shows_one_title_and_telegrams_back_alone(shell_u
     facts(f'telegram-tablet-band-words-{shell_ui["engine"]}', seen)
     shot(page, f'telegram-tablet-jump-{shell_ui["engine"]}')
     for name, band in seen.items():
-        assert len(band['titles']) <= 1 and band['backs'] == 0, (name, seen)
+        assert band['backs'] == 0, (name, seen)
+        # Exactly one where the place says its name or a page is shown; never two anywhere.
+        exact = name in ('circles', 'widgets', 'dashboard', 'dashboard-activity', 'jump')
+        assert (len(band['titles']) == 1) if exact else (len(band['titles']) <= 1), (name, seen)
     assert seen['jump']['telegramBack'] == 'back' and seen['jump']['titles'] == ['Costs'], seen
+    # A wider tablet holds the Dashboard's two panes in the docked layout: one title, and no void under the band.
+    page.set_viewport_size({'width': 1366, 'height': 1024})
+    open_nav(page, 'dashboard')
+    page.locator('#page-dashboard [data-dashboard-tab="activity"]').click()
+    rest(page)
+    wide = page.evaluate(BAND_WORDS)
+    facts(f'telegram-wide-tablet-dashboard-{shell_ui["engine"]}', wide)
+    assert len(wide['titles']) == 1 and wide['backs'] == 0 and -0.5 <= wide['below'] <= 24, wide

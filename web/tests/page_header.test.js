@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { bindHeaderControlPlacement, bindPageBack, bindPageHeader, renderBackControl, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
+import { applyPayload } from '../modules/i18n.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { ClassList, installDom, restoreDom } from './chat_dom_fixture.js';
 
@@ -50,15 +51,9 @@ test('a section band has the same inset without native chrome and one leading ed
     assert.match(css, /\.app-page-header\[data-return="column"\] > \.app-page-title-block \{ display: block; \}/);
     assert.match(css, /\.app-page-header\[data-return\] > \.app-page-title-block \{ display: flex;/, 'an ordinary leading return keeps its actual sibling');
     assert.match(css, /\.app-page-lead \.app-tab-strip \{[^}]*padding: 10px 0 26px;/);
-    assert.match(css, /section-rail \{\s*padding-top: calc\(var\(--page-header-row-h\) \+ var\(--space-3\)\)/);
-    // The Dashboard's two panes start below the band whether Logs' controls fill it or it is empty, with native chrome
-    // and without it (no 66px jump in a browser); the two-pane query, not a measured width, decides it is empty.
-    const panes = css.slice(css.indexOf('.dashboard-shell .dashboard-body { padding-inline-start'));
-    const two = panes.slice(0, panes.indexOf('\n}\n'));
-    const band = '#page-dashboard > .app-page-header:not([data-controls]):not([data-return])';
-    assert.ok(two.includes(`html[data-layout="docked"] ${band} {\n        position: absolute;`), 'the empty band lies over both columns');
-    assert.ok(two.includes(`html[data-layout="docked"] ${band} ~ .section-shell > .section-rail {\n        padding-top: calc(var(--page-header-row-h) + var(--space-3));`),
-        'the rail starts below it in any window');
+    // The Dashboard's band always holds its name on a desk, so no rule lays an empty band over its columns: the
+    // header stays in flow on every page (the rendered positions: test_dashboard_heading_stays_put_on_every_page).
+    assert.doesNotMatch(css, /html\[data-layout="docked"\] #page-dashboard > \.app-page-header:not\(\[data-controls\]\)/);
     assert.doesNotMatch(css, /#page-dashboard > \.app-page-header\[data-empty\]/, 'no Dashboard rule keys on a measured emptiness');
     // A section place's band keeps no end column (Logs' Clear ended 12px short of the cards), even under a return.
     const rule = 'html[data-layout="docked"] .section-place > .app-page-header[data-lead] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }';
@@ -79,23 +74,27 @@ test('header actions use the floating control tokens while Back keeps the round 
     assert.doesNotMatch(css, /\.app-page-header \.shell-back[^}]*--control-h:/);
 });
 
-test('Back is the shell\'s round control; a return to another place names it on a desk (owner 27.11.2026)', () => {
+test('Back is the shell\'s round control; its words are drawn only inside the header-row container', () => {
     const html = renderBackControl({ to: 'Tools', title: 'Settings › Tools', attrs: 'data-shell-back' });
-    assert.match(html, /^<button type="button" class="shell-icon-control shell-back" data-shell-back aria-label="Back to Settings › Tools" title="Back to Settings › Tools"><svg [^>]*>(?:(?!<\/svg>)[\s\S])*<\/svg><\/button>$/,
-        'one round icon control; its words are written by bindPageBack only for a return to another place');
-    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    assert.match(css, /\.shell-icon-control \{[^}]*width: var\(--control-h-float\);[^}]*height: var\(--control-h-float\);/);
-    assert.match(css, /\.shell-back > svg \{ translate: 0\.75px 0; \}/, 'the chevron\'s stroke is centred in the circle');
-    assert.doesNotMatch(css, /(^|\n)\.shell-back \{[^}]*(width|padding|font)/, 'the circle has no width, padding or word of its own');
-    // The capsule: the same control, on a desk only, its words one line ending in an ellipsis; the stack layout keeps
-    // the circle (the label is not drawn there), so a phone and a narrow window lose nothing to it.
-    assert.match(css, /\.shell-back-label \{ display: none; \}/);
-    assert.match(css, /html\[data-layout="docked"\] \.shell-back\[data-named\] \{[^}]*width: auto;[^}]*max-width: min\(16rem, 100%\);/);
-    assert.match(css, /html\[data-layout="docked"\] \.shell-back\[data-named\] > \.shell-back-label \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);
-    assert.doesNotMatch(css, /html\[data-layout="stack"\][^{]*\.shell-back-label/, 'no capsule in the stack layout');
-    assert.match(css, /\.app-page-return \{ display: flex; align-items: center; flex: none; order: -1; \}/);
-    assert.match(css, /\.app-page-header\[data-return-named\] \.app-page-return \{ flex-shrink: 1; min-width: 0; \}/,
-        'only a named return yields width, to its own ellipsis');
+    assert.match(html, /aria-label="Back to Settings › Tools"/);
+    assert.doesNotMatch(html, /shell-back-label/, 'its words are written by bindPageBack only for a return to another place');
+    // Which at-rules wrap each declaration that lends the capsule its words (a small brace walk over the sheet).
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const lenders = [];
+    const stack = [];
+    let head = '';
+    for (const ch of css) {
+        if (ch === '{') { stack.push(head.trim()); head = ''; } else if (ch === '}') { stack.pop(); head = ''; } else {
+            head += ch;
+            if (/--return-words:\s*block/.test(head)) { lenders.push(stack.join(' / ')); head = ''; }
+        }
+    }
+    assert.equal(lenders.length, 2, 'one for a page row, one for a room bar');
+    for (const where of lenders) {
+        assert.match(where, /^@container (pagereturn|roomreturn) \(min-width: [\d.]+rem\) \/ html\[data-layout="docked"\]/, where);
+    }
+    assert.match(css, /\.shell-back\[data-named\] > \.shell-back-label \{[^}]*display: var\(--return-words, none\)/,
+        'outside those rows the words are not drawn');
 });
 
 test('Telegram sections keep a visible drawer control and one title baseline inside both host buttons', () => {
@@ -470,33 +469,23 @@ test('a named return occupies one shell slot in both layouts, and clearing relea
 });
 
 test('a place the sidebar names by its glyph alone says its name; Files and Settings keep their own words', () => {
-    const read = (name) => readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
-    // Circles and Widgets at the band's start, Dashboard over its list (owner 27.11.2026, place-name A).
-    assert.match(read('circles.js'), /renderPageHeader\(\{ page: 'circles', named: false,/);
-    assert.match(read('widgets.js'), /renderPageHeader\(\{ page: 'widgets', named: false \}\)/);
-    assert.match(read('widgets.js'), /bindPageHeader\(document\.querySelector\('#page-widgets > \.app-page-header'\)\)/,
-        'Widgets\' name stands on the desk band, as Circles\' does');
-    assert.match(read('dashboard.js'), /renderPageHeader\(\{ page: 'dashboard', named: false, leadHtml \}\)/);
-    // The other direction: the band names Files by its location and Settings by its search, and Extensions, reached
-    // through Settings, keeps Settings chosen in the sidebar (outside this decision); their title stays for readers.
-    assert.doesNotMatch(read('extensions.js'), /named: false/);
-    assert.doesNotMatch(read('files.js'), /named: false/);
-    assert.doesNotMatch(read('settings.js'), /named: false/);
-    const named = renderPageHeader({ page: 'widgets', named: false });
-    assert.doesNotMatch(named, /data-sidebar-names|data-empty/, 'a visible name: never the hidden title, never an empty band');
-    assert.equal((named.match(/<h2/g) || []).length, 1, 'one heading for readers, the one shown');
-    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    assert.match(css, /html\[data-layout="docked"\] \.app-page-header\[data-sidebar-names\] \.app-page-title \{\n    position: absolute;/,
-        'only a header the band already names hides its title');
-    const unnamed = 'html[data-layout="docked"] .section-place > .app-page-header:not([data-sidebar-names])';
-    assert.ok(css.includes(`${unnamed} > .app-page-title-block { display: grid; }`), 'the name shares the lead\'s row');
-    const wide = css.slice(css.indexOf(`${unnamed} > .app-page-title-block > *`));
-    assert.match(wide, /@container sectionplace \(min-width: 40rem\) \{\n[^\n]*\.app-page-title-row \{\n\s*width: calc\(var\(--section-rail-w\) - var\(--section-rail-start\) - var\(--section-rail-end\)\);/,
-        'two panes: the name is as wide as the list\'s column, over the list');
-    assert.doesNotMatch(css, /#page-widgets \.app-page-header\[data-empty\]|\[data-empty\]:not\(\[data-return\]\) ~ \.widgets-scroll/,
-        'the board starts under its named band; no empty-band rule of its own survives');
-    // After a return to another place the page names itself beside the capsule, in two panes as in one.
-    assert.match(css, /html\[data-layout="docked"\] #content \.app-page-header\[data-return-named\] \.section-lead-page > \.app-page-lead-title \{\n\s*position: static;/);
+    // Each module's own header call, whatever the order of its fields (the rendered titles are pinned in the browser:
+    // tests/test_header_question_a_browser.py::test_a_named_return_yields_to_the_pages_own_name_and_controls).
+    const call = (name, page) => {
+        const source = readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
+        const found = [...source.matchAll(/renderPageHeader\(\{([^}]*)\}\)/g)].map(([, body]) => body)
+            .find((body) => new RegExp(`page:\\s*'${page}'`).test(body));
+        assert.ok(found !== undefined, `${name} draws the shared header of ${page}`);
+        return /\bnamed:\s*false\b/.test(found);
+    };
+    assert.deepEqual(['circles', 'widgets', 'dashboard'].map((page) => call(`${page}.js`, page)), [true, true, true],
+        'Circles and Widgets at the band\'s start, the Dashboard over its list');
+    assert.deepEqual([['files.js', 'files'], ['settings.js', 'settings'], ['extensions.js', 'skills']].map(([n, p]) => call(n, p)),
+        [false, false, false], 'Files\' location, Settings\' search; Extensions keeps Settings chosen in the sidebar');
+    const shown = renderPageHeader({ page: 'widgets', named: false });
+    assert.doesNotMatch(shown, /data-sidebar-names|data-empty/, 'a visible name: never the hidden title, never an empty band');
+    assert.equal((shown.match(/<h2/g) || []).length, 1, 'one heading for readers, the one shown');
+    assert.match(renderPageHeader({ page: 'files', actionsHtml: '<button>R</button>' }), /data-sidebar-names/);
 });
 
 test('a return to another place names it beside the chevron; a level or a move inside one place keeps the circle', (t) => {
@@ -519,7 +508,7 @@ test('a return to another place names it beside the chevron; a level or a move i
     assert.deepEqual(button.querySelector('.shell-back-label').children.map((step) => step.textContent), ['Settings', 'Consciousness'],
         'each step its own words, so the interface language reaches them; style.css draws the ›');
     top = { ...top, returnTo: { key: 'project:p1' }, back: { label: 'Nova', title: 'Nova' } }; notify();
-    assert.ok(button.querySelector('.shell-back-label').hasAttribute('data-i18n-skip'), 'a Project\'s name stays as its owner wrote it');
+    assert.equal(button.querySelector('.shell-back-label').getAttribute('dir'), 'auto', 'a Project\'s name keeps its own direction');
     // The other direction: a jump between two pages of one place, and a level, keep the round control.
     top = { ...top, destination: 'settings:models', returnTo: { key: 'settings:consciousness' } }; notify();
     assert.equal(words(), null, 'Settings › Consciousness → Settings › Models: one place, the circle');
@@ -580,4 +569,34 @@ test('outside a section column a file or room level above a jump keeps its own B
     assert.equal(header.querySelector('[data-shell-level]'), null);
     level = null; notify();
     assert.equal(header.querySelector('[data-shell-back]').getAttribute('aria-label'), 'Back to Settings');
+});
+
+test('the capsule\'s words, its accessible name and its tooltip come from one localized destination', (t) => {
+    const { mount } = setup(t), page = new NodeStub();
+    page.innerHTML = renderPageHeader({ page: 'circles', named: false });
+    mount.append(page);
+    const header = page.querySelector('.app-page-header');
+    let top = { id: 'jump', page: true, destination: 'circles', returnTo: { key: 'settings:' }, back: { label: 'Settings', title: 'Settings' } }, notify;
+    t.after(bindPageBack({ layers: { page: () => top, onChange: fn => { notify = fn; return () => {}; }, back: () => {} }, currentHeader: () => header }));
+    // The dictionary alone (the stub DOM has no overlay walker): the shell's overlay is not what this control relies on.
+    const load = (payload) => {
+        const doc = globalThis.document;
+        if (!doc) return applyPayload(payload);
+        const { body } = doc;
+        doc.body = null;
+        try { return applyPayload(payload); } finally { doc.body = body; }
+    };
+    t.after(() => load({ language: '', english: true, entries: {} }));
+    const button = header.querySelector('[data-shell-back]');
+    // The language changes while the jump is still owed: the next paint (the shell's ouro:language-changed) says it all.
+    load({ language: 'fr', english: false, revision: 1, entries: { Settings: { text: 'Réglages' }, 'Back to {place}': { text: 'Retour à {place}' } } });
+    notify();
+    assert.equal(button.querySelector('.shell-back-label').textContent, 'Réglages');
+    assert.equal(button.getAttribute('aria-label'), 'Retour à Réglages', 'the spoken name agrees with the drawn word');
+    assert.equal(button.title, 'Retour à Réglages');
+    assert.ok(button.dataset.i18nFmt, 'the page overlay leaves the control alone: it is already translated');
+    // A Project's name is the owner's, never looked up.
+    top = { ...top, returnTo: { key: 'project:p' }, back: { label: 'Settings', title: 'Settings' } }; notify();
+    assert.equal(button.querySelector('.shell-back-label').textContent, 'Settings');
+    assert.equal(button.getAttribute('aria-label'), 'Retour à Settings');
 });

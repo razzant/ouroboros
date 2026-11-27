@@ -904,7 +904,7 @@ export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
-    bindPageHeader(document.querySelector('#page-widgets > .app-page-header'));  // its name on the desk's band
+    const disposeBar = bindPageHeader(document.querySelector('#page-widgets > .app-page-header'));  // its name on the desk's band
     const list = document.getElementById('widgets-list');
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
@@ -1393,6 +1393,7 @@ export function initWidgets(ctx = {}) {
         if (event.persisted) return;
         cardMenus.destroy();
         widths.dispose();
+        disposeBar();
         stopContributionFacts?.();
         stopLifecycleFacts?.();
         for (const tab of lastTabs || []) if (!isBoardFrame(tab)) disposeWidgetByKey(widgetKey(tab));
