@@ -144,10 +144,15 @@ html[data-layout="stack"] .shell-icon-control {
    that row is narrow, never a pill without words. The row is the header's own: the page column of a section, the title block of any
    other page, the whole bar of a room (whose title block is as wide as its words); the stack layout keeps the circle,
    its words in its name. The queries only lend the capsule its values (--return-*). */
-.shell-back { flex: none; --back-nudge: 0.75px 0; }
+.shell-back {
+    flex: none;
+    --back-nudge: 0.75px 0;
+}
 .shell-back > svg { translate: var(--back-nudge); }
 /* Back points to the inline start in both directions: mirrored in a right-to-left interface, its nudge with it. */
-:root[dir="rtl"] .shell-back { --back-nudge: -0.75px 0; }
+:root[dir="rtl"] .shell-back {
+    --back-nudge: -0.75px 0;
+}
 :root[dir="rtl"] .shell-back > svg { scale: -1 1; }
 .shell-back-label { display: none; }
 .shell-back-label > span + span::before { content: " › "; }
