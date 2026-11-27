@@ -1052,8 +1052,10 @@ def map_at_parts(view: Any) -> bool:
 def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_save: bool = False) -> None:
     """Size recovery's books rung: the Body Map at its parts and addresses, which is all that rung has to give since
     the books left every prompt (the tools stay). From Max that is the Low frame; a frame already below Max keeps its
-    mode and takes the same step; a smaller physical frame may require Nano. A walk that did not step the Map (it
-    already stood at its parts, or this actor has no reader for its full text) changes and announces nothing.
+    mode and takes the same step; a smaller physical frame may require Nano. A walk that neither stepped the Map nor
+    left the request's own text smaller (the Map already stood at its parts, or this actor has no reader for its full
+    text: the Low frame then only adds its note) changes and announces nothing; one that saved without the Map's
+    step is named as memory shown coarser, never as the Map.
 
     Low keeps the refused Max view's memory level, never its unsent startup view (``select_mode``)."""
     if ctx.context_fit_plan is None or map_at_parts(ctx.context_fit_plan.projection(active := str(ctx.active_context_mode or "max"))):
@@ -1073,8 +1075,11 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_sa
         books_rung=True,
         unsent_start=start_unread(ctx.tools._ctx, ctx.accumulated_usage),
         reasoning_effort=str(getattr(ctx, "active_effort", "") or ""))  # the shape the round measured
-    if not map_at_parts(rebound.projection(mode := rebound.initial_mode)):
-        return  # a trial that left the Map whole is not a rewrite or a contribution from the books rung
+    before, after = plan.projection(active), rebound.projection(mode := rebound.initial_mode)
+    stepped = map_at_parts(after)
+    if not stepped and (after.system_content_json == before.system_content_json
+                        or len(after.system_content_json) > len(before.system_content_json)):
+        return  # nothing stepped and nothing got smaller: not a rewrite or a contribution from the books rung
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = rebound
     ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
     if trials:
@@ -1084,7 +1089,7 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_sa
     ctx.tools._ctx.messages = ctx.messages
     _adopt_view_facts(ctx.tools._ctx, ctx.context_fit_plan, mode)
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-        "checkpoint_kind": "context_fit_low_retry",
+        "checkpoint_kind": "context_fit_low_retry" if stepped else "context_memory_coarsened",
         "round": ctx.round_idx,
         "route_fp": str(getattr(ctx.context_fit_plan, "route_fp", "") or ""),
         "preferred_mode": str(getattr(ctx.context_fit_plan, "preferred_mode", "") or ""),
