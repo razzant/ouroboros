@@ -193,19 +193,23 @@ def test_a_host_notice_beside_a_salvaged_child_answer_yields_no_second_row(tmp_p
     assert notice not in receipt["text"]
 
 
-def test_telegram_holds_a_child_row_only_while_its_root_is_unfinished(tmp_path):
+def test_telegram_holds_a_child_row_only_while_its_root_is_unfinished(tmp_path, monkeypatch):
     """The bot has no cards: a child's card row waits for its root, a root's does not.
 
     Both directions matter. The hold must fire for a child under a live root and
     stay quiet for the root's own placed row, which is an ordinary progress note
     there and follows the owner's progress toggle.
     """
+    from ouroboros import task_results
     from tests.test_telegram_health_tasks import _api_with_data, _load_plugin
 
     held = _load_plugin()._child_row_held_for_root
     api, data = _api_with_data(tmp_path)
     child = {"delegation_role": "subagent", "root_task_id": "root-one", "card_row": "timeline"}
-    assert held(api, child), "an unreadable root counts as unfinished"
+    assert held(api, child), "an unknown root counts as unfinished"
+    with monkeypatch.context() as patch:  # a store that cannot be read is no proof the root has finished
+        patch.setattr(task_results, "load_task_result", lambda *_a, **_k: (_ for _ in ()).throw(OSError("busy")))
+        assert held(api, child), "an unreadable root counts as unfinished"
     assert held(api, {**child, "card_row": "", "system_type": "terminal_incident"})
     seed_result(data, "root-one", {"status": "running"})
     assert held(api, child)

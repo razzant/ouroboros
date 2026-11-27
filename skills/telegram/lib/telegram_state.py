@@ -656,7 +656,7 @@ def _child_row_held_for_root(api, event: Dict[str, Any]) -> bool:
     try:
         stored = load_task_result(_data_dir(api), root)
     except Exception:
-        return False
+        return True  # unreadable: unfinished, as promised above
     status = str(stored.get("status") or "").strip().lower() if isinstance(stored, dict) else ""
     return status not in FINAL_STATUSES
 
@@ -664,16 +664,18 @@ def _child_row_held_for_root(api, event: Dict[str, Any]) -> bool:
 def _child_final_report(event: Dict[str, Any]) -> bool:
     """Whether a row is a child task's own final report to its parent, never sent here.
 
-    Typed facts only: the child's lineage, no progress, card or lifecycle marking, no
-    host type and the plain assistant role. A child's deliberate message to the owner is
-    typed (``proactive_message``, ``relay_reply``, ``main_notice``), a host notice about
-    it carries the system role, and a row without lineage is never held back.
+    Typed facts only: the child's lineage and no progress, card, lifecycle or host type. The
+    author does not matter: a report the host wrote for a helper it could not start, or one it
+    stopped, is an untyped System row (``supervisor/terminal_delivery.py``; only terminals stay
+    untyped, ``tests/test_host_message_voice.py``) and speaks to the parent like the model's own.
+    A child's deliberate message to the owner and a host notice about it are typed
+    (``proactive_message``, ``relay_reply``, ``main_notice``, ...), and a row without lineage is
+    never held back.
     """
     if str(event.get("delegation_role") or "").strip().lower() != "subagent":
         return False
-    if event.get("is_progress") or event.get("card_row") or event.get("subagent_event") or event.get("system_type"):
-        return False
-    return str(event.get("role") or "assistant").strip().lower() == "assistant"
+    return not (event.get("is_progress") or event.get("card_row") or event.get("subagent_event")
+                or event.get("system_type"))
 
 
 _SUBAGENT_ICONS = {
