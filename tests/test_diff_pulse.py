@@ -161,7 +161,7 @@ def test_staged_constitution_and_prompts_are_sized_from_the_index_and_a_conflict
     """The ruled texts (BIBLE.md and prompts/) follow the index like the books: an unstaged edit after staging
     neither hides nor inflates the staged balance; during an unresolved merge the prompts are unmeasured, never a
     false deletion, and they are measured again once the conflict is staged resolved."""
-    from ouroboros.reference_books import book_balance_note, ruled_text_sizes
+    from ouroboros.reference_books import UnmeasuredText, book_balance_note, ruled_text_sizes
 
     repo = _body(tmp_path / "body")
     (repo / "prompts").mkdir()
@@ -187,7 +187,8 @@ def test_staged_constitution_and_prompts_are_sized_from_the_index_and_a_conflict
     merged = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "merge", "theirs"], cwd=repo,
                             capture_output=True)
     assert merged.returncode == 1 and _git(repo, "ls-files", "-u", "--", "prompts/other.md")
-    assert ruled_text_sizes(repo, "prompts", staged=True) is None
+    with pytest.raises(UnmeasuredText, match="holds prompts/other.md unmerged"):  # there and unread: never "absent"
+        ruled_text_sizes(repo, "prompts", staged=True)
     assert "balance unavailable" in book_balance_note(repo, ["prompts/other.md"], staged=True)
     (repo / "prompts/other.md").write_text("resolved\n", encoding="utf-8", newline="\n")
     _git(repo, "add", "prompts/other.md")
