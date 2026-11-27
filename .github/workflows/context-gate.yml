@@ -1,4 +1,5 @@
-# Owner exception, 2026-11-15: only context-related PRs; general CI stays manual/tag.
+# Owner exception, 2026-11-15: only context-related PRs; general CI stays manual/tag. Second exception, 2026-11-27:
+# also PRs that change only a live call's files (its product files below and their guard modules).
 name: Context capacity gate (keyless)
 
 on:
@@ -84,6 +85,27 @@ on:
       - 'uv.lock'
       - '.github/actions/setup-python-env/**'
       - '.github/workflows/context-gate.yml'
+      - 'supervisor/inline_carrier.py'
+      - 'ouroboros/realtime_setup.py'
+      - 'ouroboros/live_*.py'
+      - 'ouroboros/host_notice.py'
+      - 'skills/live_conversation/**'
+      - 'tests/test_live_works_line_form.py'
+      - 'tests/test_installed_skills_manifest_syntax.py'
+      - 'tests/test_memory_resident_facts.py'
+      - 'tests/test_memory_scale_fit.py'
+      - 'tests/test_live_preparation_fit_refusal.py'
+      - 'tests/test_live_tool_catalog_transaction.py'
+      - 'tests/test_live_fit_refused.py'
+      - 'tests/test_memory_view_forms.py'
+      - 'tests/test_memory_view_room.py'
+      - 'tests/_memory_scale_fixture.py'
+      - 'tests/_live_works_fixture.py'
+      - 'tests/_memory_view_synthetic.py'
+      - 'tests/_memory_inventory_shared.py'
+      - 'tests/_live_world.py'
+      - 'tests/_live_stack.py'
+      - 'tests/conversation_carrier_support.py'
   workflow_dispatch:
 
 permissions:
