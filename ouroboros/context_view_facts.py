@@ -3,7 +3,8 @@
 A window's source and date, reserve, disagreement and retired history are shared by facts rows, Settings and size
 failures (``window_projection``); a size failure names its round's own refused request (``remember_size_refusal``).
 An integrating start's facts row also names the gate's shortest telling by kind (``start_facts``), its draw kept on
-the captured core."""
+the captured core. The view's largest parts by producer kind and its largest single part are the facts row's, the size
+terminal's and the native room fact's one set of named sizes (``largest_parts``), said by ``largest_parts_text``."""
 from __future__ import annotations
 
 import pathlib
@@ -63,6 +64,91 @@ def block_label(message, index, block, plan):
     if text.startswith("## DEVELOPMENT.md"):
         return "development book"
     return "core and books" if index == 0 else "runtime facts"
+
+
+def _producer_kind(messages, index, first_user):
+    """Who produced a transcript row, the kind the size facts count: typed metadata its producer's binding still vouches
+    for, never the text. A typed host row is its producer's while bound to its exact text (``host_row_intact``) and a
+    recorded review dispute while its source binding verifies (``_review_source_ref``); the owner's and principals'
+    words and my outward replies keep their delivery type, bound or not. An old merge into a typed row or another row
+    no binding vouches for is an ordinary delivered row."""
+    from ouroboros.context_budget import OWNER_ROW_KINDS, OWNER_WORDS_KIND, host_row_intact
+    from ouroboros.context_compaction import _capsule_metadata, _review_source_ref
+    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, _review_index_identity
+
+    row = messages[index]
+    if _review_index_identity(row) is not None:
+        return "review decisions"
+    if _review_source_ref(row) is not None:
+        return "recorded review disputes"
+    meta = _capsule_metadata(row)[1]
+    if meta:
+        return "my notes" if meta.get("authorship") == "actor" else "recovery address records"
+    kind = row.get(HOST_CONTEXT_KIND_KEY)
+    if kind in OWNER_ROW_KINDS:
+        return "owner and principal words" if kind == OWNER_WORDS_KIND else "my outward replies"
+    if kind or row.get(REVIEW_HISTORY_MESSAGE_KEY):
+        return str(kind) if kind and host_row_intact(row) else "other delivered rows"
+    if row.get("role") == "tool" or row.get("tool_calls"):
+        return "tool calls and results"
+    if row.get("role") == "assistant":
+        return "my replies"
+    return "assignment" if index == first_user else "other delivered rows"
+
+
+LARGEST_SINGLE = "largest single "  # the label of the largest single part when its kind does not already name it
+
+
+def largest_parts(view, *, measured):
+    """The view's three largest parts by producer kind and its largest single part, as ``[label, tokens]`` pairs: the
+    named sizes the facts row, the size terminal and the native room fact each frame and calibrate as their own
+    (``measured``: the view's measured density, else raw estimates) in the request shape of the view's plan and
+    ``active_effort``. Kinds come from typed metadata its producer's binding vouches for (``_producer_kind``), system
+    blocks keep their block labels and the route's tool schemas are one part; ``kind ×N`` counts the transcript rows of
+    a kind that spans several. The single part is a unit's id (else its block or kind), said once: beside its kind when
+    it is that kind's only part, else as a last pair labelled ``LARGEST_SINGLE`` (pairs, the size terminal's stored form
+    that a same-task checkpoint carries across versions). Many small rows of one kind read as the one part they are, so
+    a resident kind that only grows is visible (BIBLE P1): facts, no advice (owner 09.10 5A)."""
+    from ouroboros.context_compaction import context_units
+    from ouroboros.context_measurement import estimate_context_prompt_tokens, tool_schema_tokens
+
+    density = float(view.accumulated_usage.get("_context_measurement_density") or 1.0) if measured else 1.0
+    messages, plan = view.messages, view.context_fit_plan
+    first_user = next((i for i, row in enumerate(messages) if row.get("role") == "user"), -1)
+    units = context_units(messages, scope="dialogue", measurement_density=density)
+    covered = {i for unit in units for i in range(unit.start, unit.end + 1)}
+    parts = [(_producer_kind(messages, unit.start, first_user), unit.unit_id, range(unit.start, unit.end + 1),
+              unit.context_size_tokens) for unit in units]  # (kind, its name, its rows, tokens)
+    for i, message in enumerate(messages):
+        if i in covered:
+            continue
+        content, system = message.get("content"), message.get("role") == "system"
+        for chunk in [{**message, "content": [block]} for block in content] if system and isinstance(content, list) else [message]:
+            block = chunk.get("content")
+            kind = (block_label(message, i, block[0] if isinstance(block, list) and block else block, plan) if system
+                    else _producer_kind(messages, i, first_user))
+            parts.append((kind, kind, (i,), int(estimate_context_prompt_tokens([chunk]) * density)))
+    parts.append(("tool schemas", "tool schemas", (), int(tool_schema_tokens(view.tool_schemas,
+        provider=getattr(plan, "provider", ""), reasoning_effort=getattr(view, "active_effort", "")) * density)))
+    kinds: Dict[str, list] = {}
+    for kind, _name, rows, tokens in parts:  # each kind's tokens, transcript rows and parts
+        total = kinds.setdefault(kind, [0, set(), 0])
+        total[0], total[2] = total[0] + tokens, total[2] + 1
+        total[1].update(rows)
+    top = sorted(kinds.items(), key=lambda item: item[1][0], reverse=True)[:3]
+    own_kind, name, _rows, tokens = max(parts, key=lambda part: part[3])
+    alone = kinds[own_kind][2] == 1 and own_kind in dict(top)  # the largest part is a named kind's only part
+    named = [[kind + (f" ×{len(rows)}" if len(rows) > 1 else "") + (f" ({name})" if alone and kind == own_kind != name else ""),
+              total] for kind, (total, rows, _parts) in top]
+    return named if alone else [*named, [LARGEST_SINGLE + name, tokens]]
+
+
+def largest_parts_text(pairs):
+    """``largest_parts`` (or an older writer's ``[label, tokens]`` pairs) as one clause: the kinds, then the largest
+    single part after a semicolon."""
+    said = [(str(label).startswith(LARGEST_SINGLE), f"{label} ~{int(tokens):,}") for label, tokens in pairs]
+    return "; ".join(filter(None, (", ".join(text for single, text in said if not single),
+                                   *(text for single, text in said if single))))
 
 
 def memory_facts(plan, mode, messages=()):
@@ -412,12 +498,13 @@ def _refused_request_text(slot):
 
 def refusal_frame_facts(usage, round_idx):
     """The size terminal's bracket: the smallest request the round's refusing model refused in this task (its own key,
-    never another model's) and the current view's largest parts, raw estimates (``context_renewal._cannot_help``)."""
+    never another model's) and the current view's largest parts by kind and its largest single part, raw estimates
+    (``largest_parts``, captured by ``context_renewal._cannot_help``)."""
     from ouroboros.context_anchor import REFUSED_INPUTS_KEY
 
     slot = size_refusal(usage, round_idx)
     refused = int((usage.get(REFUSED_INPUTS_KEY) or {}).get(slot.get("key") or "") or 0) if slot else 0
-    parts = ", ".join(f"{label} ~{int(tokens):,}" for label, tokens in usage.get("_context_refusal_frame") or [])
+    parts = largest_parts_text(usage.get("_context_refusal_frame") or ())
     return "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
                                        f"largest parts: {parts} by raw estimate of the current view" if parts else "") if fact)
 
