@@ -40,8 +40,17 @@ test('Files keeps location and actions in the band, with the filter first in its
     const vertical = ui.match(/:where\(\.scroll-fade-y,\s*\[data-fold-clipped\]\)\s*\{([^}]+)\}/)[1];
     assert.match(vertical, /--scroll-fade-y-depth:\s*min\(var\(--scroll-fade-edge\),\s*max\(0px,\s*\(100%\s*-\s*var\(--scroll-fade-inset\)\)\s*\*\s*var\(--scroll-fade-limit\)\)\);/,
         'the fade cannot take more than its share of the space left below the band');
-    assert.match(vertical, /linear-gradient\(to bottom,\s*transparent var\(--scroll-fade-inset\),\s*rgb\(0 0 0 \/ \.028\) calc\(var\(--scroll-fade-inset\) \+ var\(--scroll-fade-top\) \* \.1\),/,
-        'the list is transparent through the band and fades in immediately below it');
+    // The stops of the top end, whitespace collapsed: transparent through the band, then the curve (its values pinned in
+    // scroll_fade.test.js) laid from the band's edge over one fade depth, opaque at its end.
+    const image = vertical.match(/--scroll-fade-y-image:\s*linear-gradient\(([\s\S]+)\);/)[1].replace(/\s+/g, ' ');
+    const stops = image.split(/,(?![^(]*\))/).map((stop) => stop.trim());
+    assert.equal(stops[0], 'to bottom');
+    assert.equal(stops[1], 'transparent var(--scroll-fade-inset)', 'the list is transparent through the band');
+    const opaque = stops.indexOf('#000 calc(var(--scroll-fade-inset) + var(--scroll-fade-top))');
+    assert.ok(opaque > 2, 'and opaque one fade depth below it');
+    const ramp = stops.slice(2, opaque).map((stop) => stop.match(/calc\(var\(--scroll-fade-inset\) \+ var\(--scroll-fade-top\) \* ([\d.]+)\)$/));
+    assert.ok(ramp.every(Boolean), 'every stop between lies on the band\'s edge plus a share of the depth');
+    assert.ok(ramp.every((m, i) => i === 0 || Number(m[1]) > Number(ramp[i - 1][1])), 'in rising order: it fades in right below the band');
     // The band's location row takes the band's inset alone (a phone showed it 28px in, the rows 12px).
     assert.match(css, /\.files-band > \.files-browser-header \{ padding-inline: 0; \}/);
     assert.match(css, /\.app-page-tabs \{[^}]*padding: 0 var\(--page-header-padding-x\)/, 'the band itself keeps the page\'s inset');

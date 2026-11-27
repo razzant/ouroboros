@@ -321,29 +321,53 @@ function gradientsIn(value) {
     }
     return found;
 }
-const fades = (stops) => /\btransparent\b|rgba?\([^)]*(?:,\s*0?\.\d+|\/\s*0?\.\d+)\s*\)|hsla?\([^)]*\/\s*0?\.\d+/.test(stops);
-function edgeRecipes(css, sheet) {
+// A colour that is not fully opaque: `transparent`, or an alpha below 1 in any notation (0, 0.5, .5, 50%).
+const alphaBelowOne = (alpha) => (alpha.endsWith('%') ? parseFloat(alpha) < 100 : parseFloat(alpha) < 1);
+function fades(stops) {
+    if (/\btransparent\b/.test(stops)) return true;
+    for (const [, args] of stops.matchAll(/(?:rgba?|hsla?)\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g)) {
+        const slash = args.split('/');
+        const alpha = slash.length > 1 ? slash.at(-1).trim() : (args.split(',').length === 4 || /^var\(/.test(args.trim())
+            && args.split(',').length === 2 ? args.split(',').at(-1).trim() : '');
+        if (alpha && alphaBelowOne(alpha)) return true;
+    }
+    return false;
+}
+// The style rules of a sheet: each selector list with its declarations, values with whitespace collapsed.
+function rulesOf(css) {
     css = css.replace(/\/\*[\s\S]*?\*\//g, '');
-    const found = [];
-    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-        const rule = selectors.trim();
-        const decls = body.split(';').map((d) => d.split(/:(.*)/s)).filter(([p, v]) => p && v !== undefined)
-            .map(([p, v]) => [p.trim(), v.trim()]);
-        const masked = decls.some(([p, v]) => /^(-webkit-)?mask(-image)?$/.test(p) && v !== 'none');
+    return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, selectors, body]) => ({
+        rule: selectors.trim().replace(/\s+/g, ' '),
+        decls: body.split(';').map((d) => d.split(/:(.*)/s)).filter(([p, v]) => p && v !== undefined)
+            .map(([p, v]) => [p.trim(), v.trim().replace(/\s+/g, ' ')]),
+    }));
+}
+// The classes and ids a rule's subjects carry (the last compound of each selector), so that rules styling the same
+// element are seen together however the sheet splits them.
+const subjectKeys = (rule) => new Set(topLevel(rule, /,/).flatMap((one) => {
+    const last = topLevel(one, /[\s>+~]/).at(-1) || '';
+    return last.replace(/:not\([^)]*\)/g, '').match(/[.#][\w-]+/g) || [];
+}));
+function edgeRecipes(css, sheet) {
+    const rules = rulesOf(css), found = [];
+    const isMask = (prop) => /^(-webkit-)?mask(-image)?$/.test(prop);
+    const masked = new Set(rules.filter(({ decls }) => decls.some(([p, v]) => isMask(p) && v !== 'none'))
+        .flatMap(({ rule }) => [...subjectKeys(rule)]));
+    for (const { rule, decls } of rules) {
         for (const [prop, value] of decls) {
             if (/^--edge-(curve|blur-)/.test(prop) && !(sheet === 'ui.css' && rule === ':root')) found.push(`${rule} defines ${prop}`);
             if (prop.startsWith('--') && !SHARED_EDGE_IMAGES.has(prop) && gradientsIn(value).some(fades)) found.push(`${rule} ${prop}`);
             if (SHARED_EDGE_IMAGES.has(prop) && sheet !== 'ui.css') found.push(`${rule} redefines ${prop}`);
-            if (/^(-webkit-)?mask(-image)?$/.test(prop)) {
-                const own = gradientsIn(value).filter((stops) => !/^(to [a-z ]+,\s*|var\(--edge-to\),\s*)?var\(--edge-curve\)$/.test(stops)
-                    && !/^#000,\s*#000$/.test(stops));
+            if (isMask(prop)) {
+                const own = gradientsIn(value).filter((stops) => !/^(to [a-z ]+, |var\(--edge-to\), )?var\(--edge-curve\)$/.test(stops)
+                    && !/^#000, ?#000$/.test(stops));
                 if (own.length) found.push(`${rule} ${prop}`);
             }
             if (/^background(-image)?$/.test(prop) && gradientsIn(value).some((stops) => fades(stops)
-                && new Set(stops.split(/,(?![^(]*\))/).map((s) => s.trim())).size > 1)) found.push(`${rule} ${prop}`);
-            if (/^(-webkit-)?backdrop-filter$/.test(prop) && masked && !/^var\(--edge-blur-(soft|deep)\)$/.test(value)) {
-                found.push(`${rule} ${prop}`);
-            }
+                && new Set(stops.split(/,(?![^(]*\))/).map((part) => part.trim())).size > 1)) found.push(`${rule} ${prop}`);
+            // A blur on anything a sheet masks is an edge: it reads the edge's tokens, in whichever rule it stands.
+            if (/^(-webkit-)?backdrop-filter$/.test(prop) && value !== 'none' && !/^var\(--edge-blur-(soft|deep)\)$/.test(value)
+                && [...subjectKeys(rule)].some((key) => masked.has(key))) found.push(`${rule} ${prop}`);
         }
     }
     return found;
@@ -363,6 +387,11 @@ test('every edge in every sheet is the one shared edge', () => {
         '.toast-edge { -webkit-backdrop-filter: blur(14px); -webkit-mask-image: linear-gradient(var(--edge-curve)); }',
         '.page { --edge-curve: #000, transparent; }',
         '.list { --list-fade: linear-gradient(black 80%, transparent); }',
+        // The room edge's own split: the mask in one rule, a private radius in another rule for the same element.
+        '.fake-edge { mask-image: linear-gradient(var(--edge-curve)); } .fake-edge[data-b] { backdrop-filter: blur(9px); }',
+        // A painted fade whose clear end is written with an integer alpha.
+        '.fake-fade { background: linear-gradient(rgba(var(--shell-rgb), 1), rgba(var(--shell-rgb), 0)); }',
+        '.fake-fade { background: linear-gradient(rgb(0 0 0 / 1), rgb(0 0 0 / 0%)); }',
     ]) assert.ok(edgeRecipes(broken, 'style.css').length, broken);
     const allowed = `.room-edge { mask-image: linear-gradient(var(--edge-to), var(--edge-curve)), linear-gradient(#000, #000); }
         .room-edge[data-edge="deep"] { backdrop-filter: var(--edge-blur-deep); mask-image: linear-gradient(to top, var(--edge-curve)); }
@@ -370,7 +399,10 @@ test('every edge in every sheet is the one shared edge', () => {
         .chip { background: linear-gradient(var(--surface-capsule), var(--surface-capsule)), rgba(var(--shell-rgb), 0.98); }
         .glass { backdrop-filter: var(--glass); }
         .bar-meter { background: linear-gradient(to right, var(--accent) 40%, var(--neutral) 40%); }
-        .list.scroll-fade-y[data-scroll-below] { --scroll-fade-edge: 24px; }`;
+        .list.scroll-fade-y[data-scroll-below] { --scroll-fade-edge: 24px; }
+        .opaque { background: linear-gradient(rgba(var(--shell-rgb), 1), rgba(var(--shell-rgb), 1)); }
+        .room-edge[data-edge="soft"] { backdrop-filter: var(--edge-blur-soft); }
+        .toast { backdrop-filter: blur(14px); } .toast-words { mask-image: linear-gradient(var(--edge-curve)); }`;
     assert.deepEqual(edgeRecipes(allowed, 'style.css'), [], 'what places an edge, or paints no fade, is not a recipe');
 });
 
@@ -387,14 +419,19 @@ test('the shared scroller masks and the curve are one curve, and a room edge is 
         const stops = alphas(ui.match(new RegExp(`${image}:([^;]+);`))[1]);
         assert.deepEqual(stops, [...[...curve].reverse(), ...curve], `${image} lays the curve over both ends`);
     }
-    const style = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    const piece = style.match(/\n\.room-edge \{([^}]+)\}/)[1];
-    assert.match(piece, /mask-image: linear-gradient\(var\(--edge-to\), var\(--edge-curve\)\), linear-gradient\(#000, #000\);/);
-    assert.match(style, /\.room-edge\[data-edge="soft"\] \{[^}]*backdrop-filter: var\(--edge-blur-soft\);/);
-    assert.match(style, /\.room-edge\[data-edge="deep"\] \{[^}]*backdrop-filter: var\(--edge-blur-deep\);/);
-    assert.equal((style.match(/\.room-edge[^{]*\{[^}]*backdrop-filter/g) || []).length, 2, 'two blur steps, the soft and the deep');
+    // A room's edge, read from the parsed sheet (whitespace and line breaks do not matter).
+    const rules = rulesOf(readFileSync(new URL('../style.css', import.meta.url), 'utf8'));
+    const decl = (rule, prop) => rules.filter((r) => r.rule === rule).flatMap((r) => r.decls).find(([p]) => p === prop)?.[1];
+    assert.equal(decl('.room-edge', 'mask-image'), 'linear-gradient(var(--edge-to), var(--edge-curve)), linear-gradient(#000, #000)');
+    assert.equal(decl('.room-edge', '-webkit-mask-image'), decl('.room-edge', 'mask-image'));
+    assert.equal(decl('.room-edge[data-edge="soft"]', 'backdrop-filter'), 'var(--edge-blur-soft)');
+    assert.equal(decl('.room-edge[data-edge="deep"]', 'backdrop-filter'), 'var(--edge-blur-deep)');
+    const blurring = rules.filter(({ rule, decls }) => subjectKeys(rule).has('.room-edge')
+        && decls.some(([p, v]) => p === 'backdrop-filter' && v !== 'none'));
+    assert.equal(blurring.length, 2, 'two blur steps, the soft and the deep');
     assert.equal(ROOM_EDGE_HTML.match(/data-edge="(\w+)"/g).join(' '), 'data-edge="soft" data-edge="deep" data-edge="tint"',
         'the tint is drawn last, over the blurred feed');
-    assert.doesNotMatch(style, /:is\(\.chat-page-header, \.project-panel-bar\)::before|:is\(#chat-input-area, \.chat-input-area\)::before/,
-        'the bars draw no edge of their own beside it');
+    const barEdge = rules.filter(({ rule, decls }) => /(chat-page-header|project-panel-bar|chat-input-area)[^,]*::before/.test(rule)
+        && decls.some(([p, v]) => (/backdrop-filter$/.test(p) || /mask-image$/.test(p)) && v !== 'none'));
+    assert.deepEqual(barEdge.map(({ rule }) => rule), [], 'the bars draw no edge of their own beside it');
 });
