@@ -131,7 +131,9 @@ body {
     width: 20px;
     height: 20px;
 }
-html[data-layout="stack"] { --shell-icon-size: 44px; }
+html[data-layout="stack"] {
+    --shell-icon-size: 44px;  /* the round control's side: the ×, the drawer's first row, a narrow window's header row */
+}
 html[data-layout="stack"] .shell-icon-control {
     width: var(--shell-icon-size);
     height: var(--shell-icon-size);
@@ -421,6 +423,7 @@ html[data-layout="docked"] #primary-sidebar {
 :root[data-window-chrome="integrated"] {
     --window-chrome-top: 0px;
     --window-chrome-start: 0px;
+    --window-chrome-mid: initial;  /* no value until the shell writes one: each reader then takes its own fallback */
     --window-chrome-row: max(var(--control-h-float), calc(2 * var(--window-chrome-mid, calc(var(--window-chrome-top) / 2))));
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
     --page-header-row-h: var(--window-chrome-row);
