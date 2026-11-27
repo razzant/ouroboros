@@ -86,8 +86,10 @@ def test_a_waiting_link_binds_only_its_own_start_and_the_bot_says_connected(tmp_
     assert settings["TELEGRAM_CHAT_ID"] == "42" and not settings["TELEGRAM_PAIRING_DIGEST"]
     assert [(item["chat_id"], item["text"]) for item in injected] == [(42, "привет")]  # Start itself never reaches Main
     assert (42, texts["connected"]) in sent
-    assert {chat for chat, text in sent if text == texts["pairing_waits"]} == {99, 77, 55}
-    assert not [item for item in sent if item[0] == 99 and item[1] != texts["pairing_waits"]]
+    waits = {chat: texts.format("pairing_waits", chat_id=chat) for chat in (99, 77, 55)}
+    assert {chat for chat, text in sent if text == waits.get(chat)} == {99, 77, 55}
+    assert "99" in waits[99] and "Telegram Chat ID" in waits[99], "the way out without the link names this chat's ID"
+    assert not [item for item in sent if item[0] == 99 and item[1] != waits[99]]
 
 
 def test_a_link_still_held_by_setup_binds_before_its_post_lands(tmp_path, monkeypatch):
@@ -98,7 +100,7 @@ def test_a_link_still_held_by_setup_binds_before_its_post_lands(tmp_path, monkey
         _private(2, 42, f"/start {CODE}"),
     ])
     assert settings["TELEGRAM_CHAT_ID"] == "42" and injected == []
-    assert (99, texts["pairing_waits"]) in sent and (42, texts["connected"]) in sent
+    assert (99, texts.format("pairing_waits", chat_id=99)) in sent and (42, texts["connected"]) in sent
 
 
 def test_where_no_link_was_shown_the_first_private_writer_is_the_owner(tmp_path, monkeypatch):
@@ -107,7 +109,7 @@ def test_where_no_link_was_shown_the_first_private_writer_is_the_owner(tmp_path,
         _private(2, 42, f"/start {CODE}"),  # a link nobody armed binds nobody once an owner exists
     ])
     assert settings["TELEGRAM_CHAT_ID"] == "99" and [item["chat_id"] for item in injected] == [99]
-    assert not any(text == texts["pairing_waits"] for _chat, text in sent)
+    assert not any("waits for its owner's link" in text for _chat, text in sent)
 
 
 @pytest.mark.parametrize("mode", ["strict", "safe_commands", "full_access"])
@@ -194,3 +196,28 @@ def test_the_cards_token_check_names_the_bot_and_never_the_token(monkeypatch):
     assert refused == {"ok": False, "cause": "unreachable"} and "SECRET" not in json.dumps(refused)
     asked.clear()
     assert telegram_pairing.bot_identity("not a token") == {"ok": False, "cause": "refused"} and asked == []
+
+
+def test_a_code_moving_from_the_wizard_to_the_skill_between_two_reads_is_never_missed(tmp_path, monkeypatch):
+    """The wizard's post writes the skill's settings before it leaves the wizard's record: reading the record first
+    cannot see neither copy, so a stranger is never bound by the first-writer rule while a shown link waits."""
+    def moved(drive_root, skill):  # the post lands right after the record is read: the record is already empty
+        stored = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+        (tmp_path / "settings.json").write_text(json.dumps({**stored, "TELEGRAM_PAIRING_DIGEST": DIGEST}),
+                                                encoding="utf-8")
+        return None
+
+    monkeypatch.setattr("ouroboros.onboarding_connections.awaited_code_digest", moved)
+    settings, injected, sent, texts = _run_poller(tmp_path, monkeypatch, {"TELEGRAM_COMMAND_MODE": "strict"}, [
+        _private(1, 99, "hello"),
+    ])
+    assert "TELEGRAM_CHAT_ID" not in settings and injected == []
+
+
+def test_the_cards_check_asks_the_bot_api_server_the_skill_names(tmp_path):
+    saved_api_base = _pairing_module().saved_api_base
+    assert saved_api_base(tmp_path) is None
+    (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_API_BASE": "http://127.0.0.1:8081/"}), encoding="utf-8")
+    assert saved_api_base(tmp_path) == "http://127.0.0.1:8081"
+    (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_API_BASE": "file:///etc"}), encoding="utf-8")
+    assert saved_api_base(tmp_path) is None

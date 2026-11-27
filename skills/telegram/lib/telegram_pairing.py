@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pathlib
 import re
 import urllib.error
 import urllib.request
@@ -82,22 +83,29 @@ def _awaited_by_setup(data_dir: Any) -> Optional[str]:
     return awaited_code_digest(data_dir, "telegram")
 
 
-def unbound_private(text: Any, settings: dict, data_dir: Any) -> str:
+def unbound_private(text: Any, waiting: set) -> str:
     """For a private message while no owner chat is bound: ``"bind"`` when this chat becomes the owner (the waiting
-    link's own code, or the first writer where no link waits), else ``"wait"``."""
-    waiting = {value for value in (str(settings.get(DIGEST_KEY) or "").strip(), _awaited_by_setup(data_dir)) if value}
+    link's own code, or the first writer where no link waits: ``waiting`` empty), else ``"wait"``."""
     if not waiting:
         return "bind"
     payload = start_payload(text)
     return "bind" if payload and digest(payload) in waiting else "wait"
 
 
+def saved_api_base(state_dir: Any) -> Optional[str]:
+    """The card's ``api_base`` reader: the Bot API server this skill's own settings name (a self-hosted one), else
+    None for Telegram's cloud. Stdlib only; a reader that raises asks nobody."""
+    path = pathlib.Path(state_dir) / "settings.json"
+    if not path.is_file():
+        return None
+    base = str((json.loads(path.read_text(encoding="utf-8")) or {}).get("TELEGRAM_API_BASE") or "").strip()
+    return base.rstrip("/") if re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:]+/?", base) else None
+
+
 async def bind_unbound(api, client, update: dict, chat_id: int, lang: str) -> bool:
     """The bridge's owner rule for a private update while no owner chat is bound (the caller checked private and
     positive): bind ``chat_id`` when ``unbound_private`` says so, else tell a writer that the bot waits for its owner's
     link and bind nobody. Bridge-side only: its imports stay inside so the card's ``bot_identity`` loads by path."""
-    import pathlib
-
     from ..scripts.telegram_settings import load_settings, merge_settings
     from .telegram_api import _LOCALIZED_TEXTS
     from .telegram_state import _data_dir
@@ -105,12 +113,17 @@ async def bind_unbound(api, client, update: dict, chat_id: int, lang: str) -> bo
     state_dir = pathlib.Path(api.get_state_dir())
     callback = bool(update.get("callback_query"))
     text = None if callback else (update.get("message") or {}).get("text")
-    if unbound_private(text, load_settings(state_dir), _data_dir(api)) == "bind":
+    # The wizard's record first, then the skill's settings: its post writes the settings before it leaves the record,
+    # so this order cannot miss a code moving between them.
+    setup = _awaited_by_setup(_data_dir(api))
+    waiting = {value for value in (setup, str(load_settings(state_dir).get(DIGEST_KEY) or "").strip()) if value}
+    if unbound_private(text, waiting) == "bind":
         merge_settings(state_dir, {"TELEGRAM_CHAT_ID": str(chat_id), DIGEST_KEY: ""})
         return True
     if not callback:
-        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["pairing_waits"])
+        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang].format("pairing_waits", chat_id=chat_id))
     return False
 
 
-__all__ = ["CODE_FIELD", "DIGEST_KEY", "bind_unbound", "bot_identity", "digest", "start_payload", "unbound_private"]
+__all__ = ["CODE_FIELD", "DIGEST_KEY", "bind_unbound", "bot_identity", "digest", "saved_api_base", "start_payload",
+           "unbound_private"]

@@ -275,7 +275,7 @@ def test_the_telegram_mini_app_cannot_arm_a_code_and_a_saved_completion_records_
     # A completion that saved nothing records nothing; one that saved records the owner's consent and settles it.
     answer.update(status=400, body={"ok": False, "saved": False, "error": "no Main model"})
     assert client.post("/complete", json=connections).status_code == 400
-    assert "connections" not in skill_starter.read_marker(drive) and settled == []
+    assert not skill_starter.read_marker(drive).get("connections") and settled == []  # noted first, then withdrawn
     answer.update(status=200, body={"ok": True, "status": "saved"})
     assert client.post("/complete", json=connections).status_code == 200, "the app and browsers pass"
     record = skill_starter.read_marker(drive)["connections"][0]
@@ -416,9 +416,16 @@ def test_the_consent_is_noted_before_the_write_and_withdrawn_when_the_write_did_
 
     monkeypatch.setattr(cards, "settle_later", lambda drive_root, repo_dir=None: None)
     client = _client(Route("/complete", endpoint=cards.guard_completion(completion), methods=["POST"]), drive_root=drive)
+    skill_starter.write_marker(drive, state="running", requested=["demo"])  # a starter run already writes here
     answer.update(status=400, body={"ok": False, "saved": False})
     assert client.post("/complete", json={"connections": _entry()}).status_code == 400
-    assert seen == [hashlib.sha256(CODE.encode()).hexdigest()] and not skill_starter.marker_path(drive).exists()
+    marker = skill_starter.read_marker(drive)
+    assert seen == [hashlib.sha256(CODE.encode()).hexdigest()] and marker["connections"] == []
+    assert (marker["state"], marker["requested"]) == ("running", ["demo"]), "only this completion's consent leaves"
+    # An outcome nobody knows yet (a write still finishing: saved null) keeps the consent the shown QR stands for.
+    answer.update(status=503, body={"ok": False, "saved": None, "code": "settings_save_timeout"})
+    assert client.post("/complete", json={"connections": _entry()}).status_code == 503
+    assert cards.awaited_code_digest(drive, "demo") == seen[0]
     answer.update(status=200, body={"ok": True, "status": "saved"})
     assert client.post("/complete", json={"connections": _entry()}).status_code == 200
     assert cards.awaited_code_digest(drive, "demo") == seen[0] and cards.awaited_code_digest(drive, "other") is None

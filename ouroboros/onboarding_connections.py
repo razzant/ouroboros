@@ -304,35 +304,55 @@ def guard_completion(endpoint: Callable[[Any], Any]) -> Callable[[Any], Any]:
             return unsaved_error("A connection card's token and code are not accepted from the Telegram Mini App; "
                                  "finish setup in Ouroboros itself.", 403, code="connection_owner_only")
         # The consent is noted BEFORE the write that saves the token: a skill that starts on that write already sees
-        # the link it waits for (``awaited_code_digest``). A write that did not land withdraws it again.
+        # the link it waits for (``awaited_code_digest``). Only a write that positively did not land withdraws it;
+        # an unknown outcome (``saved: null``, a write still finishing) keeps it.
         drive_root = request_drive_root(request) if cards else None
-        before = await asyncio.to_thread(_connections, drive_root) if cards else None
+        before = await asyncio.to_thread(_connections, drive_root) if cards else []
         recorded = await asyncio.to_thread(record_consent, drive_root, cards) if cards else []
         response = await endpoint(request)
-        if recorded and _saved(response):
-            settle_later(drive_root)  # an installed skill settles now; a starter run still installing settles after it
+        if recorded and _unsaved(response):
+            await asyncio.to_thread(_withdraw, drive_root, recorded, before)
         elif recorded:
-            await asyncio.to_thread(_restore_connections, drive_root, before)
+            settle_later(drive_root)  # an installed skill settles now; a starter run still installing settles after it
         return response
     return completion
 
 
-def _connections(drive_root: pathlib.Path) -> Optional[List[Any]]:
-    """The marker's cards before this completion: None when there was no marker at all."""
-    from ouroboros.skill_starter import marker_path, read_marker
+def _unsaved(response: Any) -> bool:
+    """Whether a completion answer says positively that its write did not land (``saved: false``)."""
+    try:
+        payload = json.loads(bytes(getattr(response, "body", b"") or b"{}"))
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("saved") is False
 
-    return list(read_marker(drive_root).get("connections") or []) if marker_path(drive_root).exists() else None
 
-
-def _restore_connections(drive_root: pathlib.Path, before: Optional[List[Any]]) -> None:
-    """Withdraw a consent whose write did not land: the cards as they were, or no marker where there was none."""
-    from ouroboros.skill_starter import marker_path, write_marker
+def _connections(drive_root: pathlib.Path) -> List[Any]:
+    """The marker's cards before this completion."""
+    from ouroboros.skill_starter import read_marker
 
     try:
-        if before is None:
-            marker_path(drive_root).unlink(missing_ok=True)
-        else:
-            write_marker(drive_root, connections=before)
+        return list(read_marker(drive_root).get("connections") or [])
+    except Exception:  # noqa: BLE001 — unreadable: nothing of it to put back
+        return []
+
+
+def _withdraw(drive_root: pathlib.Path, recorded: List[Dict[str, Any]], before: List[Any]) -> None:
+    """Take back exactly this completion's records under the marker's lock, and put back what they replaced; every
+    other key and record of the marker (a starter run's, another completion's) stays."""
+    from ouroboros.skill_starter import update_marker
+
+    ours = {(record["skill"], record["at"]) for record in recorded}
+
+    def change(current: Dict[str, Any]) -> Dict[str, Any]:
+        kept = [c for c in current.get("connections") or [] if (c.get("skill"), c.get("at")) not in ours]
+        present = {c.get("skill") for c in kept}
+        replaced = [c for c in before if isinstance(c, dict) and c.get("skill") in {s for s, _ in ours}
+                    and c.get("skill") not in present]
+        return {"connections": kept + replaced}
+
+    try:
+        update_marker(drive_root, change)
     except Exception as exc:  # noqa: BLE001
         log.warning("The setup's unsaved connection card consent could not be withdrawn (%s)", type(exc).__name__)
 
@@ -354,16 +374,6 @@ def awaited_code_digest(drive_root: Any, skill: str) -> Optional[str]:
                 and isinstance(record.get("code"), str) and _CODE.fullmatch(record["code"])):
             return hashlib.sha256(record["code"].encode("utf-8")).hexdigest()
     return None
-
-
-def _saved(response: Any) -> bool:
-    """Whether a completion answer says its write landed (success, or saved before a later step failed)."""
-    try:
-        payload = json.loads(bytes(getattr(response, "body", b"") or b"{}"))
-    except ValueError:
-        return False
-    return isinstance(payload, dict) and (payload.get("saved") is True or (payload.get("ok") is True and
-                                                                            getattr(response, "status_code", 0) == 200))
 
 
 # -- after the write: the owner's consent and the one post ----------------------------------------------------------

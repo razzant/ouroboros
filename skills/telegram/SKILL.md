@@ -23,6 +23,7 @@ connection_card:
     code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}
     link: "https://t.me/{username}?start={code}"
     identity: "lib/telegram_pairing.py:bot_identity"
+    api_base: "lib/telegram_pairing.py:saved_api_base"
     hint: "Scan it with your phone’s camera, then press Start in Telegram."
     note: "You can finish setup now; the bot answers Connected once Ouroboros starts."
   options:

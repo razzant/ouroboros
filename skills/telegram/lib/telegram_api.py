@@ -1206,7 +1206,8 @@ _MENU_TEXTS_EN = {
     "panic_unconfirmed": "Panic was not confirmed and will not be retried. Check Ouroboros on the host computer.",
     "connected": "✅ Connected. What you write here goes to Ouroboros; /panic stops it completely.",
     "pairing_waits": "This bot waits for its owner's link from Ouroboros setup. Open that link (scan its QR code) "
-                     "and press Start.",
+                     "and press Start. Without the link, the owner can enter this chat's ID, {chat_id}, in Ouroboros: "
+                     "Extensions › Telegram › Telegram Chat ID.",
 }
 # Every line the bridge composes is English source here and translated by the install's
 # memory under the one interface language (lib/telegram_i18n.py); the skill ships no
