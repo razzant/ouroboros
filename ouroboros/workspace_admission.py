@@ -182,10 +182,11 @@ def folders_overlap(folder: pathlib.Path, target: pathlib.Path) -> str:
 
 
 # What works instead when a writing child's source overlaps runtime data, in the guard's own geometry
-# (``WorkspaceRootError.overlap``); the refusal stands, as the child's writes would land in or around runtime data.
+# (``WorkspaceRootError.overlap``); the refusal stands. A worktree child's files are written outside the source, but
+# preparing it records the child in the source's Git store; a child working in place writes the folder itself.
 _CHILD_SOURCE_IN_DATA = {
     "inside": "A folder in runtime data (a task drive copy, for one) cannot be a writing child's source, since the "
-              "child's writes and Git records would land in runtime data",
+              "child's Git records (and, for a child working in place, its writes) would land in runtime data",
     "around": "A folder that holds runtime data cannot be a writing child's source, since runtime data would sit "
               "inside the folder the child writes"}
 

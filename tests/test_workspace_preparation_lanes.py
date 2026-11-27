@@ -247,6 +247,8 @@ def test_a_native_writing_child_source_in_runtime_data_hears_what_works_in_the_g
     inside = refusal("self_worktree", str(copy_))  # the C11 fixers' own path
     around = refusal("external_workspace", str(runtime))
     assert "overlap the Ouroboros data drive. A folder in runtime data (a task drive copy" in inside
+    assert ("since the child's Git records (and, for a child working in place, its writes) would land in runtime data"
+            in inside)  # a worktree child's files are written outside runtime data (R1F D4, REV3F C-F1)
     assert "prepare_self_change" in inside and "input_files" in inside
     assert "overlap the Ouroboros data drive. A folder that holds runtime data" in around and "input_files" in around
     assert refusal("external_workspace", str(repo / "sub")) == (
