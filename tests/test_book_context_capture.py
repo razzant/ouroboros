@@ -175,14 +175,16 @@ def test_authored_common_understanding_is_resident_with_every_note_summary(tmp_p
 
 
 @pytest.mark.parametrize("ceiling", ["no-ceiling", "system-docs", "no-reader", "workspace-reader"])
-def test_a_presence_ceiling_that_cannot_follow_the_maps_addresses_is_not_told_to_read_them(tmp_path, ceiling):
-    """astra 2 (PR3 review): the Map names its reader only for an actor that can follow it. A Presence turn whose
-    positive capability ceiling holds no ``read_file``, or grants it for a workspace subtree only, gets
-    ``BODY_MAP_NO_READER`` in the whole Map and in its parts form, through the real capture; an actor with no ceiling
-    and a Presence whose ceiling admits the system repository's docs keep the reader line, and the registry's own
-    read of the Architecture entrypoint agrees with what the Map says. No access is widened."""
+def test_a_presence_ceiling_that_grants_file_reading_follows_the_maps_addresses_and_nothing_more(tmp_path, ceiling):
+    """The Map names its reader only for an actor that can follow it, and every address it names is followable by
+    one that carries it and was granted file reading (owner's decision, 27 Nov 2026): a Presence turn whose positive
+    ceiling grants ``read_file``, whatever its resource grants, reads the shipped manuals the Map names (both
+    books' entrypoints and chapters, the Reference Atlas's documents) through the real capture and registry, and
+    still reads nothing else its grants do not admit. A ceiling with no ``read_file`` reads none of them and gets
+    ``BODY_MAP_NO_READER`` in the whole Map and in its parts form."""
     from ouroboros import reference_books
     from ouroboros.tools.registry import ToolContext, ToolRegistry
+    from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED
     from tests import test_presence_authority as pa
 
     targets = {"no-ceiling": None, "no-reader": (),
@@ -194,15 +196,35 @@ def test_a_presence_ceiling_that_cannot_follow_the_maps_addresses_is_not_told_to
         pa.build_presence_capability_ceiling(skill_name="moderator", skill_content_hash="c" * 64,
                                              state_fingerprint="d" * 64, resolution=pa._resolution(*targets)))}
     env, _plain, task = _capture(tmp_path, {"task_contract": contract} if contract else None)
+    entry = env.repo_dir / "docs" / "ARCHITECTURE.md"
+    entry.write_text(entry.read_text() + "\n## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) — how the screens look.\n"
+                     "- `README.md` and `CONTRIBUTING.md` — the first look.\n")
+    for path in ("docs/DESIGN.md", "README.md", "docs/unlisted.md", "ouroboros/loop.py"):
+        (env.repo_dir / path).parent.mkdir(parents=True, exist_ok=True)
+        (env.repo_dir / path).write_text("text\n")  # CONTRIBUTING.md is named and absent: no address
     ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_contract=contract)
     registry = ToolRegistry(repo_dir=env.repo_dir, drive_root=env.drive_root)
     registry.set_context(ctx)
     core = context._capture_context_core(env, Memory(drive_root=env.drive_root, repo_dir=env.repo_dir), task, None, ctx,
                                          registry)
-    readable = ceiling in ("no-ceiling", "system-docs")
+    readable = ceiling != "no-reader"
     promise = 'read_file(root="system_repo"'
     for form in (core.body_map, core.body_map_parts):
         assert (promise in form) is readable and (reference_books.BODY_MAP_NO_READER in form) is not readable, form
     assert (promise in _text(_plan(env, core, task, "max"), "max")) is readable
-    read = registry.execute_result("read_file", {"root": "system_repo", "path": "docs/ARCHITECTURE.md"})
-    assert (read.status == "ok") is readable, read.text[:200]
+
+    def read(path):
+        return registry.execute_result("read_file", {"root": "system_repo", "path": path})
+
+    manuals = ("docs/ARCHITECTURE.md", "docs/architecture/runtime.md", "docs/DEVELOPMENT.md",
+               "docs/development/change.md", "docs/DESIGN.md", "README.md")
+    assert sorted(reference_books.body_map_addresses(env.repo_dir)) == sorted(manuals)
+    for path in manuals:
+        assert (read(path).status == "ok") is readable, (path, read(path).text[:200])
+    # Nothing the Map does not name opens by this: only a grant that already admitted it (or no ceiling) reads it.
+    for path, admitted in (("docs/unlisted.md", ("no-ceiling", "system-docs")), ("ouroboros/loop.py", ("no-ceiling",)),
+                           ("BIBLE.md", ("no-ceiling",))):
+        got = read(path)
+        assert (got.status == "ok") is (ceiling in admitted), (path, got.text[:200])
+        if ceiling in ("system-docs", "workspace-reader") and ceiling not in admitted:
+            assert PRESENCE_RESOURCE_BLOCKED in got.text, (path, got.text[:200])

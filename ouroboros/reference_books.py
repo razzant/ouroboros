@@ -290,7 +290,7 @@ BODY_MAP_READER = 'Each `Source:` path and Atlas address reads with `read_file(r
 #: What stands in the reader's place for an actor whose capability ceiling cannot follow the addresses (BIBLE P1: a
 #: disclosure names a source its reader can resolve, or says that it cannot).
 BODY_MAP_NO_READER = ("This task's capability ceiling holds no reader for these addresses: they say where each "
-                      "manual lives, for a focus that has `read_file` on the system repository.")
+                      "manual lives, for a focus whose ceiling grants `read_file`.")
 
 
 def _atlas_rows(entrypoint: MarkdownSource) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -319,6 +319,26 @@ def _atlas_rows(entrypoint: MarkdownSource) -> tuple[tuple[str, tuple[str, ...]]
                 at = link.span.end_byte
         rows.append(("".join([*parts, entrypoint.raw[at:item.end_byte].decode("utf-8")]).strip(), tuple(paths)))
     return tuple(rows)
+
+
+def body_map_addresses(root: Path) -> frozenset[str]:
+    """Every repository path the resident Body Map gives as an address, read from the body at ``root``: both
+    entrypoints, their chapters, and the Reference Atlas's documents (a linked row's link targets; an unlinked
+    row's backticked paths on its address side that are files there). These are the shipped manuals a focus
+    carrying the Map is told it can read (``presence_authority.presence_ceiling_allows_binding``); an entrypoint
+    that cannot be read or parsed contributes nothing."""
+    root, found = Path(root), set()
+    for book_id, entry_path in BOOK_ENTRYPOINTS.items():
+        try:
+            entry = parse_markdown_source((root / entry_path).read_bytes(), entry_path)
+            members = _member_paths(entry, book_id) or ()
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        found.update((entry_path, *members))
+        for text, paths in _atlas_rows(entry):
+            named = paths or tuple(span.strip("`") for span in text.split(" — ", 1)[0].split() if span[:1] == "`" == span[-1:])
+            found.update(path for path in named if (root / path).is_file())
+    return frozenset(found)
 
 
 def _under_folders(entries: Iterable[tuple[str, str]]) -> list[str]:

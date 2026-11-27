@@ -860,9 +860,10 @@ def _section_root_for(env: Any, ctx: Any) -> str:
 
 def _manuals_readable(ctx: Any) -> bool:
     """Whether this actor can follow the Body Map's addresses. Every actor reads the system repository's manuals but
-    a Presence turn under its binding's capability ceiling: it can only where the ceiling grants ``read_file`` and its
-    resource ceiling admits the books (the read path's own admission decides, ``core_file_tools.read_admission``).
-    A ceiling that cannot be read is not a reader: the Map then says so instead of naming a call that would be refused."""
+    a Presence turn under its binding's capability ceiling: it can where the ceiling grants ``read_file``, which
+    admits exactly the addresses the Map names (``presence_authority.presence_ceiling_allows_binding``; the read
+    path's own admission decides, ``core_file_tools.read_admission``). A ceiling without file reading, or one that
+    cannot be read, is not a reader: the Map then says so instead of naming a call that would be refused."""
     try:
         from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
 
