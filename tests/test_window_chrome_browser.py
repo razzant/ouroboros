@@ -259,11 +259,32 @@ def test_the_header_line_stands_on_the_lights_centre_and_an_older_shell_keeps_th
     capture(page, "window-chrome-lights-line")
     apply(page, mid=MID - 4)  # the same band, the lights 4 px higher: the line follows them
     assert page.evaluate(LINE)["restart"] == pytest.approx(MID - 4, abs=0.6)
+    apply(page, mid=10)  # a large Interface size: twice the centre is under a control, the row keeps a control's height
+    line = page.evaluate(LINE)
+    assert line["header"] == pytest.approx(30, abs=0.6) and line["restart"] == pytest.approx(15, abs=0.6), line
+    between = page.evaluate("""() => { const h = document.querySelector('.chat-page-header');
+        const a = h.querySelector('.app-page-title-block').getBoundingClientRect(), b = h.querySelector('.app-page-actions').getBoundingClientRect();
+        return (a.right + b.left) / 2; }""")
+    page.mouse.click(between, 25)  # the row's floor strip, between the header's groups, inside the native bar
+    assert drags(page) == ["drag", "drag"], "the handle is the band the page renders, its floor included"
 
     apply(page)  # an older shell: no centre, the whole band is the row (today's line)
     line = page.evaluate(LINE)
     assert line["restart"] == pytest.approx(TOP / 2, abs=0.6) and line["find"] == pytest.approx(TOP / 2, abs=0.6), line
     assert line["header"] == pytest.approx(TOP, abs=0.6) and line["card"] >= TOP, line
+
+
+def test_a_narrow_window_stands_its_header_on_the_lights_line(subscription_ui):
+    """The stack layout (a narrow window, or 800 pt at a larger Interface size) centres its 44px controls on the lights
+    too; without a centre it keeps its 56px row centred at 28."""
+    page = shell_page(subscription_ui, 700)
+    apply(page, mid=MID + 6)
+    mid = """() => { const r = document.querySelector('[data-chat-command="panic"]').getBoundingClientRect();
+        return { panic: (r.top + r.bottom) / 2, header: document.querySelector('.chat-page-header').getBoundingClientRect().height }; }"""
+    state = page.evaluate(mid)
+    assert state["panic"] == pytest.approx(MID + 6, abs=0.6) and state["header"] == pytest.approx(2 * (MID + 6), abs=0.6), state
+    apply(page)
+    assert page.evaluate(mid) == pytest.approx({"panic": 28, "header": 56}, abs=0.6)
 
 
 def test_the_search_capsule_is_a_text_target_and_the_band_beside_it_drags(subscription_ui):

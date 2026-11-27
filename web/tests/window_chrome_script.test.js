@@ -56,12 +56,15 @@ function boot({ port = true, origin = 1_791_100_000_000.25, painted = { themeCho
         addEventListener: (type, fn) => listeners.set(type, fn),
         ...(port ? { webkit: { messageHandlers: { [HANDLER]: { postMessage: (message) => messages.push({ ...message }) } } } } : {}),
     };
-    const context = { window, document, MutationObserver, Element: FakeElement, getComputedStyle: (el) => ({ cursor: el.cursor }) };
+    // The page's rendered band (its registered --window-chrome-row); '' is a page that does not render one.
+    const rendered = { row: '' };
+    const context = { window, document, MutationObserver, Element: FakeElement,
+        getComputedStyle: (el) => ({ cursor: el.cursor, getPropertyValue: (name) => (name === '--window-chrome-row' ? rendered.row : '') }) };
     vm.runInNewContext(source, context);
     const mutate = (kind) => observers.filter((o) => o.live && (kind === 'attributes' ? o.options.attributes : o.options.childList))
         .forEach((o) => o.callback([]));
     return {
-        messages, root, properties, window,
+        messages, root, properties, window, rendered,
         parseRoot() { document.documentElement = root; mutate('childList'); },
         parseMeta(content = INTEGRATED) { meta = { content }; mutate('childList'); },
         parseBody() { document.body = {}; mutate('childList'); },
@@ -128,21 +131,35 @@ test('only the shell\'s measured state for this document is written, and zero re
     assert.equal(page.properties.size, 0);
 });
 
-test('the lights\' centre is written only when the shell reports one, and the page\'s band is the window\'s handle', () => {
+test('the lights\' centre is written only when the shell reports one; it clears with the band', () => {
     const page = boot();
     page.parseMeta();
     page.push({ doc: 1_791_100_000_000.25, top: 66, start: 79, mid: 25.5 });
     assert.deepEqual(Object.fromEntries(page.properties),
         { '--window-chrome-top': '66px', '--window-chrome-start': '79px', '--window-chrome-mid': '25.5px' });
-    assert.equal(page.press({ clientY: 45 }).prevented, true, 'inside the lights\' row (51 px): the window\'s');
-    assert.equal(page.press({ clientY: 60 }).prevented, false, 'under the row, inside the native bar: the page\'s content');
-    assert.equal(page.press({ clientY: 60, detail: 2 }).prevented, false, 'nor a double-click that would zoom the window');
     page.push({ doc: 1_791_100_000_000.25, top: 66, start: 79 });  // an older shell, or no centre inside the band
     assert.deepEqual(Object.fromEntries(page.properties), { '--window-chrome-top': '66px', '--window-chrome-start': '79px' });
-    assert.equal(page.press({ clientY: 60 }).prevented, true, 'without a centre the whole measured band is the handle');
     page.push({ doc: 1_791_100_000_000.25, top: 66, start: 79, mid: 25.5 });
     page.push({ doc: 1_791_100_000_000.25, top: 0, start: 0, mid: 0 });  // full screen or the ordinary bar
     assert.equal(page.properties.size, 0);
+});
+
+test('the window\'s handle is the band the page renders, capped at the native bar; the whole bar without one', () => {
+    const page = boot();
+    page.parseMeta();
+    page.push({ doc: 1_791_100_000_000.25, top: 66, start: 79, mid: 25.5 });
+    page.rendered.row = '51px';  // the lights' row
+    assert.equal(page.press({ clientY: 45 }).prevented, true, 'inside the rendered row: the window\'s');
+    assert.equal(page.press({ clientY: 60 }).prevented, false, 'under the row, inside the native bar: the page\'s content');
+    assert.equal(page.press({ clientY: 60, detail: 2 }).prevented, false, 'nor a double-click that would zoom the window');
+    page.rendered.row = '30px';  // a large Interface size: a control's floor above twice a 10 px centre
+    assert.equal(page.press({ clientY: 25 }).prevented, true, 'the floor\'s strip is the window\'s too');
+    page.rendered.row = '90px';  // a row taller than the native bar never widens the handle past it
+    assert.equal(page.press({ clientY: 70 }).prevented, false);
+    page.rendered.row = '';  // an older page under this shell, or an engine without @property: the whole bar
+    assert.equal(page.press({ clientY: 60 }).prevented, true);
+    page.rendered.row = 'max(30px, calc(2 * 25.5px))';  // unresolved: not a length
+    assert.equal(page.press({ clientY: 60 }).prevented, true);
 });
 
 test('a plain left press in the band, off any control, drags; a second press is the title bar double-click', () => {

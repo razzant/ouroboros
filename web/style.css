@@ -414,6 +414,8 @@ html[data-layout="docked"] #primary-sidebar {
    than a control (a large Interface size), so nothing is clipped at the window's top. A shell that gives no centre
    leaves the whole band as the row. Content reaching the left edge (drawer layout, a project panel as
    wide as the window) starts past the lights. Without the shell's attribute nothing moves. */
+/* Registered, so its computed value is the rendered length the shell's band-press script reads as the window's handle. */
+@property --window-chrome-row { syntax: '<length>'; inherits: true; initial-value: 0px; }
 :root[data-window-chrome="integrated"] {
     --window-chrome-top: 0px;
     --window-chrome-start: 0px;
@@ -471,6 +473,12 @@ html[data-layout="docked"] #primary-sidebar {
     --sidebar-top: max(calc(var(--chrome-inset) + var(--inset-top)), calc(var(--space-2) + var(--window-chrome-row)));
 }
 :root[data-window-chrome="integrated"][data-layout="stack"] .app-page-header { padding-left: max(12px, var(--window-chrome-clearance)); }
+/* A narrow window's (stack layout's) header row stands on the lights' line too: its 44px controls centred on their
+   centre, the row as tall as that needs; a shell without the centre keeps the 56px row centred at 28 as before. */
+:root[data-window-chrome="integrated"][data-layout="stack"] :is(.app-page-header, .chat-page-header, .project-panel-bar) {
+    min-height: max(44px, calc(2 * var(--window-chrome-mid, 28px)));
+    padding-block: max(0px, calc(var(--window-chrome-mid, 28px) - 22px));
+}
 /* The lights stay on the window's physical left in an RTL page too, over the room's or a page's header there, so that
    header starts past them; the sidebar's row is clear on the right. */
 :root[data-window-chrome="integrated"][data-layout="docked"][dir="rtl"] :is(.chat-page-header, .project-panel-bar, #content > .page > .app-page-header) {

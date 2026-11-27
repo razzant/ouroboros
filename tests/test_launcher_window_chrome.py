@@ -2371,33 +2371,6 @@ def test_the_page_reserves_room_only_under_the_measured_state():
     assert "window-chrome" not in re.sub(r"/\*.*?\*/", "", _read("web/ui.css"), flags=re.S)
 
 
-def _assert_header_line_follows_the_lights(css):
-    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
-    rows = re.findall(r"--window-chrome-row:\s*([^;]+);", css)
-    assert rows == ["max(var(--control-h-float), calc(2 * var(--window-chrome-mid, calc(var(--window-chrome-top) / 2))))"], rows
-    assert not re.search(r"--window-chrome-mid\s*:", css), "a default centre would hide an older shell's whole band"
-    reserving = [m.group(0) for m in re.finditer(r"var\(--window-chrome-top\)", css)]
-    assert len(reserving) == 1, "every band the page reserves is the lights' row; only the row reads the native band"
-
-
-def test_the_header_line_is_the_lights_line_and_falls_back_to_the_whole_band():
-    """With the shell's centre the page's band is twice it (as much air under the lights' line as above it), never
-    shorter than a control; without it the expression is the native band itself, today's geometry. Both directions
-    fail when the rule is broken."""
-    css = _read("web/style.css")
-    _assert_header_line_follows_the_lights(css)
-    with pytest.raises(AssertionError):  # a constant centre: the page guesses
-        _assert_header_line_follows_the_lights(css.replace(
-            ":root[data-window-chrome=\"integrated\"] {\n    --window-chrome-top: 0px;",
-            ":root[data-window-chrome=\"integrated\"] {\n    --window-chrome-mid: 25.5px;\n    --window-chrome-top: 0px;", 1))
-    with pytest.raises(AssertionError):  # a band reserved from the native height again
-        _assert_header_line_follows_the_lights(css.replace("min-height: var(--window-chrome-row);",
-                                                           "min-height: var(--window-chrome-top);", 1))
-    with pytest.raises(AssertionError):  # no fallback: an older shell would reserve nothing
-        _assert_header_line_follows_the_lights(css.replace(
-            "calc(2 * var(--window-chrome-mid, calc(var(--window-chrome-top) / 2)))", "calc(2 * var(--window-chrome-mid))"))
-
-
 @pytest.mark.parametrize("selector", [
     ':root[data-window-chrome="integrated"] :is(.chat, .project), .unguarded',
     '.unguarded, :root[data-window-chrome="integrated"] :where(.chat, .project)',
