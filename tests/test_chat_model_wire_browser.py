@@ -10,14 +10,14 @@ says nothing in its room, so a queued one has no card there. In the product a qu
 frame the work that scheduled it sends (``events_schedule_task``: its line and the ``cancelable`` marker); the test
 appends that row for the task the server admitted, and everything about the task itself is the server's.
 
-What is proved end to end (owner 10.11.2026: a room's model stays with its room; a pick in the Main chat writes
-Main itself after a confirming sheet; a queued work's model is changed before it starts; the recent models are the
-server's):
+What is proved end to end (owner 10.11.2026: a room's model stays with its room; a queued work's model is changed
+before it starts; the recent models are the server's; owner 26.11.2026: the Main chat's capsule saves the Main
+chat's own model and never writes Main the role):
 
 - a pick in a Project room's capsule is saved for that room, the next Send reaches the provider on that model, the
   running card says whose model it is, and a reload keeps the room's choice;
-- the Main chat's capsule changes Main through the sheet, the settings document holds it, and the next work runs
-  on it;
+- the Main chat's capsule saves that chat's own model without a question, Main the role stays as it was, and the
+  next work in Main runs on the pick while a room that follows Main still runs on Main's;
 - a queued work is moved from its card before it starts (``at_start``) and then runs on the model it was given;
 - the recent models are what the picks were, newest first, the same on a second page load.
 """
@@ -206,47 +206,32 @@ def test_a_rooms_model_mains_write_and_a_queued_works_model_reach_the_provider(d
             _idle(page)
             assert provider.models_of("ROOM_WIRE_RELOADED") == ["mock-picked"]
 
-            # --- 5. The Main chat's capsule is Main itself: a pick asks first, then writes Main; the next work runs on it.
+            # --- 5. The Main chat's capsule is the Main chat's own: a pick asks nothing and saves its model for new work
+            #        there, Main the role stays, and the next work in Main runs on the pick.
             _close_project(page)
-            # Main's sheet counts the works that follow Main from the page's last state: the answered turn leaves the
-            # server's works first, then the page reads the state once more (under load that read can lag the turn).
-            page.wait_for_function("""async () => { const s = await (await fetch('/api/state', { cache: 'no-store' })).json();
-                return s.works_complete === true && !(s.works || []).some((w) => (w.lead || {}).basis === 'main' && w.activity !== 'queued'); }""",
-                                   timeout=60_000)
-            with page.expect_response(lambda r: r.url.split("?")[0].endswith("/api/state"), timeout=30_000):
-                pass
             _sheet_pick(page, "#chat-model-mode", OTHER)
-            page.wait_for_selector(".confirm-dialog [data-main-followers]", timeout=20_000)
-            sheet = page.evaluate("""() => { const d = document.querySelector('.confirm-dialog'); const text = (n) => n.innerText.replace(/\\s+/g, ' ').trim();
-                return { title: text(d.querySelector('h3')), row: text(d.querySelector('.chat-model-sheet-row')), count: text(d.querySelector('[data-main-followers]')),
-                    rooms: [...d.querySelectorAll('.chat-model-off')].map((row) => [text(row.querySelector('.chat-model-off-name')), row.querySelector('.ui-checkbox')?.checked]),
-                    ok: text(d.querySelector('[data-confirm-ok]')) }; }""")
-            seen["sheet"] = sheet
-            assert sheet["title"] == "Change Main" and "mock-other" in sheet["row"] and "was mock-main" in sheet["row"], sheet
-            assert sheet["count"] == "No running work follows Main now.", sheet
-            assert sheet["rooms"] == [["Wire alpha", False]] and sheet["ok"] == "Change Main", "the room with its own model is listed, unticked"
-            assert json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == MAIN, "nothing is written before he confirms"
-            page.click(".confirm-dialog [data-confirm-ok]")
             page.wait_for_function("() => document.querySelector('#chat-model-mode .chat-capsule-value').textContent === 'mock-other'", timeout=20_000)
-            where, body = writes[-1]
-            assert set(body.pop("if_unchanged")) == {"OUROBOROS_MODEL", "USE_LOCAL_MAIN", "OUROBOROS_MODEL_ACCOUNTS",
-                                                     "OUROBOROS_MODEL_PROCESSING_PREFERENCES"}, writes
-            assert (where, body) == ("owner/chat-model", {"kind": "model", "model": OTHER, "use_local": False}), writes
-            assert _state(page)["main_route"] == {"model": OTHER, "use_local": False}
+            assert not page.query_selector(".confirm-dialog"), "the Main chat's pick asks nothing"
+            assert writes[-1] == ("owner/chat-model", {"kind": "model", "model": OTHER, "use_local": False,
+                                                       "scope": "main_chat"}), writes
+            state = _state(page)
+            seen["main_chat"] = state["main_chat"]
+            assert state["main_route"] == {"model": MAIN, "use_local": False}, "Main the role is Settings › Models' to change"
+            assert state["main_chat"]["model_choice"] == {"kind": "model", "model": OTHER, "use_local": False}, state["main_chat"]
             saved = json.loads(settings_path.read_text(encoding="utf-8"))
-            assert saved["OUROBOROS_MODEL"] == OTHER, saved["OUROBOROS_MODEL"]
+            assert (saved["OUROBOROS_MODEL"], saved["OUROBOROS_MAIN_CHAT_MODEL"]) == (MAIN, OTHER), saved
             assert (saved["OUROBOROS_MODEL_LIGHT"], saved["OUROBOROS_MODEL_FALLBACKS"]) == \
-                (settings["OUROBOROS_MODEL_LIGHT"], settings["OUROBOROS_MODEL_FALLBACKS"]), "only Main was written"
+                (settings["OUROBOROS_MODEL_LIGHT"], settings["OUROBOROS_MODEL_FALLBACKS"]), "no role was written"
             _send(page, "chat", "ROOM_WIRE_MAIN")
             _answered(page, "chat", "ROOM_WIRE_MAIN")
             _idle(page)
             assert provider.models_of("ROOM_WIRE_MAIN") == ["mock-other"], provider.models_of("ROOM_WIRE_MAIN")
-            # A follower follows the new Main; the room with its own model does not.
+            # A room that follows Main still follows Main the role, whatever the Main chat chose.
             beta_prefix = _open_project(page, beta)
             _send(page, beta_prefix, "ROOM_WIRE_FOLLOWER")
             _answered(page, beta_prefix, "ROOM_WIRE_FOLLOWER")
             _idle(page)
-            assert provider.models_of("ROOM_WIRE_FOLLOWER") == ["mock-other"]
+            assert provider.models_of("ROOM_WIRE_FOLLOWER") == ["mock-main"], provider.models_of("ROOM_WIRE_FOLLOWER")
 
             # --- 6. The recent models are the server's: what was picked, newest first, the same on a second page load.
             recents = _preferences(page)["model_recents"]
@@ -262,11 +247,12 @@ def test_a_rooms_model_mains_write_and_a_queued_works_model_reach_the_provider(d
                                        ".some((node) => node.textContent === 'Recent')", timeout=20_000)
                 sheet = page.evaluate(_SHEET)
                 seen.setdefault("recent_sheets", []).append(sheet)
-                # Main's own model first, chosen; then the recent picks, newest first, Main's not again.
-                assert [(row["row"], row["id"], row["tag"], row["selected"]) for row in sheet["groups"][0]["rows"]] == \
-                    [("main", "mock-other", "Main", True)], sheet
+                # No row follows Main; the chat's own model stands first among the recent ones, chosen, then the
+                # recent picks, newest first, never twice.
                 recent = next(group for group in sheet["groups"] if group["heading"] == "Recent")
-                assert [row["id"] for row in recent["rows"]] == ["mock-queued", "mock-picked"], sheet
+                assert [(row["id"], row["selected"]) for row in recent["rows"]] == \
+                    [("mock-other", True), ("mock-queued", False), ("mock-picked", False)], sheet
+                assert not [row for group in sheet["groups"] for row in group["rows"] if row["row"] == "main"], sheet
                 assert _preferences(page)["model_recents"] == recents
                 _close_sheet(page)
         finally:

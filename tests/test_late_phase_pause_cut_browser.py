@@ -14,6 +14,7 @@ import json
 import os
 import pathlib
 import threading
+from types import SimpleNamespace
 
 import pytest
 from starlette.applications import Starlette
@@ -24,7 +25,7 @@ from starlette.testclient import TestClient
 
 from tests.test_late_phase_pause_cut import ROOT, _join, _phase, _start, fit  # noqa: F401 — fixture
 from tests.test_late_phase_pause_cut import late as late  # noqa: F401 — fixture
-from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # noqa: F401 — fixture
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, subscription_ui as subscription_ui  # noqa: F401 — fixture
 from tests._work_projection_shared import state_fields
 
 pytestmark = [pytest.mark.ui_browser]
@@ -63,6 +64,7 @@ def test_browser_pause_ends_the_upkeep_at_once_with_the_delivered_answer_intact(
     app = Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(f.root)),
                            Route("/api/tasks/{task_id}/pause", api_task_pause, methods=["POST"])])
     app.state.drive_root = f.root
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: PREVIEW_SCOPE)  # the proof the page's scope meta names
     entered, release, posts = threading.Event(), threading.Event(), []
     f.light.hooks["draft"] = [lambda: (entered.set(), release.wait(30))]
     threads = _start(f)

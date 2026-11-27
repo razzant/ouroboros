@@ -382,7 +382,7 @@ def test_write_admits_one_ordinary_main_task_and_records_the_request(door, tmp_p
     assert response.status_code == 200, response.text
     body = response.json()
     task_id = body["task_id"]
-    assert body["status"] == "queued" and body["key"] == _key() and len(task_id) == 8
+    assert body["status"] == "queued" and body["key"] == _key() and len(task_id) == 16
     [task] = door.pending
     assert (task["id"], task["type"], task["chat_id"]) == (task_id, "task", 1)
     assert (task["root_task_id"], task["delegation_role"]) == (task_id, "root"), "a typed root, like any host start"

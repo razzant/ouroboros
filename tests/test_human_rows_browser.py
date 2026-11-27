@@ -47,7 +47,7 @@ def test_unrelated_system_rows_keep_working_and_sending(subscription_ui, tmp_pat
     ui, out = subscription_ui, _evidence(tmp_path)
     page = ui["page"]
     _bridge, frames = _host(tmp_path, monkeypatch)
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
     status = page.locator("#page-chat #chat-status")
 
     mounted = mount_sidebar(ui, 1360, theme, False, ROOM, [activity("turn-main")])
@@ -132,7 +132,7 @@ def test_reworded_host_rows_live_and_after_reload(engine_ui, tmp_path, monkeypat
     bridge, frames = _host(tmp_path, monkeypatch)
     # Each run is its own install: the process-wide delivered-id memo must not dedupe it.
     monkeypatch.setattr(events_chat_delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
     sender = SimpleNamespace(DRIVE_ROOT=tmp_path, task_registry={}, RUNNING={},
                              send_with_budget=message_bus.send_with_budget, append_jsonl=lambda *_a: None,
                              load_state=lambda: {"owner_chat_id": 1})
@@ -283,7 +283,7 @@ def test_stop_response_reaches_card_from_real_endpoints(subscription_ui, tmp_pat
         monkeypatch.setattr("ouroboros.cancel_intents.request_cancel", fail_write)
     write_task_result(tmp_path, tid, "running", chat_id=1, result="Checking the report.")
     _host(tmp_path, monkeypatch)
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
     mounted = mount_sidebar(subscription_ui, width, theme, False, ROOM, [activity(tid)])
     if width < 700:
         page.locator('#primary-sidebar [data-nav-page="chat"]').click()
@@ -366,7 +366,7 @@ def test_selected_claim_bytes_render_without_renderer_normalization(subscription
     page = ui["page"]
     _bridge, frames = _host(tmp_path, monkeypatch)
     monkeypatch.setattr(events_chat_delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
     sender = SimpleNamespace(DRIVE_ROOT=tmp_path, task_registry={}, RUNNING={},
                              send_with_budget=message_bus.send_with_budget, append_jsonl=lambda *_a: None)
     mounted = mount_sidebar(ui, 1360, "light", False, ROOM, [])
@@ -401,7 +401,7 @@ def test_project_ingress_refusal_settles_only_its_own_sending(subscription_ui, t
     from supervisor import message_bus
 
     page = subscription_ui["page"]
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
     mounted = mount_sidebar(subscription_ui, 1360, "light", False, ROOM, [activity("main-other")])
     page.locator('.nav-project-row[data-project-id="p-fixture"]').click()
     prefix = "pchat-p-fixture"
@@ -448,7 +448,7 @@ def test_initialization_notice_kept_send_controls_are_room_and_message_scoped(su
         "view": {"name": "plan.pdf", "kind": "file", "mime": "application/pdf", "size": 4,
                  "available": True, "url": f"/api/files/download?upload={upload}"},
     }))
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
     # Main accepts non-Project chat ids too; a foreign room must be a known Project.
     foreign = dict(id="p-foreign", name="Foreign room", chat_id=99, lifecycle="active", visible_revision=0)
     mounted = mount_sidebar(subscription_ui, 1360, "light", False, [*ROOM, foreign], [])

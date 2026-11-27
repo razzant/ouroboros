@@ -1328,6 +1328,7 @@ def call_llm_with_retry(
     send_clock_policy: Any = None, max_tokens: int = MAIN_LOOP_MAX_TOKENS, configured_api_child: bool = False,
     physical_fit_predicate: Optional[Callable[[Any], Any]] = None,  # every send; candidate_predicate is first-attempt-only
     local_consideration: bool = False, letter_send: Any = None,
+    processing_connection: tuple[str, str] | None = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
     """Call one model with bounded retries and deadline-aware transport.
 
@@ -1355,7 +1356,7 @@ def call_llm_with_retry(
     owner = current_model_wait()
     activity_attempt = task_attempt if task_attempt is not None or not owner or owner.task_id != task_id else owner.attempt
     response_cache_bypass_requested, send_messages = False, None
-    from ouroboros.loop_transport import note_route_caution
+    from ouroboros.loop_transport import note_route_caution, note_withheld_route
     route_caution = (None, False, "")  # a failed send's caution, whether it was withheld and its route; noted when no answer came
     for attempt in range(transient_budget):
         letter = letter_send if attempt == 0 else None
@@ -1405,6 +1406,7 @@ def call_llm_with_retry(
                     _own_capture(last_physical_attempt_capture(), prior)),  # sent: its own attempt's fact
                 "model_account_override": account,
                 "processing_preference": processing_preference,
+                **({"processing_connection": processing_connection} if processing_connection else {}),
                 "reasoning_effort": effort,
                 "max_tokens": max_tokens,
                 **main_loop_wire_options(model, allow_server_web_search=allow_server_web_search,
@@ -1557,6 +1559,7 @@ def call_llm_with_retry(
                 note_route_caution(accumulated_usage, e.route_caution_used[0], route=e.route_caution_used[1])
             if getattr(e, "route_caution", None):
                 route_caution = (e.route_caution, bool(getattr(e, "route_withheld", False)), getattr(e, "route_caution_key", ""))
+            note_withheld_route(accumulated_usage, route_caution)
             if letter:
                 capture = _own_capture(physical_attempt_capture_from_exception(e), prior)
                 if letter.settle(capture) and not local_consideration:  # provably unsent: the plain request goes

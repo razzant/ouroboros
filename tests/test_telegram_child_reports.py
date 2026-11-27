@@ -155,7 +155,7 @@ def test_a_natural_final_reaches_telegram_only_from_a_root(bridge, monkeypatch, 
 
 def _host_terminal(cause):
     """``(text, usage)`` of a task the host ended in its own words, each stamped by its real producer: a helper
-    whose route could not start (the reported shape, every configured alternative inline) or a start refused before
+    whose route could not start (the reported shape, every configured alternative named) or a start refused before
     any model ran (a window that cannot hold it)."""
     if cause == "unstartable":
         from ouroboros.agent_dispatch import executor_blocked_outcome

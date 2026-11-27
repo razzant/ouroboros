@@ -5,7 +5,7 @@ import pytest
 
 from tests.settings_browser_helpers import open_settings
 from tests.settings_section_helpers import open_extensions
-from tests.test_subscription_setup_browser import capture
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, PROFILE_FRAME, capture
 from tests.test_subscription_setup_browser import subscription_ui as _subscription_ui
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
@@ -454,13 +454,13 @@ def test_living_card_chart_series_follow_the_theme_and_a_new_revision(subscripti
 
     card = {'card_id': 'card-plan', 'kind': 'components', 'title': 'Training plan'}
     page.route('**/api/chat/history*', lambda r: r.fulfill(content_type='application/json', body=json.dumps({
-        'messages': [{'role': 'user', 'text': 'Plan my November training by week.', 'ts': '2026-10-27T10:00:00Z'},
+        'profile_scope': PREVIEW_SCOPE, 'messages': [{'role': 'user', 'text': 'Plan my November training by week.', 'ts': '2026-10-27T10:00:00Z'},
                      {'role': 'assistant', 'msg_type': 'card', 'card': {**card, 'revision': 1},
                       'fallback_text': 'Training plan by week', 'text': 'Training plan by week',
                       'ts': '2026-10-27T10:00:01Z'}], 'progress': []})))
     page.route('**/api/cards/card-plan', lambda r: r.fulfill(content_type='application/json',
                                                              body=json.dumps(body(shown['revision']))))
-    page.route_web_socket('**/ws', lambda ws: (sockets.append(ws), ws.send(json.dumps({'type': 'heartbeat'}))))
+    page.route_web_socket('**/ws', lambda ws: (sockets.append(ws), ws.send(PROFILE_FRAME), ws.send(json.dumps({'type': 'heartbeat'}))))
     page.add_init_script(CARD_THEME_LISTENERS)
     page.emulate_media(color_scheme='dark')
     page.goto(ui['url'])

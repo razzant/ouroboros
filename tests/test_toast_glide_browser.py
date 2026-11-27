@@ -1581,8 +1581,10 @@ class ModelWrites:
         self.tier = 'refuse'
         self.pin = 'refuse'
         self.held = []
+        self.sent = []
 
     def tiers(self, route):
+        self.sent.append(route.request.post_data_json)
         if self.tier == 'hold':
             self.held.append(route)
         else:
@@ -1591,14 +1593,20 @@ class ModelWrites:
     def pins(self, route):
         if route.request.method == 'GET':
             route.fulfill(json={'model_recents': [], 'model_pins': []})
+        elif self.pin == 'hold':
+            self.held.append(route)
         else:
             route.fulfill(status=500, json={'ok': False, 'error': 'The pins could not be saved.'})
 
 
-def _model_page(ui, width, height, *, touch, writes):
+def _model_page(ui, width, height, *, touch, writes, older=False):
     page = seed_page(ui, width, height, touch=touch)
     state = {'supervisor_ready': True, 'active_chat_activities': [], 'projects': PROJECTS, 'main_route': MODEL,
              'project_chat_ids': [p['chat_id'] for p in PROJECTS], 'processing_tiers': {'main': '', 'default': 'standard'}}
+    # CLIENT_CONTRACT §9: a server that keeps the Main chat's own model and tier names `main_chat`; a body without it is an
+    # older server's (`older`), which the capsule sends nothing to.
+    if not older:
+        state['main_chat'] = {'model_choice': {'kind': 'main'}, 'processing_choice': ''}
     page.route(re.compile(r'/api/state(\?.*)?$'), lambda route: route.fulfill(json=state))
     page.route('**/api/model-catalog*', lambda route: route.fulfill(json=_model_catalog()))
     page.route('**/api/ui/preferences', writes.pins)
@@ -1644,6 +1652,7 @@ def test_the_phones_model_sheet_answers_a_tier_and_a_pin_inside_it_and_holds_the
         assert [(n['where'], n['text'], n['visible'], n['hit'], n['inSheet']) for n in _of(tier, 'sheet')] == [
             ('sheet', 'The server could not save the tier.', True, True, True)], ('said in the sheet, pressable', facts)
         assert [(n['visible'], n['hit']) for n in _of(tier, 'page')] == [(False, False)], facts
+        assert writes.sent == [{'processing': 'fast', 'scope': 'main_chat'}], 'the Main chat\'s own tier, named by its scope'
         _press_at(page, _of(tier, 'sheet')[0]['box'], True)
         assert page.evaluate(NOTICES) == 1 and page.evaluate(SHEET)['sheet'], ('the × hid the notice and nothing else', facts)
         # A Pin the server refuses answers the same way.
@@ -1681,7 +1690,8 @@ def test_the_phones_model_sheet_answers_a_tier_and_a_pin_inside_it_and_holds_the
 
 
 def test_the_question_before_main_takes_ultrafast_answers_inside_the_sheet_it_leaves_open(toast_ui, tmp_path):
-    """Main's Ultrafast reads its settings first, with the sheet still open: a refusal of that read is said in it."""
+    """The Main chat's Ultrafast is asked for Main's account as the settings name it, with the sheet still open: where
+    they could not be read nothing is asked or sent, and that is said in the sheet."""
     writes = ModelWrites()
     page = _model_page(toast_ui, 390, 844, touch=True, writes=writes)
     page.route('**/api/settings', lambda route: route.fulfill(status=500, json={'error': 'The settings could not be read.'}))
@@ -1697,24 +1707,28 @@ def test_the_question_before_main_takes_ultrafast_answers_inside_the_sheet_it_le
         sheet.locator('.toast').wait_for()
         rest(page)
         facts['ultrafast'] = seen = page.evaluate(TOASTS)
-        assert [(n['text'], n['visible'], n['hit'], n['inSheet']) for n in _of(seen, 'sheet')] == [
-            ('The settings could not be read.', True, True, True)], ('said where it was asked', facts)
+        setup_browser.capture(page, name)
+        said = _of(seen, 'sheet')
+        assert [(n['visible'], n['hit'], n['inSheet']) for n in said] == [(True, True, True)], ('said where it was asked', facts)
+        assert 'account or this connection is not read yet' in said[0]['text'], facts
         assert page.evaluate(SHEET)['sheet'] and [(n['visible'], n['hit']) for n in _of(seen, 'page')] == [(False, False)], facts
+        assert not page.locator(CONFIRM_OPEN).count() and writes.sent == [], ('nothing was asked, nothing was sent', facts)
     finally:
         save_evidence(tmp_path, name, facts)
         page.close()
 
 
-def test_a_tier_refused_after_the_sheet_went_is_the_pages_never_a_later_sheets(toast_ui, tmp_path):
+@pytest.mark.parametrize('act', ['tier', 'pin'])
+def test_a_tier_or_a_pin_refused_after_the_sheet_went_is_the_pages_never_a_later_sheets(toast_ui, tmp_path, act):
     writes = ModelWrites()
-    writes.tier = 'hold'
+    setattr(writes, act, 'hold')
     page = _model_page(toast_ui, 390, 844, touch=True, writes=writes)
-    name = f'toast-model-sheet-late-{toast_ui["engine"]}'
+    name = f'toast-model-sheet-late-{act}-{toast_ui["engine"]}'
     facts = {}
     sheet = page.locator('.ui-popup.model-sheet')
     try:
         _open_sheet(page, True)
-        sheet.locator('.model-tier-seg[data-tier="fast"]').tap()
+        (sheet.locator('.model-tier-seg[data-tier="fast"]') if act == 'tier' else sheet.locator('.chat-model-pin').first).tap()
         page.wait_for_timeout(300)
         assert len(writes.held) == 1, 'the save is on its way'
         page.keyboard.press('Escape')
@@ -1730,6 +1744,29 @@ def test_a_tier_refused_after_the_sheet_went_is_the_pages_never_a_later_sheets(t
         rest(page)
         facts['after'] = after = page.evaluate(TOASTS)
         assert [(n['where'], n['visible'], n['hit']) for n in after] == [('page', True, True)], facts
+    finally:
+        save_evidence(tmp_path, name, facts)
+        page.close()
+
+
+def test_a_tier_pressed_against_an_older_server_is_refused_in_the_phones_sheet(toast_ui, tmp_path):
+    """A state body without `main_chat` is an older server's: the tier is sent nowhere, and the sheet it was pressed in,
+    which stays open over the held page, is where that is said."""
+    writes = ModelWrites()
+    page = _model_page(toast_ui, 390, 844, touch=True, writes=writes, older=True)
+    name = f'toast-model-sheet-older-{toast_ui["engine"]}'
+    facts = {}
+    sheet = page.locator('.ui-popup.model-sheet')
+    try:
+        _open_sheet(page, True)
+        sheet.locator('.model-tier-seg[data-tier="fast"]').tap()
+        sheet.locator('.toast').wait_for()
+        rest(page)
+        facts['older'] = seen = page.evaluate(TOASTS)
+        setup_browser.capture(page, name)
+        assert [(n['where'], n['visible'], n['hit'], n['inSheet']) for n in seen] == [('sheet', True, True, True)], facts
+        assert seen[0]['text'].startswith('Ouroboros is running an older version than this window'), facts
+        assert writes.sent == [] and page.evaluate(SHEET)['sheet'], ('nothing was sent, and the sheet stays', facts)
     finally:
         save_evidence(tmp_path, name, facts)
         page.close()
@@ -1779,16 +1816,18 @@ def test_a_page_toast_close_leaves_the_desktop_model_sheet_open(toast_ui, tmp_pa
             sheet.locator('.chat-model-pin').first.click()
             notice = page.locator(f'{STACK} .toast', has_text='pins could not be saved')
             notice.wait_for()
+            setup_browser.capture(page, f'{name}-{step}')
             press(notice.get_by_role('button', name='Dismiss notice'))
             notice.wait_for(state='detached')
             facts[step] = {'sheet': sheet.count(), 'notices': page.evaluate(NOTICES)}
             assert facts[step]['sheet'] == 1, ('the × hid only the notice', facts)
-        page.keyboard.press('Escape')
-        page.wait_for_function(SHEET_GONE)
-        open_sheet()
+        # The other press, in the opening the × left standing: an ordinary one outside closes the sheet.
         page.mouse.click(10, 10)
         page.wait_for_function(SHEET_GONE)
         facts['outside'] = True
+        open_sheet()
+        page.keyboard.press('Escape')
+        page.wait_for_function(SHEET_GONE)
     finally:
         save_evidence(tmp_path, name, facts)
         page.close()

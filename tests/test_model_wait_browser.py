@@ -46,7 +46,8 @@ def waiting_ui(subscription_ui):
     sockets, controls, logins = [], [], []
     acknowledgements = {}
     status = {"terminal": False, "fail_next": False, "stale_next": False}
-    page.route_web_socket("**/ws", lambda socket: sockets.append(socket))
+    # The serving socket proves the document's data profile first (gateway/ws.py), or the page drops every frame.
+    page.route_web_socket("**/ws", lambda socket: (sockets.append(socket), socket.send(setup_browser.PROFILE_FRAME)))
     page.add_init_script("""window.waitFrames = 0;
         window.WebSocket = class extends window.WebSocket {
             constructor(...args) { super(...args); this.addEventListener('message', () => { window.waitFrames += 1; }); }
@@ -71,7 +72,9 @@ def waiting_ui(subscription_ui):
                                  'task_id': TASK, 'ts': event['ts'],
                                  'model_waits': {event['wait_id']: event},
                                  **({'task_terminal_status': 'completed'} if status['terminal'] else {})})
-        reply(route, {"messages": [*ui.get('wait_chat_messages', []), *messages]})
+        # A whole room's page, under the profile the document proves (api_client.js `chatHistory`).
+        reply(route, {"profile_scope": setup_browser.PREVIEW_SCOPE, "messages": [*ui.get('wait_chat_messages', []), *messages],
+                      "progress": [], "has_more": False, "page_cursor": "recent"})
 
     page.route("**/api/chat/history*", history_reply)
     page.route(f"**/api/tasks/{TASK}", lambda route: reply(route, {

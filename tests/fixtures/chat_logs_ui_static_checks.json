@@ -1038,12 +1038,6 @@
     "value": "export function outcomeTone(outcome) {"
   },
   {
-    "id": "test_sync_history_merges_offline_bootstrap_user_rows",
-    "path": "web/modules/chat.js",
-    "kind": "regex",
-    "value": "if\\s*\\(\\s*result\\.status\\s*!==\\s*'applied'\\s*\\)\\s*applyHistoryMessages\\(\\s*messages\\s*,\\s*\\{\\s*fromReconnect\\s*,\\s*newest:\\s*admitted\\s*,\\s*requestedAt:\\s*data\\.requestedAt\\s*,\\s*window:\\s*data\\.window\\s*,\\s*hasMore:\\s*data\\.has_more\\s*,?\\s*\\}\\s*\\)"
-  },
-  {
     "id": "test_cancel_run_confirm_and_cascade",
     "path": "web/modules/chat.js",
     "kind": "contains",
@@ -1089,7 +1083,7 @@
     "id": "test_inflight_history_annotation_retires_pending",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (msg.chat_annotation && localOwnerRow(msg) && msg.client_message_id &&\n                            (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {"
+    "value": "if (msg.chat_annotation && ownerSends.local(msg) && msg.client_message_id &&\n                            (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {"
   },
   {
     "id": "test_inflight_history_annotation_retires_pending",
@@ -1108,12 +1102,6 @@
     "path": "web/modules/chat.js",
     "kind": "regex",
     "value": "} else if \\(unkeyedFrameEndsTurn\\(msg\\)\\) \\{[^{}]*?activeDirectActivities\\.clear\\(\\);\\s*pendingSubmissions\\.clear\\(\\);"
-  },
-  {
-    "id": "test_inflight_reconnect_user_row_retires_pending",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "if (fromReconnect && msg.role === 'user' && localOwnerRow(msg) && msg.client_message_id) {"
   },
   {
     "id": "test_inflight_queue_eviction_retires_pending",

@@ -186,8 +186,11 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # Rolled again after review: "A card stays answerable, from Main after the task ends too" stands as its own
     # sentence again, a fact of every card; nothing else changed (c54daa33... before).
     # forward_to_worker describes the next mailbox check for both initial admission and readmission.
+    # Rolled for a skill's sign-in offered in a conversation (C11, owner vision 27.11): a send_links link may give
+    # `place` (skill-sign-in/<skill>/<service>) instead of `url`, so `url` leaves the item's required keys and the
+    # description says so; every other entry is byte-identical (d2e98c6b... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "d2e98c6b6c9c7a0f9c4265a0f3fb69b3689bf3fb7bb14ce061aaf30897fb0e7c"
+        "76678c7f9035089939103aa466eeb653337d1e725c6b91c7a189f83ba11c872a"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

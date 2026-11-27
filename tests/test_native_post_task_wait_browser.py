@@ -17,7 +17,7 @@ from ouroboros.post_task_checkpoint import post_task_model_wait
 from ouroboros.task_results import load_task_result
 from supervisor import active_activity, workers
 from tests.test_post_task_model_wait import phase as post_phase_fixture, until
-from tests.test_subscription_setup_browser import capture, subscription_ui as ui_fixture
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, capture, subscription_ui as ui_fixture
 
 phase = post_phase_fixture
 subscription_ui = ui_fixture
@@ -63,6 +63,7 @@ def test_browser_stops_native_post_task_wait_without_losing_answer(subscription_
     app = Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(f.root)),
                            Route("/api/tasks/{task_id}/cancel", api_task_cancel, methods=["POST"])])
     app.state.drive_root = f.root
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: PREVIEW_SCOPE)  # the proof the page's scope meta names
     try:
         until(lambda: post_task_model_wait(f.root, task_id) and any(
             row.get("credential_harness") for row in post_task_model_wait(f.root, task_id).waits.values()))

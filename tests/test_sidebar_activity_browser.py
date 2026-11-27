@@ -107,6 +107,7 @@ def mount_sidebar(ui, width, theme, reduced, projects, census):
 
     def connect(socket):
         sockets.append(socket)
+        socket.send(setup_browser.PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         socket.send(json.dumps({'type': 'heartbeat'}))
 
     def state_response(route):

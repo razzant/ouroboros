@@ -286,10 +286,15 @@ _owner_audit = owner_audit  # Existing settings writers retain their import surf
 SURFACE_HEADER, ACTOR_HEADER, TASK_HEADER = "X-Ouroboros-Surface", "X-Ouroboros-Actor", "X-Ouroboros-Task-Id"
 APP_SURFACE = "app"
 _SURFACE_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
-_ROW_PHRASES = {  # the two decisions the owner reads by name; any other key is said by its name
+_ROW_PHRASES = {  # the decisions the owner reads by name; any other key is said by its name
     "OUROBOROS_MODEL": "Main model: {old} → {new}.",
     "OUROBOROS_CONSCIOUSNESS_DAILY_USD": "Consciousness allowance: {old} → {new} USD per rolling 24 hours.",
+    # The Main chat's own choice, which a word to Ouroboros can change: said as its capsule says it.
+    "OUROBOROS_MAIN_CHAT_MODEL": "Model for new work in Main: {old} → {new}.",
+    "OUROBOROS_MAIN_CHAT_PROCESSING": "Processing tier for new work in Main: {old} → {new}.",
 }
+# What those two say when empty, in the row's words (a tier is said without the word an Ultrafast is saved with).
+_ROW_EMPTY = {"OUROBOROS_MAIN_CHAT_MODEL": "Main's model", "OUROBOROS_MAIN_CHAT_PROCESSING": "Default"}
 # Who changed it, in the owner's words; the surface and the task stay in the event (DESIGN principle 7).
 _ROW_ACTORS = {"ouroboros": "by Ouroboros", "owner": "by you"}
 
@@ -340,12 +345,26 @@ def _shown(change: Dict[str, Any], side: str) -> str:
     return (value or "empty") if isinstance(value, str) else json.dumps(value)
 
 
+def _said(key: str, change: Dict[str, Any], side: str) -> str:
+    """One side of a change in the row's words: the Main chat's own two settings by what they mean, any other as
+    ``_shown`` says it."""
+    value = change.get(side, "")
+    if key not in _ROW_EMPTY or not isinstance(value, str):
+        return _shown(change, side)
+    if key == "OUROBOROS_MAIN_CHAT_PROCESSING":
+        from ouroboros.owner_model import PROCESSING_WORDS  # the tiers in the words the owner chose them by
+
+        value = value.partition("@")[0]
+        value = PROCESSING_WORDS.get(value, value) if value else ""
+    return value or _ROW_EMPTY[key]
+
+
 def settings_change_text(changes: Dict[str, Dict[str, Any]], origin: Dict[str, str]) -> str:
     """The one System row of a change the app did not declare: what changed and who changed it, in one
     line, so a withheld value or a text of several lines (the owner's rules) is said by its key alone. The
     event keeps the text, the surface, the declared actor and its task."""
     parts = [f"{key} changed." if "withheld" in change or any("\n" in str(value) for value in change.values())
-             else _ROW_PHRASES.get(key, key + ": {old} → {new}.").format(old=_shown(change, "old"), new=_shown(change, "new"))
+             else _ROW_PHRASES.get(key, key + ": {old} → {new}.").format(old=_said(key, change, "old"), new=_said(key, change, "new"))
              for key, change in changes.items()]
     actor = _ROW_ACTORS.get(str(origin.get("actor") or ""), "outside the app")
     return " ".join([*parts, f"Changed {actor}."])
@@ -829,7 +848,6 @@ def _owner_update_settings(
     if_unchanged: Optional[dict] = None,
     unset: Sequence[str] = (),
     commit_if_current: Optional[Callable[[Callable[[], None]], bool]] = None,
-    check_unchanged: Optional[Callable[[Dict[str, Any]], None]] = None,
     drive_root: Optional[pathlib.Path] = None,
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """Read, change and persist ONE settings document inside ONE settings lock.
@@ -841,8 +859,7 @@ def _owner_update_settings(
     key by key while this request answers "saved" (BIBLE P1). Here ``transform`` receives
     the settings as they are INSIDE the lock and returns the document to persist, or
     ``None`` to persist nothing — which is also how a no-change decision avoids rewriting
-    the file at all. A conditional no-op may still need to validate its destination: ``check_unchanged``
-    sees the authored document from the same locked read, without inventing a write or reading the file again.
+    the file at all.
 
     ``expected_digest`` closes the other half: an endpoint that took a DECISION from an
     earlier read (the previous mode, whether anything changed at all) passes the digest
@@ -876,7 +893,7 @@ def _owner_update_settings(
     once the lock is released, a commit retires those its connections no longer serve
     (``_retire_unserved_prior_routes``)."""
     from ouroboros import config as _config
-    from ouroboros.provider_connections import record_connection_revisions, settings_snapshot
+    from ouroboros.provider_connections import plan_connection_revisions, record_connection_revisions, settings_snapshot
 
     _config._guard_live_settings_write()
     _config.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -904,8 +921,6 @@ def _owner_update_settings(
         effective_before = _config.settings_of_document(document, present=_settings_document_present())
         proposed = transform(dict(document) if isinstance(transform, _SavedDocumentFields) else current)
         if proposed is None:
-            if check_unchanged is not None:
-                check_unchanged(document)
             return {}
         to_write = dict(proposed)
         if not whole_document:
@@ -913,7 +928,7 @@ def _owner_update_settings(
 
             for key in unedited_unauthored_slots(document, to_write, shown) - set(authored_keys):
                 to_write.pop(key, None)
-        from ouroboros.gateway.owner_effort import check_main_ultrafast
+        from ouroboros.gateway.owner_effort import check_main_ultrafast, keep_chat_ultrafast
 
         # Main's Ultrafast binding judges the document as it would land (prepared, ``unset`` removed) before the
         # prologue's own effects, so its refusal writes nothing (invariant 2).
@@ -928,6 +943,9 @@ def _owner_update_settings(
             raise SettingsDocumentUnreadable(UNREADABLE_SETTINGS_REFUSAL) from exc
         for key in unset:
             to_write.pop(key, None)
+        # The Main chat's own Ultrafast: its confirmed write is judged here; any other write that moves it ends it.
+        connection_plan = plan_connection_revisions(read_snapshot, document, to_write)
+        keep_chat_ultrafast(document, to_write, connection_plan, getattr(transform, "chat_ultrafast", None))
         _retire_revived_prior_routes(document, to_write)
 
         def commit():
@@ -944,7 +962,7 @@ def _owner_update_settings(
             commit()
         elif not commit_if_current(commit):
             return {}  # a replay found this decision already saved
-        record_connection_revisions(read_snapshot, document, to_write)  # still under the lock; never raises
+        record_connection_revisions(to_write, connection_plan["after"])  # still under the lock; never raises
         try:
             changes = _committed_changes(document, shown, to_write, effective_before)
             if boundary is not None:

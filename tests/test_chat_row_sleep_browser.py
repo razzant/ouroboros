@@ -103,7 +103,8 @@ def test_rows_asleep_wake_for_a_theme_and_for_a_late_answer_above_the_passage(sl
              'text': SETTLED['question'], 'quiz': {k: v for k, v in SETTLED.items() if k != 'question'}}]
     rows += [{'role': 'user', 'chat_id': 1, 'text': f'Reading row {i}. ' + 'Some words to read. ' * 12,
               'ts': (start + timedelta(minutes=i)).isoformat(), 'row_address': f'main-row-{i}'} for i in range(130)]
-    page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': []}))
+    page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': [],
+                                                                          'profile_scope': setup_browser.PREVIEW_SCOPE}))
     facts = {'engine': sleep_ui['engine']}
     try:
         page.goto(sleep_ui['url'] + '/')

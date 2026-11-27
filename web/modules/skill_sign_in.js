@@ -438,14 +438,14 @@ const draftOf = (group) => {
  * again and answers it (the page repaints its cards from the same answer); `open` is the control that opened the
  * sheet, whose `data-sign-in-*` name a service and, with `data-sign-in-begin`, an account to sign in. Returns the disposer.
  */
-export function mountSkillSignIn(container, skillName, { status = null, reload = readSignInStatus, open = null } = {}) {
+export function mountSkillSignIn(container, skillName, { status = null, reload = readSignInStatus, open = null, ask: wanted = null } = {}) {
     const doc = container.ownerDocument, win = doc.defaultView;
     const states = new Map(), written = new WeakMap();
     const lifetime = new AbortController();
     let current = status, closed = false, menu = null, disarm = null;
     const isWaiting = () => [...states.values()].some((state) => state.editor?.kind === 'waiting');
-    let ask = open?.dataset?.signInService
-        ? { service: open.dataset.signInService, account: open.dataset.signInAccount || '', begin: open.dataset.signInBegin !== undefined } : null;
+    let ask = wanted || (open?.dataset?.signInService
+        ? { service: open.dataset.signInService, account: open.dataset.signInAccount || '', begin: open.dataset.signInBegin !== undefined } : null);
     const services = () => servicesOf(current, skillName);
     const stateOf = (id) => states.get(id) || states.set(id, { editor: null, confirm: null, results: new Map(), dirty: false, busy: false }).get(id);
     const groupOf = (id) => [...container.querySelectorAll('[data-sign-in-group]')].find((node) => node.dataset.signInGroup === id) || null;
@@ -526,18 +526,21 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         return { text: words('signed_in_as', 'Signed in as {account} via {client}.', { account: nameOf(account), client: account.client?.label || editor.client?.label || '' }), tone: 'ok' };
     }
 
-    function update(data) {
+    function update(data, fresh = true) {
         if (closed || !data) return;
         current = data;
         settle();
         paint();
         if ([...states.values()].some((state) => state.editor?.kind === 'waiting')) armReturn();
         else disarm?.();
-        const service = ask && services().find((row) => row.service === ask.service);
+        const service = ask && fresh && services().find((row) => row.service === ask.service);
         if (service) {
             const wanted = ask;
             ask = null;
-            if (wanted.begin) openEditor(service, wanted.account, false);
+            // From a conversation (no account named): the one account that needs the owner, with its access asked for,
+            // else a new sign-in; with several, the owner picks one in this group.
+            const needing = wanted.account === null ? list(service.accounts).filter((row) => accountState(service, row).needs) : [];
+            if (wanted.begin && needing.length < 2) openEditor(service, wanted.account ?? needing[0]?.key ?? '', false);
             else groupOf(service.service)?.scrollIntoView?.({ block: 'nearest' });
         }
     }
@@ -547,8 +550,11 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         try {
             const data = await reload({ signal: lifetime.signal });
             if (!data || closed) return;
-            if (data !== current) update(data);
-        } catch { return; } // A failed read changes no displayed account fact.
+            if (data !== current || ask) update(data);
+        } catch { // A failed read changes no displayed account fact; a waiting chat button opens on what is shown.
+            if (ask && current) update(current);
+            return;
+        }
         if (!watched) return;
         for (const service of services()) {
             const state = stateOf(service.service), editor = state.editor;
@@ -907,7 +913,11 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
     container.addEventListener('click', onClick);
     container.addEventListener('change', onEdit);
     container.addEventListener('input', onEdit);
-    if (current) update(current); else void refresh();
+    // A conversation's button (no account named) chooses its account on a fresh status read, never on a snapshot this
+    // page kept from an earlier visit: the asked access may be newer than it.
+    const chatAsk = ask?.account === null;
+    if (current) update(current, !chatAsk);
+    if (!current || chatAsk) void refresh();
     return () => {
         if (closed) return;
         closed = true;
