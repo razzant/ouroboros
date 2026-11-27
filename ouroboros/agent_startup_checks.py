@@ -62,6 +62,8 @@ _TASK_RESULT_PROCESS_EVIDENCE_FIELDS = frozenset({
     "raw_response",
     "request_wire",
     "request_wire_history",
+    # A helper request's proof token (``task_id_claims.REQUEST_CLAIM``): its producer and recovery read it raw.
+    "request_claim",
 })
 
 # Automatic continuation gets at most one ordinary tool-result-sized slice of

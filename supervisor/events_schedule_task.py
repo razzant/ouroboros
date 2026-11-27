@@ -118,6 +118,10 @@ def _reject_schedule_task(
     extra_fields: Optional[Dict[str, Any]] = None,
     persist_result: bool = True,
     preparation: Any = None,
+    only_if: Any = None,
+    keep_files: bool = False,
+    announce_turned_away: bool = True,
+    guard: Any = None,
 ) -> bool:
     """Clean up and notify a rejection, preserving an existing result when asked.
 
@@ -129,10 +133,25 @@ def _reject_schedule_task(
     loop); otherwise nothing is overwritten and the copy is freed only once
     another owner provably holds the row. A workspace child that never ran has
     no artifacts to finalize, so its artifact status is terminal (as the API
-    refusal records it). Returns whether the refusal was durably confirmed.
+    refusal records it). A never-admitted refusal writes only a row ``only_if``
+    accepts (absence included), and ``keep_files`` leaves the child drive of a
+    producer that may still live, as a request whose producer claimed its id leaves its folders. With ``announce_turned_away=False`` a refusal
+    ``only_if`` turned away (its row retired or moved since it was judged, so
+    nothing was refused there) is not announced; an unknown outcome still is.
+    ``guard`` is held around a never-admitted refusal's store reads and write
+    (``persist_never_admitted_refusal``). Returns whether the refusal was durably
+    confirmed.
     """
     log.warning("Rejecting scheduled task %s: %s", tid, detail)
     write_fields = {**result_fields, **(extra_fields or {})}
+    turned_away: list = []
+
+    def admits(current: Dict[str, Any]) -> bool:  # a row ``only_if`` turns away receives no write of this refusal
+        accepted = only_if(current)
+        if not accepted:
+            turned_away.append(True)
+        return accepted
+
     if preparation is not None:
         write_fields.update(admission_outcome="never_admitted", artifact_status=ARTIFACT_STATUS_FAILED,
                             **preparation.refusal_fields())
@@ -149,7 +168,9 @@ def _reject_schedule_task(
 
             # ABI-3: a rejected schedule spent a confirmed zero — stamped
             # under the honest name (the retired alias is read-only).
-            receipt = dict(result=detail, accounted_upper_bound_usd=0.0, **write_fields)
+            receipt = dict(result=detail, accounted_upper_bound_usd=0.0, **write_fields,
+                           **({"_only_if": admits} if only_if is not None else {}),
+                           **({"_guard": guard} if guard is not None and never_admitted else {}))
             if preparation is not None:
                 # Rejoin only the chosen receipt. A closing generation must
                 # still settle it; copy disposal and notice are not retried.
@@ -173,14 +194,20 @@ def _reject_schedule_task(
                 if fallback_message:  # the owner's sentence carries the same fact without the code
                     fallback_message += held if abandoned else unrecorded.format("")
     if refusal_confirmed and never_admitted:
+        from ouroboros.task_id_claims import request_token_of
+
+        # A request whose producer claimed its id (``task_id_claims``) is no proof of what else lies under the id: a
+        # writer that claims nothing may share it. Its folders stay for their ordinary retention; its copy still goes.
+        drive = (lambda: None) if request_token_of(stored) else functools.partial(_remove_refused_child_drive, ctx, tid)
         if preparation is not None:
-            preparation.after_refusal(functools.partial(_remove_refused_child_drive, ctx, tid))
+            preparation.after_refusal(drive)
         else:
             _cleanup_rejected_worktree(tid, result_fields)
-            _remove_refused_child_drive(ctx, tid)
+            if not keep_files:
+                drive()
     # A torn-down notification bus must not escape into the supervisor loop.
     try:
-        if chat_id is not None:
+        if chat_id is not None and (announce_turned_away or refusal_confirmed or not turned_away):
             if delegation_role == "subagent":
                 # The stored result keeps ``detail`` for the parent model; the card
                 # shows the producer's owner sentence when it wrote one (#1403).
@@ -790,6 +817,11 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
         )
     else:
         admitted = ctx.enqueue_task(task)
+    if isinstance(admitted, dict) and admitted.get("_admission_blocked") == "restart_admission_unconfirmed":
+        # Unknown, never a refusal: the restart snapshot that may hold this row was not confirmed, so it may boot.
+        # Nothing is written, disposed or removed; its receipt and token stay for the queue recovery to decide.
+        log.warning("%s: admission unconfirmed by the restart snapshot; custody retained", tid)
+        return
     if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
         r.reject(ctx, tid=tid, chat_id=r.chat_id, delegation_role=delegation_role, parent_id=parent_id,
                  root_task_id=root_task_id, role=role, result_fields=r.result_fields,

@@ -6,7 +6,6 @@ import asyncio
 import functools
 import logging
 import pathlib
-import shutil
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -47,12 +46,9 @@ from ouroboros.gateway.task_archive import (
 from ouroboros.confined_files import root_spellings
 from ouroboros.task_custody import task_artifact_stores
 from ouroboros.headless import (
-    ARTIFACTS_DIR,
     ARTIFACT_STATUS_FAILED,
     ARTIFACT_STATUS_PENDING,
-    HEADLESS_TASKS_DIR,
     prepare_task_drive,
-    task_artifacts_dir,
     write_workspace_preflight_artifact,
 )
 from ouroboros.contracts.task_contract import (
@@ -125,37 +121,24 @@ _RESERVED_METADATA_KEYS = frozenset({
 })
 
 
-def _cleanup_api_admission_attempt(
-    drive_root: pathlib.Path,
-    task_id: str,
-    admission_token: str,
-    child_drive: Optional[pathlib.Path] = None,
-) -> None:
-    """Clean a known pre-enqueue failure while its reservation excludes rivals."""
-    from supervisor import queue
+def _cleanup_api_admission_attempt(drive_root: pathlib.Path, task_id: str, admission_token: str,
+                                   primary: Optional[JSONResponse] = None, retained: Optional[JSONResponse] = None,
+                                   **facts: Any) -> Optional[JSONResponse]:
+    """``task_api_claim.roll_back_admission`` as the HTTP answer: ``primary``, this attempt's own refusal, once the same
+    id may be sent again; once what it staged stays with its recorded refusal, that refusal (``retained`` when its
+    words differ) with ``staging_retained`` added, its status, reason and diagnostics kept; else the rollback's."""
+    import json
 
-    with queue._queue_lock:
-        if (queue.ADMISSION_RESERVATIONS.get(task_id) != admission_token
-                or task_id in queue.RUNNING or any(row.get("id") == task_id for row in queue.PENDING)):
-            return
-        try:
-            if load_task_result(drive_root, task_id, strict=True) is not None:
-                return
-        except Exception:
-            return  # unreadable identity is not proof of our preparation ownership
-    # Keep the reservation through cleanup, but not Q through drive preparation.
-    # Even a raising prepare_task_drive may have created a partial owned drive.
-    from ouroboros.headless import remove_subagent_task_drive
-    try:
-        remove_subagent_task_drive(drive_root, task_id, live=queue.task_settlement_liveness,
-                                   guard=queue.task_settlement_interlock, admission_rollback=True)
-    except Exception:
-        log.warning("Failed to clean child drive for rejected task %s", task_id, exc_info=True)
-    try:
-        shutil.rmtree(task_artifacts_dir(drive_root, task_id, create=False), ignore_errors=True)
-    except Exception:
-        log.warning("Failed to clean admission artifacts for task %s", task_id, exc_info=True)
-    queue.release_task_admission(task_id, admission_token)
+    from supervisor.task_api_claim import STAGING_RETAINED, roll_back_admission
+
+    answer = roll_back_admission(drive_root, task_id, admission_token, **facts)
+    if isinstance(answer, dict):
+        base = retained or primary
+        body = json.loads(bytes(base.body)) if base is not None else {}
+        words = str(body.get("error") or "Task was not scheduled").rstrip().removesuffix(".")
+        return UTF8JSONResponse({**body, **answer, "error": f"{words}. {STAGING_RETAINED}"},
+                                status_code=base.status_code if base is not None else 409)
+    return primary if answer is None else UTF8JSONResponse(answer[1], status_code=answer[0])
 
 
 def _external_subagent_label(body: Dict[str, Any], metadata: Dict[str, Any]) -> bool:
@@ -207,8 +190,10 @@ def _admission_rejection_response(
     child_drive: Optional[pathlib.Path],
     status_code: int = 409,
     detail: str = "Task was not scheduled because its admission fence is closed.",
+    own: Any = (),
 ) -> Optional[JSONResponse]:
-    """Terminalize a typed queue refusal so no scheduled phantom remains."""
+    """Terminalize a typed queue refusal so no scheduled phantom remains. Its cleanup removes of ``own`` only what
+    holds nothing (``task_id_claims.remove_own_paths``); the rest stays keyed by the refusal row, for its retention."""
     if not (isinstance(admitted, dict) and admitted.get("_admission_blocked")):
         return None
     reason_code = str(admitted.get("_admission_blocked") or "admission_fence")
@@ -261,25 +246,17 @@ def _admission_rejection_response(
         result=detail,
         accounted_upper_bound_usd=0.0,
     )
-    if child_drive is not None:
-        from ouroboros.headless import remove_subagent_task_drive
-        from supervisor.queue import task_settlement_interlock, task_settlement_liveness
-        removed = remove_subagent_task_drive(drive_root, task_id, live=task_settlement_liveness,
-                                             guard=task_settlement_interlock, admission_rollback=True)
-        write_task_result(
-            drive_root,
-            task_id,
-            STATUS_FAILED,
-            admission_cleanup={"child_drive_removed": bool(removed)},
-        )
-    try:
+    removed = False  # its record says the drive went only once it is gone (a caller may name no folder as its own)
+    try:  # another writer may have written into what it staged: only what holds nothing goes
         from ouroboros.owner_keep import gate
+        from ouroboros.task_id_claims import remove_own_paths
 
-        with gate(drive_root, task_id, timeout_sec=0) as kept:  # the owner's keep holds a rejected task's artifacts too
-            if not kept:
-                shutil.rmtree(task_artifacts_dir(drive_root, task_id, create=False), ignore_errors=True)
+        with gate(drive_root, task_id, timeout_sec=0) as kept:  # the owner's keep holds a rejected task's files too
+            removed = not kept and remove_own_paths(own) and child_drive is not None and not child_drive.exists()
     except Exception:
-        log.warning("Failed to clean rejected task artifacts for %s", task_id, exc_info=True)
+        log.warning("The rejected task %s keeps what it staged", task_id, exc_info=True)
+    if child_drive is not None:
+        write_task_result(drive_root, task_id, STATUS_FAILED, admission_cleanup={"child_drive_removed": removed})
     return JSONResponse(
         {
             "error": detail,
@@ -299,15 +276,15 @@ def _enqueue_api_task_durably(
     admission_token: str,
     result_fields: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Enqueue under Q, publish outside it, then the admission's receipt under Q again (Q spans memory only).
+    """Enqueue under Q, then publish and write the admission's receipt outside it (Q spans memory only).
 
-    The row is durable before the 202 (the barrier). Its receipt lands on the record as the window left it:
-    the row still queued takes the whole receipt as ``scheduled``; an assignment meanwhile wrote ``running`` and a
-    Stop its terminal, and the receipt keeps that status and every word they wrote (their result text, their
-    metadata), adding only the token and the admission facts the record lacks (the launch and the Stop write
-    under Q, so the read and the merge here see one state). Unknown persistence (a failed or uncertain barrier,
-    a receipt the readback does not show) retains the queue row, its reservation and its resources: unknown is
-    not refusal, and the next generation's restore decides the row.
+    The row is durable before the 202 (the barrier). Its receipt lands on the record as the window left it, in one
+    store write that reads it (``task_api_claim.land_api_receipt``): no row yet takes the whole receipt as
+    ``scheduled``; a start or Stop of this task that wrote first (``running``, a terminal) carries this admission's
+    token, and the receipt keeps that status and every word it wrote, adding only the token and the admission facts
+    the record lacks. Any other record proves nothing and is left as it is. Unknown persistence (a failed or
+    uncertain barrier, a receipt the readback does not show) retains the queue row, its reservation and its
+    resources: unknown is not refusal, and the next generation's restore decides the row.
     """
     from supervisor import queue
 
@@ -319,15 +296,9 @@ def _enqueue_api_task_durably(
     try:
         if queue.publish_queue_snapshot(reason="api_task_create") is not True:  # durable before 202, outside Q
             raise RuntimeError("Queue snapshot persistence was not confirmed")
-        with queue._queue_lock:
-            current = load_task_result(drive_root, task_id, strict=True) or {}
-            # Another writer's word stands (a Stop's "cancelled" text, a launch's "assigned"): the receipt adds its
-            # token and the admission facts the record has not got.
-            receipt = {key: value for key, value in result_fields.items() if key == "api_admission" or key not in current}
-            write_task_result(drive_root, task_id, str(current.get("status") or STATUS_SCHEDULED), **receipt)
-            stored = load_task_result(drive_root, task_id, strict=True) or {}
-            if stored.get("api_admission") != result_fields["api_admission"]:
-                raise RuntimeError("The exact API admission receipt was not persisted")
+        from supervisor.task_api_claim import land_api_receipt
+
+        land_api_receipt(drive_root, task_id, admission_token, result_fields, write_task_result)  # its own record only
     except Exception as exc:
         # An observer may raise AFTER atomic replacement. Read the exact
         # token; unknown persistence retains the queue row and its resources.
@@ -337,6 +308,9 @@ def _enqueue_api_task_durably(
             stored = {}
         if stored.get("api_admission") != result_fields["api_admission"]:
             return {**admitted, "_admission_uncertain": str(exc)}
+    from ouroboros.task_id_claims import retire_provisional_claim
+
+    retire_provisional_claim(drive_root, task_id, admission_token)  # only once its receipt row holds the id
     queue.release_task_admission(task_id, admission_token)
     return admitted
 
@@ -357,8 +331,10 @@ def _complete_api_task_admission(
     child_drive: Optional[pathlib.Path],
     artifacts: List[Dict[str, Any]],
     metadata: Dict[str, Any],
+    caller_named: bool = True,
+    own: Any = (),
 ) -> JSONResponse:
-    """Publish one API admission; retain custody when persistence is unknown."""
+    """Publish one API admission; retain custody when persistence is unknown (a refusal removes only ``own``)."""
     from ouroboros.model_wait import execution_opening
 
     result_fields = {
@@ -398,16 +374,11 @@ def _complete_api_task_admission(
             return JSONResponse({"task_id": task_id, "status": "unconfirmed",
                                  "error": "Task admission persistence is unconfirmed; its resources were retained.",
                                  "detail": admitted["_admission_uncertain"]}, status_code=503)
-        rejection = _admission_rejection_response(
-            admitted,
-            drive_root=drive_root,
-            task_id=task_id,
-            project_id=project_id,
-            workspace_root=workspace_root,
-            child_drive=child_drive,
-        )
-        if rejection is not None:
-            return rejection
+        if admitted.get("_admission_blocked"):
+            return _answer_api_refusal(
+                admitted, drive_root=drive_root, task_id=task_id, admission_token=admission_token,
+                child_drive=child_drive, caller_named=caller_named, own=own, project_id=project_id,
+                workspace_root=workspace_root)
     except Exception as exc:
         # The queue may already have been observed or persisted. No broad
         # rollback can prove non-execution here, and unreadable is not refusal.
@@ -423,20 +394,60 @@ def _complete_api_task_admission(
     })
 
 
-def _task_identity_occupied(drive_root: pathlib.Path, task_id: str) -> bool:
-    """Whether a stored task-result row already owns *task_id*.
+def _answer_api_refusal(
+    admitted: Dict[str, Any], *, drive_root: pathlib.Path, task_id: str, admission_token: str,
+    child_drive: Optional[pathlib.Path], caller_named: bool, own: Any = (), **facts: Any,
+) -> JSONResponse:
+    """A typed queue refusal queued nothing. A recorded one is the answer (its row retires the claim); one that left
+    no record is rolled back like an earlier failure (the id free again only when nothing of it remains, else held
+    by its refusal or, unconfirmed, by its claim, which nothing later frees). The restart barrier's is none (a partial
+    publication may boot that row): unconfirmed, nothing written, removed or released. A rival's keeps all held, a
+    generated id unnamed."""
+    from ouroboros.task_id_claims import retire_provisional_claim
+
+    reason = str(admitted.get("_admission_blocked") or "admission_fence")
+    why = str(admitted.get("_admission_detail") or "")
+    if reason == "restart_admission_unconfirmed":  # before any refusal writer: the booted row may be this task
+        return JSONResponse({"task_id": task_id, "status": "unconfirmed", "reason_code": reason, "error": "Task "
+                             "admission is unconfirmed: the restart snapshot that may hold it was not confirmed. Its "
+                             "resources and task_id stay held; the next start decides the task."}, status_code=503)
+    try:
+        rejection = _admission_rejection_response(
+            admitted, drive_root=drive_root, task_id=task_id, child_drive=child_drive, own=own, **facts)
+    except Exception as exc:
+        if _task_identity_occupied(drive_root, task_id) is not False:
+            raise
+        log.warning("The refusal of task %s was not recorded", task_id, exc_info=True)
+        rejection, why = None, f"{type(exc).__name__}: {exc}"
+    retire_provisional_claim(drive_root, task_id, admission_token)  # only once a refusal row holds the id
+    if rejection is not None and reason not in {"task_id_lookup_failed", "admission_reservation_lost"}:
+        if not caller_named and reason in {"duplicate_task_id", "admission_reservation_owned"}:
+            return json_error("Task was not scheduled: another admission holds the generated task id.", 409,
+                              reason_code=reason)
+        return rejection
+    named = {"task_id": task_id, "reason_code": reason, **({"detail": why} if why else {})}
+    return _cleanup_api_admission_attempt(drive_root, task_id, admission_token, json_error(
+        f"Task was not scheduled ({reason}). Nothing was queued and the attempt was cleaned up: the same task_id may "
+        "be sent again.", 503, **named), json_error(f"Task was not scheduled ({reason}).", 503, **named), refused=True,
+        own=own, caller_named=caller_named, cause=f"{reason}: {why}" if why else reason, reason_code=reason)
+
+
+def _task_identity_occupied(drive_root: pathlib.Path, task_id: str) -> Optional[bool]:
+    """Whether a stored task-result row already owns *task_id*; None when the store cannot answer.
 
     ABI-2: identity collision is an AUTHORITY question, so the probe is the
     strict reader. The fail-soft default would QUARANTINE an inadmissible
     stored row as a side effect of this check and then report "no result",
     letting the endpoint reuse that row's task id; strict raises WITHOUT
     moving anything, and any stored row — admissible or not — keeps its
-    identity occupied. A store that cannot answer is the same unknown.
+    identity occupied. A store that cannot answer is unknown, never free.
     """
     try:
         return load_task_result(drive_root, task_id, strict=True) is not None
-    except (ValueError, StoreError):
+    except ValueError:
         return True
+    except StoreError:
+        return None
 
 
 def _broadcast_task_named(task_id: str, suggested_name: str) -> None:
@@ -516,15 +527,15 @@ def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[
     if ready_error:
         return ready_error
     repo_dir = request_repo_dir(request)
-    try:
-        task_id = validate_task_id(body.get("task_id") or uuid.uuid4().hex[:16])
+    try:  # a generated id is minted where it is claimed (``task_api_claim``)
+        task_id = validate_task_id(body["task_id"]) if body.get("task_id") else ""
         created_at = utc_now_iso() if not body.get("task_id") else ""
     except ValueError as exc:
         return json_error(str(exc), 400)
-    if _task_identity_occupied(drive_root, task_id):
-        return json_error(f"task_id already exists: {task_id}", 409)
-    if (drive_root / HEADLESS_TASKS_DIR / task_id).exists() or (drive_root / ARTIFACTS_DIR / task_id).exists():
-        return json_error(f"task_id already has headless state: {task_id}", 409)
+    if task_id and (known := _task_identity_occupied(drive_root, task_id)) is not False:
+        return json_error(f"task_id already exists: {task_id}", 409) if known else json_error(  # unknown is never free
+            f"task_id already exists or could not be checked; nothing was changed: {task_id}", 409,
+            reason_code="task_id_inspection_failed")
     try:
         workspace_root = _resolve_workspace_root(
             body.get("workspace_root"),
@@ -616,33 +627,29 @@ def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[
     if deadline_at:
         metadata["deadline_at"] = deadline_at
     admission_token = uuid.uuid4().hex
-    from supervisor.queue import reserve_task_admission
+    from ouroboros.task_id_claims import advance_provisional_claim
+    from supervisor.task_api_claim import claim_task_admission, make_staging_folders
 
-    reservation = reserve_task_admission(
-        task_id,
-        admission_token,
-        require_worker_pool=True,
-        drive_root=drive_root,
-    )
-    if reservation.get("status") != "reserved":
-        reason = str(reservation.get("reason") or "admission_reservation_failed")
-        status_code = 503 if reason.startswith("worker_pool_") else 409
-        return json_error(
-            f"task admission refused: {reason}",
-            status_code,
-            task_id=task_id,
-            reason_code=reason,
-            worker_pool_disabled_reason=str(
-                reservation.get("worker_pool_disabled_reason") or ""
-            ),
-        )
+    # Its claim in the store outside Q, then the live host's ownership (memory): nothing is staged before.
+    caller_named = bool(task_id)
+    task_id, refusal = claim_task_admission(drive_root, task_id, admission_token)
+    if refusal is not None:  # its fields may name ``status``, which ``json_error`` reads as the HTTP code
+        return UTF8JSONResponse({"error": refusal[1], **refusal[2]}, status_code=refusal[0])
+    declared, own_drive = _normalize_attachments(body.get("attachments")), effective_drive_mode in {"forked", "empty"}
+    try:  # what its staging writes into is made by this request alone; its rollback removes only that (``own``)
+        own = make_staging_folders(drive_root, task_id, drive=own_drive,
+                                   artifacts=bool(workspace_root) or bool(declared) and not own_drive)
+    except OSError as exc:  # another writer's folder stands under the id, or one could not be made
+        return _cleanup_api_admission_attempt(drive_root, task_id, admission_token, json_exception(exc, 503),
+                                              caller_named=caller_named, cause=exc)
+    rollback = functools.partial(_cleanup_api_admission_attempt, drive_root, task_id, admission_token,
+                                 caller_named=caller_named, own=own)
     try:
         child_drive = prepare_task_drive(
             drive_root, task_id, effective_drive_mode, project_id=_task_project_id
         )
     except Exception as exc:
-        _cleanup_api_admission_attempt(drive_root, task_id, admission_token)
-        return json_exception(exc, 503)
+        return rollback(json_exception(exc, 503), cause=exc)
     # v6.52.0 (P1): stage attachments into the SAME drive the task will read from at
     # runtime — the child drive when forked/empty, else the shared drive (matches the
     # task['drive_root'] set at the end of this handler). The returned manifest renders
@@ -650,16 +657,15 @@ def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[
     effective_drive = child_drive or drive_root
     try:
         attachment_manifest, attachment_error = stage_initial_task_attachments(
-            effective_drive, task_id, _normalize_attachments(body.get("attachments")),
+            effective_drive, task_id, declared,
             # Partial staging is the DEFAULT (В25c); explicit false = atomic admission.
             allow_partial=body.get("allow_partial_attachments") is not False,
         )
     except Exception as exc:
-        _cleanup_api_admission_attempt(drive_root, task_id, admission_token, child_drive)
-        return json_exception(exc, 503)
+        return rollback(json_exception(exc, 503), cause=exc)
     if attachment_error is not None:
-        _cleanup_api_admission_attempt(drive_root, task_id, admission_token, child_drive)
-        return attachment_error
+        return rollback(attachment_error, cause="the attachments were refused",
+                        reason_code="attachment_admission_rejected")
     from ouroboros.artifacts import attachment_manifest_projection
     metadata.setdefault("session_id", str(body.get("session_id") or uuid.uuid4().hex))
     metadata.setdefault("actor_id", str(body.get("actor_id") or "cli")); metadata["work_kind"] = "owner"
@@ -704,10 +710,7 @@ def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[
             attachments=attachment_authority,
         )
     except Exception as exc:
-        _cleanup_api_admission_attempt(
-            drive_root, task_id, admission_token, child_drive
-        )
-        return json_exception(exc, 503)
+        return rollback(json_exception(exc, 503), cause=exc)
     _title, _suggested_name = admission_names(body, description)
     task = {
         "id": task_id,
@@ -756,13 +759,19 @@ def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[
     try:
         task = attach_task_contract(task)
     except Exception as exc:
-        _cleanup_api_admission_attempt(drive_root, task_id, admission_token, child_drive)
-        return json_exception(exc, 503)
+        return rollback(json_exception(exc, 503), cause=exc)
     if child_drive is not None:
         task["child_drive_root"] = str(child_drive)
         task["budget_drive_root"] = str(drive_root)
         metadata["child_drive_root"] = str(child_drive)
         metadata["budget_drive_root"] = str(drive_root)
+    if passed := advance_provisional_claim(drive_root, task_id, admission_token, "handoff"):  # nothing is queued before
+        if passed == "stopped":
+            return rollback(json_error("A Stop of this task_id arrived before the task was queued: nothing was "
+                                       "queued.", 409, task_id=task_id, reason_code="task_id_stop_pending"),
+                            cause="a Stop arrived before it was queued", reason_code="task_id_stop_pending")
+        return rollback(json_error("Task admission could not record its hand-off; nothing was queued.", 503,
+                                   task_id=task_id), cause=f"the hand-off was not recorded ({passed})")
     return _complete_api_task_admission(
         task,
         drive_root=drive_root,
@@ -778,6 +787,7 @@ def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[
         child_drive=child_drive,
         artifacts=artifacts,
         metadata=metadata,
+        caller_named=caller_named, own=own,
     )
 
 
@@ -821,6 +831,8 @@ def _tasks_list_payload(
     """
     if queue_only:
         return {"tasks": [], "queue": _queue_snapshot(drive_root)}
+    from ouroboros.task_id_claims import PROVISIONAL_ROWS, provisional_request
+
     # One shared events-tail parse for every stale-running orphan check in this
     # request (lazy: zero reads when no running row consults it).
     events_index = _EventsTailIndex(drive_root)
@@ -831,7 +843,7 @@ def _tasks_list_payload(
         stored = filtered_list_candidates(drive_root, wanted, limit)
         rows = [effective_task_result(
             drive_root, row, materialize_artifacts=False, _events_index=events_index,
-        ) for row in stored]
+        ) for row in stored if not provisional_request(row)]  # excluded before the limit: pages stay full
         rows = [row for row in rows if str(row.get("status") or "").lower() in wanted]
         rows.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
         if limit is not None:
@@ -840,7 +852,7 @@ def _tasks_list_payload(
                 "queue": _queue_snapshot(drive_root)}
     from ouroboros.task_store import documents_by_ids, newest_ids
     # The unfiltered list keeps the raw-``ts`` slice: the newest ``limit`` stored rows, read whole.
-    ids = newest_ids(drive_root, limit)
+    ids = newest_ids(drive_root, limit, where=f"NOT ({PROVISIONAL_ROWS})")  # the page counts only public rows
     stored = documents_by_ids(drive_root, ids)
     rows = [_compact_list_row(public_task_result(effective_task_result(
         drive_root, stored[task_id], materialize_artifacts=False, _events_index=events_index,
@@ -922,6 +934,10 @@ def _task_get_response(request: Request) -> JSONResponse:
         data = None  # the store cannot answer for this id: unavailable, not absent
     if not data:
         return json_error("task result is unavailable", 503)
+    from ouroboros.task_id_claims import provisional_request
+
+    if provisional_request(data):  # a helper request still being prepared is no task yet
+        return json_error("task not found", 404)
     payload = short_gist(public_task_result(data))
     from ouroboros.gateway.main_decisions import question_display_rooms
     payload["question_rooms"] = question_display_rooms(drive_root, task_id, payload.get("owner_quiz"))
@@ -1134,17 +1150,14 @@ def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str, source: st
     """Record a hard Stop's durable intent before anything is torn down. ``source`` and ``request_origin`` name an
     ingress that is not the app's Stop (a linked Ouroboros cancelling its letter); absent, it is the app's.
 
-    No liveness probe precedes it: a live, queued, or persisted but never
-    admitted target gets its intent first, so an admission racing the click is
-    never torn down without its watchdog-replayable fence. A settled target
-    mints nothing (completion wins) unless live ownership remains — stored
-    completion can precede the worker's exit, and a settled root can still
-    coordinate live descendants — so ownership is asked only once the request
-    found the target settled, and the intent is then requested with
-    ``allow_settled_target``. A cascade needs a recorded tree: over an id with
-    no durable row it is minted only while something of it is live, because
-    the cascade postcondition would settle that phantom tree as cancelled.
-    Returns the intent, or None when there is nothing to stop.
+    No liveness probe precedes it: a live, queued, or persisted but never admitted target gets its intent first, so
+    an admission racing the click is never torn down without its watchdog-replayable fence. A settled target mints
+    nothing (completion wins) unless live ownership remains — stored completion can precede the worker's exit, and a
+    settled root can still coordinate live descendants — so ownership is asked only once the request found the target
+    settled, and the intent is then requested with ``allow_settled_target``. A cascade needs a recorded tree: over an
+    id with no durable row it is minted only while something of it is live, because the cascade postcondition would
+    settle that phantom tree as cancelled; an id a ``POST /api/tasks`` admission holds by its claim alone takes a
+    single Stop (``task_api_claim.admission_claimed``). Returns the intent, or None when there is nothing to stop.
     """
     from supervisor.queue import DRIVE_ROOT, task_has_live_ownership, task_subtree_is_live
 
@@ -1168,7 +1181,13 @@ def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str, source: st
             if custody != CUSTODY_QUEUED:
                 return None
         elif not row and not still_owned():
-            return None
+            from supervisor.task_api_claim import admission_claimed  # an admission's claim alone: a single Stop
+
+            if (claimed := admission_claimed(DRIVE_ROOT, task_id)) is None:
+                raise OSError("the admission claim of the id is unreadable; Stop intent not recorded")
+            if not claimed:
+                return None
+            cascade = claimed == "queued"  # admitted between the reads: the Stop as asked; a claim alone: single
     source = source or ("http_cascade" if cascade else "http_single")
     record = functools.partial(
         request_cancel, DRIVE_ROOT, task_id, source=source, stop_action_id=stop_action_id,
@@ -1189,18 +1208,14 @@ def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str, source: st
 def _drive_stop(task_id: str, intent: Dict[str, Any], *, cascade: bool) -> JSONResponse:
     """Drive a recorded hard Stop through its canonical owner, then answer.
 
-    ``drive_cancel_intent_scope`` re-reads the durable scope right before the
-    teardown, so an intent already widened to a cascade runs as one whatever
-    this request's body said; kills and joins run off the event loop and
-    outside the queue lock, and a large tree makes the caller wait for the
-    kills it asked for. Cancelled answers 200 with the legacy envelope;
-    nothing to cancel — completion won, or an unknown id settled ``not_found``
-    without a task row — is the legacy 404. Any other outcome is judged by the
-    durable intent alone: still open (busy store, unknown ownership, a refused
-    or failed teardown, an unmet cascade postcondition) answers 202
-    ``cancel_state: "pending"``, which the cancel-intent watchdog settles and
-    task detail shows meanwhile; closed by a concurrent settle, 404. A cascade
-    that raised or did not settle is also an owner-visible incident.
+    ``drive_cancel_intent_scope`` re-reads the durable scope right before the teardown, so an intent already widened
+    to a cascade runs as one whatever this request's body said; kills and joins run off the event loop and outside the
+    queue lock, and a large tree makes the caller wait for the kills it asked for. Cancelled answers 200 with the
+    legacy envelope; nothing to cancel — completion won, or an unknown id settled ``not_found`` without a task row —
+    is the legacy 404. Any other outcome is judged by the durable intent alone: still open (busy store, unknown
+    ownership, a refused or failed teardown, an unmet cascade postcondition) answers 202 ``cancel_state: "pending"``,
+    which the cancel-intent watchdog settles and task detail shows meanwhile; closed by a concurrent settle, 404. A
+    cascade that raised or did not settle is also an owner-visible incident.
     """
     from supervisor.queue import (
         CANCEL_ALREADY_SETTLED, CANCEL_CANCELLED, CANCEL_NOT_FOUND, DRIVE_ROOT,
@@ -1241,11 +1256,10 @@ def _drive_stop(task_id: str, intent: Dict[str, Any], *, cascade: bool) -> JSONR
 async def _graceful_stop_acknowledgement(task_id: str, *, cascade: bool, stop_action_id: str = "") -> JSONResponse:
     """S3 graceful ingress: durable finalize intent + IMMEDIATE pending ack.
 
-    The socket is NOT held for the (up to) 120-second episode (§12.2 item 2):
-    the durable intent is the whole owner will, one orchestration pass is
-    kicked off a background thread (the ~20s intent sweep is the crash-safe
-    watchdog replay), and the caller gets the typed pending acknowledgement.
-    Stop-now stays available throughout and HARDENS the same intent.
+    The socket is NOT held for the (up to) 120-second episode (§12.2 item 2): the durable intent is the whole owner
+    will, one orchestration pass is kicked off a background thread (the ~20s intent sweep is the crash-safe watchdog
+    replay), and the caller gets the typed pending acknowledgement. Stop-now stays available throughout and HARDENS
+    the same intent. An id a ``POST /api/tasks`` admission holds by its claim alone takes a single intent (no tree).
     """
     import threading
     from supervisor.followup_policy import StopActionConflict
@@ -1266,7 +1280,13 @@ async def _graceful_stop_acknowledgement(task_id: str, *, cascade: bool, stop_ac
 
     live_own = await asyncio.to_thread(_live_ownership, task_id)
     if not live_own and not await asyncio.to_thread(_live_check, task_id):
-        return json_error("task not found or not active", 404, task_id=task_id)
+        from supervisor.task_api_claim import admission_claimed  # an admission's claim alone: a single Stop
+
+        if not (claimed := await asyncio.to_thread(admission_claimed, _drive_root, task_id)):
+            return json_error("task not found or not active", 404, task_id=task_id) if claimed is False else json_error(
+                "durable stop intent could not be recorded; nothing was requested — retry", 503, task_id=task_id,
+                reason_code="cancel_intent_write_failed")
+        cascade = cascade and claimed == "queued"  # admitted between the reads: the Stop as asked
     observation = await asyncio.to_thread(observe_cancellation_target, _drive_root, task_id, request_origin={"kind": "http_client", "source": "http_graceful"})
     try:
         intent = await asyncio.to_thread(functools.partial(
@@ -1370,7 +1390,7 @@ async def api_task_cancel(request: Request) -> JSONResponse:
         return await _graceful_stop_acknowledgement(task_id, cascade=cascade, stop_action_id=action_id)
     from supervisor.followup_policy import StopActionConflict
 
-    from ouroboros.cancel_intents import CancelIntentProjectionCorrupt
+    from ouroboros.cancel_intents import SCOPE_CASCADE, CancelIntentProjectionCorrupt
 
     try:
         intent = await asyncio.to_thread(functools.partial(
@@ -1403,7 +1423,8 @@ async def api_task_cancel(request: Request) -> JSONResponse:
         )
     if intent is None:
         return json_error("task not found or not active", 404, task_id=task_id)
-    return await asyncio.to_thread(functools.partial(_drive_stop, task_id, intent, cascade=cascade))
+    return await asyncio.to_thread(functools.partial(_drive_stop, task_id, intent,
+                                                     cascade=cascade and intent.get("scope") == SCOPE_CASCADE))
 
 
 async def api_task_resume(request: Request) -> JSONResponse:

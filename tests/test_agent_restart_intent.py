@@ -503,16 +503,23 @@ def test_task_http_consumer_reports_only_durable_admission(runtime, monkeypatch,
         monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", lambda **k: False)
     with TestClient(_app(runtime.root, runtime.root / "repo")) as client:
         result = client.post("/api/tasks", json={"description": "HTTP request B", "source": "web", "chat_id": 1})
-    assert result.status_code == (200 if fault == "none" else 409), result.text
+    assert result.status_code == {"none": 200, "closed": 409, "save_failed": 503}[fault], result.text
     if fault == "none":
         assert result.json()["status"] == "scheduled"
         assert any(row["id"] == result.json()["task_id"] for row in runtime.queue.PENDING)
         runtime.workers.assign_tasks()
         assert not delivered
-    else:
+    elif fault == "closed":
         assert result.json()["status"] == "failed" and not runtime.queue.PENDING
-        assert result.json()["admission"]["reason_code"] == (
-            "restart_intake_closed" if fault == "closed" else "restart_admission_unconfirmed")
+        assert result.json()["admission"]["reason_code"] == "restart_intake_closed"
+    else:  # the barrier's outcome is unknown, never a refusal: the snapshot that may boot the row was not confirmed
+        assert result.json()["status"] == "unconfirmed" and not runtime.queue.PENDING
+        assert result.json()["reason_code"] == "restart_admission_unconfirmed"
+        from ouroboros.task_id_claims import provisional_claim
+        from ouroboros.task_results import load_task_result
+
+        held = result.json()["task_id"]  # nothing written over the id, which its claim still holds
+        assert load_task_result(runtime.root, held) is None and provisional_claim(runtime.root, held)
 
 
 def test_unpublished_ack_and_another_attempt_never_claim_success(runtime, monkeypatch):

@@ -461,6 +461,7 @@ def test_schedule_copies_the_selection_before_queueing_and_the_work_order_names_
 
 @pytest.mark.parametrize("kind", ["agent_session", "api_model"])
 def test_schedule_refuses_unpreparable_and_writing_selections_without_queueing(tmp_path, monkeypatch, kind):
+    from ouroboros.task_results import load_task_result
     from ouroboros.tools import control
 
     ctx, selected, drive = _scheduler(tmp_path, monkeypatch, kind=kind)
@@ -477,7 +478,8 @@ def test_schedule_refuses_unpreparable_and_writing_selections_without_queueing(t
     assert "input_files_unavailable" in protected and '"status": "denied"' in protected, protected
     assert not [row for row in ctx.pending_events if row["type"] == "schedule_subagent"]
     assert not _retained_home(ctx).exists()
-    assert not list((ctx.drive_root / "state" / "headless_tasks").glob("*")), "no child state was left behind"
+    for left in (ctx.drive_root / "state" / "headless_tasks").glob("*"):  # what a refused request staged stays
+        assert load_task_result(ctx.drive_root, left.name)["reason_code"] == "request_unsent", left.name
 
 
 @pytest.mark.parametrize("stage", ["copy", "retained-root"])
@@ -1909,7 +1911,8 @@ def test_ordinary_input_respects_presence_in_the_receiving_workspace(tmp_path, m
     _presence(ctx, *grants, ("active_workspace", "one.md"))
     refused = control._schedule_task(ctx, **options, input_files=[nested_file, inherited_file])
     assert "PRESENCE_RESOURCE_BLOCKED" in refused, refused
-    rows = json.loads(refused.partition("input_files: ")[2])  # each entry keeps its own status
+    rows = json.loads(refused.partition("input_files: ")[2].partition("\n")[0])  # each entry keeps its own status
+    assert "closed as never sent: its staged folder stays" in refused  # the note on what it staged: its own line
     assert [(row["path"], row["status"]) for row in rows] == [("nested/one.md", "checked"), ("other.md", "denied")]
     assert not ctx.pending_events and not _retained_home(ctx).exists()
 

@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 from ouroboros.dialogue_provenance import presence_root_carrier, presence_root_relation
 from ouroboros.tools.control_events import (
+    SAVED_INTENT,
     _emit_and_wait_for_routing,
     _promotion_pool_disabled_from_snapshot,
     _routing_status_root,
@@ -463,6 +464,9 @@ def own_time_on(ctx: Any) -> bool:
         return False
 
 
+_CLAIM_UNCONFIRMED = ("⚠️ PROMOTE_UNCONFIRMED: task id {tid} was minted for this start, but its claim could not be "
+                      "confirmed ({detail}); nothing was emitted. Whether the id holds this start is unknown, so a "
+                      "record read under it is not proof it is this start's. A new start_task creates a NEW task id.")
 _MINE_NOTE = (" Started as your own work (consciousness kind, {level} autonomy): it draws on the consciousness "
               "allowance and own-task cap, and the Off switch stops it.")
 # What a declaration refused by own time, the cap or the allowance may do instead (one sentence for every caller).
@@ -511,6 +515,33 @@ def _focus_start_note(metadata, private, owner_basis) -> str:
                      " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
                      "the Off switch stops it.")
     return ""
+
+
+def _claimed_start(ctx: ToolContext, evt: Dict[str, Any], replyable: bool) -> tuple:
+    """``(task id, (mode, receipt))`` of one start: its id is acquired by the one intent write before emission
+    (``promotion_intent.claim_new_start``), before anything is staged or emitted, and only that owned id is ever
+    shown. A claim that failed with a proof says rejected and names no id; one of unknown outcome says unconfirmed,
+    names the attempted id and never moves the start to another. The emission sends that saved intent."""
+    from ouroboros.promotion_intent import claim_new_start
+    from ouroboros.task_id_claims import TaskIdUnconfirmed, claim_failure_words
+
+    try:
+        saved = claim_new_start(_routing_status_root(ctx), evt)["promotion_intent"]
+    except Exception as exc:
+        log.warning("No task id could be claimed for a new start", exc_info=True)
+        held = isinstance(exc, TaskIdUnconfirmed)
+        if not held:
+            evt.pop("task_id", None)  # an id this start never owned (another record's) rides no receipt
+        words = f"{type(exc).__name__}: {exc}" if held else claim_failure_words(exc)
+        return (str(evt.get("task_id") or "") if held else ""), ("intent_persist_failed", {
+            "status": "unconfirmed" if held else "rejected", "reason": "intent_persist_failed",
+            "detail": f"New work was not emitted: {words}"})
+    scope = SAVED_INTENT.set(saved)
+    try:
+        return evt["task_id"], _emit_and_wait_for_routing(
+            ctx, evt, **({"about_work": evt["task_id"]} if replyable else {}))
+    finally:
+        SAVED_INTENT.reset(scope)
 
 
 def _start_task(
@@ -644,25 +675,23 @@ def _start_task(
                 " (workspace_root named the Ouroboros repository itself; started as an "
                 "ordinary task over it — no separate workspace)"
             )
-    tid = uuid.uuid4().hex[:16]
     routing_token = uuid.uuid4().hex
     disabled_reason = _promotion_pool_disabled_from_snapshot(ctx)
-    if disabled_reason:
+    if disabled_reason:  # no id is minted before its claim, so none is shown
         response = (
-            f"⚠️ PROMOTE_REJECTED: task {tid} was not scheduled "
+            f"⚠️ PROMOTE_REJECTED: the task was not scheduled "
             f"(worker_pool_unavailable: {disabled_reason}){_cause_words('worker_pool_unavailable')}. "
             "No project/workspace admission side effects were started."
         )
         return _finish_swarm_handoff(
             ctx,
-            {"task_id": tid, "routing_token": routing_token, **chosen},
+            {"task_id": "", "routing_token": routing_token, **chosen},
             response,
             status="rejected",
             reason=f"worker_pool_unavailable:{disabled_reason}",
         )
     evt: Dict[str, Any] = {
         "type": "promote_chat_to_task",
-        "task_id": tid,
         "routing_token": routing_token,
         "objective": goal,
         **({"metadata": model_metadata} if model_metadata else {}),
@@ -745,7 +774,7 @@ def _start_task(
     kind_note += (_MINE_NOTE.format(level=evt.get("consciousness_autonomy")) if mine
                   else _focus_start_note(metadata, private, owner_basis))
     replyable = not private and not presence_carrier and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN
-    mode, confirmation = _emit_and_wait_for_routing(ctx, evt, **({"about_work": tid} if replyable else {}))
+    tid, (mode, confirmation) = _claimed_start(ctx, evt, replyable)  # the id its intent claimed, then the emission
     confirmation_status = str(confirmation.get("status") or "unconfirmed")
     reason = str(confirmation.get("reason") or "")
     detail = str(confirmation.get("detail") or "")
@@ -768,6 +797,9 @@ def _start_task(
             ctx._confirmed_reply_works = {*getattr(ctx, "_confirmed_reply_works", ()), tid}
             response += f"\nFor a reply confirming this handoff, use finish_task(about_work={tid!r}, …) so Replies address it."
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")
+    if mode == "intent_persist_failed" and confirmation_status == "unconfirmed":  # nothing emitted; the id stays held
+        return _finish_swarm_handoff(ctx, evt, _CLAIM_UNCONFIRMED.format(tid=tid, detail=f"{reason}: {detail}"),
+                                     status="unconfirmed", reason=reason)
     if confirmation_status in {"rejected", "needs_manual_target", "not_started"}:
         shown_reason = (
             f"{reason}: {disabled_reason}" if disabled_reason else reason
@@ -775,7 +807,7 @@ def _start_task(
         if detail:
             shown_reason = f"{shown_reason}: {detail}" if shown_reason else detail
         response = (
-            f"⚠️ PROMOTE_REJECTED: task {tid} was not scheduled"
+            f"⚠️ PROMOTE_REJECTED: {f'task {tid}' if tid else 'the task'} was not scheduled"
             f"{f' ({shown_reason})' if shown_reason else ''}{_cause_words(reason, mine=bool(mine))}. "
             "Do not report this task as created."
         )

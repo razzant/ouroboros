@@ -15,6 +15,7 @@ import datetime
 import json
 import logging
 import math
+import os
 import pathlib
 import threading
 import time
@@ -58,6 +59,116 @@ log = logging.getLogger(__name__)
 # thread reading one right now.
 _RESTORED: set = set()
 _RESTORING: dict = {}
+# Boot-scoped observation of the original queue_snapshot.json BEFORE any startup publication replaces it:
+# key -> {"read": bool, "ids": frozenset[str], "stopped_tasks": dict[str, dict]}.
+_BOOT_SNAPSHOT_READ: dict = {}
+
+_STOPPED_SAVED_FIELDS = (
+    "chat_id", "title", "suggested_name", "description", "project_id",
+    "workspace_root", "workspace_mode", "memory_mode", "child_drive_root",
+    "budget_drive_root", "delegation_role", "parent_task_id", "root_task_id",
+    "session_id", "actor_id", "metadata", "attachment_manifest",
+    "attachment_manifest_ref", "_admission_owner_token",
+)
+
+
+def reset_boot_snapshot(path: Any) -> None:
+    """Clear the boot-scoped snapshot observation for PATH when a new supervisor generation initializes."""
+    _BOOT_SNAPSHOT_READ.pop(str(pathlib.Path(path).absolute()), None)
+
+
+def _stopped_task_fields(task: dict) -> dict:
+    """Lightweight task fields captured when restore skips an unrecorded saved row under an active Stop."""
+    return {k: copy.deepcopy(task[k]) for k in _STOPPED_SAVED_FIELDS if k in task and task[k] is not None}
+
+
+def _snapshot_lane_ids(saved: Any) -> Optional[frozenset]:
+    """All task ids named in SAVED's pending/running lanes, or None when those lanes are not lists of dicts."""
+    if not isinstance(saved, dict):
+        return None
+    ids: set[str] = set()
+    for lane in ("pending", "running"):
+        rows = saved.get(lane)
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            tid = str(row.get("id") or "")
+            if tid:
+                ids.add(tid)
+            task = row.get("task")
+            if isinstance(task, dict):
+                nested = str(task.get("id") or "")
+                if nested:
+                    ids.add(nested)
+    return frozenset(ids)
+
+
+def _record_boot_snapshot(key: str, *, read: bool, ids: frozenset = frozenset(), stopped_tasks: Optional[dict] = None) -> None:
+    _BOOT_SNAPSHOT_READ[key] = {
+        "read": bool(read),
+        "ids": frozenset(ids) if read else frozenset(),
+        "stopped_tasks": dict(stopped_tasks or {}) if read else {},
+    }
+
+
+def _published_same(key: str) -> bool:
+    publication = _queue().QUEUE_PUBLICATION
+    return publication is not None and str(pathlib.Path(publication[0]).absolute()) == key
+
+
+def original_saved_queue_state(drive_root: Any = None) -> tuple:
+    """Boot-scoped proof of the original saved queue before any startup publication replaced it.
+
+    Returns ``(state, original_ids, stopped_tasks)``:
+    - ``("read", original_ids, stopped_tasks)``: the original snapshot was read whole (or verified absent via
+      ``FileNotFoundError``) this boot before replacement.
+    - ``("unreadable", frozenset(), {})``: the original snapshot could not be read or validated before replacement
+      (including when startup publication already overwrote it without a prior readable restore).
+    - ``("unowned", frozenset(), {})``: restore is still running/pending or a readable saved queue with work sits
+      unrestored on disk.
+    """
+    path = (pathlib.Path(drive_root) / "state" / "queue_snapshot.json") if drive_root is not None else _queue().QUEUE_SNAPSHOT_PATH
+    key = str(path.absolute())
+    if _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes"):
+        return "unowned", frozenset(), {}
+    if _RESTORING.get(key, threading.get_ident()) != threading.get_ident():
+        return "unowned", frozenset(), {}
+    boot = _BOOT_SNAPSHOT_READ.get(key)
+    if boot is not None:
+        if boot["read"]:
+            return "read", boot["ids"], dict(boot["stopped_tasks"])
+        if not _published_same(key):
+            try:
+                if snapshot_names_work(path, require_readable=True):
+                    return "unowned", frozenset(), {}
+            except (OSError, ValueError):
+                pass
+        return "unreadable", frozenset(), {}
+    if key in _RESTORED:
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return "read", frozenset(), {}
+        except (OSError, ValueError):
+            return "unreadable", frozenset(), {}
+        ids = _snapshot_lane_ids(saved)
+        return ("read", ids, {}) if ids is not None else ("unreadable", frozenset(), {})
+    if _published_same(key):
+        return "unreadable", frozenset(), {}
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "read", frozenset(), {}
+    except (OSError, ValueError):
+        return "unreadable", frozenset(), {}
+    ids = _snapshot_lane_ids(saved)
+    if ids is None:
+        return "unreadable", frozenset(), {}
+    if saved.get("pending") or saved.get("running"):
+        return "unowned", frozenset(), {}
+    return "read", ids, {}
 
 
 def _keeps_saved_queue(path: Any, *held: Any, require_readable: bool = False) -> bool:
@@ -982,6 +1093,16 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         # An unreadable snapshot (its marker reads as empty) names no queue row; a direct root queue init's
         # handover names as caught still restores, over an empty, stale queue (the gate below).
         unread = bool(snap.get("_snapshot_invalid") or snap.get("_snapshot_missing"))
+        missing_verified = False
+        if snap.get("_snapshot_missing") and not snap.get("_snapshot_invalid"):
+            try:
+                os.lstat(_queue().QUEUE_SNAPSHOT_PATH)
+            except FileNotFoundError:
+                missing_verified = True
+            except OSError:
+                missing_verified = False
+        original_ids = None if unread else _snapshot_lane_ids(snap)
+        stopped_tasks: dict[str, dict] = {}
         ts = str(queue_stamp(snap, boot=True).get("ts") or "")
         ts_unix = _queue().parse_iso_to_ts(ts)
         # Timestamp validity and freshness gate ORDINARY rows only (#1196): a readable snapshot whose stamp is
@@ -1022,6 +1143,9 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         running_rows = running_rows + envelopes
         direct_caught = _absent_direct_ids(direct_roots.get("task_ids") or [], snapshot_pending, running_rows)
         if unread and not direct_caught and not envelopes:
+            _record_boot_snapshot(
+                key, read=bool(missing_verified and not _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes")),
+            )
             return 0
         snapshot_pending, unseen_pauses, consumed_rows, prior_roots = _retain_snapshot_pending(  # #1183 handoffs
             snapshot_pending, running_rows, stale=stale, certified=ts_unix is not None, direct_caught=direct_caught,
@@ -1047,7 +1171,8 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         if retry := _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes"):
             retry["fences"] = fences
         restored, changed = _restore_retained(snapshot_pending, pending_by_id, fenced_running, fences,
-                                              unseen_pauses, prior_roots, restored, direct_roots.get("incomplete", False))
+                                              unseen_pauses, prior_roots, restored, direct_roots.get("incomplete", False),
+                                              stopped_tasks=stopped_tasks)
         if not any(fences[1:]) and (snapshot_pending or restored or not stale):
             if retry:  # its late pass sweeps these very latches, once their trees are dead in the live queue
                 retry["orphans"] = dict(_queue().BUDGET_ROOT_FENCES)
@@ -1055,16 +1180,24 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
                 sweep_orphaned_budget_fences(_queue().PENDING, _queue().BUDGET_ROOT_FENCES, _queue().DRIVE_ROOT)
         if not unread:
             _RESTORED.add(key)
+        _record_boot_snapshot(
+            key,
+            read=bool((original_ids is not None or missing_verified)
+                      and not _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes")),
+            ids=original_ids or frozenset(),
+            stopped_tasks=stopped_tasks,
+        )
         if changed or normalized:
             _publish_restored()
         return restored
     except Exception:
+        _record_boot_snapshot(key, read=False)
         log.warning("Failed to restore pending queue from snapshot", exc_info=True)
         return 0
 
 
 def _restore_retained(snapshot_pending, pending_by_id, fenced_running, fences, unseen, prior,
-                      restored=0, direct_incomplete=False, *, late=False):
+                      restored=0, direct_incomplete=False, *, late=False, stopped_tasks=None):
     """Admit retained work against the boot fences and current result and cancel custody, whenever its envelope arrives."""
     from ouroboros.budget_pause import RESTORE_REFUSAL_RECORD_UNREADABLE
     from ouroboros.work_stop import continuation_refusal
@@ -1186,6 +1319,8 @@ def _restore_retained(snapshot_pending, pending_by_id, fenced_running, fences, u
                 try:
                     if (existing_status in _TRULY_TERMINAL_STATUSES or existing_status == STATUS_CANCEL_REQUESTED
                             or restore_custody_owns(_queue().DRIVE_ROOT, task_id)):
+                        if not existing and stopped_tasks is not None:
+                            stopped_tasks[task_id] = _stopped_task_fields(task)
                         skipped_terminal += 1
                         continue
                 except Exception:

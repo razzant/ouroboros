@@ -156,9 +156,12 @@ def _is_workspace_task_record(record: Optional[Dict[str, Any]]) -> bool:
     return bool(str(record.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip())
 
 def queued_address(task: Any, existing: Any) -> Dict[str, Any]:
-    """A never-started task's queue address for its first result row; a recorded one stays."""
-    chat = task.get("chat_id") if isinstance(task, dict) else None
-    return {"chat_id": chat} if chat is not None and (existing or {}).get("chat_id") is None else {}
+    """A never-started task's queue address for its first result row, with the token of the admission that queued it
+    (``_admission_owner_token``, what that admission's receipt lands on); a recorded one stays."""
+    task, existing = (task if isinstance(task, dict) else {}), (existing or {})
+    chat, token = task.get("chat_id"), task.get("_admission_owner_token")
+    return {**({"chat_id": chat} if chat is not None and existing.get("chat_id") is None else {}),
+            **({"_admission_owner_token": token} if token and not existing.get("_admission_owner_token") else {})}
 
 def _cancel_result_fields(
     task: Optional[Dict[str, Any]],
@@ -853,6 +856,33 @@ def live_presence_row(row: Any) -> bool:
             and not queue_kept(row))
 
 
+def _fence_provisional_claim(q: Any, task_id: str, intent: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The Stop of an id no row holds, against an admission's provisional claim of it
+    (``task_id_claims.stop_provisional_claim``): None when no claim stands (the caller reads the row again);
+    ``cancelled`` once a claim before its hand-off is fenced (its admission queues nothing and rolls back: no row
+    is written, the Stop alone records it); a released claim (``failed``) while a handed-off admission may be
+    queuing the task or the store does not answer, so the watchdog drives the pending Stop again."""
+    from supervisor.task_lifecycle import _release_intent_claim, _settle_intent
+
+    from ouroboros.task_id_claims import stop_provisional_claim
+
+    try:
+        held = stop_provisional_claim(q.DRIVE_ROOT, task_id)
+    except Exception:
+        log.warning("The provisional claim of %s could not be read for its Stop; the Stop stays pending", task_id,
+                    exc_info=True)
+        held = "unknown"
+    if held == "absent":
+        return None
+    if held == "stopped":
+        _settle_intent(q, task_id, outcome="cancelled",
+                       detail="its admission was stopped before the task was queued", intent=intent)
+        return CANCEL_CANCELLED
+    _release_intent_claim(q, task_id, intent=intent, error=(
+        "its admission may be queuing the task" if held == "handoff" else "its admission claim is unreadable"))
+    return CANCEL_FAILED
+
+
 def _finalize_cancel_intent_on_miss(
     q: Any, task_id: str, *, intent: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -893,6 +923,14 @@ def _finalize_cancel_intent_on_miss(
         legacy_latch = str(existing.get("status") or "") == STATUS_CANCEL_REQUESTED
         if not active and not legacy_latch:
             return CANCEL_NOT_FOUND
+        if not existing:
+            # An admission still preparing this id holds it without a row (#4317): the Stop fences it before its
+            # hand-off, so nothing will be queued, or stays pending once it may be queuing the task. Read before
+            # the row again: a claim is retired only after its receipt row, so absence then a missing row is proof.
+            fenced = _fence_provisional_claim(q, task_id, intent)
+            if fenced is not None:
+                return fenced
+            existing = load_task_result(q.DRIVE_ROOT, task_id) or {}
         if not existing:
             # No durable row ANYWHERE for this id: nothing was ever scheduled
             # under it (a mistyped/stale id reaching the cancel ingress). Settle

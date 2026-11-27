@@ -313,7 +313,8 @@ def test_real_api_settles_only_its_refused_attempt(room, monkeypatch, tmp_path, 
     else:
         assert response.status_code == 409 and record["admission_outcome"] == "never_admitted"
         assert record["reason_code"] == "project_routing_fence"
-        assert not room.pending and not drives[0].exists()
+        # Its drive holds files another writer may share: it stays whole under the refusal row, for its retention.
+        assert not room.pending and drives[0].is_dir() and record["admission_cleanup"] == {"child_drive_removed": False}
         assert room.queue.reserve_task_admission("api-task", "new", drive_root=room.root)["reason"] == "duplicate_task_id"
 
 
@@ -321,9 +322,12 @@ def test_real_api_settles_only_its_refused_attempt(room, monkeypatch, tmp_path, 
 def test_api_unknown_persistence_never_removes_possible_admission(room, monkeypatch, failure):
     from ouroboros.gateway import tasks as api
     from ouroboros.headless import prepare_task_drive
+    from ouroboros.task_id_claims import advance_provisional_claim, claim_provisional_id
 
+    claim_provisional_id(room.root, "api-unknown", "token")
+    assert room.queue.reserve_task_admission("api-unknown", "token", drive_root=room.root)["status"] == "reserved"
     child = prepare_task_drive(room.root, "api-unknown", "empty")
-    room.queue.reserve_task_admission("api-unknown", "token", drive_root=room.root)
+    assert advance_provisional_claim(room.root, "api-unknown", "token", "handoff") == ""
     if failure == "snapshot":
         monkeypatch.setattr(room.queue, "persist_queue_snapshot", lambda **kw: False)
     else:

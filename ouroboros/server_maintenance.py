@@ -1122,6 +1122,7 @@ def _run_periodic_reconcile_sweep(marker: list, stop_event: Any = None, latch: A
         if not _stop_requested(stop_event):
             from supervisor.workspace_preparation import recover_interrupted_preparations
             recover_interrupted_preparations(DATA_DIR, stop=lambda: _stop_requested(stop_event))
+            _reconcile_id_claims(DATA_DIR, stop_event=stop_event)
         if not _stop_requested(stop_event):
             _run_reconcile_prunes(stop_event)
         if _stop_requested(stop_event):
@@ -1449,6 +1450,29 @@ def _startup_worker_pids(drive_root: pathlib.Path) -> set[int] | None:
         return None
 
 
+def _reconcile_id_claims(drive_root: pathlib.Path, *, protected: set[str] | None = None,
+                         stop_event: Any = None) -> list[str]:
+    """Reconcile provisional task-id claims at startup and cheaply in periodic reconcile (O(1) when none exist)."""
+    from ouroboros.task_id_claims import has_provisional_claims, retire_settled_claims
+    from supervisor import queue
+    from supervisor.queue_snapshot import original_saved_queue_state
+
+    if not has_provisional_claims(drive_root):
+        return []
+    stop_cb = lambda: _stop_requested(stop_event)
+    if protected is None:
+        live: set[str] | frozenset | None = queue_owned_task_ids() if queue.owns_live_queue(drive_root) else None
+    else:
+        live = None if "*" in protected else protected
+    state, original_ids, stopped_tasks = original_saved_queue_state(drive_root)
+    if state == "read" and live is not None:
+        return retire_settled_claims(drive_root, queued=live, original_queued=original_ids,
+                                     stopped_tasks=stopped_tasks, stop=stop_cb)
+    if state == "unreadable" and live is not None:
+        return retire_settled_claims(drive_root, queued=live, queue_unreadable=True, stop=stop_cb)
+    return retire_settled_claims(drive_root, queued=None, stop=stop_cb)
+
+
 def _recover_terminal_task_files(drive_root: pathlib.Path, protected: set[str]) -> dict:
     from ouroboros.startup_task_files import recover_terminal_task_files
     return recover_terminal_task_files(drive_root, protected)
@@ -1505,6 +1529,10 @@ def _run_startup_task_recovery(
     except Exception:
         intent_errors.append("promotion_intent_reconcile_failed")
         log.warning("Startup new-work intent reconciliation deferred", exc_info=True)
+    try:  # after queue recovery: id claims that proof now settles (a claim left behind only keeps its id held)
+        _reconcile_id_claims(drive_root, protected=protected)
+    except Exception:
+        log.warning("Startup id-claim retirement deferred", exc_info=True)
     report = {**_recover_terminal_task_files(drive_root, protected), "prior_workers_ended": True}
     report["unresolved"].extend(preparations["retained"] + preparations["uncertain"])
     report["errors"].extend(f"preparation:{item}" for item in preparations["errors"])

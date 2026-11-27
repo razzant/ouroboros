@@ -387,8 +387,12 @@ def test_every_rejection_producer_names_the_refused_childs_selection_live_and_on
         monkeypatch.setattr(prep, "_request_ended", lambda *_: prep.REQUEST_ORPHANED)
         assert prep._recover_unmarked(tmp_path, load_task_result(tmp_path, tid, strict=True)) == "retained"
     elif producer == "preflight_unreadable":
-        monkeypatch.setattr(task_admission, "subagent_schedule_owned", inaccessible)
-        events._handle_schedule_task(event, ctx)
+        read = task_admission.load_task_result
+        with monkeypatch.context() as fault:  # the event's first step reads this id's authority itself (#4317)
+            fault.setattr(task_admission, "subagent_schedule_owned", inaccessible)
+            fault.setattr(task_admission, "load_task_result", lambda root, task_id, *args, **kwargs: (
+                inaccessible() if task_id == tid else read(root, task_id, *args, **kwargs)))
+            events._handle_schedule_task(event, ctx)
     else:
         if "recovered" not in producer:
             claim = prep.PreparationClaim(task_id=tid, ctx=ctx, token=token, generation=None, generation_token="gen",

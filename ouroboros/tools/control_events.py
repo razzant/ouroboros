@@ -14,6 +14,7 @@ import logging
 import os
 import queue
 import threading
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict
 
@@ -31,6 +32,9 @@ log = logging.getLogger(__name__)
 
 
 _SCHEDULE_EMIT_LOCK = threading.RLock()
+# The saved intent of a start whose one intent write already happened (``promotion_intent.claim_new_start``): that
+# emission sends it as saved and prepares nothing again. Call-scoped; the emission's signature is unchanged.
+SAVED_INTENT: ContextVar[Dict[str, Any] | None] = ContextVar("routing_saved_intent", default=None)
 
 
 _PROMOTE_CONFIRM_TIMEOUT_SEC = get_promote_confirm_wait_sec()
@@ -227,17 +231,23 @@ def _emit_and_wait_for_routing(
     evt: Dict[str, Any],
     *, about_work: str = "",
 ) -> tuple[str, Dict[str, Any]]:
-    """Emit one routing event and return only its durable handler outcome."""
+    """Emit one routing event and return only its durable handler outcome. New work's intent is saved first, once:
+    a caller that saved it already (``SAVED_INTENT``) emits its event as saved."""
     from ouroboros.tool_custody import record_control_handoff, forget_unemitted_control
 
     if str(evt.get("type") or "") == "promote_chat_to_task":
-        from ouroboros.promotion_intent import prepare_promotion_intent
+        saved = SAVED_INTENT.get()
+        if saved and saved.get("routing_token") == evt.get("routing_token"):
+            evt.clear()
+            evt.update(saved)  # its one intent write already happened: send it exactly as saved
+        else:
+            from ouroboros.promotion_intent import prepare_promotion_intent
 
-        try:
-            prepare_promotion_intent(_routing_status_root(ctx), evt)
-        except Exception as exc:
-            return "intent_persist_failed", {"status": "rejected", "reason": "intent_persist_failed",
-                                             "detail": f"New work was not emitted: {type(exc).__name__}: {exc}"}
+            try:
+                prepare_promotion_intent(_routing_status_root(ctx), evt)
+            except Exception as exc:
+                return "intent_persist_failed", {"status": "rejected", "reason": "intent_persist_failed",
+                                                 "detail": f"New work was not emitted: {type(exc).__name__}: {exc}"}
     record_control_handoff(evt)
     mode = _emit_control_event(ctx, evt)
     if mode == "serialization_failed":

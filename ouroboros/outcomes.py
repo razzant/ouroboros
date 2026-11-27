@@ -896,7 +896,8 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
                 item_key: item_value
                 for item_key, item_value in value.items()
                 if item_key not in {"result_status", "compat_result_status"}
-                and (parent is not None or item_key not in {"swarm_fanouts", "swarm_fanout_basis", "swarm_fanout_rollup"})
+                and (parent is not None or item_key not in {"swarm_fanouts", "swarm_fanout_basis", "swarm_fanout_rollup",
+                                                            "request_claim"})  # a request's proof token is no reader's
             }
             if parent is None:
                 public = clone

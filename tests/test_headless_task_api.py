@@ -168,13 +168,14 @@ def test_task_api_admission_refusal_is_terminal_not_scheduled_phantom(tmp_path, 
     result = load_task_result(data, "blocked-root")
     assert result["status"] == STATUS_FAILED
     assert result["reason_code"] == "project_routing_fence"
-    assert result["admission_cleanup"] == {"child_drive_removed": True}
-    assert not (data / "state" / "headless_tasks" / "blocked-root").exists()
+    # Another writer may have written into its drive: it stays whole, keyed by the refusal row, for its retention.
+    assert result["admission_cleanup"] == {"child_drive_removed": False}
+    assert (data / "state" / "headless_tasks" / "blocked-root" / "data" / "state" / "state.json").is_file()
 
 
 def test_task_api_publishes_its_admission_outside_q_and_writes_the_receipt_with_the_row_still_queued(tmp_path, monkeypatch):
-    """Q spans memory only: the row is enqueued under Q, the snapshot that makes it durable before the 202 is
-    published outside Q, and the receipt is written under Q again with the row revalidated still queued."""
+    """Q spans memory only: the row is enqueued under Q, and both the snapshot that makes it durable before the 202
+    and the receipt (one store write that reads the record it lands on) are written outside Q."""
     import supervisor.queue as queue
     from ouroboros.task_results import load_task_result
 
@@ -204,14 +205,15 @@ def test_task_api_publishes_its_admission_outside_q_and_writes_the_receipt_with_
     app.state.repo_dir = repo
     response = TestClient(app).post("/api/tasks", json={"description": "durable", "task_id": "outside-q", "memory_mode": "empty"})
     assert response.status_code == 200 and response.json()["status"] == "scheduled"
-    assert seen == [("api_task_create", False, ["outside-q"]), ("receipt", True, ["outside-q"])]
+    assert seen == [("api_task_create", False, ["outside-q"]), ("receipt", False, ["outside-q"])]
     stored = load_task_result(data, "outside-q")
     assert stored["api_admission"]["status"] == "accepted" and stored["result"] == "Task accepted and durably scheduled."
 
 
-def _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, task_id, write_in_window):
+def _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, task_id, write_in_window, *, status=200):
     """POST one API task whose durability barrier (outside Q) finds ``write_in_window`` already written the record:
-    a Stop's terminal or a launch's ``running`` landed between the enqueue and the receipt."""
+    a Stop's terminal or a launch's ``running`` landed between the enqueue and the receipt. As the queue's own Stop
+    and tick do, ``write_in_window`` moves the task out of PENDING under Q before it writes (``take``)."""
     import supervisor.queue as queue
 
     repo = tmp_path / "repo"
@@ -222,8 +224,14 @@ def _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, task_id, wr
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(queue, "RUNNING", {})
 
+    def take():  # the captured row, as the Stop of a queued task and the tick's assignment take it under Q
+        with queue._queue_lock:
+            [task] = [row for row in queue.PENDING if row.get("id") == task_id]
+            queue.PENDING.remove(task)
+            return task
+
     def persist(reason=""):
-        write_in_window(data)
+        write_in_window(data, take)
         return True
 
     monkeypatch.setattr(queue, "persist_queue_snapshot", persist)
@@ -231,20 +239,23 @@ def _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, task_id, wr
     app.state.drive_root = data
     app.state.repo_dir = repo
     response = TestClient(app).post("/api/tasks", json={"description": "durable", "task_id": task_id, "memory_mode": "empty"})
-    assert response.status_code == 200
-    return data
+    assert response.status_code == status, response.text
+    return data, response.json()
 
 
 def test_a_stop_in_the_barrier_window_keeps_its_terminal_words_and_the_receipt_writes_only_its_token(tmp_path, monkeypatch):
     """Review F5: a task created and stopped inside the barrier window ends ``cancelled`` with the Stop's own result
     text, never "accepted"; the receipt adds the token the readback needs and nothing the Stop wrote."""
     from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.cancel_publication import _cancel_result_fields
 
-    def stop(data):
-        write_task_result(data, "stopped-in-window", "cancelled", result="Task cancelled by user/agent request.",
-                          metadata={"stopped_by": "owner"}, artifact_status="")
+    def stop(data, take):  # captured, then its verdict written with the fields every queued cancel writes
+        task = take()
+        write_task_result(data, "stopped-in-window", "cancelled", metadata={"stopped_by": "owner"}, **{
+            **_cancel_result_fields(task, existing=load_task_result(data, "stopped-in-window") or {},
+                                    result="Task cancelled by user/agent request."), "artifact_status": ""})
 
-    data = _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, "stopped-in-window", stop)
+    data, _answer = _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, "stopped-in-window", stop)
     stored = load_task_result(data, "stopped-in-window")
     assert stored["status"] == "cancelled" and stored["result"] == "Task cancelled by user/agent request."
     assert stored["metadata"] == {"stopped_by": "owner"} and stored["artifact_status"] == ""
@@ -255,16 +266,120 @@ def test_a_launch_in_the_barrier_window_keeps_its_words_and_still_gets_the_admis
     """The receipt never overwrites another writer's word, and never drops an admission fact the record lacks: a
     row the tick assigned meanwhile (the mirror's ``running`` and "Assigned to a worker.") keeps both and gains the
     admission's facts no other writer records."""
-    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_results import load_task_result
+    from supervisor.worker_assignment import _mirror_assigned_running_status
 
-    def launch(data):
-        write_task_result(data, "launched-in-window", "running", result="Assigned to a worker.", description="durable")
+    def launch(data, take):
+        import supervisor.queue as queue
 
-    data = _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, "launched-in-window", launch)
+        task = take()
+        queue.RUNNING["launched-in-window"] = {"task": task}  # assigned under Q, then the tick's own mirror written
+        _mirror_assigned_running_status(task)
+
+    data, _answer = _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, "launched-in-window", launch)
     stored = load_task_result(data, "launched-in-window")
     assert stored["status"] == "running" and stored["result"] == "Assigned to a worker."
     assert stored["memory_mode"] == "empty" and stored["allowed_resources"] == {} and "deadline_at" in stored
     assert stored["api_admission"]["status"] == "accepted"
+
+
+@pytest.mark.parametrize("window", ["still_queued", "left_the_queue", "another_admissions_token"])
+def test_a_record_a_non_claiming_writer_put_under_the_id_in_the_barrier_window_takes_no_receipt(
+        tmp_path, monkeypatch, window):
+    """A record without this admission's token proves nothing of it, whatever its shape and wherever its task is:
+    the answer is unknown, never success, and the record is left exactly as that writer wrote it."""
+    from ouroboros.task_results import load_task_result, write_task_result
+    from tests._store_shared import result_signature
+
+    written = {}
+
+    def foreign(data, take):
+        if window != "still_queued":
+            take()
+        write_task_result(data, "foreign-in-window", "running", result="another producer's work",
+                          **({"_admission_owner_token": "theirs"} if window == "another_admissions_token" else {}))
+        written["signature"] = result_signature(data, "foreign-in-window")
+
+    data, answer = _post_with_a_writer_in_the_barrier_window(tmp_path, monkeypatch, "foreign-in-window", foreign,
+                                                             status=503)
+    assert answer["status"] == "unconfirmed", answer
+    assert result_signature(data, "foreign-in-window") == written["signature"]
+    assert "api_admission" not in load_task_result(data, "foreign-in-window")
+
+
+def test_a_stop_before_the_hand_off_stays_the_answer_and_what_was_staged_stays_with_its_refusal(tmp_path, monkeypatch):
+    import supervisor.queue as queue
+    from ouroboros.headless import task_state_dir
+    from ouroboros.task_id_claims import provisional_claim, stop_provisional_claim
+    from ouroboros.task_results import load_task_result
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = tmp_path / "data"
+    (data / "memory").mkdir(parents=True)
+    monkeypatch.setattr(queue, "DRIVE_ROOT", data)
+    monkeypatch.setattr(queue, "PENDING", [])
+    monkeypatch.setattr(queue, "RUNNING", {})
+    monkeypatch.setattr(queue, "ADMISSION_RESERVATIONS", {})
+    real = tasks.attach_task_contract
+
+    def stopped_while_staging(task):  # the Stop's own fence of the claim (``cancel_publication``) lands here
+        assert stop_provisional_claim(data, "stopped-early") == "stopped"
+        return real(task)
+
+    monkeypatch.setattr(tasks, "attach_task_contract", stopped_while_staging)
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    app.state.drive_root = data
+    app.state.repo_dir = repo
+    response = TestClient(app).post("/api/tasks", json={"description": "x", "task_id": "stopped-early",
+                                                        "memory_mode": "empty"})
+    answer = response.json()
+    assert response.status_code == 409 and answer["reason_code"] == "task_id_stop_pending", response.text
+    assert answer["staging_retained"] is True and not queue.PENDING  # a separate fact, beside the Stop's answer
+    assert task_state_dir(data, "stopped-early").is_dir()  # its drive's files stay
+    row = load_task_result(data, "stopped-early")
+    assert row["status"] == "failed" and row["reason_code"] == "task_id_stop_pending"
+    assert provisional_claim(data, "stopped-early") is None and "stopped-early" not in queue.ADMISSION_RESERVATIONS
+
+
+def test_every_public_stop_finds_an_id_held_by_its_claim_alone_and_an_absent_id_stays_404(tmp_path, monkeypatch):
+    """Single, cascade and graceful Stops of an id a ``POST /api/tasks`` admission holds by its provisional claim
+    alone record a single Stop (nothing of it is queued: no tree), through the real handler; an id nothing holds
+    stays 404."""
+    import supervisor.queue as queue
+    from supervisor import task_lifecycle, workers
+
+    from ouroboros.cancel_intents import active_intent
+    from ouroboros.gateway.tasks import api_task_cancel
+    from ouroboros.task_id_claims import claim_provisional_id, provisional_claim
+
+    data = tmp_path / "data"
+    (data / "memory").mkdir(parents=True)
+    monkeypatch.setattr(queue, "DRIVE_ROOT", data)
+    monkeypatch.setattr(queue, "PENDING", [])
+    monkeypatch.setattr(queue, "RUNNING", {}, raising=False)
+    monkeypatch.setattr(workers, "WORKERS", {}, raising=False)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
+    monkeypatch.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {}, raising=False)
+    monkeypatch.setattr(task_lifecycle, "_ACTIVE_CASCADE_FENCES", {}, raising=False)
+    begun = []
+    monkeypatch.setattr("supervisor.owner_stop.begin_graceful_stop", begun.append)
+    app = Starlette(routes=[Route("/api/tasks/{task_id}/cancel", endpoint=api_task_cancel, methods=["POST"])])
+    app.state.drive_root = data
+    client = TestClient(app)
+    for tid, body, code in (("claimonly1", {}, 200), ("claimonly2", {"cascade": True}, 200),
+                            ("claimonly3", {"stop_policy": "finalize_then_cancel"}, 202),
+                            ("claimonly4", {"cascade": True, "stop_policy": "finalize_then_cancel"}, 202)):
+        claim_provisional_id(data, tid, "token-" + tid)
+        answer = client.post(f"/api/tasks/{tid}/cancel", json=body)
+        assert answer.status_code == code and "cascade" not in answer.json(), (tid, answer.text)
+        if code == 200:  # driven at once: its admission is fenced before anything is queued
+            assert provisional_claim(data, tid)["phase"] == "stopped"
+        else:  # graceful: its intent stands, single, and the episode starts
+            intent = active_intent(data, tid, strict=True)
+            assert intent and intent.get("scope") != "cascade" and begun[-1] == tid
+        assert client.post("/api/tasks/absent00/cancel", json=body).status_code == 404, body
+    assert active_intent(data, "absent00", strict=True) is None
 
 
 def test_task_api_retains_possible_admission_when_snapshot_is_unconfirmed(tmp_path, monkeypatch):

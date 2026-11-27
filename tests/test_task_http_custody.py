@@ -120,9 +120,10 @@ def test_cancelled_create_settles_original_admission(tmp_path, monkeypatch, mode
     asyncio.run(_cancel_while_held(
         lambda: tasks.api_tasks_create(request), entered, release, mode, held_assertion,
     ))
-    assert finished.is_set() and not reservations
+    assert finished.is_set()
     row = load_task_result(data, "custody")
     if outcome == "accepted":
+        assert not reservations
         assert len(pending) == 1 and pending[0]["id"] == "custody"
         assert snapshots[0][0] == "api_task_create" and len(snapshots[0][1]) == 1
         assert row["status"] == "scheduled" and child.is_dir()
@@ -132,19 +133,26 @@ def test_cancelled_create_settles_original_admission(tmp_path, monkeypatch, mode
         assert all(pathlib.Path(item["abs_path"]).read_text(encoding="utf-8") == "complete input" for item in manifest)
     elif outcome == "snapshot_failure":
         # Cancellation cannot turn unknown persistence into a safe rollback.
-        assert [item["id"] for item in pending] == ["custody"] and child.is_dir()
+        assert not reservations and [item["id"] for item in pending] == ["custody"] and child.is_dir()
         assert row is None
         assert [reason for reason, _ in snapshots] == ["api_task_create"]
         assert all(pathlib.Path(item["abs_path"]).read_text(encoding="utf-8") == "complete input"
                    for item in captured if item.get("status") == "staged")
         assert queue.reserve_task_admission("custody", "other", drive_root=data)["reason"] == "duplicate_task_id"
-    else:
-        assert not pending and not child.exists()
+    else:  # its drive holds files another writer may share: it stays whole, keyed by its own recorded refusal
+        assert not pending and not reservations and child.is_dir()  # only its own reservation, once that is written
         assert not artifacts.task_artifacts_dir(data, "custody", create=False).exists()
         staged = [item for item in captured if item.get("status") == "staged"]
         assert staged
-        assert all(not pathlib.Path(item["abs_path"]).exists() for item in staged)
-        assert row is None and not snapshots
+        if outcome == "atomic_rejection":  # the atomic refusal took back the copies it staged itself
+            assert all(not pathlib.Path(item["abs_path"]).exists() for item in staged)
+        else:
+            assert all(pathlib.Path(item["abs_path"]).read_text(encoding="utf-8") == "complete input"
+                       for item in staged)
+        assert row["status"] == "failed" and row["admission_outcome"] == "never_admitted" and not snapshots
+        assert row["admission_cleanup"] == {"staging_retained": True}
+        assert row["reason_code"] == ("attachment_admission_rejected" if outcome == "atomic_rejection"
+                                      else "admission_preparation_failed")
 
 
 @pytest.mark.parametrize(("surface", "mode"), [

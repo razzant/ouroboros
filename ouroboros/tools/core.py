@@ -1230,6 +1230,7 @@ def _forward_to_worker(
     from ouroboros.peer_roster import (
         durable_descendant_of, independent_message_target, peer_contribution_admission,
     )
+    from ouroboros.task_id_claims import public_row
     from ouroboros.task_results import STATUS_REQUESTED, STATUS_RUNNING, STATUS_SCHEDULED, validate_task_id
     from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
 
@@ -1245,7 +1246,8 @@ def _forward_to_worker(
             "message (it is never truncated or spilled to an artifact).")))
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     status_drive_root = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-    data = load_effective_task_result(status_drive_root, tid)
+    # A helper's claim still being prepared is no task yet: no drive is bound to write to (``public_row``).
+    data = public_row(load_effective_task_result(status_drive_root, tid))
     status = str(data.get("status") or "").lower()
     if not data:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(f"⚠️ TASK_NOT_FOUND: task {tid} is not registered.")))

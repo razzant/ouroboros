@@ -22,6 +22,7 @@ from ouroboros.chat_chain import _FULL_DIGEST, _row_chat_id, format_address, row
 from ouroboros.chat_uploads import row_attachments, upload_specs
 from ouroboros.context_budget import OWNER_WORDS_KIND
 from ouroboros.safety_evidence import CLOSED_STAMP, UNKINDED_STAMP
+from ouroboros.task_id_claims import provisional_request
 
 KIND_RELAY = "relay_entry"
 # A carried row's ``went_to`` when no work was delivered it: a head of the room routed it. A typed marker, never a
@@ -1441,8 +1442,8 @@ def carry_to_members(ctx, *, delivered: bool) -> None:
         census = (find_child_tasks(root, parent_task_id=task_id, scope="direct", materialize_artifacts=False) if helper
                   else find_child_tasks(root, root_task_id=str(metadata.get("root_task_id") or task_id),
                                         exclude_task_id=task_id, materialize_artifacts=False))
-        live = {str(row.get("task_id") or ""): row for row in census
-                if str(row.get("task_id") or "") and str(row.get("status") or "") not in FINAL_STATUSES}
+        live = {str(row.get("task_id") or ""): row for row in census if str(row.get("task_id") or "")
+                and str(row.get("status") or "") not in FINAL_STATUSES and not provisional_request(row)}
         rows = _rows_to_carry(ctx, root) if live and (due or set(live) != memo["members"]) else []
         if not rows:
             memo.update(members=set(live), failed=False)
@@ -1487,9 +1488,9 @@ def carry_at_receipt(drive_root, work_id: str, quotes: list, *, went_to: str = "
     except Exception:
         log.warning("Carriage at receipt: the members of %s could not be read; its drain carries", tree, exc_info=True)
         census = []
-    for member in census:
+    for member in census:  # a helper still being prepared has no mailbox: its drain carries once it is sent
         tid = str(member.get("task_id") or "")
-        if tid and str(member.get("status") or "") not in FINAL_STATUSES:
+        if tid and str(member.get("status") or "") not in FINAL_STATUSES and not provisional_request(member):
             try:
                 _carry_to_member(drive_root, _task_drive_for_task(member, tid, canonical=drive_root), tid, member, rows,
                                  tree)

@@ -574,6 +574,7 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     # letter's ceiling and billing group (peer_letters.separate_work_refusal); the owner starts it.
     "letter_work_starts_no_separate_root": "a letter's work cannot start separate work",
     "promotion_persistence_failed": "the task record could not be saved",
+    "intent_persist_failed": "the task record could not be saved",
     "routing_receipt_persist_failed": "the receipt could not be saved",
     "routing_annotation_persist_failed": "the receipt could not be saved",
     "source_continuation_publish_failed": "the source hand-off could not be published",

@@ -245,6 +245,16 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "deep_self_review_error": (False, "deep_self_review.py review-stage error (and agent.py's exception branch) on a review task; never a truncation"),
     "worker_pool_unavailable": (False, "gateway/tasks.py managed-task admission refusal"),
     "worker_pool_state_unavailable": (False, "gateway/tasks.py fail-closed admission inspection"),
+    "task_id_inspection_failed": (False, "gateway/tasks.py pre-admission refusal: a caller's id could not be checked"),
+    "task_id_stop_pending": (False, "gateway/tasks.py pre-admission refusal: a Stop of the id arrived before its hand-off"),
+    "request_unsent": (
+        False,
+        "task_id_claims.close_unsent_claim: a helper request that was never sent closes never_admitted; no attempt ran",
+    ),
+    "saved_queue_unreadable": (
+        False,
+        "task_api_claim.record_unknown_handoff: startup hand-off whose original saved queue was unreadable; unknown admission, not execution truncation",
+    ),
     "attachment_admission_rejected": (
         False,
         "gateway/_helpers.py pre-task attachment admission refusal; never a task terminal",

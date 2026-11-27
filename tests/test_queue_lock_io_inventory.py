@@ -37,11 +37,6 @@ ALLOWED: Dict[Site, str] = {
     ("supervisor/continuation_admission.py in admit_continuation", "store.write"):
         "the successor's receipt (write_task_result) is written under the second hold with the row revalidated still "
         "queued, so a replay under Q never meets a row without it and a Stop's record is never written over",
-    ("ouroboros/gateway/tasks.py in _enqueue_api_task_durably", "store.read"):
-        "the API admission's receipt merges over the record as the window left it (an assignment's running, a Stop's "
-        "terminal): the read of that record and the readback of the exact receipt, under the second hold",
-    ("ouroboros/gateway/tasks.py in _enqueue_api_task_durably", "store.write"):
-        "the API admission's receipt itself, under the same hold (the launch and the Stop write under Q: one state)",
     ("supervisor/queue.py in enqueue_task", "open"):
         "the admission's pending-placement read (projects_registry._load_bindings) inside enqueue_task's own hold: "
         "one transaction with the placement it decides; a residual named in the journal, not a barrier",
@@ -54,7 +49,8 @@ ALLOWED: Dict[Site, str] = {
         "one state for the replay); its barrier runs outside Q; a residual named in the journal",
     ("supervisor/task_admission.py in reserve_task_admission", "store.read"):
         "the reservation reads the task's stored record under its own hold (task_admission.py: not this item's file; "
-        "the hunk that moves the read before the hold is in the journal)",
+        "the hunk that moves the read before the hold is in the journal); the task API asks without it, its decisive "
+        "store claim following outside Q",
     # Known debt: Phase B of a drive's settlement (task_custody.settle_child_drive) runs under Q, the ownership
     # interlock that keeps any occupant from being admitted before the move; one hold reached 95 s (sprint S8), and
     # its steps' seconds now ride the settlement pass's report (``under_q_sec``) until the work leaves Q.
@@ -242,8 +238,11 @@ def _drive_restart_pending_admission(tmp_path, monkeypatch) -> None:
 def _drive_api_task(tmp_path, monkeypatch) -> None:
     from ouroboros.gateway.tasks import _enqueue_api_task_durably
 
+    from ouroboros.task_id_claims import claim_provisional_id
+
     data = tmp_path / "data"
     _own_queue(data, monkeypatch)
+    claim_provisional_id(data, "api-audit", "token-1")  # the API's claim, before anything of it is staged
     assert queue.reserve_task_admission("api-audit", "token-1", drive_root=data)["status"] == "reserved"
     task = {"id": "api-audit", "type": "task", "chat_id": 0, "text": "audit", "_admission_token": "token-1",
             "metadata": {}, "description": "audit"}

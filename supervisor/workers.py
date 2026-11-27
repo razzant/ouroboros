@@ -620,10 +620,8 @@ def _stage_promoted_initial_attachments(
         # would start with none of its declared material).
         if attachment_manifest_all_rejected(manifest) and not historical:
             remove_staged_attachments(manifest)
-            from ouroboros.headless import remove_subagent_task_drive
-            from supervisor.queue import task_settlement_interlock, task_settlement_liveness
-            remove_subagent_task_drive(DRIVE_ROOT, tid, live=task_settlement_liveness,
-                                       guard=task_settlement_interlock, admission_rollback=True)
+            from supervisor.worker_promotion import remove_refused_start_drive
+            remove_refused_start_drive(evt, DRIVE_ROOT, tid)
             return manifest, {
                 "status": "needs_manual_target",
                 "reason": "attachment_admission_rejected",

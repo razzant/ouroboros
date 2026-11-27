@@ -96,9 +96,6 @@ TERMINAL_WRITERS = {
     # preserves the current lifecycle; "running" is the writer's placeholder.
     ('ouroboros/delegate_terminal.py::refresh_disposed_reconciliation', '"running"'): 'dynamic',
     ('ouroboros/gateway/tasks.py::_admission_rejection_response', 'STATUS_FAILED'): 'terminal',
-    # The API admission receipt lands after the snapshot barrier, outside the first queue-lock section: it keeps
-    # the status the window left (a launch's running, a Stop's terminal) and adds only its token and admission facts.
-    ('ouroboros/gateway/tasks.py::_enqueue_api_task_durably', 'str(current.get("status") or STATUS_SCHEDULED)'): 'dynamic',
     # #2753 native capture facts (a capture gap, received files, a capture effect) are written with the stored
     # row's own status; their field projectors add only the capture facts and never end a task.
     ('ouroboros/headless.py::_native_capture_gap', 'row["status"]'): 'dynamic',
@@ -168,6 +165,9 @@ TERMINAL_WRITERS = {
     # projector; a changed attempt basis aborts, and they never originate a transition.
     ('ouroboros/task_custody.py::_write_custody_fields', 'str(observed.get("status") or "")'): 'dynamic',
     ('ouroboros/tools/control_delegation.py::record_depth_limit_refusal', 'STATUS_FAILED'): 'terminal',
+    # #4317: a never-sent helper request whose retained selection is keyed by its record closes that claimed row
+    # (never admitted) instead of deleting it; only its own claimed row, under the cancel lock, no pending Stop.
+    ('ouroboros/task_id_claims.py::close_unsent_claim', 'STATUS_FAILED'): 'terminal',
     # Recovery of a dead attempt whose answer the host already holds (owed/delivered/unreadable
     # registry evidence): the attempt is finalized from the outbox's bytes as failed /
     # infra_failed / finalization_incomplete instead of re-running the prompt (both the
@@ -190,6 +190,9 @@ TERMINAL_WRITERS = {
     # Accepted pending restore refusal; retain custody for retry until its terminal is durable.
     ('supervisor/task_admission.py::restore_invalid_depth_admission', 'STATUS_FAILED'): 'terminal',
     ('supervisor/task_admission.py::terminalize_invalid_depth_restore', 'STATUS_FAILED'): 'terminal',
+    # Boot hand-off whose original saved queue was unreadable before startup publication: honest unknown failure,
+    # keeping staged files and ID ownership without writing never_admitted.
+    ('supervisor/task_api_claim.py::record_unknown_handoff', 'STATUS_FAILED'): 'terminal',
     ('supervisor/task_lifecycle.py::_finish_captured_pending', 'STATUS_CANCELLED'): 'terminal',
     ('supervisor/task_lifecycle.py::_finish_captured_running', 'STATUS_CANCELLED'): 'terminal',
     ('supervisor/task_reaper.py::reap_timed_out_task', 'STATUS_FAILED'): 'terminal',
@@ -246,6 +249,12 @@ NO_DELIVERABLE_LANES = {
         'an invalid-depth pending row is terminalized before it ever ran',
     'ouroboros/tools/control_delegation.py::record_depth_limit_refusal':
         'a depth-refused delegation never became a task with an answer',
+    'ouroboros/task_id_claims.py::close_unsent_claim':
+        'a helper request that was never sent never became a task with an answer',
+    'supervisor/cancel_publication.py::_fence_provisional_claim':
+        'a Stop fenced an admission before its hand-off: no task row was written, nothing ran, no answer exists',
+    'supervisor/task_api_claim.py::record_unknown_handoff':
+        'startup hand-off with unreadable original saved queue: admission outcome unknown, no answer exists',
 }
 
 _OWE_CALLS = ("register_final_answer_owed", "register_pending_delivery",

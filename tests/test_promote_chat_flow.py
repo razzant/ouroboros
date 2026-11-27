@@ -2882,3 +2882,40 @@ def test_host_initiated_refusal_row_names_an_untitled_act_at_a_word_boundary():
     assert objective.startswith(title[:-1]) and objective[len(title) - 1] == " "
     assert clause == "Not started: the skill repair request was invalid"
     assert kw["role"] == "system" and kw["system_type"] == "task_not_started" and kw["task_id"] == "t1"
+
+
+@pytest.mark.parametrize("blocked", ["worker_pool_unavailable", "restart_admission_unconfirmed"])
+def test_a_start_whose_id_it_claimed_keeps_what_lies_under_it_and_an_unconfirmed_barrier_refuses_nothing(
+        swarm_host, blocked):
+    """start_task claims its id before staging (``promotion_intent.claim_new_start``): a refusal writes its own
+    record and leaves the folders under the id, which a writer that claims nothing may share; the restart barrier's
+    unconfirmed outcome is no refusal at all (the snapshot that may boot the row was not confirmed)."""
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.control import _start_task
+    from supervisor.events import _handle_promote_chat_to_task
+
+    host = swarm_host
+    seen = {}
+
+    def enqueue(task):
+        foreign = host.root / "task_drives" / task["id"] / "foreign.txt"
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_bytes(b"written under this id by a writer that claims nothing")
+        seen.update(task_id=task["id"], foreign=foreign)
+        return {**task, "_admission_blocked": blocked, "_admission_detail": "a synthetic queue answer",
+                **({"_admission_never_admitted": True} if blocked != "restart_admission_unconfirmed" else {})}
+
+    host.monkeypatch.setattr(host.ctx, "enqueue_task", enqueue)
+    ctx = types.SimpleNamespace(current_chat_id=1, drive_root=host.root, task_metadata={}, pending_events=[],
+                                event_queue=types.SimpleNamespace(
+                                    put_nowait=lambda event: _handle_promote_chat_to_task(event, host.ctx)))
+    result = _start_task(ctx, "Synthetic start", title="Synthetic start", workspace="none")
+    assert not result.startswith("OK: task"), result
+    row = load_task_result(host.root, seen["task_id"])
+    assert seen["foreign"].read_bytes() == b"written under this id by a writer that claims nothing"
+    assert not host.pending
+    if blocked == "restart_admission_unconfirmed":
+        assert row["status"] == "requested" and row.get("admission_outcome") != "never_admitted", row
+    else:
+        assert row["status"] == "failed" and row["admission_outcome"] == "never_admitted", row
+        assert row["promotion_intent"]["task_id_claimed"] is True

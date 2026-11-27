@@ -171,6 +171,7 @@ def _mirror_assigned_running_status(task: Dict[str, Any]) -> None:
             "role": task.get("role"),
             "description": task.get("description"),
             "objective": task.get("objective") or task.get("description"),
+            "_admission_owner_token": task.get("_admission_owner_token"),  # what its admission's receipt lands on
         }
         if _is_subagent:
             from ouroboros.tools.control_delegation import stamp_task_assignment_depth

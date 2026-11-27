@@ -23,6 +23,7 @@ from ouroboros.task_results import (
     STATUS_REJECTED_DUPLICATE,
     validate_task_id,
 )
+from ouroboros.task_id_claims import PROVISIONAL_ROWS, public_row
 from ouroboros.task_status import (
     SETTLED_STATUSES,
     load_effective_task_result,
@@ -311,7 +312,7 @@ def _get_task_result(
         )
         if refusal:
             return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
-    data = load_effective_task_result(status_drive_root, task_id)
+    data = public_row(load_effective_task_result(status_drive_root, task_id))  # a claim being prepared: no task
     if scoped:
         from ouroboros.presence_authority import presence_effective_refusal
 
@@ -704,15 +705,23 @@ def _wait_for_task(
                                   margin=NESTED_SETTLEMENT_MARGIN_SEC)
     status_drive_root = _status_root(ctx)
     with in_slot_wait(ctx, timeout, "tasks", task_ids=[tid]):
-        waited = wait_for_effective_tasks(
+        waited = _public_wait(wait_for_effective_tasks(
             status_drive_root, [tid], timeout_sec=timeout,
             terminal_probe=_terminal_probe(ctx, [tid]),
             on_poll=_wait_attention_poll(ctx, "", [tid]), poll_interval_sec=2.0,
-        )
+        ))
     hold_meta, withdrawn = _held_return(ctx, waited.get("early_return"))
     window = None if bound == "requested" else {"requested_sec": requested, "window_sec": timeout, "window_bound": bound}
     return _with_held(ctx, _single_wait_text(ctx, tid, waited, view=selected_view, known=known_result_sha256,
                                              withdrawn=withdrawn, window=window), hold_meta)
+
+
+def _public_wait(waited: Dict[str, Any]) -> Dict[str, Any]:
+    """WAITED (``wait_for_effective_tasks``) with a helper's claim still being prepared shown as no task yet, as
+    get_task_result shows it (``task_id_claims.public_row``): it waits, and answers, like an id not yet registered."""
+    if isinstance(waited.get("tasks"), dict):
+        waited["tasks"] = {tid: public_row(row) for tid, row in waited["tasks"].items()}
+    return waited
 
 
 def _single_wait_text(ctx: Any, tid: str, waited: Dict[str, Any], *, view: str, known: str, withdrawn: str = "",
@@ -1083,8 +1092,9 @@ def _count_live_sibling_children(ctx: ToolContext, status_drive_root: Path, *, e
         )
         from ouroboros.task_store import task_facts
 
-        rows = task_facts(
-            status_drive_root, where="parent_task_id=? AND task_id<>? AND status IN (?,?,?)",
+        rows = task_facts(  # a helper's claim still being prepared is no sibling yet
+            status_drive_root, where=("parent_task_id=? AND task_id<>? AND status IN (?,?,?) "
+                                      f"AND NOT ({PROVISIONAL_ROWS})"),
             params=(parent_id, exclude_task_id, STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED))
         if held is not None and rows:
             from ouroboros.task_status import _load_queue_snapshot
@@ -1136,7 +1146,7 @@ def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List
     unknown: List[str] = []
     for tid in task_ids:
         try:
-            if load_effective_task_result(status_drive_root, tid):
+            if public_row(load_effective_task_result(status_drive_root, tid)):  # a claim being prepared: unminted
                 continue
             queue_status, _ = _queue_task_status(snapshot, tid)
             if queue_status:  # running/scheduled row, or "unknown" on a missing snapshot (fail-soft)
@@ -1395,22 +1405,22 @@ def _wait_for_tasks(
     _phantom_only = bool(entry_unknown_ids) and len(entry_unknown_ids) == len(normalized_ids)
     first_window = min(float(timeout), _UNMINTED_WAIT_GRACE_SEC) if _phantom_only else float(timeout)
     with in_slot_wait(ctx, first_window, "tasks", task_ids=normalized_ids):
-        waited = wait_for_effective_tasks(
+        waited = _public_wait(wait_for_effective_tasks(
             status_drive_root, normalized_ids, timeout_sec=first_window, mode=normalized_mode,
             terminal_probe=_terminal_probe(ctx, normalized_ids),
             on_poll=_wait_attention_poll(ctx, _wait_since, normalized_ids), poll_interval_sec=2.0,
-        )
+        ))
     if _phantom_only and first_window < float(timeout) and waited.get("early_return") is None:
         entry_unknown_ids = _unminted_wait_ids(ctx, status_drive_root, normalized_ids)
         if len(entry_unknown_ids) < len(normalized_ids):
             elapsed = float(waited.get("elapsed_sec") or 0.0)
             with in_slot_wait(ctx, max(0.0, float(timeout) - elapsed), "tasks", task_ids=normalized_ids):
-                resumed = wait_for_effective_tasks(
+                resumed = _public_wait(wait_for_effective_tasks(
                     status_drive_root, normalized_ids,
                     terminal_probe=_terminal_probe(ctx, normalized_ids),
                     timeout_sec=max(0.0, float(timeout) - elapsed), mode=normalized_mode,
                     on_poll=_wait_attention_poll(ctx, _wait_since, normalized_ids), poll_interval_sec=2.0,
-                )
+                ))
             resumed["elapsed_sec"] = float(resumed.get("elapsed_sec") or 0.0) + elapsed
             resumed["timeout_sec"] = float(timeout)
             waited = resumed
