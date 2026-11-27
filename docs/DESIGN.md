@@ -124,7 +124,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
 
-9. **A continuation fades at the edge.** Content fades past bars, strips, sheet heads and menus; long descriptions fade before disclosure (short names and excerpts keep ellipsis). One shared transparent fade, only where more waits; one float glass; the Widgets board (20.10) crisp, a room's feed (21.10) unmasked.
+9. **A continuation fades at the edge.** Content fades past bars, strips, sheet heads and menus; long descriptions fade before disclosure (short names and excerpts keep ellipsis). One shared transparent fade on the one edge curve (§10 "One edge"), only where more waits; one float glass; the Widgets board (20.10) crisp, a room's feed (21.10) unmasked.
 
 **Seed (light | dark)**
 
@@ -193,13 +193,15 @@ On Windows the desktop window keeps its ordinary system caption, buttons, Snap a
 resizing; only their light or dark tint follows the painted palette — the system
 tint, not the page's colour — and a High Contrast theme keeps its own colours.
 On macOS the main window is one surface: the page reaches the top edge under a
-transparent title bar, the real traffic lights sit level with the header row, empty
-parts of that band drag the window, and a double-click follows the Mac's setting:
+transparent title bar and every header stands on the real traffic lights' line where the row has room for its
+controls: the page's band is the lights' row, as much air under their line as above it. Empty parts of that row drag
+the window, and a double-click follows the Mac's setting:
 Zoom, Minimize, Do Nothing or Fill. Fill relies on an available undocumented native
 action, not an imitation by Zoom. Its appearance follows Light or Dark and inherits
 under System. In full screen the bar hides until the pointer reveals it; the setup
 and error windows and a UI that does not declare it keep the ordinary title bar. A
-browser, another OS or an older desktop app reserves nothing.
+browser, another OS or a desktop app without the integrated bar reserves nothing; an older integrated desktop app,
+which reports no centre for the lights, keeps the whole band as the page's row.
 
 A screen that cannot read the choice follows its host (owner 26.10, #1111 A). Main and
 setup open at once: the Mac's room colour, Windows' app mode, or GTK's theme until its
@@ -416,6 +418,28 @@ family; `.ui-switch` acts at once, `.ui-checkbox` on its form's Save. `.ui-field
 label, control and optional `.ui-field-help`. A placeholder is an example,
 never the field's only name. Help and validation belong to that field without
 changing the alignment of neighboring controls and their actions.
+
+**Three choices, three controls.** Pick one is `.ui-radio`, tick any is
+`.ui-checkbox`, an on/off that acts at once is `.ui-switch`. Every check box is
+`.ui-checkbox`, and it is round: an input the product draws, with one size
+(`--checkbox-size`), one shape (`--checkbox-radius`, the single value that
+would make every box square), one white mark on the accent (a white bar on the
+accent when mixed), an edge that holds 3:1 on its surface, one focus ring and
+one disabled look. Under a finger the glyph keeps its size, and a person can
+reliably select each box or radio by a target of its own at least the touch
+minimum tall: the label row that holds it, or the space a lone box keeps around
+it, never a strip of its neighbour. A box stands one `--checkbox-gap` from
+its words, which wrap beside it, and sits on their first line. A form's boxes,
+a menu row's, the Panic list's and setup's are inputs; a share part's box and
+an authored task's mark, in the chat and in Share's part picker, are drawn
+marks wearing the same class, the task's state apart from the part's
+inclusion. The exported share card draws a task as document content. Under
+forced colours an input is the system's own box and a drawn mark takes the
+system's colours. A radio is the same glyph, always a circle, a dot when
+chosen. A page places a box and its words, never sizes, recolours or reshapes
+it, and no style sheet styles a checkbox or radio input of its own. New
+project's Initialize Git says what it does in a help line under the box,
+readable before the choice on every surface.
 
 **A search field has one look across the app**: a capsule a row high in the composer field's material, the search
 glyph at its start and a placeholder that names what it searches (`Find a project`, `Search settings`, `Find an
@@ -1945,7 +1969,7 @@ Each episode keeps its name, time, outcome and sentence; only the current one ow
 Expanded ordinary cards disclose earlier Files, timeline, Reviews, children
 in collapsible original-content sections, never duplicate cards.
 
-**Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint; only painted fading text extends two lines into footer whitespace, without moving Project/time/actions. Short answers have no fade; limitations/details keep the tail above their words. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
+**Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint whose last two lines fade on the shared edge (a clipped fold), the same in every state (folded, while the width moves, with a limitation under it), so no line is cut through its letters; Project, time and actions stay put. Short answers have no fade. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
 
 History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Root and API-child Details label an observed solve `Last solve response`, naming `initial request` only when that call's route changed; a session child attributes solve metadata to its coordinator (`Coordinator`, `Last coordinator solve response`, or `Coordinator model execution` when unobserved), never the delegated run. `Model handover` shows which routes were involved, whether a successor reply was recorded, and what the successor did: an accepted answer choice or a successful tool call other than schema discovery. An incomplete handover establishes no act. After one reminder, the successor can explicitly select the complete answer or its offered hash. An accepted choice clears the handover warning alone; other failures stay visible. Restoring the same task ID can recover a proved choice; a new task ID must select for itself. Files, Continue and `Model handover` follow one settled stored detail: the census read serves the card, a reveal joins it, an incomplete read is topped up once, and a failed review read keeps its ordinary Retry. An exact row jump opens what it lands in; folded children stay unread, retranslation is local.
 
@@ -3490,11 +3514,12 @@ and Add"); a destination is a room or a section.
 
 Destinations come from one registry (`web/modules/pages.js`): it renders the navigation rows, names the titles and
 feeds the shell gate, so a new page is a registry row and its module, checked at phone widths with no further work.
-The column reads from the top: Ouroboros's card, which is Main (its picture, with one 7 px amber dot on its rim
+The column reads from the top: Find a project, with + (New project) at the end of its row, the column's first row:
+on a Mac the traffic lights' row, past the lights where that row has room for it; in the drawer beside its ×. Then Ouroboros's card, which is Main (its picture, with one 7 px amber dot on its rim
 while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
-while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
-with + (New project) at the end of its row; then the Projects, the column's only scroller, down to the version
+while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then the Projects,
+the column's only scroller, down to the version
 (no heading, collapse or unread total). Outside the column, at its start, the rail (the room or the drawer's column
 gives its width): Circles, Files and Widgets at its top, Dashboard and Settings at its foot, each a glyph whose word
 is its accessible name, chosen in the strong crimson. The version is the column's one-line foot under the Projects
@@ -3527,7 +3552,7 @@ read answers, nothing is called missing. Neither reads a room's history or marks
 rows, sorting on: off the top the first row in view that kept its place holds the reading place, focus its row; a
 find's rows stand while it has words. A Project outside the list opens by its own id; a missing or deleting one
 leaves the room on screen and says so. A short window first compacts mouse rows, then scrolls the whole column down to
-the version and its indicator. Ouroboros's card stays in view if a Project fits below it; the rail stays if its own
+the version and its indicator. Find a project and Ouroboros's card stay in view if a Project fits below them; the rail stays if its own
 controls fit. One destination is chosen at a time, its fill alone with no stripe, rule or mark at its edge, and pressing
 it opens it, never closes it.
 
@@ -3543,7 +3568,8 @@ are this row; a list groups it under a quiet group name, on a phone one card of 
 
 Settings, Dashboard and Extensions share a list and page layout. From a 40rem section box, the list is a rail
 (`--section-rail-w`) beside its page. The band holds list controls (Settings' search; on phones, in the list) and
-page controls. The chosen row names its page; the heading stays for readers, deeper levels keep their names.
+page controls. The chosen row names its page; the heading stays for readers, deeper levels keep their names, and a page reached by a
+jump from another place shows its name after the named Back.
 A page is always open: initially Models in Settings, Skills in Extensions; later the device's last choice.
 Extensions holds Skills, MCP servers, Browse and Sources. Editors open over their lists; Sources’ Publish one jumps to Skills with Back.
 Narrower, the list stands under the section name and Ouroboros's picture, or the page under Back and its name.
@@ -3660,16 +3686,20 @@ glyphs (`web/modules/page_icons.js`).
 
 ### Page header
 
-The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is a round
-Back with the arrow, its destination in its name: the top layer's, peeled one by one (“Back to
-Extensions › Skills”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
-(Consciousness model), distinct from its return. Docked, the sidebar identifies a section without pages by its glyph and accessible name.
+The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is Back,
+its destination in its name: the top layer's, peeled one by one (“Back to Extensions › Skills”). A return to another
+place shows that destination after the arrow on a desk, in the same capsule (`‹ Settings`), and the page's own name
+follows it. The page's name and controls win the row: the return yields first, its words ending in an ellipsis, and a
+narrow row keeps the round arrow, as do a level's Back, a move inside one place and the stack layout. Two panes put it over the page column; one
+column replaces the leading picture. A model role names its destination (Consciousness model), distinct from its
+return. Docked, a place the rail names by a glyph alone says its name: Circles and Widgets at the band's start, the
+Dashboard over its list; Files keeps its location, Settings its search.
 Tabs or Files' location lead its band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
 18px below a browser's top. Rails use the shared fade;
 location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
-An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
-which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), while a room's
+An empty band draws nothing. Its scroller reaches the window's top; its first row starts under the traffic lights'
+row, which stays the window's. Widgets cards end at its named band with crisp edges (owner 20.10), while a room's
 feed passes under its bar's frosted edge ("A room's edges"); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
 a page's 18px below a browser's top: one leading control (the picture on a room or section list, the round Back when
 owed), destination name, status, then a room's consciousness chip and Panic. Tabs or filters occupy one line below;
@@ -3685,7 +3715,7 @@ state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 In Extensions, Back names the return. Each page owns its actions: Skills keeps Refresh and Update all in the header; MCP controls stay with the server.
 Files keeps location and actions in the band, its divider at the window top; the filter heads the list, which
-scrolls under the shared fade. Circles ends the band with New circle; Widgets has no controls.
+scrolls under the shared fade. Circles ends the band with New circle; Widgets' band holds its name alone, as low as the name needs without the macOS band.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it with a round Back to its folder, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
@@ -3706,20 +3736,32 @@ whole or not at all, as the status word does, so a narrow phone may show the sta
 becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
 (both are layers). The work list and consciousness sheet hang below at page width. Typing keeps the same row.
 
+### One edge
+
+Everything that scrolls ends in the same edge: one curve, `--edge-curve` (smoothstep from
+opaque to clear, flat at both ends, so neither end of a fade reads as a line), in `web/ui.css`. Its length is
+`--edge-length` (32 px) for a room's edges and by default for vertical lists; sideways rails take a smaller spacing
+token and a folded answer two of its line heights. A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
+more waits), a clipped preview `[data-fold-clipped]`, and a painted fade (a colour into what passes under it) is the
+colour masked by `linear-gradient(var(--edge-curve))`; a sheet sets only where an edge is and how long, never a
+gradient, curve or blur of its own. The Widgets board stays crisp and a room's feed unmasked.
+
 ### A room's edges
 
 The transcript runs to the room's top under the bar and to its bottom under the composer; nothing masks it. At both
-ends it is darkened and blurred under what floats over it, one material top and bottom (owner 15.11 «прозрачную шапку…
-градиент затемнения по нашей библии… и в десктопе», his choice 17.11 1A, 3A): the composer's darkening (the room's
-colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top. A 12 px blur
-keeps scrolling card actions distinct from the floating controls. It is full behind the capsules and phone clock,
-then tapers to clear within 32 px below the bar on every layout. The composer has the same soft transition inside
-its top 32 px. The first row and every landing clear the header's reach; a row under it is not read yet. The top
-effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
-do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
-both themes. While typing in Telegram the feed still passes under both. The newest line and time rest just above the
-measured composer. In a tight room the top extension yields to the feed. Reading history holds the passage in place,
-as it does in a shorter window, and the feed still scrolls.
+ends what floats over it stands on one material, top and bottom (owner 15.11 «прозрачную шапку… градиент затемнения
+по нашей библии… и в десктопе», his choice 17.11 1A, 3A): two blur steps, a soft one (4 px) over the
+whole taper and a deep one in its depth (12 px in all over the soft), under the room's colour, 72 % at the window's
+edge. Blur and darkening each follow the shared edge curve to clear, the deep blur dissolving into the soft and the
+soft into sharp text, so the blurred zone ends with no line. It is full behind the
+capsules and phone clock and clears one edge length below the bar on every layout; the composer's area has the same
+edge inside its top. It keeps scrolling card actions distinct from the floating controls. The first row and every
+landing clear the header's reach; a row under it is not read yet. The top edge is separate from the desktop
+title-band strip. A note or the search sheet floats above it as the capsules do (a Project's status note, in its flow,
+stands below it). The blur belongs to the edge, not to a chip, so it applies in both themes; without backdrop blur,
+or with reduced transparency, a stronger room-colour tint alone fades the edge. While typing in Telegram the feed still passes
+under both. The newest line and time rest just above the measured composer. In a tight room the top extension yields
+to the feed. Reading history holds the passage in place, as it does in a shorter window, and the feed still scrolls.
 Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter

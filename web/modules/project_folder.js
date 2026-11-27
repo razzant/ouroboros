@@ -253,7 +253,7 @@ export function openProjectFolderDialog({ apiClient, project }) {
                 const label = document.createElement('label');
                 const radio = document.createElement('input');
                 radio.type = 'radio';
-                radio.className = 'ui-checkbox';
+                radio.className = 'ui-radio';
                 radio.name = 'pf-action';
                 radio.value = name;
                 radio.checked = name === action;

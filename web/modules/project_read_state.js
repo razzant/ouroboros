@@ -207,9 +207,10 @@ export function readBand(viewport, header, composer) {
     if (header?.getClientRects?.().length) {
         // The edge in the page's own scale: a phone's drawer scales the room, and the edge with it.
         const box = header.getBoundingClientRect(), view = header.ownerDocument?.defaultView;
-        // The edge material's own box (style.css: `::before`, the bar's padding box plus the reach) resolves in every
-        // engine; the property itself resolves to px only with `@property` (WebKit 16.4+), else it is its tokens.
-        const drawn = parseFloat(view?.getComputedStyle?.(header, '::before')?.height) - header.clientHeight;
+        // The edge's own box (its tint, ROOM_EDGE_HTML in page_header.js: the bar's padding box plus the reach) resolves
+        // in every engine; the property itself resolves to px only with `@property` (WebKit 16.4+), else it is its tokens.
+        const tint = header.querySelector?.(':scope > .room-edge[data-edge="tint"]');
+        const drawn = tint ? parseFloat(view?.getComputedStyle?.(tint)?.height) - header.clientHeight : NaN;
         const edge = Number.isFinite(drawn) ? Math.max(0, drawn)
             : parseFloat(view?.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach')) || 0;
         top = Math.max(top, box.bottom + edge * (header.offsetHeight > 0 && box.height > 0 ? box.height / header.offsetHeight : 1));

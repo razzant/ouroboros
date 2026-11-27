@@ -474,11 +474,13 @@ test('the mirrored answer replays from history exactly as it arrived live', asyn
     }
 });
 
-test('the fold is CSS over the complete answer: clamp always, fade only when folded, tokens only', () => {
+test('the fold is CSS over the complete answer: clamp always, the shared fade only when clipped, tokens only', () => {
     const block = styleSource.slice(styleSource.indexOf('"Project completion mirror"'));
     const rules = block.slice(0, block.indexOf('A block that exists only for open attention'));
     assert.match(rules, /\.chat-bubble\.project-answer > \.message \{ max-height: var\(--project-answer-fold\); overflow: hidden; \}/);
-    assert.match(rules, /\.chat-bubble\.project-answer\.is-folded > \.message \{[^}]*mask-image/);
+    // The fade is the shared clipped fold (ui.css [data-fold-clipped]), two lines deep; no local mask of its own.
+    assert.match(rules, /\.chat-bubble\.project-answer > \.message\[data-fold-clipped\] \{ --scroll-fade-edge: calc\(var\(--project-answer-line\) \* 2\); \}/);
+    assert.doesNotMatch(rules, /mask-image|--project-answer-tail|--project-answer-compensation/);
     // The Project is the route to the complete answer; the mirror never expands in place.
     assert.doesNotMatch(rules, /\.project-answer\.is-expanded/);
     assert.doesNotMatch(rules, /user-select|font-size: \d|#[0-9a-fA-F]{3,6}\b/);

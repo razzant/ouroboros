@@ -27,6 +27,7 @@ import {
     generatedPreviewCanReplace,
     parseAvailableSubagentsSetting,
     reviewerTickCaption,
+    toggleHtml,
     validateAvailableSubagentsSetting,
 } from '../modules/subagents_settings.js';
 import {
@@ -365,6 +366,20 @@ test('the editor shows a numbered row and only one owner-authored prose field', 
     assert.match(html, /data-subagent-field="model"/);
     assert.match(html, /aria-labelledby="available-subagent-api_scout-heading"/);
     assert.match(html, /aria-label="Duplicate Subagent 3"/);
+});
+
+test('a form-saved on/off, the reviewer mark and the re-check mark are the shared check box', () => {
+    const html = availableSubagentRowMarkup(apiRow(), {
+        catalogKnown: false, accountsKnown: false, quotaKnown: false, statusError: '', snapshot: null,
+    }, 0);
+    const boxes = (html.match(/<input\b[^>]*type="checkbox"[^>]*>/g) || []).filter((tag) => !/role="switch"/.test(tag));
+    assert.ok(boxes.length >= 3, boxes.join('\n'));
+    for (const tag of boxes) assert.match(tag, /class="[^"]*\bui-checkbox\b/, tag);
+    // An unsaved agent's page builds its Available and Reviewer fields through the same builder; a saved one switches.
+    for (const field of ['enabled', 'review_eligible']) {
+        assert.match(toggleHtml(field, 'Reviewer', false, false), /^<input class="ui-checkbox" type="checkbox"/);
+        assert.match(toggleHtml(field, 'Reviewer', true, true), /^<label class="ui-switch"><input [^>]*role="switch"/);
+    }
 });
 
 test('API and session rows render different controls; account belongs only to session', () => {

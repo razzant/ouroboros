@@ -160,6 +160,7 @@ class Node extends Events {
     appendChild(node) { return this.insertBefore(node, null); }
     prepend(...nodes) { const first = this.children[0] || null; for (const node of nodes) this.insertBefore(node, first); }
     insertBefore(node, before) {
+        if (node === before) return node;  // as the DOM: a node inserted before itself stays where it is
         node.parent?.removeChild(node);
         const index = before ? this.children.indexOf(before) : -1;
         if (index >= 0) this.children.splice(index, 0, node); else this.children.push(node);

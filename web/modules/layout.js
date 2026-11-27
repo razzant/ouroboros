@@ -73,7 +73,8 @@ export function pinchMagnified(w = win()) {
  * `data-bars-crowd` lets the head scroll away with the list (a pinned head would cover every row). Independently, the
  * rail and its groups are watched: where the rail's natural height (ignoring auto-margin stretch space on
  * `.nav-rail-system`) passes the column's available content height, `data-rail-crowd` unpins the rail so its lower
- * controls scroll cleanly into view. Returns the disposer. */
+ * controls scroll cleanly into view. Main's card line in the head is written too (--sidebar-card-top), for the rail's
+ * first place under the macOS lights. Returns the disposer. */
 export function measurePinnedBars(sidebar, { Observer = globalThis.ResizeObserver } = {}) {
     const head = sidebar?.querySelector('.sidebar-head');
     if (!head || typeof Observer !== 'function') return () => {};
@@ -82,8 +83,16 @@ export function measurePinnedBars(sidebar, { Observer = globalThis.ResizeObserve
     const write = () => {
         const view = sidebar.ownerDocument?.defaultView;
         const sideStyle = view?.getComputedStyle?.(sidebar);
-        const headH = head.getBoundingClientRect().height;
+        const headBox = head.getBoundingClientRect(), headH = headBox.height;
         sidebar.style.setProperty('--sidebar-head-h', `${headH}px`);
+        // Where Main's card starts in the head: under the macOS lights the rail's first place stands on its line,
+        // whether Find a project shares the lights' row or wraps under it (style.css). Written in the next frame and
+        // only when it moved, so the rail's change is never part of this observation's own layout pass.
+        const card = head.querySelector?.('.nav-row-main')?.getBoundingClientRect?.();
+        const cardTop = card ? `${card.top - headBox.top}px` : '';
+        if (cardTop && cardTop !== sidebar.style.getPropertyValue?.('--sidebar-card-top')) {
+            (view?.requestAnimationFrame || ((fn) => fn()))(() => sidebar.style.setProperty('--sidebar-card-top', cardTop));
+        }
         const row = sidebar.querySelector('.nav-project-row')?.getBoundingClientRect().height || 48;
         const clearance = px(sideStyle?.getPropertyValue?.('--space-4'));
         const room = Number(sidebar.clientHeight) || 0;
