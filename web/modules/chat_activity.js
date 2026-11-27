@@ -3,11 +3,11 @@
 // census snapshot hydration. The room's status word is the server's (work_status.js).
 import { META_PART_SEPARATOR, compactModel, coordinatorLine, executorIdentityMarkup, executorTitle, harnessPresentation, modelWords, selectionLane } from './harness_presentation.js';
 import { cardCoordinator, executorModelFact, modelText, requestedFact } from './executor_card_facts.js';
-import { effortChipMarkup } from './effort_chip.js';
+import { effortChipMarkup, effortFact } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
 import { modelHandoverFact } from './model_handover.js';
 import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
-import { childLineCause, formatLogDuration, modelExecutionView, serviceOutputLinksHtml } from './log_events.js';
+import { childLineCause, formatLogDuration, modelExecutionView, serviceOutputLinksHtml, summarizeChatLiveEvent } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
@@ -45,6 +45,26 @@ export function withTaskCostMeta(summary, payload, { replace = false, rawTs = ''
         out.meta = out.meta.filter((entry) => !String(entry || '').startsWith('cost='));
     }
     return out;
+}
+
+/** Project card frames and saved full output; lineage and the kept selection stay with the room. */
+export function createSubagentCardSummarizer(readLineage, readRequestedExecutor) {
+    return (evt, childId, overrides = {}, rawTs = '') => {
+        const { parentId = '', role = '', model = '' } = readLineage(childId) || {};
+        const summary = summarizeChatLiveEvent({
+            ...evt,
+            type: 'send_message',
+            is_progress: true,
+            delegation_role: 'subagent',
+            subagent_task_id: childId,
+            parent_task_id: parentId,
+            subagent_role: role,
+            model,
+            ...overrides,
+        }, readRequestedExecutor(childId));  // its kept selection, for a frame that repeats none
+        // The child's effort fact rides every frame that states a level (live, terminal, replay).
+        return summary ? withTaskCostMeta({ ...summary, ...(evt.effort_level ? { effort: effortFact(evt) } : {}) }, evt, { rawTs }) : null;
+    };
 }
 
 export function applyHistoricalModelExecution(record, historical) {

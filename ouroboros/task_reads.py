@@ -88,6 +88,7 @@ class TaskReads:
         self._successors: Dict[str, str] = {}  # canonical task id -> the successor its projection overlays
         self.store_reads = 0  # store transactions this read opened (cost evidence for tests)
         self.failed = False  # a read the store could not answer: what this page shows is not known to be current
+        self.projection_failed = False  # its terminal projection failed part-way: no ``after_cursor``, a repair refuses
 
     # -- documents ------------------------------------------------------------------------
     def _fetch(self, root: pathlib.Path, task_ids: Iterable[str]) -> None:
