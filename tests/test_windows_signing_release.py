@@ -481,6 +481,8 @@ def test_smoke_windows_setup_script_enforces_disposable_guard_aumid_and_safe_cle
     assert "Remove-Item -LiteralPath $UserDataDir -Recurse" not in smoke
     assert smoke.index("if (Test-Path -LiteralPath $UserDataDir) {") < smoke.index("$ProfileBefore = Get-TreeManifest")
     assert smoke.index("$ProfileBefore = Get-TreeManifest") < smoke.index("$InstallProc = Invoke-SilentSetup")
+    assert "$env:OUROBOROS_APP_ROOT = $CliAppRoot" in smoke
+    assert "$env:USERPROFILE =" not in smoke and "$env:LOCALAPPDATA =" not in smoke
 
 
 def test_inno_setup_pin_downloader_and_packer_enforce_digest_and_payload_contract():

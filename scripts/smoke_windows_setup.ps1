@@ -517,24 +517,21 @@ try {
     $OldCwd = Join-Path $Work 'old-layout-cwd'
     $CliShimTarget = Join-Path $Work 'cli-shim-target'
     $MigratedShim = Join-Path $CliShimTarget 'ouroboros.cmd'
-    New-Item -ItemType Directory -Force -Path $HomeDir, (Join-Path $HomeDir 'AppData\Local'), `
-        (Join-Path $HomeDir 'AppData\Roaming'), $OrdinaryCwd, (Join-Path $OldCwd 'ouroboros') | Out-Null
+    $CliAppRoot = Join-Path $HomeDir 'Ouroboros'
+    New-Item -ItemType Directory -Force -Path $HomeDir, $OrdinaryCwd, (Join-Path $OldCwd 'ouroboros') | Out-Null
     # Legitimate old-layout working folder (empty ouroboros package without packaged_cli; no code to run from cwd).
     [IO.File]::WriteAllText((Join-Path $OldCwd 'ouroboros\__init__.py'), '')
     $InstalledCli = Join-Path $InstallDir 'bin\ouroboros.cmd'
     $InstalledCliInstaller = Join-Path $InstallDir 'bin\install-ouroboros-cli.cmd'
     $PortableCliInstaller = Join-Path $ExpectedRoot 'Ouroboros\bin\install-ouroboros-cli.cmd'
     $SavedEnv = @{}
-    foreach ($Key in @('HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'HOMEDRIVE', 'HOMEPATH')) {
+    foreach ($Key in @('OUROBOROS_APP_ROOT', 'OUROBOROS_REPO_DIR', 'OUROBOROS_DATA_DIR',
+                       'OUROBOROS_SETTINGS_PATH', 'OUROBOROS_PID_FILE', 'OUROBOROS_PORT_FILE')) {
         $SavedEnv[$Key] = [Environment]::GetEnvironmentVariable($Key, 'Process')
     }
     try {
-        $env:HOME = $HomeDir
-        $env:USERPROFILE = $HomeDir
-        $env:LOCALAPPDATA = Join-Path $HomeDir 'AppData\Local'
-        $env:APPDATA = Join-Path $HomeDir 'AppData\Roaming'
-        $env:HOMEDRIVE = Split-Path -Qualifier $HomeDir
-        $env:HOMEPATH = $HomeDir.Substring($env:HOMEDRIVE.Length)
+        foreach ($Key in $SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($Key, $null, 'Process') }
+        $env:OUROBOROS_APP_ROOT = $CliAppRoot
         # Snapshot HKCU:\Environment\Path (unexpanded) before install-ouroboros-cli.cmd so finally restores it cleanly.
         $EnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
         try {
@@ -547,7 +544,7 @@ try {
         } finally {
             if ($EnvKey) { $EnvKey.Dispose() }
         }
-        # Seed an owned CLI shim from the portable copy in a temp target dir (does not touch $HomeDir\Ouroboros).
+        # Seed an owned CLI shim from the portable copy in a temp target dir (does not touch $CliAppRoot).
         $PortableShimInstall = Invoke-CmdInDir $OrdinaryCwd $PortableCliInstaller @('--target-dir', $CliShimTarget)
         if ($PortableShimInstall.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $MigratedShim -PathType Leaf)) {
             throw "Portable CLI shim install failed: exit $($PortableShimInstall.ExitCode)`n$($PortableShimInstall.Output)"
@@ -572,7 +569,7 @@ try {
                         try { $GuiProc.Kill($true); $GuiProc.WaitForExit(10000) | Out-Null } catch { }
                         throw "Ouroboros.exe ($($GuiCase.Label)) did not exit promptly while Setup held the mutex"
                     }
-                    if ($GuiProc.ExitCode -ne 75 -or (Test-Path -LiteralPath (Join-Path $HomeDir 'Ouroboros'))) {
+                    if ($GuiProc.ExitCode -ne 75 -or (Test-Path -LiteralPath $CliAppRoot)) {
                         throw "Ouroboros.exe ($($GuiCase.Label)) did not refuse before work: exit $($GuiProc.ExitCode)"
                     }
                 } finally {
