@@ -104,6 +104,9 @@ WORK = ("connect", "statements", "begins", "commits", "writes", "json_loads", "j
 COUNT_JITTER = 2
 BYTE_JITTER = 4096
 BYTE_KEYS = ("json_chars", *(f"read_bytes:{where}" for where in (*LOCATIONS, "outside")))
+# A known room gap keeps exact archive and decoded-byte ceilings; only the decoded characters carry the width of the
+# live epoch the reader child parses (a float of varying length: +39,046 seen against 39,044 recorded).
+GAP_JITTER = {"json_chars": 64}
 
 
 def vm_allowance(large: int, small: int = K_SMALL) -> int:
@@ -125,7 +128,7 @@ class KnownBreach(AssertionError):
 # A room read's known breach: its cause, and the k=1 -> k=30 growth of each counter it grows on this fixture's
 # drives (one causal pair, measured by the exact meter: 2f8ebe37's report; the same growth in the reader child that
 # builds the page since #4320, counted there: #4348). A precondition, an answer that differs, any other counter, or
-# more growth (a byte counter: beyond ``BYTE_JITTER``; the child decodes the request's live inputs, whose epoch is a
+# more growth (json_chars: beyond ``GAP_JITTER``, every archive and byte counter: any; the child decodes the request's live inputs, whose epoch is a
 # float of varying length) fails as a plain AssertionError; no growth at all is a strict XPASS.
 ROOM_GAPS: Dict[str, Tuple[str, Dict[str, int]]] = {"R_late": (
     "The tool-call evidence a late task's card replays (tool_call_log.replay_evidence -> Memory.read_task_recent) "
@@ -245,9 +248,9 @@ def assert_flat(measured: Dict[Any, Any], tag: str, gap: Dict[str, int] | None =
     growing = sorted(((source, amount - little.get("callers", {}).get(source, 0))
                       for source, amount in big.get("callers", {}).items()
                       if amount > little.get("callers", {}).get(source, 0)), key=lambda item: -item[1])[:8]
-    if gap is not None:  # a byte counter keeps the jitter the law grants it (BYTE_KEYS): a timestamp's digits
+    if gap is not None:  # only json_chars keeps a jitter (GAP_JITTER): a timestamp's digits
         excused = {key: value for key, value in breaches.items() if key in gap and value[1] - value[0] <= (
-            gap[key] * (large - K_SMALL) / 29 + (BYTE_JITTER if key in BYTE_KEYS else 0))}
+            gap[key] * (large - K_SMALL) / 29 + GAP_JITTER.get(key, 0))}
         breaches = {key: value for key, value in breaches.items() if key not in excused}
     assert not breaches, (f"{tag} grows with unrelated history (k={K_SMALL} -> k={large}): {breaches}; "
                           f"history touched at k={large}: {touched}; growing readers: {growing}")
@@ -346,7 +349,8 @@ def test_a_room_gap_excuses_only_its_own_counters_within_their_recorded_growth()
     with pytest.raises(KnownBreach):  # a byte count off by a timestamp's digits (the child decodes the live epoch)
         assert_flat(measured({**gap, "json_chars": gap["json_chars"] + 2}), "R_late", gap)
     for grown in ({**gap, "stat:root": 29}, {**gap, "json_loads": gap["json_loads"] + 1},
-                  {**gap, "read_bytes:archive": gap["read_bytes:archive"] + BYTE_JITTER + 1}):
+                  {**gap, "json_chars": gap["json_chars"] + GAP_JITTER["json_chars"] + 1},
+                  {**gap, "read_bytes:archive": gap["read_bytes:archive"] + 1}):
         with pytest.raises(AssertionError, match="grows with unrelated history") as caught:
             assert_flat(measured(grown), "R_late", gap)
         assert not isinstance(caught.value, KnownBreach), grown
