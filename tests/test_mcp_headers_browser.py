@@ -127,11 +127,29 @@ def _enable(page, identity):
 
 def _facts(card):
     """The exact stamps and the engine's words on a server's page: {name: value}. The engine's raw words ride behind
-    a Details disclosure kept out of translation (mcp_settings.js): such a value is read as ``Details: <words>``."""
+    a Details disclosure kept out of translation (mcp_settings.js): such a fact is read as ``Details`` (its collapsed
+    summary, as the owner sees it); the words themselves are only read through ``_reveal``, which opens the real summary."""
     return card.locator('[data-mcp-facts]').evaluate(
-        "dl => Object.fromEntries([...dl.children].map((fact) => { const raw = fact.querySelector('dd .ui-result-details');"
-        " return [fact.querySelector('dt').textContent,"
-        " raw ? `Details: ${raw.textContent}` : fact.querySelector('dd').textContent]; }))")
+        "dl => Object.fromEntries([...dl.children].map((fact) => { const raw = fact.querySelector('dd details > summary');"
+        " return [fact.querySelector('dt').textContent, raw ? raw.textContent : fact.querySelector('dd').textContent]; }))")
+
+
+def _reveal(scope, words):
+    """Open the ACTUAL Details summary inside ``scope`` (a click on the control the owner sees, not a label the test
+    supplies) and require the raw diagnostics it reveals to be visible and exactly ``words``."""
+    from playwright.sync_api import expect
+    disclosure = scope.locator('details.ui-disclosure')
+    summary = disclosure.locator(':scope > summary')
+    expect(summary).to_be_visible()
+    expect(summary).to_have_text('Details')
+    if not disclosure.evaluate('el => el.open'):
+        summary.click()
+    raw = disclosure.locator(':scope > .ui-result-details')
+    expect(raw).to_be_visible()
+    expect(raw).to_have_text(words)
+    if isinstance(words, str):
+        assert raw.text_content() == words
+    return raw
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
@@ -500,7 +518,8 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
             assert not re.search(r'2026-10-21|offline', badge.inner_text()), badge.inner_text()
             facts = _facts(card)
             assert facts['Listed'] and (facts['Last attempt'], facts['Error']) == (
-                f"{stamp('2026-10-21T10:00:00+00:00')} · failed", 'Details: offline'), facts
+                f"{stamp('2026-10-21T10:00:00+00:00')} · failed", 'Details'), facts
+            _reveal(card.locator('[data-mcp-facts] > div').filter(has_text='Error'), 'offline')
             badge.scroll_into_view_if_needed()
             _capture(page, 'mcp-catalog-failed-with-tools')
             answer(lambda entry: entry.update(tools=[], tool_count=0, listed_at=None, latest_attempt=None,
@@ -510,7 +529,8 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
                 latest_attempt={'at': '2026-10-21T10:00:00+00:00', 'ok': False, 'error': 'offline', 'partial': False}))
             expect(badge).to_have_text(re.compile(r'^Listing failed [^·]+$'))
             assert _facts(card) == {'Last attempt': f"{stamp('2026-10-21T10:00:00+00:00')} · failed",
-                                    'Error': 'Details: offline'}, _facts(card)  # never listed: no Listed stamp
+                                    'Error': 'Details'}, _facts(card)  # never listed: no Listed stamp
+            _reveal(card.locator('[data-mcp-facts] > div').filter(has_text='Error'), 'offline')
             badge.scroll_into_view_if_needed()
             _capture(page, 'mcp-catalog-never-listed')
             page.set_viewport_size({'width': 390, 'height': 844})
@@ -522,19 +542,21 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
             page.route('**/api/mcp/refresh', lambda route: route.fulfill(json={
                 'ok': True, 'published': False, 'tool_count': 1, 'publication_error': 'disk full'}))
             answer(lambda entry: entry.update(publication_error='disk full'), expected='Refresh failed.')
-            assert message.locator('.ui-result-details').text_content() == 'disk full'  # the raw words, behind Details
+            _reveal(message, 'disk full')  # the raw words, behind the message's own Details summary
             expect(badge).to_have_text(re.compile(r'^1 tool · listed [^·]+ · catalog not published$'))
-            assert _facts(card)['Catalog publication'] == 'Details: disk full', _facts(card)
+            assert _facts(card)['Catalog publication'] == 'Details', _facts(card)
+            _reveal(card.locator('[data-mcp-facts] > div').filter(has_text='Catalog publication'), 'disk full')
             assert 'Listed again.' not in message.inner_text()
             page.unroute('**/api/mcp/refresh')
             page.route('**/api/mcp/refresh', lambda route: route.fulfill(json={'ok': False, 'error': 'offline'}))
             answer(lambda entry: entry.update(latest_attempt={'at': '2026-10-21T11:00:00+00:00',
                 'ok': False, 'error': 'offline', 'partial': False}), expected='Refresh failed.')
-            assert message.locator('.ui-result-details').text_content() == 'offline'
+            _reveal(message, 'offline')
             expect(badge).to_have_text(re.compile(r'^1 tool · listed [^·]+ · listing failed [^·]+$'))
             facts = _facts(card)
             assert (facts['Last attempt'], facts['Error']) == (f"{stamp('2026-10-21T11:00:00+00:00')} · failed",
-                                                               'Details: offline'), facts
+                                                               'Details'), facts
+            _reveal(card.locator('[data-mcp-facts] > div').filter(has_text='Error'), 'offline')
             page.unroute('**/api/mcp/refresh')
             page.unroute('**/api/mcp/status')
         finally:
@@ -662,7 +684,9 @@ def test_stdio_task_session_choice(direct_server_with_data):  # noqa: F811
             card = _card(page, 'chrome_browser')
             # Not installed here: the state says its skill can't run it (the reason is the Error fact), not "not listed yet".
             expect(card.locator('[data-mcp-state]')).to_have_text('Its skill can’t run it now')
-            assert 'MCP_SKILL_UNAVAILABLE' in _facts(card)['Error']
+            assert _facts(card)['Error'] == 'Details'
+            assert 'MCP_SKILL_UNAVAILABLE' in _reveal(card.locator('[data-mcp-facts] > div').filter(has_text='Error'),
+                                                      re.compile('MCP_SKILL_UNAVAILABLE')).text_content()
             bound_choice = card.locator('[data-mcp-field="task_session"]')
             expect(bound_choice).to_be_checked()
             expect(bound_choice).to_be_disabled()  # the skill's reviewed manifest decides it at each start
