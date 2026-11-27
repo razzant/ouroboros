@@ -50,7 +50,7 @@ function heldWakeRoom(data) {
 // question owner: a landing claims it, as any other navigation does, so the feed stops following the live edge.
 export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySelector('.chat-toolbar-row'), insertMessageNode,
     stampNodeTimestamp, openSettings, refresh = () => {}, mutate = fn => fn(), decision = () => null,
-    revealQuestion = () => {}, reading = () => null }) {
+    revealQuestion = () => {}, reading = () => null, noticeVisible }) {
     // The question owner (chat_decision.js), read when used: chat.js creates it after this navigator.
     const owner = () => decision() || {};
     const pill = document.createElement('button');
@@ -93,7 +93,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         return button;
     }
     const panic = createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mutate, refresh, onChange: () => update(),
-        stopControl });
+        stopControl, ...(noticeVisible ? { isVisible: noticeVisible } : {}) });
 
     // ---- owner-required actions: one System message per task, the task's own controls
     function recordFor(row) {
@@ -399,6 +399,8 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
             panic.setConnected(value);
             owner().setConnected?.(value);  // the question owner withdraws its forms and voids its reads in flight
         },
+        // Main's Panic notice keeps the room seam's rules (chat.js passes it to the history controls).
+        notice: panic.notice,
         destroy() {
             panic.destroy();
             waits.destroy();

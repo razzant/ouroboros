@@ -184,9 +184,6 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-shade-body { min-height: 0; overflow-y: scroll; overscroll-behavior: contain; }
 /* Main and Project: the header floats over the transcript, so its anchor hangs from the header's bottom edge. */
 :is(.chat-page-header, .project-panel-bar) > .rw-shade-anchor { position: absolute; left: 0; right: 0; top: 100%; height: 0; z-index: 30; }
-/* Main's history note hangs on the place an open list covers, so it waits behind the list (Project's note is in
-   flow): the room's work list, or the consciousness chip's (consciousness_status.js). */
-.chat-page-header:is([data-rw-open], [data-cx-shade]) ~ .chat-page-note { visibility: hidden; }
 /* A narrow bar's commands are the list's last rows (Main's Restart and budget, page_header.js): the same two nodes
    lie flat here, the budget saying its name and its amount, and an empty slot takes no room. */
 .rw-extras { display: flex; flex-direction: column; gap: 2px; padding: 0 var(--space-2) var(--space-3); }
@@ -212,7 +209,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-extras .chat-budget-word { display: inline; }
 .rw-extras .chat-budget-text { font-size: var(--type-body); color: var(--text-meta); }
 .rw-extras .chat-budget-bar { display: none; }
-/* The Project status bar keeps the room's history note; without one it takes no room (`:empty`, see style.css). */
+/* The Project status bar holds the room's status until this list adopts it; empty, it takes no room (`:empty`). */
 .chat-panel-statusbar:empty { display: none; }
 
 /* ---- the list and its rows ------------------------------------------------------------------------- */

@@ -42,7 +42,6 @@
     --accent-18: rgba(201, 53, 69, 0.18);
     --accent-22: rgba(201, 53, 69, 0.22);
     --accent-25: rgba(201, 53, 69, 0.25);
-    --accent-35: rgba(201, 53, 69, 0.35);
     --accent-45: rgba(201, 53, 69, 0.45);
     --accent-55: rgba(201, 53, 69, 0.55);
     /* Project identity (vivid fuchsia): a converted task card, its sidebar marker,
@@ -174,6 +173,9 @@
     /* The one veil under every layer: dialogs, the Project panel, the file dialog and the reader, the feed under a row
        lifted by a long press. */
     --scrim: rgba(0, 0, 0, 0.45);
+    /* The veil's one softening: faint enough that the room behind an open layer, Main
+       beside a Project, still reads; glass on a floating object is --glass. */
+    --scrim-filter: blur(2px);
     --radius-object: 18px;
     --radius-inner: 12px;
     --radius-sheet: 24px;

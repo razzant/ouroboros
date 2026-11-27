@@ -58,3 +58,87 @@ def test_scanners_see_the_shape_they_refuse():
         ':root[data-theme] :is(.chat-header-menu, .task-control-menu)']
     assert translucent_popup_paint('.task-control-menu { background: var(--popup-float); } '
                                    '.chat-header-menu-item { background: var(--surface-float); }') == []
+
+
+# One glass and one shadow for what floats: each object below rests on the float shadow token, the toast and the staged
+# file wear the float surface and the one glass with no visible rim (the staged file also its resting shadow, its edge on a
+# light room), the status badge the one glass, and the three named veils soften with the one scrim filter. Every
+# unconditioned rule naming the bare selector (alone or in a list) counts, so a later override is seen too.
+FLOAT_SHADOW = (".toast", ".files-preview-image", ".files-drop-card", ".onboarding-restart-card",
+                ".chat-file-dialog", ".document-reader", ".project-panel")
+FLOAT_SURFACE = (".toast", ".attach-badge")
+GLASS = (".toast", ".attach-badge", ".status-badge")
+SCRIMS = (".onboarding-overlay-backdrop", ".files-drop-overlay", ".project-panel-backdrop")
+_NO_RIM = re.compile(r"^(?:none|0|0px|transparent|\d+px solid transparent|0 none)$")
+
+
+def _declarations(css: str, selector: str) -> dict[str, list[str]]:
+    """Every value each property takes in the flat rules whose selector list names `selector` itself (not a descendant,
+    a state or a theme), in sheet order."""
+    found: dict[str, list[str]] = {}
+    for selectors, body in _rules(css):
+        if selector not in [part.strip() for part in selectors.split(",")]:
+            continue
+        for decl in body.split(";"):
+            name, _, value = decl.partition(":")
+            if value.strip():
+                found.setdefault(name.strip(), []).append(" ".join(value.split()))
+    return found
+
+
+def floating_material_drift(css: str) -> list[str]:
+    """Named floating objects whose rules paint a material other than the shared tokens."""
+    found = []
+    for selector in FLOAT_SHADOW:
+        if set(_declarations(css, selector).get("box-shadow", ["missing"])) != {"var(--elev-float)"}:
+            found.append(f"{selector} shadow")
+    for selector in FLOAT_SURFACE:
+        decls = _declarations(css, selector)
+        rims = [v for name in ("border", "border-color") for v in decls.get(name, [])]
+        if set(decls.get("background", ["missing"])) != {"var(--surface-float)"} or not all(_NO_RIM.match(v) for v in rims):
+            found.append(f"{selector} surface")
+    for selector in GLASS:
+        if set(_declarations(css, selector).get("backdrop-filter", ["missing"])) != {"var(--glass)"}:
+            found.append(f"{selector} glass")
+    if set(_declarations(css, ".attach-badge").get("box-shadow", ["missing"])) != {"var(--elev-rest)"}:
+        found.append(".attach-badge edge")
+    for selector in SCRIMS:
+        if set(_declarations(css, selector).get("backdrop-filter", ["missing"])) != {"var(--scrim-filter)"}:
+            found.append(f"{selector} veil")
+    # Forced colours drop the shadow: the toast's transparent outline is the edge they paint.
+    if set(_declarations(css, ".toast").get("outline", ["missing"])) != {"1px solid transparent"}:
+        found.append(".toast forced-colours edge")
+    return found
+
+
+GOOD = (".toast { background: var(--surface-float); box-shadow: var(--elev-float); backdrop-filter: var(--glass);"
+        " outline: 1px solid transparent; }"
+        ".attach-badge { background: var(--surface-float); border: 1px solid transparent; box-shadow: var(--elev-rest);"
+        " backdrop-filter: var(--glass); } .status-badge { backdrop-filter: var(--glass); }"
+        ".files-preview-image { box-shadow: var(--elev-float); } .files-drop-card { box-shadow: var(--elev-float); }"
+        ".onboarding-restart-card { box-shadow: var(--elev-float); }"
+        ".chat-file-dialog, .document-reader { box-shadow: var(--elev-float); }"
+        ".project-panel { box-shadow: var(--elev-float); }"
+        ".onboarding-overlay-backdrop { backdrop-filter: var(--scrim-filter); }"
+        ".files-drop-overlay { backdrop-filter: var(--scrim-filter); }"
+        ".project-panel-backdrop { backdrop-filter: var(--scrim-filter); }")
+
+
+def test_floating_material_scanner_sees_drift():
+    assert floating_material_drift(GOOD) == []
+    assert floating_material_drift(GOOD + ".toast:hover { border: 1px solid red; }") == [], "a state is not the object"
+    for broken, expected in (
+            (".toast { border: 1px solid var(--divider); }", [".toast surface"]),           # a plain rim, later
+            (".toast { box-shadow: 0 2px 4px red; }", [".toast shadow"]),                   # an override at the end
+            (".status-badge { backdrop-filter: blur(8px); }", [".status-badge glass"]),
+            (".attach-badge { box-shadow: none; }", [".attach-badge edge"]),
+            (".x, .files-drop-overlay { backdrop-filter: blur(3px); }", [".files-drop-overlay veil"]),
+            (".toast { outline: none; }", [".toast forced-colours edge"])):
+        assert floating_material_drift(GOOD + broken) == expected, broken
+
+
+def test_floating_objects_wear_the_shared_material():
+    from pathlib import Path
+
+    css = (Path(__file__).resolve().parents[1] / "web" / "style.css").read_text(encoding="utf-8")
+    assert floating_material_drift(css) == []

@@ -54,7 +54,7 @@ _NOTICE_FACTS = """({feed, mark}) => {
                   composer?.getClientRects().length ? composer.getBoundingClientRect().top - band.top : root.clientHeight];
     const pre = node.querySelector('.message pre');
     const code = pre && pre.getBoundingClientRect();
-    const toasts = [...document.querySelectorAll('#page-chat .toast-stack--room .toast')].map((toast) => {
+    const toasts = [...document.querySelectorAll('#toast-stack .toast')].map((toast) => {
         const rect = toast.getBoundingClientRect();
         return {top: rect.top - band.top, bottom: rect.bottom - band.top, left: rect.left, right: rect.right,
                 text: toast.textContent || ''};
@@ -77,8 +77,10 @@ _SIDEWAYS = """async ({feed, mark, left}) => {
 
 _HOLD_TOAST = """async (text) => {
     const { showToast } = await import('/static/modules/toast.js');
-    window.__heldToast = showToast(text, 'info', { ttl: 0, haptic: false, dismissLabel: 'Dismiss held notice',
-        host: document.querySelector('#page-chat') });
+    // The page's one stack stands at the top right; this check needs a notice over the conversation's LAST lines, so the
+    // stimulus lowers that stack to the reading band's lower part (its geometry is measured below, not assumed).
+    window.__heldToast = showToast(text, 'info', { ttl: 0, haptic: false, dismissLabel: 'Dismiss held notice' });
+    document.getElementById('toast-stack').style.setProperty('--toast-top', `${Math.round(innerHeight * 0.55)}px`);
     return Boolean(window.__heldToast?.isConnected);
 }"""
 
@@ -210,8 +212,8 @@ def test_a_wide_notice_is_read_once_all_of_it_was_in_view_and_rows_under_a_notic
                     _shot(page, request, "T1-short-notice-under-a-held-notice")
                     capture.checkpoint("2-under-a-notice")
                     page.evaluate("() => { for (const toast of document.querySelectorAll("
-                                  "'#page-chat .toast-stack--room .toast')) toast.dispose?.(); }")
-                    page.wait_for_function("() => !document.querySelector('#page-chat .toast-stack--room .toast')")
+                                  "'#toast-stack .toast')) toast.dispose?.(); }")
+                    page.wait_for_function("() => !document.querySelector('#toast-stack .toast')")
                     # Its end is a reading moment: no scroll, the reader is already at the short notice.
                     wait_until(lambda: _read_ahead(page, chat) == {revision} or None, 30)
                     assert _read_ahead(page, chat) == {revision} and _unread(page, project)

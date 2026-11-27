@@ -559,8 +559,8 @@ html[data-layout="docked"] #primary-sidebar {
 }
 /* On a desk a room's bar (Main's, a docked Project's) is the band's row too, as every page's header is
    (.app-page-header[data-lead] below): its capsules are centred on the lights' line at every Interface size, the
-   insets shrinking with a shorter row; the transcript's reserve and the history note follow the bar's measured height
-   (chat.js --chat-header-bar). */
+   insets shrinking with a shorter row; the transcript's reserve follows the bar's measured height (chat.js
+   --chat-header-bar). */
 :root[data-window-chrome="integrated"][data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
     box-sizing: border-box;
     min-height: var(--window-chrome-row);
@@ -1142,6 +1142,14 @@ html[data-layout="stack"] .resize-handle { display: none; }
 /* An owner-required action is a System message: the task, one sentence, the task's own controls. */
 .owner-action-body { display: flex; flex-direction: column; gap: var(--space-2); }
 .owner-action-reason { font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
+/* A System row speaks at the size of every voice: its words, its title and its status sentences (an owner action's, a
+   Project ending's outcome) at 16; its name, time and metadata (a place, a count, a row's answer) stay 12. */
+.chat-bubble.system :is(:is(.owner-action-body, .project-ending-head) > .ui-status,
+    .owner-action-reason:not([data-panic-summary]), .model-wait-heading strong) {
+    font-size: var(--type-section);
+    line-height: var(--line-body);
+}
+.chat-bubble.system .owner-action-reason:not([data-panic-summary]) { color: var(--system-text); }
 /* The works Panic stopped (panic_recovery.js): Choose all/none beside the count, then one row per work, its box on the
    name's first line, its place and its last answer under the name, the Stop… its card had at the row's end; the one
    Resume follows the list. The whole label is the box's, so a finger reaches it anywhere, and a tap answers with the
@@ -1169,10 +1177,10 @@ html[data-layout="stack"] .resize-handle { display: none; }
     -webkit-tap-highlight-color: transparent;
 }
 .panic-recovery-pick.is-locked { cursor: default; }
-.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); }
+.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-section) * var(--line-body) - var(--checkbox-size)) / 2); }
 /* The words keep their column when a row that came back has no box. */
 .panic-recovery-pick > :not(.ui-checkbox) { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
-.panic-recovery-name { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); font-weight: 500; }
+.panic-recovery-name { color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-body); font-weight: 500; }
 .panic-recovery-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .panic-recovery-meta:empty { display: none; }
 @media (pointer: coarse) {
@@ -1516,7 +1524,7 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     max-height: 100%;
     margin: 0 auto;
     border-radius: var(--radius-inner);
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+    box-shadow: var(--elev-float);
 }
 
 .files-preview-frame {
@@ -1534,7 +1542,8 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     align-items: center;
     justify-content: center;
     background: rgba(var(--menu-rgb), 0.72);
-    backdrop-filter: blur(3px);
+    backdrop-filter: var(--scrim-filter);
+    -webkit-backdrop-filter: var(--scrim-filter);
     z-index: 5;
     pointer-events: none;
 }
@@ -1552,7 +1561,7 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     font-size: 14px;
     font-weight: 600;
     letter-spacing: 0.01em;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.24);
+    box-shadow: var(--elev-float);
 }
 
 .files-modal-input { margin-top: var(--space-3); }
@@ -1922,31 +1931,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     pointer-events: auto;
 }
 
-/* The history note (a reading-window fact: a failed read, an approximate position) is its own floating chip under
-   the bar, never a full-width strip: it floats at the bar's measured height (chat.js writes --chat-header-bar)
-   with its own float-sheet backing, and the transcript's reserve counts both. Empty, it takes no room. */
-.chat-page-note {
-    position: absolute;
-    top: var(--chat-header-bar, 56px);
-    left: var(--page-header-padding-x);
-    right: auto;
-    max-width: min(560px, calc(100% - 2 * var(--page-header-padding-x)));
-    z-index: var(--z-page-header);
-    padding: 2px 0 var(--space-2);
-    pointer-events: none;
-}
-.chat-page-note > * {
-    display: block;
-    padding: 6px 12px;
-    border-radius: var(--radius-inner);
-    background: var(--surface-float);
-    box-shadow: var(--elev-rest);
-    -webkit-backdrop-filter: var(--glass);
-    backdrop-filter: var(--glass);
-    pointer-events: auto;
-}
-.chat-page-note:not(:has(> :not([hidden]))) { display: none; }
-
 /* Search in a chat (DESIGN "Search in a chat", chat_search.js): one sheet floating under the room's bar at its
    trailing edge, over moving content, so it wears the menus' material (--popup-float, the float shadow). Its corner is
    the composer field's: the sheet radius, half the height of the field alone in it, so the field alone is a capsule
@@ -2208,8 +2192,8 @@ html[data-layout="stack"] .chat-find {
     font-size: var(--type-meta);
     font-weight: 500;
     background: rgba(var(--composer-rgb), 0.78);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
 }
 .status-badge.online { color: var(--status-ok-fg); }
 /* Loading… and Starting… go on by themselves: the meta ink, never amber. */
@@ -2299,14 +2283,6 @@ html[data-layout="stack"] .chat-find {
     gap: inherit;
 }
 .chat-saved-preview > .chat-load-older-note { align-self: center; }
-.chat-history-status {
-    grid-column: 1 / -1;
-    flex: 0 0 100%;
-    order: 1;
-    max-width: none;
-    text-align: left;
-    overflow-wrap: anywhere;
-}
 /* The transcript's typing bubble: the shared moving mark (status_mark.js) in the bubble's secondary ink, on a line of
    its own height. */
 .typing-bubble { opacity: 0.7; color: var(--text-secondary); }
@@ -2326,7 +2302,8 @@ html[data-layout="stack"] .chat-find {
     position: absolute;
     inset: 0;
     background: rgba(var(--media-rgb), 0.78);
-    backdrop-filter: blur(10px);
+    backdrop-filter: var(--scrim-filter);
+    -webkit-backdrop-filter: var(--scrim-filter);
 }
 
 .onboarding-surface {
@@ -2363,7 +2340,7 @@ html[data-layout="stack"] .chat-find {
     border-radius: var(--radius-inner);
     background: var(--bg-secondary);
     color: var(--text-primary);
-    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+    box-shadow: var(--elev-float);
 }
 
 .onboarding-restart-card h2 {
@@ -5036,11 +5013,6 @@ html[data-layout="stack"] .chat-page-header > .app-page-title-block {
 html[data-layout="stack"] .chat-page-header > .app-page-actions {
     flex: 0 0 auto;
 }
-html[data-layout="stack"] .chat-page-note {
-    left: var(--space-3);
-    max-width: calc(100% - 2 * var(--space-3));
-    padding: 2px 0 var(--space-2);
-}
 #chat-input-area,
 .chat-input-area {
     /* Its edge (A room's edges) darkens the transcript before the frosted input without trapping scroll. */
@@ -5363,10 +5335,11 @@ html[data-layout="stack"] .chat-page-note {
     align-items: center;
     gap: 6px;
     padding: 4px 8px 4px 6px;
-    background: rgba(var(--composer-rgb), 0.78);
-    border: 1px solid var(--accent-35);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: var(--surface-float);
+    border: 1px solid transparent;  /* no rim; forced colours paint it */
+    box-shadow: var(--elev-rest);  /* its edge on a light room, as the composer chips beside it have */
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border-radius: var(--radius-inner);
     font-size: var(--type-meta);
     color: var(--text-primary);
@@ -7688,7 +7661,7 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .toast-stack {
     --toast-top: calc(76px + var(--inset-top));
     position: fixed;
-    right: 18px;
+    inset-inline-end: 18px;
     top: var(--toast-top);
     z-index: 120;
     display: flex;
@@ -7709,10 +7682,14 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     column-gap: var(--space-1);
     max-width: min(420px, calc(100vw - 112px));
     /* The close's reach under a finger (8px past its 28px) stays inside the notice, so the column never clips it. */
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+    padding-block: var(--space-2);
+    padding-inline: var(--space-4) var(--space-2);
     border-radius: var(--radius-object);
     background: var(--surface-float);
     color: var(--text-primary);
+    /* No rim: the transparent outline is only the edge forced colours paint, where the shadow is dropped. */
+    outline: 1px solid transparent;
+    outline-offset: -1px;
     box-shadow: var(--elev-float);
     -webkit-backdrop-filter: var(--glass);
     backdrop-filter: var(--glass);
@@ -7730,7 +7707,7 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 }
 
 .toast-ok { color: var(--status-ok-fg); }
-.toast-danger { color: var(--status-error-fg); }
+.toast-danger { color: var(--status-error-word, var(--status-error-fg)); }
 .toast-warn { color: var(--status-warn-fg); }
 .toast-muted { color: var(--status-neutral-fg); }
 /* Room notices sit above the measured composer, away from header menus. */
@@ -7770,9 +7747,10 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
        not meet, so a tap on that line stays a press on the words. */
     .toast > .toast-action { margin-top: var(--space-4); }
 }
-/* Its close is the quiet icon control (as a card's ⋮): no body, the meta ink, the primary ink on hover. */
+/* Its close is a small plain × in the top corner: the quiet icon control (as a card's ⋮) without a body even on hover,
+   the meta ink, the primary ink on hover. */
 .toast > .toast-dismiss { --control-pad-x: 0; grid-column: 2; grid-row: 1 / span 2; width: var(--control-h); color: var(--text-meta); }
-.toast > .toast-dismiss:not(:disabled):hover { color: var(--text-primary); }
+.toast > .toast-dismiss:not(:disabled):hover { background: transparent; color: var(--text-primary); }
 .toast > .toast-dismiss > svg { width: 16px; height: 16px; }
 /* The page's stack ends 18 px above the screen's bottom, as it keeps from its right, and the notices it keeps scroll
    there as one column: every word and close button is reached by wheel, touch or keyboard (toast.js names it a region
@@ -7780,10 +7758,11 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
    down and 44px of blur): left and below them, and the 18 px to the right edge that `right` kept before. Room notices
    keep their own place. */
 #toast-stack {
-    right: 0;
+    inset-inline-end: 0;
     box-sizing: border-box;
     max-height: calc(var(--vvh) - var(--toast-top) - var(--inset-bottom) - 18px);
-    padding: 0 18px 62px 44px;
+    padding-block: 0 62px;
+    padding-inline: 44px 18px;
     overflow-y: auto;
     overscroll-behavior: contain;
 }
@@ -9355,7 +9334,7 @@ body.keyboard-open #page-chat.active {
 }
 
 /* Outside Telegram, keyboard chrome takes its place in the column and the feed scrolls between it. */
-html:not([data-telegram-fullscreen]) body.keyboard-open #page-chat.active :is(.chat-page-header, .chat-page-note),
+html:not([data-telegram-fullscreen]) body.keyboard-open #page-chat.active .chat-page-header,
 html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .project-panel-bar {
     flex-shrink: 0;
     position: relative;
@@ -9382,9 +9361,9 @@ html:not([data-telegram-fullscreen]) body.keyboard-open :is(#chat-input-area, .c
     bottom: auto;
     padding-block: var(--composer-typing-pad, var(--space-2));
 }
-/* Capsule hints pass below Panic. The note and search sheet still float over the bar's material. */
+/* Capsule hints pass below Panic. The search sheet still floats over the bar's material. */
 body.keyboard-open :is(.chat-page-header, .project-panel-bar),
-html[data-telegram-fullscreen] body.keyboard-open :is(.chat-page-note, .chat-find) {
+html[data-telegram-fullscreen] body.keyboard-open .chat-find {
     z-index: calc(var(--z-page-header) + 1);
 }
 /* A short room's composer keeps --space-1 between its rows (a folded row takes it along) and inside the field (one
@@ -10106,7 +10085,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     /* A reading surface is one flat opaque material, even where native backdrop blur is not composited; the
        project's colour lives in its small marks, and underlying Main text must never show through. */
     background: rgb(var(--shell-rgb));
-    box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);
+    box-shadow: var(--elev-float);
     transform: translateX(18px);
     opacity: 0;
     pointer-events: none;
@@ -10166,8 +10145,8 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     z-index: var(--z-project-scrim);
     cursor: default;
     background: var(--scrim);
-    backdrop-filter: blur(1.5px);
-    -webkit-backdrop-filter: blur(1.5px);
+    backdrop-filter: var(--scrim-filter);
+    -webkit-backdrop-filter: var(--scrim-filter);
     opacity: 0;
     pointer-events: none;
     transition: opacity 180ms ease;
@@ -10248,10 +10227,10 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
         outline-offset: -2px;
     }
 }
-/* The note already reserves the floating bar. With a keyboard both are in flow. The bar holds only that note, and only
-   with text (chat_render_batch.js), so `:empty` answers. Never a :has() on the room: in WebKit, beside the rows' own
-   :has() rules, it made each live card's log frame cost 3 times as much, and more with each room kept away (measured;
-   tests/test_design_system_css_static.py guards it). */
+/* A Project's status bar, while it holds the room's status (before room_work.js adopts it), already reserves the
+   floating bar; with a keyboard both are in flow. Empty, it takes no room, so `:empty` answers. Never a :has() on the
+   room: in WebKit, beside the rows' own :has() rules, it made each live card's log frame cost 3 times as much, and more
+   with each room kept away (measured; tests/test_design_system_css_static.py guards it). */
 .project-panel .chat-panel-statusbar:not(:empty) ~ .chat-messages {
     --chat-feed-reserve: 8px;
 }
@@ -11226,7 +11205,7 @@ html[data-layout="stack"] .project-panel {
     border-radius: var(--radius-sheet);
     background: var(--ui-modal-bg);
     color: var(--text-primary);
-    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
+    box-shadow: var(--elev-float);
 }
 
 .chat-file-dialog { width: min(420px, calc(100vw - 32px)); }
@@ -12870,7 +12849,9 @@ html[data-telegram-fullscreen] body.keyboard-open :is(#content, #page-chat.activ
     box-shadow: none;
 }
 /* The page's notices keep their 18 px from the right inset, and a notice as wide as it may be as much from the left. */
-html[data-telegram-fullscreen] #toast-stack { padding-right: calc(18px + var(--inset-right)); }
+html[data-telegram-fullscreen] #toast-stack { padding-inline-end: calc(18px + var(--inset-right)); }
+/* Mirrored, the stack stands at the physical left: that side's inset. */
+html[dir="rtl"][data-telegram-fullscreen] #toast-stack { padding-inline-end: calc(18px + var(--inset-left)); }
 html[data-telegram-fullscreen] #toast-stack .toast {
     max-width: min(420px, calc(100vw - 112px - var(--inset-left) - var(--inset-right)));
 }
@@ -12890,9 +12871,10 @@ html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar { --sideba
 :is(#page-chat, .project-panel) {
     --edge-reach: var(--edge-length);
 }
-/* What floats right under the bar lies over its edge, as its capsules do: Main's history note and a room's search sheet
-   come after the bar at its own level, so they paint over it, never blurred. A Project's status note stands in its flow
-   below the edge (its top reserve counts the edge, --chat-top-reserve below). Outside Telegram the keyboard puts both bars in flow. */
+/* What floats right under the bar lies over its edge, as its capsules do: a room's search sheet comes after the bar at
+   its own level, so it paints over it, never blurred. A Project's status bar, while it holds the room's status, stands in
+   its flow below the edge (its top reserve counts the edge, --chat-top-reserve below). Outside Telegram the keyboard puts
+   both bars in flow. */
 :where(html:not([data-telegram-fullscreen])) body.keyboard-open :is(#page-chat.active, .project-panel) {
     --edge-reach: 0px;
 }
@@ -12900,9 +12882,8 @@ html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar { --sideba
 html[data-telegram-fullscreen] body.keyboard-open :is(#page-chat.active, .project-panel) {
     --edge-reach: clamp(0px, var(--vvh) - var(--inset-top) - 250px, var(--edge-length));
 }
-/* The transcript's first row and a Project's status note stand below the bar and its edge, and below Main's note, which
-   floats over that edge: the room's measured reserve (the bar and the note, chat.js) or the bar and its edge, whichever
-   ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears the edge of a
+/* The transcript's first row and a Project's status bar stand below the bar and its edge: the room's measured reserve
+   (the bar, chat.js) or the bar and its edge, whichever ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears the edge of a
    bar that tall from the first frame (Telegram's taller row is reserved once measured); a room mounted without a bar has
    no edge (room_work.js), and its measured reserve stands alone. */
 :is(#page-chat, .chat-instance-panel) {
