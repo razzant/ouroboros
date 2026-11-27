@@ -124,7 +124,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
 
-9. **A continuation fades at the edge.** Content fades past bars, strips, sheet heads and menus; long descriptions fade before disclosure (short names and excerpts keep ellipsis). One shared transparent fade, only where more waits; one float glass; the Widgets board (20.10) crisp, a room's feed (21.10) unmasked.
+9. **A continuation fades at the edge.** Content fades past bars, strips, sheet heads and menus; long descriptions fade before disclosure (short names and excerpts keep ellipsis). One shared transparent fade on the one edge curve (§10 "One edge"), only where more waits; one float glass; the Widgets board (20.10) crisp, a room's feed (21.10) unmasked.
 
 **Seed (light | dark)**
 
@@ -1967,7 +1967,7 @@ Each episode keeps its name, time, outcome and sentence; only the current one ow
 Expanded ordinary cards disclose earlier Files, timeline, Reviews, children
 in collapsible original-content sections, never duplicate cards.
 
-**Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint; only painted fading text extends two lines into footer whitespace, without moving Project/time/actions. Short answers have no fade; limitations/details keep the tail above their words. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
+**Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint whose last two lines fade on the shared edge (a clipped fold), the same in every state (folded, while the width moves, with a limitation under it), so no line is cut through its letters; Project, time and actions stay put. Short answers have no fade. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
 
 History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Root and API-child Details label an observed solve `Last solve response`, naming `initial request` only when that call's route changed; a session child attributes solve metadata to its coordinator (`Coordinator`, `Last coordinator solve response`, or `Coordinator model execution` when unobserved), never the delegated run. `Model handover` shows which routes were involved, whether a successor reply was recorded, and what the successor did: an accepted answer choice or a successful tool call other than schema discovery. An incomplete handover establishes no act. After one reminder, the successor can explicitly select the complete answer or its offered hash. An accepted choice clears the handover warning alone; other failures stay visible. Restoring the same task ID can recover a proved choice; a new task ID must select for itself. Files, Continue and `Model handover` follow one settled stored detail: the census read serves the card, a reveal joins it, an incomplete read is topped up once, and a failed review read keeps its ordinary Retry. An exact row jump opens what it lands in; folded children stay unread, retranslation is local.
 
@@ -3733,20 +3733,32 @@ whole or not at all, as the status word does, so a narrow phone may show the sta
 becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
 (both are layers). The work list and consciousness sheet hang below at page width. Typing keeps the same row.
 
+### One edge
+
+Everything that scrolls ends in the same edge: one curve, `--edge-curve` (smoothstep from
+opaque to clear, flat at both ends, so neither end of a fade reads as a line), in `web/ui.css`. Its length is
+`--edge-length` (32 px) for a room's edges and by default for vertical lists; sideways rails take a smaller spacing
+token and a folded answer two of its line heights. A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
+more waits), a clipped preview `[data-fold-clipped]`, and a painted fade (a colour into what passes under it) is the
+colour masked by `linear-gradient(var(--edge-curve))`; a sheet sets only where an edge is and how long, never a
+gradient, curve or blur of its own. The Widgets board stays crisp and a room's feed unmasked.
+
 ### A room's edges
 
 The transcript runs to the room's top under the bar and to its bottom under the composer; nothing masks it. At both
-ends it is darkened and blurred under what floats over it, one material top and bottom (owner 15.11 «прозрачную шапку…
-градиент затемнения по нашей библии… и в десктопе», his choice 17.11 1A, 3A): the composer's darkening (the room's
-colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top. A 12 px blur
-keeps scrolling card actions distinct from the floating controls. It is full behind the capsules and phone clock,
-then tapers to clear within 32 px below the bar on every layout. The composer has the same soft transition inside
-its top 32 px. The first row and every landing clear the header's reach; a row under it is not read yet. The top
-effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
-do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
-both themes. While typing in Telegram the feed still passes under both. The newest line and time rest just above the
-measured composer. In a tight room the top extension yields to the feed. Reading history holds the passage in place,
-as it does in a shorter window, and the feed still scrolls.
+ends what floats over it stands on one material, top and bottom (owner 15.11 «прозрачную шапку… градиент затемнения
+по нашей библии… и в десктопе», his choice 17.11 1A, 3A): two blur steps, a soft one (4 px) over the
+whole taper and a deep one in its depth (12 px in all over the soft), under the room's colour, 72 % at the window's
+edge. Blur and darkening each follow the shared edge curve to clear, the deep blur dissolving into the soft and the
+soft into sharp text, so the blurred zone ends with no line. It is full behind the
+capsules and phone clock and clears one edge length below the bar on every layout; the composer's area has the same
+edge inside its top. It keeps scrolling card actions distinct from the floating controls. The first row and every
+landing clear the header's reach; a row under it is not read yet. The top edge is separate from the desktop
+title-band strip. A note or the search sheet floats above it as the capsules do (a Project's status note, in its flow,
+stands below it). The blur belongs to the edge, not to a chip, so it applies in both themes; without backdrop blur,
+or with reduced transparency, a stronger room-colour tint alone fades the edge. While typing in Telegram the feed still passes
+under both. The newest line and time rest just above the measured composer. In a tight room the top extension yields
+to the feed. Reading history holds the passage in place, as it does in a shorter window, and the feed still scrolls.
 Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter

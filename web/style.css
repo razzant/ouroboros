@@ -297,7 +297,9 @@ html[data-layout="docked"] #primary-sidebar {
         right: 0;
         height: var(--space-4);
         pointer-events: none;
-        background: linear-gradient(var(--surface-side), transparent);
+        background: var(--surface-side);
+        -webkit-mask-image: linear-gradient(var(--edge-curve));
+        mask-image: linear-gradient(var(--edge-curve));
     }
 }
 
@@ -961,36 +963,16 @@ html[data-layout="stack"] .resize-handle { display: none; }
 :is(.chat-quiz-project, .chat-live-bound-pointer) .chat-live-project-name { font-weight: 600; }
 
 /* A Project root's final answer in Main is an ordinary Ouroboros message (docs/DESIGN.md
-   "Project completion mirror"): folded when it is long, with the Project chip under it. The
-   seven-line footprint stays fixed while the painted tail borrows footer whitespace. JS
-   compensates the actual extension (including answers shorter than the tail); full text stays selectable. */
+   "Project completion mirror"): folded to seven lines when it is longer, with the Project chip under it. The fold
+   (project_answer.js marks its clipped body) ends on the shared edge, two lines deep, in every state. */
 .chat-bubble.project-answer {
     --project-reference-backing: var(--voice-ouroboros);
     --project-answer-line: calc(var(--type-section) * var(--line-body));
     --project-answer-lines: 7;
     --project-answer-fold: calc(var(--project-answer-line) * var(--project-answer-lines));
-    --project-answer-tail: calc(var(--project-answer-line) * 2);
 }
 .chat-bubble.project-answer > .message { max-height: var(--project-answer-fold); overflow: hidden; }
-.chat-bubble.project-answer.is-folded > .message {
-    max-height: calc(var(--project-answer-fold) + var(--project-answer-tail));
-    margin-bottom: var(--project-answer-compensation, 0px);
-    -webkit-mask-image: linear-gradient(to bottom, black 0, black calc(var(--project-answer-line) * 25 / 6), rgba(0,0,0,.94) calc(var(--project-answer-line) * 31 / 6), rgba(0,0,0,.65) calc(var(--project-answer-line) * 6), rgba(0,0,0,.25) var(--project-answer-fold), rgba(0,0,0,.07) calc(var(--project-answer-line) * 95 / 12), transparent calc(var(--project-answer-line) * 9));
-    mask-image: linear-gradient(to bottom, black 0, black calc(var(--project-answer-line) * 25 / 6), rgba(0,0,0,.94) calc(var(--project-answer-line) * 31 / 6), rgba(0,0,0,.65) calc(var(--project-answer-line) * 6), rgba(0,0,0,.25) var(--project-answer-fold), rgba(0,0,0,.07) calc(var(--project-answer-line) * 95 / 12), transparent calc(var(--project-answer-line) * 9));
-}
-/* Width changes defer measurement: retain the CSS-only footprint until the feed settles. */
-[data-resizing] .chat-bubble.project-answer.is-folded > .message {
-    max-height: var(--project-answer-fold);
-    margin-bottom: 0;
-    -webkit-mask-image: linear-gradient(180deg, black 60%, transparent 100%);
-    mask-image: linear-gradient(180deg, black 60%, transparent 100%);
-}
-/* A limitation and its disclosure own the space before Project; never paint over their words. */
-.chat-bubble.project-answer:has(> .project-answer-limitation, > .project-ending-details) { --project-answer-tail: 0px; }
-.chat-bubble.project-answer.is-folded > .message:has(~ .project-answer-limitation, ~ .project-ending-details) {
-    -webkit-mask-image: linear-gradient(180deg, black 60%, transparent 100%);
-    mask-image: linear-gradient(180deg, black 60%, transparent 100%);
-}
+.chat-bubble.project-answer > .message[data-fold-clipped] { --scroll-fade-edge: calc(var(--project-answer-line) * 2); }
 .chat-bubble.project-answer > :is(.system-message-actions, .msg-time) { position: relative; z-index: 1; }
 /* Reply, actions and Copy stand above both, so a finger's whole reach around each stays the control's. */
 .chat-bubble:is(.project-answer, .system) > .chat-message-actions { z-index: 2; }
@@ -4983,7 +4965,7 @@ html[data-layout="stack"] .chat-page-note {
 }
 #chat-input-area,
 .chat-input-area {
-    /* Bottom fade darkens transcript before the frosted input without trapping scroll. */
+    /* Its edge (A room's edges) darkens the transcript before the frosted input without trapping scroll. */
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -4995,13 +4977,6 @@ html[data-layout="stack"] .chat-page-note {
     right: 0;
     z-index: 5;
     pointer-events: none;
-    background: linear-gradient(
-        0deg,
-        rgba(var(--shell-rgb), 0.72) 0%,
-        rgba(var(--shell-rgb), 0.36) 48%,
-        rgba(var(--shell-rgb), 0.10) 78%,
-        rgba(var(--shell-rgb), 0.00) 100%
-    );
 }
 
 #chat-input-area > *,
@@ -10180,8 +10155,8 @@ html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .chat-pan
 
 /* Shared dock contract (v6.71.0): the panel composer docks exactly like the
    main chat one — the base .chat-input-area rule supplies position:absolute
-   (anchored to the position:relative panel), the SAME bottom fade gradient,
-   and the pointer-events pass-through; no second fade layer. */
+   (anchored to the position:relative panel), the SAME room edge (chat.js
+   mounts it in every composer area) and the pointer-events pass-through. */
 .chat-instance-panel .chat-input-area {
     padding: 24px 14px max(16px, var(--inset-bottom));
 }
@@ -11413,7 +11388,17 @@ html[data-layout="stack"] .project-panel {
     z-index: 2;
     inset: 0 0 auto;
     border-bottom: 0;
-    background: linear-gradient(to bottom, var(--bg-primary), transparent);
+}
+/* Its controls stand on the room's colour, which fades into the picture on the shared edge curve. */
+.document-reader.is-image-scene .document-reader-head::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: var(--bg-primary);
+    -webkit-mask-image: linear-gradient(var(--edge-curve));
+    mask-image: linear-gradient(var(--edge-curve));
 }
 
 .document-reader.is-image-scene .document-reader-body.is-image {
@@ -12791,13 +12776,9 @@ html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar { --sideba
 
 /* ---- A room's edges and Telegram's shared row (DESIGN: A room's edges) ----
    Keep scrolling card actions from reading as header controls. Only the edge material is masked; the transcript
-   stays sharp outside it. Layout and read tracking use the same reach. Both layers taper gently to transparent. */
+   stays sharp outside it. Layout and read tracking use the same reach (the shared edge's length). */
 :is(#page-chat, .project-panel) {
-    --edge-reach: 32px;
-    --edge-fade: 32px;
-    --edge-mask: #000 calc(100% - var(--edge-fade)),
-        rgba(0, 0, 0, 0.5) calc(100% - var(--edge-fade) * 0.52),
-        rgba(0, 0, 0, 0.14) calc(100% - var(--edge-fade) * 0.22), transparent 100%;
+    --edge-reach: var(--edge-length);
 }
 /* What floats right under the bar lies over its edge, as its capsules do: Main's history note and a room's search sheet
    come after the bar at its own level, so they paint over it, never blurred. A Project's status note stands in its flow
@@ -12807,7 +12788,7 @@ html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar { --sideba
 }
 /* A low typing viewport gives the reading band priority over the extension. */
 html[data-telegram-fullscreen] body.keyboard-open :is(#page-chat.active, .project-panel) {
-    --edge-reach: clamp(0px, var(--vvh) - var(--inset-top) - 250px, 32px);
+    --edge-reach: clamp(0px, var(--vvh) - var(--inset-top) - 250px, var(--edge-length));
 }
 /* The transcript's first row and a Project's status note stand below the bar and its edge, and below Main's note, which
    floats over that edge: the room's measured reserve (the bar and the note, chat.js) or the bar and its edge, whichever
@@ -12818,39 +12799,73 @@ html[data-telegram-fullscreen] body.keyboard-open :is(#page-chat.active, .projec
     --chat-input-reserve: max(92px, var(--chat-composer-height, 92px) + 16px);
     --chat-top-reserve: max(var(--chat-header-reserve, 56px), var(--chat-header-bar, 56px) + var(--edge-reach, 0px));
 }
-/* The bar's ::after remains available to the native title-band hit target. */
-:is(.chat-page-header, .project-panel-bar)::before {
-    content: "";
+/* Each side of a room is three nodes (page_header.js ROOM_EDGE_HTML, in the bar and in the composer's area; the bar's
+   ::after is the native title band's hit target), direct children of the bar or area, no holder that could become
+   their backdrop root: the two blur steps, then the tint above them (a blur samples what is painted before it). Each is
+   --edge-curve over its far run beside a solid part that overlaps it by a pixel, so no seam and no end line show. The
+   soft step clears over the outer half of the taper; the deep one, full where the taper begins, has cleared by the time
+   the soft one starts to, so the deep blur dissolves into the soft and the soft into sharp text. Without backdrop blur,
+   or with reduced transparency, only a stronger tint fades the edge. */
+.room-edge {
     position: absolute;
-    inset: 0 0 auto 0;
-    height: calc(100% + var(--edge-reach));
+    left: 0;
+    right: 0;
     z-index: -1;
-    pointer-events: none;
-    background: linear-gradient(
-        180deg,
-        rgba(var(--shell-rgb), 0.72) 0,
-        rgba(var(--shell-rgb), 0.36) 48%,
-        rgba(var(--shell-rgb), 0.10) 78%,
-        rgba(var(--shell-rgb), 0.00) 100%
-    );
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
-    -webkit-mask-image: linear-gradient(180deg, var(--edge-mask));
-    mask-image: linear-gradient(180deg, var(--edge-mask));
+    --edge-run: calc(var(--edge-taper) / 2);
+    -webkit-mask-image: linear-gradient(var(--edge-to), var(--edge-curve)), linear-gradient(#000, #000);
+    mask-image: linear-gradient(var(--edge-to), var(--edge-curve)), linear-gradient(#000, #000);
+    -webkit-mask-size: 100% var(--edge-run), 100% calc(100% - var(--edge-run) + 1px);
+    mask-size: 100% var(--edge-run), 100% calc(100% - var(--edge-run) + 1px);
+    -webkit-mask-position: var(--edge-ends);
+    mask-position: var(--edge-ends);
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
 }
-/* Both reading and typing in Telegram use the same composer glass. */
-html[data-telegram-fullscreen] :is(#chat-input-area, .chat-input-area)::before,
-body:not(.keyboard-open) :is(#chat-input-area, .chat-input-area)::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
-    -webkit-mask-image: linear-gradient(0deg, var(--edge-mask));
-    mask-image: linear-gradient(0deg, var(--edge-mask));
+:is(.chat-page-header, .project-panel-bar, #chat-input-area, .chat-input-area) > .room-edge { pointer-events: none; }
+.room-edge[data-edge="soft"] { -webkit-backdrop-filter: var(--edge-blur-soft); backdrop-filter: var(--edge-blur-soft); }
+.room-edge[data-edge="deep"] {
+    --edge-shorten: var(--edge-run);
+    -webkit-backdrop-filter: var(--edge-blur-deep);
+    backdrop-filter: var(--edge-blur-deep);
 }
+.room-edge[data-edge="tint"] {
+    --edge-run: 100%;
+    background: rgba(var(--shell-rgb), var(--edge-tint, .72));
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .room-edge:not([data-edge="tint"]) { display: none; }
+    .room-edge[data-edge="tint"] {
+        --edge-tint: .9;
+    }
+}
+@media (prefers-reduced-transparency: reduce) {
+    .room-edge:not([data-edge="tint"]) { display: none; }
+    .room-edge[data-edge="tint"] {
+        --edge-tint: .9;
+    }
+}
+/* The top: from the window's edge to one reach below the bar, the taper starting under the bar's lower part. */
+:is(.chat-page-header, .project-panel-bar) {
+    --edge-taper: calc(var(--edge-reach) + var(--space-5));
+}
+:is(.chat-page-header, .project-panel-bar) > .room-edge {
+    --edge-to: to bottom;
+    --edge-ends: 0 100%, 0 0;
+    top: 0;
+    height: calc(100% + var(--edge-reach) - var(--edge-shorten, 0px));
+}
+/* The bottom, the same edge mirrored inside the composer's area while it floats over the feed (in Telegram also while
+   typing); in flow it has no feed under it. */
+:is(#chat-input-area, .chat-input-area) {
+    --edge-taper: var(--edge-length);
+}
+:is(#chat-input-area, .chat-input-area) > .room-edge {
+    --edge-to: to top;
+    --edge-ends: 0 0, 0 100%;
+    bottom: 0;
+    height: calc(100% - var(--edge-shorten, 0px));
+}
+:where(html:not([data-telegram-fullscreen])) body.keyboard-open :is(#chat-input-area, .chat-input-area) > .room-edge { display: none; }
 /* A room bar's capsules are the composer chips' glass in the dark theme (the capsule's veil over a blur of what passes
    under it), on the desk as on a phone; light keeps white capsules at the top as at the bottom. Panic keeps its ink
    readable on the glass over the reddest card (about 5:1 measured): a lighter ink over the glass with a light veil

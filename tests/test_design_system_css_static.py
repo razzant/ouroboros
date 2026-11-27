@@ -117,7 +117,7 @@ def test_width_inventory_sees_multiline_compound_queries_and_repeated_debt():
 # before `+`/`~` when an attribute or class in its argument changes, and for a scope-breaking argument. Browser tests
 # assert geometry, not cost, so this static check is the guard. Rewrite by asking from the styled element
 # (`.a > .x:has(~ .b)`) or by letting a common parent hold the `:has()` and set an inherited custom property the styled
-# element reads (`--project-answer-tail` in style.css).
+# element reads.
 COMBINATORS = " \t\n>+~"
 
 
