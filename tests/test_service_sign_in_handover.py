@@ -837,10 +837,10 @@ def test_a_moved_grant_whose_first_renewal_met_an_outage_renews_again(world, mon
     assert "first_refresh" not in oauth_engine.load(grant)["origin"]
 
 
-@pytest.mark.parametrize("loss", ["read_timeout", "gateway_504"])
+@pytest.mark.parametrize("loss", ["read_timeout", "gateway_504", "bare_503"])
 def test_a_moved_grants_first_renewal_whose_answer_was_lost_is_never_repeated(world, monkeypatch, loss):  # noqa: F811
-    """A timeout after sending, or a 504 a gateway may give after the exchange happened (and a provider that rotates
-    refresh tokens may have rotated it): never repeated, so a working sign-in is not spent on a second exchange."""
+    """A timeout after sending, or a 504 or a bare 503 a gateway may give after the exchange happened (and a provider
+    that rotates refresh tokens may have rotated it): never repeated, so a working sign-in is not spent twice."""
     provider, _owner, host = world
     key = _handover(host, provider)[0]["grants"][0]["account"]["key"]
     grant = service_sign_in._grant(CAL, "google", key)
@@ -850,8 +850,8 @@ def test_a_moved_grants_first_renewal_whose_answer_was_lost_is_never_repeated(wo
 
     def lost(request):
         if request.url.path == "/token":
-            if loss == "gateway_504":
-                return httpx.Response(504)
+            if loss in ("gateway_504", "bare_503"):  # no OAuth error of the provider's own: whoever answered
+                return httpx.Response(504 if loss == "gateway_504" else 503)
             raise httpx.ReadTimeout("the answer never came back", request=request)
         return served(request)
 

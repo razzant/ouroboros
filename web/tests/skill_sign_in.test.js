@@ -213,7 +213,7 @@ test('an account whose renewal the provider refused says so on its row and keeps
     const refused = account({ last_error: { reason: 'provider_refused', error: 'admin_policy_enforced', at: new Date().toISOString() } });
     const rows = text(signInRowsHtml(service({ accounts: [refused] })));
     assert.ok(rows.includes('Last check: accounts.google.com refused the renewal (admin_policy_enforced)'), rows);
-    assert.ok(rows.includes('The sign-in is kept; ask the account’s administrator to allow this client, then sign in again.'), rows);
+    assert.ok(rows.includes('The sign-in is kept; ask whoever manages this account or client to allow it, then sign in again.'), rows);
     const unreachable = account({ last_error: { reason: 'provider_unreachable', at: new Date().toISOString() } });
     assert.ok(text(signInRowsHtml(service({ accounts: [unreachable] }))).includes('couldn’t reach accounts.google.com'));
 });
