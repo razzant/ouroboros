@@ -76,13 +76,20 @@ test('answer folds in a feed whose width still moves wait until the width holds'
         // markdown writes nothing late was otherwise never measured and stayed cut through its letters with no fade.
         const late = new ElementStub('div', globalThis.document);
         late.className = 'chat-bubble';
-        late.append(Object.assign(new ElementStub('div', globalThis.document), { className: 'message' }));
+        const body = Object.assign(new ElementStub('div', globalThis.document), { className: 'message', clientHeight: 168,
+            scrollHeight: 400, style: { setProperty() {} } });
+        body.toggleAttribute = (name, on) => (on ? body.setAttribute(name, '') : body.removeAttribute(name));
+        late.append(body);
+        rows.push(late);  // the document's query finds it, as it finds every answer on the page
         measured.length = 0;
         decorateProjectRow(late, { role: 'assistant', projectId: 'project-1', projectName: 'Build' });
         frame();
         assert.deepEqual(measured, [], 'not in the frame it is added');
+        assert.equal(body.hasAttribute('data-fold-clipped'), false);
         frame();
         assert.deepEqual(measured, ['at rest', 'moving', 'mark at rest', 'mark moving']);
+        assert.equal(body.hasAttribute('data-fold-clipped'), true, 'the new answer itself is measured and marked');
+        assert.equal(late.classList.contains('is-folded'), true);
     } finally {
         restoreDom(prior);
     }

@@ -4,6 +4,7 @@ No runtime or live storage: reuse the isolated HTTP/API fixture. The excerpt is 
 accepted owner's preview; generated line counts exercise the two fold boundaries precisely.
 """
 import json
+import re
 
 import pytest
 
@@ -418,3 +419,36 @@ def test_the_fold_follows_the_answers_own_width_in_both_directions(project_chat)
         moving = bubble.evaluate(FOLD_STATE)
         assert moving["mask"] is folded and moving["folded"] is folded, (width, moving)
     page.evaluate("document.querySelector('#chat-messages').removeAttribute('data-resizing')")
+
+
+# A room's edge as the browser computes it (DESIGN "One edge", "A room's edges"): at the top and at the bottom, two
+# blur planes whose filters are the shared tokens, whatever rule tries to override them, and the tint above them; the
+# top clears toward the feed below the bar, the bottom toward the feed above the composer.
+ROOM_EDGE = """() => {
+    const root = getComputedStyle(document.documentElement);
+    const token = name => root.getPropertyValue(name).trim();
+    const side = selector => [...document.querySelector(selector).querySelectorAll(':scope > .room-edge')].map(n => {
+        const s = getComputedStyle(n);
+        return {edge: n.dataset.edge, filter: s.backdropFilter || s.webkitBackdropFilter || 'none',
+            mask: s.maskImage || s.webkitMaskImage, position: s.maskPosition || s.webkitMaskPosition,
+            events: s.pointerEvents, hidden: n.getAttribute('aria-hidden')};
+    });
+    return {soft: token('--edge-blur-soft'), deep: token('--edge-blur-deep'),
+        top: side('#page-chat > .chat-page-header'), bottom: side('#chat-input-area')};
+}"""
+
+
+@pytest.mark.parametrize("project_chat", [("chromium", "dark", 1100), ("webkit", "light", 390)], indirect=True)
+def test_a_rooms_edge_is_two_shared_blur_planes_under_its_tint_clearing_toward_the_feed(project_chat):
+    page = project_chat["page"]
+    found = page.evaluate(ROOM_EDGE)
+    assert found["soft"] and found["deep"] and found["soft"] != found["deep"], found
+    first = lambda piece: piece["mask"].split("), linear-gradient(")[0]  # noqa: E731 - the ramp layer
+    for name in ("top", "bottom"):
+        pieces = found[name]
+        assert [p["edge"] for p in pieces] == ["soft", "deep", "tint"], (name, found)
+        assert [p["filter"] for p in pieces] == [found["soft"], found["deep"], "none"], (name, 'the shared tokens', found)
+        assert all(p["events"] == "none" and p["hidden"] == "true" for p in pieces), (name, found)
+        for piece in pieces:
+            clears_upward = bool(re.search(r"to top|\b0deg", first(piece)))
+            assert clears_upward is (name == "bottom"), (name, 'which end clears', piece)
