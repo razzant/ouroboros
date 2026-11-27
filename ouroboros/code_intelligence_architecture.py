@@ -76,20 +76,14 @@ class DomainManifest:
     references: Dict[str, Tuple[str, ...]] = field(default_factory=dict)  # domain or path prefix -> manuals
 
     def manuals_for(self, path: str) -> Tuple[str, ...]:
-        """The manuals ``[references]`` declares for one repository path (``path_owner``); ``()`` where the manifest
-        declares no owner."""
-        return tuple(self.references.get(path_owner(self, path)[1], ()))
-
-
-def path_owner(manifest: Any, path: str) -> Tuple[str, str]:
-    """``(kind, key)`` of the owner a manifest declares for one repository path: ``("domain", id)`` of its module
-    row, else ``("surface", key)`` of the longest registered ``[references]`` path key that begins it, else
-    ``("", "")``. The one resolution every reader of ownership shares: the read line, the diff pulse and a packet
-    seat's owner rows."""
-    if manifest.modules.get(path):
-        return "domain", manifest.modules[path]
-    surfaces = [key for key in manifest.references if key not in manifest.domains and path.startswith(key)]
-    return ("surface", max(surfaces, key=len)) if surfaces else ("", "")
+        """The manuals ``[references]`` declares for one repository path: its module domain's, else the longest
+        path key that names it or a folder above it; ``()`` where the manifest declares no owner."""
+        domain = self.modules.get(path)
+        if domain:
+            return self.references.get(domain, ())
+        owners = [key for key in self.references if key not in self.domains
+                  and (path == key or path.startswith(key if key.endswith("/") else key + "/"))]
+        return self.references[max(owners, key=len)] if owners else ()
 
 
 def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
