@@ -1043,7 +1043,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .panic-recovery-acts:empty { display: none; }
 .panic-recovery-pick {
     display: grid;
-    grid-template-columns: 14px minmax(0, 1fr);
+    grid-template-columns: var(--checkbox-size) minmax(0, 1fr);
     column-gap: var(--space-2);
     row-gap: 2px;
     align-items: start;
@@ -6955,7 +6955,7 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 .storage-free-groups { display: grid; margin: 0; padding: 0; list-style: none; }
 .storage-free-group {
     display: grid;
-    grid-template-columns: 14px minmax(0, 1fr) auto;
+    grid-template-columns: var(--checkbox-size) minmax(0, 1fr) auto;
     column-gap: var(--space-2);
     row-gap: 2px;
     align-items: baseline;
@@ -11537,6 +11537,8 @@ html[data-layout="stack"] .project-panel {
 }
 
 .message-share-marker:empty { display: none; }
+/* An authored task's own state: the shared inert mark (ui.css .ui-checkbox), on the line of the words. */
+.message-share-task { vertical-align: -3px; cursor: inherit; }
 
 /* Exact words are selectable inside the preview; a part's own words start where an item's marker does. */
 .message-share-words {

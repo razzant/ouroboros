@@ -913,6 +913,11 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     overflow-wrap: anywhere;
 }
 
+/* Under a finger the whole row is the box's target, the shared touch minimum tall (DESIGN "Touch and containment"). */
+@media (pointer: coarse) {
+    .local-toggle { min-height: var(--touch-target-min); }
+}
+
 .local-toggle[data-warning="1"] {
     color: var(--status-warn-fg);
 }

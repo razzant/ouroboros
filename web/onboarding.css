@@ -1252,6 +1252,7 @@ textarea::placeholder {
 .harness-advanced p {
   margin: 4px 0;
   font-size: var(--type-meta);
+  line-height: var(--line-meta);
 }
 
 .settings-inline-note {

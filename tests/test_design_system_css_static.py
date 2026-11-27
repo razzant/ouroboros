@@ -323,6 +323,26 @@ def checkbox_paint_outside_the_control(css):
     return found
 
 
+def shape_problems(ui_css):
+    """The check box's shape is the one token, whatever its value; a radio is a circle whatever the token says."""
+    rules = re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(ui_css))
+    found = []
+    for selector, body in rules:
+        radius = re.search(r"border-radius:\s*([^;]+);", body)
+        if not radius or not re.search(r"\.ui-(?:checkbox|radio)\b", selector):
+            continue
+        names = [part.strip() for part in selector.split(",")]
+        value = radius[1].strip()
+        if any(re.fullmatch(r"\.ui-radio", name) for name in names) and len(names) == 1:
+            if value != "50%":
+                found.append(f"a radio is shaped {value}")
+        elif value != "var(--checkbox-radius)":
+            found.append(f"{' '.join(selector.split())} shapes the box {value}, not the one token")
+    if not any(re.fullmatch(r"\s*\.ui-radio\s*", sel) and "border-radius: 50%" in body for sel, body in rules):
+        found.append("no rule keeps the radio round on its own")
+    return found
+
+
 def test_only_the_shared_control_draws_a_check_box():
     sheets = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in first_party_sheets()}
     found = [f"{name}: {rule}" for name, css in sheets.items() if name != "web/ui.css"
@@ -332,8 +352,7 @@ def test_only_the_shared_control_draws_a_check_box():
     shared = re.search(r"\n\.ui-checkbox, \.ui-radio \{([^}]*)\}", ui)[1]
     assert "border-radius: var(--checkbox-radius);" in shared and "width: var(--checkbox-size);" in shared
     assert len(re.findall(r"--checkbox-radius:", ui)) == 1, "one token flips every box between round and square"
-    assert "--checkbox-radius: 50%;" in ui, "the owner's shape: round"
-    assert ".ui-radio { border-radius: 50%; }" in ui, "a radio stays a circle whatever the check box's shape"
+    assert shape_problems(ui) == [], shape_problems(ui)
 
     assert checkbox_paint_outside_the_control('.local-toggle input[type="checkbox"] { cursor: pointer; }')
     assert checkbox_paint_outside_the_control(".x .ui-checkbox { width: 18px; }")
@@ -341,6 +360,68 @@ def test_only_the_shared_control_draws_a_check_box():
     assert not checkbox_paint_outside_the_control(".x > .ui-checkbox { grid-column: 1; margin-top: 2px; }")
     assert checkbox_paint_outside_the_control('.x input[type="radio"] { margin: 0; }')
     assert not checkbox_paint_outside_the_control("input:not(.ui-control):not(.ui-checkbox) { border: 1px solid; }")
+    good = ".ui-checkbox, .ui-radio { border-radius: var(--checkbox-radius); }\n.ui-radio { border-radius: 50%; }"
+    assert shape_problems(good) == [] and shape_problems(good.replace("var(--checkbox-radius)", "50%"))
+    assert shape_problems(".ui-checkbox, .ui-radio { border-radius: var(--checkbox-radius); }"), "radios follow the token"
+    assert shape_problems(good + "\n.ui-checkbox:checked { border-radius: 4px; }")
+
+
+FORCED_SYSTEM_COLOUR = re.compile(r"^(?:Canvas|CanvasText|Highlight|HighlightText|ButtonText|ButtonFace|ButtonBorder|"
+                                  r"LinkText|GrayText|Field|FieldText|Mark|MarkText|AccentColor|AccentColorText)$")
+
+
+def forced_mark_problems(ui_css):
+    """Inside forced colours, a drawn check box that opts out of the user's palette paints only in system colours, and
+    its edge, its ticked fill and its tick are all given (unchecked and checked both show)."""
+    css = without_comments(ui_css)
+    found, given = [], set()
+    for block in re.findall(r"@media \(forced-colors: active\) \{((?:[^{}]*\{[^{}]*\})*)\s*\}", css):
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", block):
+            if ".ui-checkbox" not in selector or "input" in selector.split(":not")[0].split(".")[0]:
+                continue
+            for prop, value in re.findall(r"(border-color|background-color|background)\s*:\s*([^;]+);", body):
+                if not FORCED_SYSTEM_COLOUR.match(value.strip()):
+                    found.append(f"{' '.join(selector.split())} {prop}: {value.strip()}")
+                given.add(("::before" in selector, "checked" in selector, prop.split("-")[0]))
+    for need in [(False, False, "border"), (False, True, "background"), (True, False, "background")]:
+        if need not in given:
+            found.append(f"forced colours give no {need}")
+    if "forced-color-adjust: none" in css and not given:
+        found.append("a drawn mark leaves the palette without system colours")
+    return found
+
+
+def test_forced_colours_keep_every_drawn_mark_visible():
+    ui = (WEB / "ui.css").read_text(encoding="utf-8")
+    assert forced_mark_problems(ui) == [], forced_mark_problems(ui)
+    broken = "@media (forced-colors: active) {\n    .ui-checkbox:not(input) { forced-color-adjust: none; }\n}"
+    assert forced_mark_problems(broken), "opting out of the palette with nothing in its place is the 1:1 white-on-white mark"
+    themed = ("@media (forced-colors: active) {\n    .ui-checkbox:not(input) { forced-color-adjust: none; border-color: var(--x);"
+              " background-color: Canvas; }\n    .ui-checkbox:not(input):is(.is-checked) { background-color: Highlight; }\n"
+              "    .ui-checkbox:not(input)::before { background: HighlightText; }\n}")
+    assert forced_mark_problems(themed) and not forced_mark_problems(themed.replace("var(--x)", "CanvasText"))
+
+
+def checkbox_column_problems(css):
+    """A grid that places a check box in its first column reserves that column at the box's own size."""
+    rules = re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css))
+    owners = {" ".join(sel.split()).split(" > .ui-checkbox")[0] for sel, body in rules
+              if " > .ui-checkbox" in sel and re.search(r"grid-column:\s*1\b", body)}
+    found = []
+    for selector, body in rules:
+        name = " ".join(selector.split())
+        track = re.search(r"grid-template-columns:\s*([^\s;]+)", body)
+        if name in owners and track and track[1] != "var(--checkbox-size)":
+            found.append(f"{name} reserves {track[1]}")
+    return found
+
+
+def test_a_check_box_column_is_the_box_s_own_size():
+    found = [f"{path.name}: {item}" for path in first_party_sheets()
+             for item in checkbox_column_problems(path.read_text(encoding="utf-8"))]
+    assert not found, found
+    rows = ".r { display: grid; grid-template-columns: 14px minmax(0, 1fr); }\n.r > .ui-checkbox { grid-column: 1; }"
+    assert checkbox_column_problems(rows) and not checkbox_column_problems(rows.replace("14px", "var(--checkbox-size)"))
 
 
 CHECKBOX_TYPE = re.compile(r"""type\s*=\s*\\?["'](checkbox|radio)""")

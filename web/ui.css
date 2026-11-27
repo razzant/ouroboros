@@ -281,8 +281,8 @@
     --space-3: 12px;
     --space-4: 16px;
     --space-5: 24px;
-    /* The check box (DESIGN "Controls and editable choices"): one glyph size and its one shape (round, owner
-       decision 27.11.2026; 4px here makes every box square at once). */
+    /* The check box (DESIGN "Controls and editable choices"): one glyph size and its one shape (round; 4px here makes
+       every box square at once). */
     --checkbox-size: 16px;
     --checkbox-radius: 50%;
     /* Smallest result measure before a neighbouring action wraps below it. */
@@ -1663,12 +1663,18 @@ textarea.ui-control { resize: vertical; }
 @media (pointer: coarse) {
     :root { --checkbox-size: 20px; }
 }
-/* Forced colours drop the drawn fill and mark: there an input is the system's own box, and a drawn mark that is not
-   an input keeps its paint so its state still shows. */
+/* Forced colours: an input is the system's own box; a drawn mark that is not an input (a share part's, a task's) is
+   painted in the system's colours, its edge in the text colour, a ticked one filled with the highlight and its tick
+   in the highlight's text, so both states show on any palette. */
 @media (forced-colors: active) {
     input:is(.ui-checkbox, .ui-radio) { -webkit-appearance: auto; appearance: auto; }
     input.ui-checkbox::before { content: none; }
-    .ui-checkbox:not(input) { forced-color-adjust: none; }
+    .ui-checkbox:not(input) { forced-color-adjust: none; border-color: CanvasText; background-color: Canvas; }
+    .ui-checkbox:not(input):is([aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox:not(input) {
+        border-color: Highlight;
+        background-color: Highlight;
+    }
+    .ui-checkbox:not(input)::before { background: HighlightText; }
 }
 /* The switch: a label holding a checkbox with role="switch" and aria-checked, then its track and thumb, for a change
    that acts at once (a .ui-checkbox belongs to a form with its own Save). Green when on. One that cannot be used now
