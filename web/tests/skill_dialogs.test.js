@@ -36,7 +36,8 @@ test('owner skip needs a rejected digest and is hidden only for a known differen
             update: () => assert.fail('nothing was confirmed'),
         });
     }
-    for (const [reason, cause] of Object.entries({ review_unfinished: "its review didn't finish", preflight_failed: 'its file checks failed', landing_failed: "it couldn't be installed" })) {
+    for (const [reason, cause] of Object.entries({ review_unfinished: "its review didn't finish", preflight_failed: 'its file checks failed', landing_failed: "it couldn't be installed",
+        nano_publication_over_capacity: "it didn't fit the Nano context window" })) {
         await updateWithoutReview({ name: 'demo', install: {
             update_rejected: { version: '2.0', digest: 'd', reason }, update_available: { digest: 'd' },
         } }, { dialog: async (model) => { assert.ok(model.body.includes(cause)); return false; } });

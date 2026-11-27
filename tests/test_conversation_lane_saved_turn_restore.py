@@ -458,8 +458,8 @@ def test_a_historical_pooled_attempt_zero_stays_held_after_an_aborted_update(tmp
     assert held["_project_admission_restore_hold"]["reason"] == "project_dispatch_unconfirmed"
 
 
-def _parked_before_its_body(system, root, monkeypatch, *, mark=None):
-    """The carrier's real pre-body Pause event for a real Main seed, parked by the supervisor."""
+def _parked_before_its_body(system, root, monkeypatch, *, mark=None, counting=False):
+    """The real pre-body Pause park, optionally after a Web Main carrier published running before Nano's count."""
     from ouroboros import budget_pause
     from ouroboros.owner_pause import read_fence
     from supervisor import message_bus
@@ -468,10 +468,12 @@ def _parked_before_its_body(system, root, monkeypatch, *, mark=None):
 
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda *_a: None))
     monkeypatch.setattr(system.state, "budget_remaining", lambda *_a, **_k: 5.0)
-    turn = _carried_turn(system, root, metadata={"client_message_id": "cm-main"}, started=False)
+    turn = (_owner_turn(system, root, monkeypatch) if counting
+            else _carried_turn(system, root, metadata={"client_message_id": "cm-main"}, started=False))
     if mark:
         system.workers.RUNNING[turn.id]["task"]["admitted_dispatch"] = mark
-    write_task_result(root, turn.id, "scheduled", chat_id=1, root_task_id=turn.id)
+    if not counting:
+        write_task_result(root, turn.id, "scheduled", chat_id=1, root_task_id=turn.id)
     assert request_owner_pause(turn.id, request_id="pause-main")["ok"]
     fence = read_fence(root, turn.id)  # the Pause this carrier's prestart wait observed
     owner = SimpleNamespace(executed_seconds=lambda: 0.0, prestart_pause_fence=fence, drive_root=root)
@@ -567,27 +569,63 @@ def test_a_resumed_pre_body_turn_keeps_its_proof_through_another_stop(tmp_path, 
     assert not _launched(system)
 
 
+@pytest.mark.parametrize("resume_first", [False, True], ids=["still_paused", "quit_before_launch"])
+def test_the_first_main_count_park_returns_unsent_after_boot(tmp_path, monkeypatch, resume_first):
+    from supervisor.task_admission import prestart_returned_unsent
+
+    system = _system(tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch, counting=True)
+    original = load_task_result(tmp_path, turn.id)
+    ref = turn.task["metadata"]["origin_message_ref"]
+    assert ref and original["task_attempt"] == 0 and original["started_at"]
+    assert "admitted_dispatch_attempt" not in original
+    if resume_first:  # Resume published; the lane has not been handed that input again
+        assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    _lane_carrier(system, wid=52)
+    [held] = system.workers.PENDING
+    assert held["id"] == turn.id and not held.get("_project_admission_restore_hold")
+    assert prestart_returned_unsent(held)["physical_calls"] == 0
+    restored = load_task_result(tmp_path, turn.id)
+    assert all(restored[key] == original[key] for key in ("task_attempt", "started_at", "execution_owner"))
+    system.workers.assign_tasks()
+    assert not _carried(system) and not _launched(system)
+    assert system.queue.resume_budget_paused_task(turn.id)["ok"]
+    system.workers.assign_tasks()
+    [(_wid, sent)] = _carried(system)
+    assert (sent["id"], sent["_attempt"], sent["text"]) == (turn.id, 1, turn.task["text"])
+    assert sent["metadata"]["origin_message_ref"] == ref
+    _on_lane(system, tmp_path, turn.id, 1)
+    # A real later assignment consumes the old authority even before its body records running.
+    assert not prestart_returned_unsent(held)
+    system.workers.assign_tasks()
+    assert not _carried(system) and not _launched(system)
+
+
+@pytest.mark.parametrize("counting", [False, True], ids=["before_body", "during_count"])
 @pytest.mark.parametrize("evidence", ["launch_mark", "body_start"])
-def test_a_pre_body_return_proves_nothing_once_a_launch_or_body_may_have_followed(tmp_path, monkeypatch, evidence):
+def test_a_pre_body_return_proves_nothing_once_a_launch_or_body_may_have_followed(
+        tmp_path, monkeypatch, evidence, counting):
     from supervisor import task_admission
 
     system = _system(tmp_path, monkeypatch)
-    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
+    turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch, counting=counting)
     assert system.queue.resume_budget_paused_task(turn.id)["ok"]
     [row] = system.workers.PENDING
     if evidence == "launch_mark":  # the launch's own commit landed; the process died before the put
         assert task_admission.record_project_dispatch_possible(row)
     elif evidence == "body_start":
-        _persist_running(tmp_path, {**row, "_execution_owner": {"kind": "pooled"}}, clock=False)  # its attempt alone
+        _persist_running(tmp_path, row, clock=False)  # its later attempt alone, even without a new clock
         write_task_result(tmp_path, turn.id, "scheduled")
     _boot_after_stop(system, monkeypatch, tmp_path)
+    _lane_carrier(system, wid=52)
     [held] = system.workers.PENDING
     assert held["_project_admission_restore_hold"] and "admitted_dispatch" not in held
     for _ in range(2):
         system.workers.assign_tasks()
     resumed = system.queue.resume_budget_paused_task(turn.id)
     system.workers.assign_tasks()
-    assert not _launched(system), resumed
+    assert not _carried(system) and not _launched(system), resumed
     [still] = system.workers.PENDING
     assert still["_project_admission_restore_hold"]["reason"] in {"project_dispatch_unconfirmed",
                                                                   "project_routing_fence_lookup_failed"}
@@ -1371,7 +1409,11 @@ def _carried(system):
     sent = []
     for slot in list(system.workers.WORKERS.values()):
         while getattr(slot, "lane", "") == "conversation" and not slot.in_q.empty():
-            sent.append((slot.wid, slot.in_q.get_nowait()))
+            payload = slot.in_q.get_nowait()
+            # The mocked carrier receives the same idle-retirement probe as a real worker. It is not a task handoff.
+            if isinstance(payload, dict) and payload.get("type") == "worker_quiescence":
+                continue
+            sent.append((slot.wid, payload))
     return sent
 
 

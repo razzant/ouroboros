@@ -72,8 +72,25 @@ def _api_owner_safety_rules_sync(request: Request, body: Any) -> JSONResponse:
     rules = body.get("rules") if isinstance(body, dict) else None
     if not isinstance(rules, str) or len(rules.encode("utf-8")) > 64_000:
         return unsaved_error("'rules' must be text of at most 64,000 UTF-8 bytes", 400)
-    return _persist(request, {"OUROBOROS_SAFETY_OWNER_RULES": rules}, "safety_rules",
-                    {"rules_bytes": len(rules.encode("utf-8"))}, response={"rules": rules})
+    from ouroboros import config as cfg
+    from ouroboros.nano_activation import owner_rules_ticket
+    from ouroboros.nano_publication import NanoPublicationRefused
+
+    try:
+        ticket = owner_rules_ticket(cfg.DATA_DIR, rules)
+        return _persist(request, {"OUROBOROS_SAFETY_OWNER_RULES": rules}, "safety_rules",
+                        {"rules_bytes": len(rules.encode("utf-8"))}, response={"rules": rules}, nano_ticket=ticket)
+    except NanoPublicationRefused as refusal:
+        message = {
+            "over_capacity": "This edit exceeds Nano's memory capacity. Make room in memory or revise the edit.",
+            "busy": "The local counter is busy. Try again when it is free.",
+            "unavailable": "Nano's memory check is unavailable. Try again when it is available.",
+            "stale": "The rules or their memory check changed during the save. Check the current rules before retrying.",
+            "bootstrap_pending": "Nano needs one ordinary start to prepare its memory sources. Start a chat, then save again.",
+            "incomplete": "Nano could not read its full memory. Check the reported source before saving again.",
+        }.get(refusal.reason, "Nano could not check this edit.")
+        return unsaved_error(message, 409, code=f"nano_publication_{refusal.reason}",
+                             proposed_rules=rules, nano_reason=refusal.detail)
 
 
 @owner_write_guard
@@ -111,7 +128,7 @@ def _api_owner_safety_model_sync(request: Request, body: Any) -> JSONResponse:
 
 
 def _persist(request: Request, changes: dict, action: str, audit: dict, *, response: dict | None = None,
-             if_unchanged: dict | None = None, allow_empty: bool = False) -> JSONResponse:
+             if_unchanged: dict | None = None, allow_empty: bool = False, nano_ticket=None) -> JSONResponse:
     """One Safety owner write; its committed old → new is the shared settings record, and the
     endpoint's own action keeps only what was asked."""
     from ouroboros.config import apply_settings_to_env
@@ -140,7 +157,8 @@ def _persist(request: Request, changes: dict, action: str, audit: dict, *, respo
     try:
         with settings_document_mutation():
             receipt = _owner_update_settings(merge, authored_keys=tuple(changes), allow_safety_lowering=True,
-                                             if_unchanged=if_unchanged, boundary=boundary)
+                                             if_unchanged=if_unchanged, boundary=boundary,
+                                             **({"nano_ticket": nano_ticket} if nano_ticket is not None else {}))
             record_settings_change(request, receipt)
             boundary.at("environment projection")
             from ouroboros.config import load_settings

@@ -46,14 +46,18 @@ def _memory_update_registry(
 
     from ouroboros.knowledge import focus_signature
     from ouroboros.memory_publication import publish_memory_file, publication_refusal
+    from ouroboros.nano_publication import admission_for
 
     path = _registry_file(ctx)
+    # The registry is background a fresh root shows: a qualified Nano profile counts the new bytes first.
     result = publish_memory_file(path, expected_revision, lambda old: _registry_entry(old, source_id, updates),
                                  journal=path.with_name("registry_history.jsonl"),
-                                 author=focus_signature(ctx), source_type="memory_update_registry")
+                                 author=focus_signature(ctx), source_type="memory_update_registry",
+                                 nano_admission=admission_for(ctx, path.parent.parent))
     if not result.ok:
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
-            text=publication_refusal(result, REGISTRY_PATH)))
+            text=publication_refusal(result, REGISTRY_PATH),
+            meta={"nano_proposal_source": result.proposal_source} if result.proposal_source else None))
     return f"✅ Registry entry '{source_id}' updated. revision={result.revision}"
 
 

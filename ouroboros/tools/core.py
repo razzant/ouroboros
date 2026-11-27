@@ -859,18 +859,21 @@ def _edit_text(
         replacement_offset = text.index(old_str)
         replacement_line = edit_source_line(text, replacement_offset)
         local_edit = None
-        if work_domain.is_work(target):
-            work_domain.write_text(target, new_text)
-        else:
+        if repair and not work_domain.is_work(target):
+            from ouroboros.skill_repair_admission import confirm_local_text_edit
+
+            local_edit = confirm_local_text_edit(ctx, binding, [(target, text, new_text)])
+        from ouroboros.skill_repair_admission import advance_repair_expected_hash, local_edit_interval
+
+        with local_edit_interval(local_edit) as held:  # Nano capacity: refused, or held, until the digest is recorded
+            if held.refusal:
+                return held.refusal
+            if work_domain.is_work(target):
+                work_domain.write_text(target, new_text)
+            else:
+                write_text_atomic(target, new_text)
             if repair:
-                from ouroboros.skill_repair_admission import confirm_local_text_edit
-
-                local_edit = confirm_local_text_edit(ctx, binding, [(target, text, new_text)])
-            write_text_atomic(target, new_text)
-        if repair:
-            from ouroboros.skill_repair_admission import advance_repair_expected_hash
-
-            advance_repair_expected_hash(binding.state_drive_root, constraint, task_id=ctx.task_id, local_edit=local_edit)
+                advance_repair_expected_hash(binding.state_drive_root, constraint, task_id=ctx.task_id, local_edit=local_edit)
         if selected_payload:
             context_preview = numbered_edit_preview(new_text, [replacement_offset])
             result = (

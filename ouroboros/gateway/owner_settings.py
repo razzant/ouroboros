@@ -211,6 +211,11 @@ def settings_write_refusal(exc: Exception) -> JSONResponse | None:
             return unsaved_error(str(exc), 409, code="reset_interrupted", reason_code="reset_interrupted")
         status = 503 if exc.cause == "state_lock_unavailable" else 409
         return unsaved_error(str(exc), status, code="settings_publication_refused", reason_code=exc.cause)
+    from ouroboros.nano_publication import NanoPublicationRefused
+
+    if isinstance(exc, NanoPublicationRefused):
+        # Nano's capacity check of the owner's rules refused before any byte landed.
+        return unsaved_error(str(exc), 409, code=f"nano_publication_{exc.reason}", nano_reason=exc.detail)
     for error, status, code in (
         (DeploymentPolicyRefusal, 403, MANAGED_BY_DEPLOYMENT),
         (BindingRefused, 400, "main_binding_invalid"),
@@ -780,6 +785,7 @@ def _owner_write_settings(
     if_unchanged: Optional[dict] = None,
     unset: Sequence[str] = (),
     drive_root: Optional[pathlib.Path] = None,
+    nano_ticket=None,
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """Write owner-controlled settings without applying the runtime-mode ratchet; returns the receipt.
 
@@ -806,7 +812,7 @@ def _owner_write_settings(
         precondition=precondition,
         boundary=boundary,
         whole_document=True, expected_digest=expected_digest, if_unchanged=if_unchanged, unset=unset,
-        drive_root=drive_root,
+        drive_root=drive_root, nano_ticket=nano_ticket,
     )
 
 
@@ -831,6 +837,7 @@ def _owner_update_settings(
     commit_if_current: Optional[Callable[[Callable[[], None]], bool]] = None,
     check_unchanged: Optional[Callable[[Dict[str, Any]], None]] = None,
     drive_root: Optional[pathlib.Path] = None,
+    nano_ticket=None,
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """Read, change and persist ONE settings document inside ONE settings lock.
 
@@ -929,11 +936,18 @@ def _owner_update_settings(
         for key in unset:
             to_write.pop(key, None)
         _retire_revived_prior_routes(document, to_write)
+        # Every editor of the owner's rules meets one check here: the rules this commit writes carry
+        # the Nano count taken for exactly them (before this lock), or nothing is saved.
+        from ouroboros.nano_host_publication import rules_commit_ticket
+
+        nano_ticket = rules_commit_ticket(drive_root if drive_root is not None else _config.DATA_DIR,
+                                          document, to_write, nano_ticket)
 
         def commit():
             nonlocal committed
             with _config._settings_integrity.settings_publication_boundary(
-                drive_root if drive_root is not None else _config.DATA_DIR
+                drive_root if drive_root is not None else _config.DATA_DIR,
+                **({"nano_ticket": nano_ticket} if nano_ticket is not None else {}),
             ):
                 write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
                 committed = to_write

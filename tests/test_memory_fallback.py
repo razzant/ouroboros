@@ -701,6 +701,73 @@ def test_a_paid_answer_whose_publication_raises_is_billed_without_a_receipt(tmp_
     assert len(_drafts(tmp_path)) == 1 and len(charged) == 2
 
 
+@pytest.mark.parametrize("reason", ["busy", "stale", "over_capacity"])
+def test_nano_publication_retries_the_same_paid_draft(tmp_path, monkeypatch, light, reason):
+    from ouroboros import chronicle_publication, post_task_synthesis as pts
+    from ouroboros.nano_publication import NanoPublicationRefused
+    from supervisor import state
+
+    rooms = shared.world(tmp_path)
+    _consciousness(monkeypatch, False)
+    charged, attempts = [], []
+    real_prepare = chronicle_publication.prepare
+
+    def prepare(store, db, records, scan_state, *, encode):
+        if records and records[0].get("author", {}).get("kind") == "helper":
+            attempts.append(records[0]["text"])
+            if len(attempts) <= 2:
+                raise NanoPublicationRefused(reason, "synthetic exact-count refusal")
+        return real_prepare(store, db, records, scan_state, encode=encode)
+
+    monkeypatch.setattr(chronicle_publication, "prepare", prepare)
+    monkeypatch.setattr(state, "update_budget_from_usage", charged.append)
+    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
+    task = {"id": "root-task", "budget_drive_root": str(tmp_path)}
+    log_root = tmp_path / "logs"
+    first = _Light(usage={"cost": 0.0125, "prompt_tokens": 40,
+                          "provider": "openrouter", "resolved_model": "test/actually-served"})
+    assert pts._run_memory_fallback_draft(env, task, first, log_root, {}) == f"nano_{reason}"
+    key = f"legacy-b01-r{rooms['alpha']}"
+    receipt = _receipts(tmp_path)[key]
+    path = receipt["response_ref"]["read"]["arguments"]["path"]
+    assert (tmp_path / path).read_text(encoding="utf-8") == ANSWER
+    assert receipt["publication_pending"] is True and not _drafts(tmp_path)
+    followup = _Light("should not be sent")
+    later_task = {**task, "id": "later-root"}
+    assert pts._run_memory_fallback_draft(env, later_task, followup, log_root, {}) == f"nano_{reason}"
+    assert _receipts(tmp_path)[key] == receipt
+    assert pts._run_memory_fallback_draft(env, later_task, followup, log_root, {}) == ""
+    [record] = _drafts(tmp_path)
+    assert record["author"]["route"] == {"provider": "openrouter", "model": "test/actually-served"}
+    assert len(first.prompts) == len(charged) == 1 and followup.prompts == []
+    assert attempts == [json.loads(ANSWER)["text"]] * 3 and key not in _receipts(tmp_path)
+
+
+def test_unreadable_nano_paid_draft_does_not_redispatch(tmp_path, monkeypatch, light):
+    from ouroboros import chronicle_publication
+    from ouroboros.nano_publication import NanoPublicationRefused
+
+    rooms = shared.world(tmp_path)
+    _consciousness(monkeypatch, False)
+
+    real_prepare = chronicle_publication.prepare
+
+    def prepare(store, db, records, scan_state, *, encode):
+        if records and records[0].get("author", {}).get("kind") == "helper":
+            raise NanoPublicationRefused("busy", "synthetic exact-count refusal")
+        return real_prepare(store, db, records, scan_state, encode=encode)
+
+    monkeypatch.setattr(chronicle_publication, "prepare", prepare)
+    assert _run(tmp_path, _Light()).kind == "nano_busy"
+    key = f"legacy-b01-r{rooms['alpha']}"
+    receipt = _receipts(tmp_path)[key]
+    (tmp_path / receipt["response_ref"]["read"]["arguments"]["path"]).unlink()
+    followup = _Light("should not be sent")
+    assert _run(tmp_path, followup).kind == "retained_answer_unreadable"
+    assert followup.prompts == [] and not _drafts(tmp_path)
+    assert _receipts(tmp_path)[key] == receipt
+
+
 def test_the_writer_never_nominates_knowledge_or_touches_the_old_dialogue_files(tmp_path, monkeypatch, light):
     from ouroboros import knowledge
 

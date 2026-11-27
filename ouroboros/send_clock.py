@@ -210,7 +210,7 @@ def record_candidate(raw_sha256: Optional[str], note: Optional[str]) -> None:
         scope.by_candidate[str(raw_sha256)] = note
 
 
-def stamp_clock_note(payload: Dict[str, Any], *, blocks: bool = False) -> Dict[str, Any]:
+def stamp_clock_note(payload: Dict[str, Any], *, blocks: bool = False, clock_at: Optional[_dt.datetime] = None) -> Dict[str, Any]:
     """Return ``payload`` ending with a fresh clock line; no policy, no change.
 
     ``blocks`` is the Anthropic Messages shape: the line joins a trailing user
@@ -225,7 +225,7 @@ def stamp_clock_note(payload: Dict[str, Any], *, blocks: bool = False) -> Dict[s
     if scope is None or scope.policy is None or not isinstance(messages, list):
         return payload
     _found, rest = _tail_note(messages, scope.notes)
-    note = render_clock_note(scope.policy, _now())
+    note = render_clock_note(scope.policy, clock_at if clock_at is not None else _now())
     scope.notes.append(note)
     last = rest[-1] if rest else None
     if (blocks and isinstance(last, dict) and str(last.get("role") or "") == "user"

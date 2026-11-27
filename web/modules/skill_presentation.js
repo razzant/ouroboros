@@ -49,6 +49,12 @@ export function updateRejectionSentence(release) {
         preflight_failed: 'its file checks failed',
         review_unfinished: "its review didn't finish",
         landing_failed: "it couldn't be installed",
+        nano_publication_over_capacity: "it didn't fit the Nano context window",
+        nano_publication_busy: 'Nano could not check its size yet',
+        nano_publication_unavailable: 'Nano could not verify its size',
+        nano_publication_stale: 'the context changed during the Nano size check',
+        nano_publication_incomplete: 'Nano could not read all context needed to check its size',
+        nano_publication_bootstrap_pending: 'Nano has not finished its first start',
     }[release.reason] || 'it did not complete';
     return `Update to ${release.version}: ${cause}; the previous version runs.`;
 }

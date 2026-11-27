@@ -156,6 +156,11 @@ class LoadedSkill:
     identity_collision: bool = False
     location: str = ""  # physical inventory bucket, the read_file skill_payload selector
     manifest_file: str = ""  # the manifest load_skill parsed; "" when it could not
+    payload_dir: Optional[pathlib.Path] = None  # version's own files when staged or backed up
+
+    @property
+    def files_dir(self) -> pathlib.Path:
+        return self.payload_dir if self.payload_dir is not None else self.skill_dir
 
     @property
     def conflicts(self) -> tuple[str, ...]:
@@ -180,7 +185,7 @@ class LoadedSkill:
             return f"no interpreter for runtime {runtime!r}" + (f": {why}" if why else "")
         names = [str(entry.get("name") or "").strip() for entry in self.manifest.scripts or [] if isinstance(entry, dict)]
         paths = [name if "/" in name or name.startswith(".") else f"scripts/{name}" for name in names if name]
-        if any(_resolve_script_path(self.skill_dir, relpath) is not None for relpath in paths):
+        if any(_resolve_script_path(self.files_dir, relpath) is not None for relpath in paths):
             return ""
         return "no declared script file exists" + (f" ({', '.join(paths)})" if paths else "")
 
@@ -517,6 +522,12 @@ def _read_review_record(
 ) -> SkillReviewState:
     # Read-only over the state root (never mkdir): the RC auditor reuses this admission read.
     data = read_json_dict(skill_state_dir_path(drive_root, name) / "review.json")
+    return review_record_projection(drive_root, name, data, skill_type=skill_type,
+                                    is_module_widget=is_module_widget, skill_dir=skill_dir)
+
+
+def review_record_projection(drive_root, name, data, *, skill_type, is_module_widget=False, skill_dir=None):
+    """Interpret a persisted review, including a hypothetical read of kept rollback bytes."""
     if not isinstance(data, dict):
         return SkillReviewState()
     raw_status = str(data.get("status") or "").lower()

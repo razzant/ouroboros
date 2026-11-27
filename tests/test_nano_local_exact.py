@@ -50,6 +50,7 @@ def lane(data_root, monkeypatch):
         if count is None:
             return {"supported": False, "input_is_exact": False, "reason": "selected_formatter_not_measurable"}
         return {"supported": True, "input_is_exact": True, "input_tokens": count, "context_window": state["window"],
+                "raw_context_window": state.get("raw_window", state["window"]),
                 "process_id": 123, "native_input_sha256": input_fingerprint(payload),
                 "output_limit_enforced": True, "reasoning_included_in_limit": True}
 
@@ -91,6 +92,30 @@ def test_a_262k_window_sends_an_80k_exact_input_with_the_whole_ceiling(lane):
     _send(lane, _nano(262_144))
     [sent] = lane["sent"]
     assert sent["max_tokens"] == 65_536 and "cut cut" in sent["messages"][0]["content"]
+
+
+@pytest.mark.parametrize(("exact_input", "wire_cap"), [
+    pytest.param(60_516, 19_484, id="restore-room"),
+    pytest.param(61_516, 18_484, id="shrink-to-fit"),
+])
+def test_exact_local_send_reprices_from_the_callers_ceiling(lane, monkeypatch, exact_input, wire_cap):
+    from ouroboros import context_fit
+
+    monkeypatch.setattr(context_fit, "bounded_prompt_tokens_for_payload", lambda *_a, **_kw: 51_111)
+    lane["window"], lane["count"] = 80_000, lambda payload: exact_input
+    tools = [{"type": "function", "function": {"name": "inspect", "parameters": {"type": "object"}}}]
+    clock = sc.MainSendClock(sc.SendClockPolicy("UTC"))
+    with ua.usage_scope(_scope(lane["root"])), ua.bind_physical_attempt_context(_nano(80_000)), clock.bound():
+        lane["client"]._chat_local(copy.deepcopy(MESSAGES), tools, max_tokens=20_000, tool_choice="auto")
+    [measured] = lane["measured"]
+    [sent] = lane["sent"]
+    assert measured["max_tokens"] == 18_889
+    assert sent["max_tokens"] == wire_cap
+    assert measured["messages"] == sent["messages"]
+    assert measured["tools"] == sent["tools"] == tools
+    assert measured["tool_choice"] == sent["tool_choice"] == "auto"
+    assert sent["messages"][:-1] == _prepared(lane)
+    assert len(clock.notes) == 1 and sent["messages"][-1] == {"role": "user", "content": clock.notes[0]}
 
 
 def test_an_exact_shortfall_is_the_typed_refusal_with_its_own_candidate_facts(lane):
@@ -153,6 +178,31 @@ def test_unbound_helper_rejects_an_exact_overflow_after_measurement(lane):
         _send(lane, None)
     assert len(lane["measured"]) == 1 and not lane["sent"]
     assert caught.value.refused_candidate["input_tokens"] == 79000
+
+
+def test_the_padded_allocation_never_becomes_extra_room(lane):
+    """Synthetic release numbers: the backend pads a launched `--n_ctx` (80,000 -> 80,128).
+    The count names the effective window, the raw allocation rides beside it, and the
+    padded 128 never sizes the reply."""
+    lane["window"], lane["raw_window"] = 80_000, 80_128
+    lane["count"] = lambda payload: 60_000
+    _send(lane, _nano(80_000))
+    [sent] = lane["sent"]
+    assert sent["max_tokens"] == 20_000  # the effective 80,000 quartered
+    assert lane["measured"][0]["messages"] == _prepared(lane)  # the whole candidate, never padded into room
+
+
+def test_one_over_the_effective_window_is_the_typed_refusal_even_when_it_fits_the_allocation(lane):
+    """Synthetic release numbers: an 80,001-token input fits the padded 80,128 allocation and
+    still exceeds the launched effective window, so the typed refusal names the effective
+    limit — the real measurement's window, never a hand-written one."""
+    lane["window"], lane["raw_window"] = 80_000, 80_128
+    lane["count"] = lambda payload: 80_001
+    with pytest.raises(LocalContextTooLargeError) as caught:
+        _send(lane, _nano(80_000))
+    facts = caught.value.refused_candidate
+    assert facts["input_tokens"] == 80_001 and facts["context_window_tokens"] == 80_000
+    assert not lane["sent"] and len(lane["measured"]) == 1
 
 
 # The built-in server answers one request at a time, and its count waits on the lock a generation holds.

@@ -1,6 +1,7 @@
 """Resolved Safety Supervisor settings authority and one-time upgrade persistence."""
 
 import os
+from typing import List, Optional
 
 
 def _safety_values(settings: dict) -> dict:
@@ -168,7 +169,16 @@ def owner_rules_section(*, session: bool = False) -> str:
     return _owner_rules(session) + organization_rules_section(session=session)
 
 
-def organization_rules_section(*, session: bool = False) -> str:
+def owner_rule_sections(read_failures: Optional[List[str]] = None):
+    """The same ordinary bytes after the context builder's join, with their distinct authors intact."""
+    from ouroboros.section_floor import HostSection
+
+    owner = HostSection("owner_rules", _owner_rules(False, read_failures=read_failures))
+    organization = organization_rules_section(read_failures=read_failures).removeprefix("\n\n")
+    return (owner, HostSection("organization_rules", organization)) if organization else (owner,)
+
+
+def organization_rules_section(*, session: bool = False, read_failures: Optional[List[str]] = None) -> str:
     """The organization's rules from the deployment policy file, never presented as Settings words; ""
     outside a managed deployment or without rules, and a gap when the policy cannot be read."""
     from ouroboros.deployment_policy import organization_rules
@@ -178,6 +188,8 @@ def organization_rules_section(*, session: bool = False) -> str:
     try:
         rules = organization_rules()
     except Exception as exc:
+        if read_failures is not None:
+            read_failures.append("organization_rules")
         return head + f"Unreadable now ({type(exc).__name__}): the deployment policy file holds them."
     if not rules.strip():
         return ""
@@ -190,13 +202,15 @@ def organization_rules_section(*, session: bool = False) -> str:
     return head + frame + "\n\n" + rules
 
 
-def _owner_rules(session: bool) -> str:
+def _owner_rules(session: bool, *, read_failures: Optional[List[str]] = None) -> str:
     from ouroboros import config as cfg
     head = ("\n\nOWNER RULES DELIVERY (host instructions, separate from canonical work order)\n" if session
             else "## My human's standing rules\n\n")
     try:
         rules = str(cfg.runtime_setting(OWNER_RULES_KEY, "") or "")
     except Exception as exc:
+        if read_failures is not None:
+            read_failures.append("owner_rules")
         return head + f"Unreadable now ({type(exc).__name__}); they live in {_RULES_ADDRESS}."
     reach = ("every Safety check and delegated session reads them, while my marks reach only my own work and the "
              "sessions it starts")

@@ -964,7 +964,7 @@ export function syncCardControls(record, { read, actionsOf, stop, afterAction })
  * Through that read the menu keeps its Stop enabled and offers no second Resume (`resumePending`).
  */
 export function openWorkControls(anchor, work, { cancelPending = false, canAct = () => true, stopOne = requestStop,
-    afterAction = null, withResume = false } = {}) {
+    afterAction = null, withResume = false, held = undefined } = {}) {
     const grouped = workControls(work);
     const actions = workMenuActions(grouped, { cancelPending,
         resume: withResume && !resumePending(grouped.resume) });
@@ -977,7 +977,7 @@ export function openWorkControls(anchor, work, { cancelPending = false, canAct =
         onAction: (action) => {
             const target = actionTarget(grouped, action);
             if (action === ACTION_HURRY) return hurryTaskAction(target);
-            if (action === ACTION_RESUME) return resumeTaskAction(target, { settle: reconcile });
+            if (action === ACTION_RESUME) return resumeTaskAction(target, { settle: reconcile, held });
             return action === ACTION_FINALIZE ? stopAll([target], action) : stopAll(target, ACTION_STOP_NOW);
         },
     });

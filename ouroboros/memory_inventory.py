@@ -193,7 +193,10 @@ class MembershipFacts(NamedTuple):
 def membership_facts(root: Any) -> MembershipFacts:
     """Reserved Project rooms, task bindings and the bound owner messages, as ``iter_room_rows`` reads them;
     every reader of one capture (``chronicle_store.capture``) takes the same facts."""
-    return capture_memo(root, "membership", lambda: _membership_facts(root))
+    from ouroboros.nano_publication import publication_background
+
+    return capture_memo(root, "membership", lambda: publication_background(
+        ("membership", str(root)), lambda: _membership_facts(root)))
 
 
 def _membership_facts(root: Any) -> MembershipFacts:
@@ -292,7 +295,10 @@ def _tail(root: Any, frontier: Mapping[str, Any]) -> Tail:
     row, which must still answer (its anchor), projected, and stored by this reader. Until a complete prefix
     stands for this dialogue store and frontier (an update, a rebuilt index, a replaced store) the rows are
     read live, today's cost, and the maintenance job fills it (``fill_tail``)."""
-    return capture_memo(root, "tail", lambda: _read_tail(root, frontier))
+    from ouroboros.nano_publication import publication_background
+
+    return capture_memo(root, "tail", lambda: publication_background(
+        ("dialogue_tail", str(root), int(frontier["pos"])), lambda: _read_tail(root, frontier)))
 
 
 @timed_section("memory_view.tail")

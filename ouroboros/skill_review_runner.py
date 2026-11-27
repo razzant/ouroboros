@@ -41,7 +41,6 @@ from ouroboros.skill_loader import (
     SkillPayloadUnreadable,
     compute_content_hash,
     find_skill,
-    save_enabled,
     skill_identity_collision_names,
     skill_review_gate,
     skill_state_dir,
@@ -1333,7 +1332,15 @@ def run_skill_review_lifecycle_blocking(
                     and not (skill_state_dir(drive_root, skill_name) / "enabled.json").exists()
                 )
                 if just_auto_enabled:
-                    save_enabled(drive_root, skill_name, True, actor="review_auto_enable")
+                    from ouroboros.nano_activation import publish_review_auto_enable
+                    from ouroboros.nano_publication import NanoPublicationRefused
+
+                    try:
+                        just_auto_enabled = publish_review_auto_enable(drive_root, current)
+                    except NanoPublicationRefused as exc:
+                        just_auto_enabled = False
+                        setattr(outcome, "turn_on_when_ready", "not_ready")
+                        outcome.error = f"Skill not activated ({exc.reason}): {exc.detail}"
                 elif deps_ready:  # a failure just recorded is not re-run by turn-on in the same job
                     from ouroboros.skill_lifecycle_actions import reconcile_turn_on_when_ready
 

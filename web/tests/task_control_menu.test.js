@@ -27,7 +27,11 @@ import {
     taskControlActions,
     taskControlBusy,
     taskControlTriggerLabel,
+    WINDOW_HOLD_STEPS,
+    windowHoldWords,
 } from '../modules/task_control_menu.js';
+import { heldOnWindow, noteWindowHolds, windowHeldIn } from '../modules/api_client.js';
+import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
 import { ownerHurryProjection, summarizeChatLiveEvent, taskSoftStopPending } from '../modules/log_events.js';
 
 const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
@@ -1154,4 +1158,249 @@ test('two unconfirmed effects are worded in the plural, as on the server', () =>
     assert.equal(heldWorkFacts([{ kind: 'tool_handoff', task_id: 't', tool: 'run_command',
         reason: 'returned_effect_unconfirmed', effects: ['started process', 'MCP request'] }]),
     'the run_command call of task t returned; its started process and MCP request are not confirmed');
+});
+
+
+// --- a work held because its saved work does not fit the model's window (CLIENT_CONTRACT "Resume") ---
+
+const WINDOW = { pause_id: 'park-1', pause_generation: 3, input_tokens: 73308, window_tokens: 80000,
+    reply_floor_tokens: 8192, over_tokens: 1500 };
+const OFFER = { held_revision: 'rev-held', current_revision: 'rev-current', input_tokens: 70808 };
+const censusOf = (...ids) => ({ active_chat_activities: [
+    ...ids.map((id) => ({ activity_id: id, phase: 'budget_paused', stop: { rail: 'context_window' } })),
+    { activity_id: 'owner-paused', phase: 'budget_paused', stop: { cause: 'pause' } }] });
+
+/** One press of Resume on `id`: what the dialog was asked, what the door was sent, what the owner was told. */
+async function pressResume(id, { window = null, pick = null, answer = { ok: true, exact_continuation: true },
+    detail = undefined } = {}) {
+    const asked = [], sent = [], told = [], read = [], settled = [];
+    await resumeTaskAction(id, {
+        resume: async (target, body) => { sent.push(body === undefined ? [target] : [target, body]); return answer; },
+        toast: (text, kind) => told.push([text, kind]),
+        askOwner: async (dialog) => { asked.push(dialog); return pick ? { confirmed: true, value: pick } : { confirmed: false, value: '' }; },
+        readTask: async (target) => {
+            read.push(target);
+            if (detail instanceof Error) throw detail;
+            if (detail !== undefined) return detail;
+            return window ? { current_stop: { window, identity: 'stop-identity' } } : { current_stop: {} };
+        },
+        settle: async () => { settled.push(id); },
+    });
+    return { asked, sent, told, read, settled };
+}
+const HOLD_UNREAD = ['This task\'s hold could not be read, so nothing was sent. Press Resume again.', 'error'];
+const HOLD_GONE = ['The window hold was not found. Nothing was sent. Refresh the task card for its current status.', 'info'];
+const HOLD_UNOFFERED = ['This hold does not offer that step, so nothing was sent. Press Resume to choose again.', 'error'];
+
+test('only a work the last state body showed held on the window asks before its Resume', async () => {
+    noteWindowHolds(censusOf('held-a'));
+    assert.equal(heldOnWindow('held-a'), true);
+    assert.equal(heldOnWindow('owner-paused'), false);
+    const other = await pressResume('owner-paused', { window: WINDOW, pick: 'end' });
+    assert.deepEqual([other.read, other.asked, other.sent], [[], [], [['owner-paused']]], 'another pause: the plain Resume, unread');
+    noteWindowHolds({ active_chat_activities: [] });
+    assert.equal(heldOnWindow('held-a'), false, 'the next state body replaces what was held');
+    noteWindowHolds(censusOf('held-a'));
+    noteWindowHolds({ works: [] });
+    assert.equal(heldOnWindow('held-a'), true, 'a body without a census says nothing about it');
+});
+
+test('a window hold offers its own steps, and each is one request naming the hold it was shown for', async () => {
+    noteWindowHolds(censusOf('held-b', 'held-c', 'held-d', 'held-e'));
+    const offered = { ...WINDOW, overview: OFFER };
+    const taken = await pressResume('held-b', { window: offered, pick: 'overview' });
+    assert.deepEqual(taken.read, ['held-b']);
+    assert.equal(taken.asked.length, 1);
+    assert.deepEqual(taken.asked[0].choices, [
+        { value: 'again', label: 'Try again as it is' }, { value: 'overview', label: 'Use the current overview' },
+        { value: 'end', label: 'End this attempt' }]);
+    assert.equal(taken.asked[0].choices[0].value, 'again', 'the step that changes nothing is the one preselected');
+    assert.equal(taken.asked[0].input, true);
+    assert.deepEqual(taken.sent, [['held-b', { context_choice: {
+        pause_id: 'park-1', pause_generation: 3, stop_identity: 'stop-identity', overview_revision: 'rev-current' } }]]);
+    assert.deepEqual(taken.told, [['The task first retries with the earlier overview. If that still does not fit and the '
+        + 'chosen revision is still current and fits, the task saves it and waits for another Resume.', 'info']]);
+
+    const ended = await pressResume('held-c', { window: offered, pick: 'end' });
+    assert.deepEqual(ended.sent, [['held-c', { context_choice: { pause_id: 'park-1', pause_generation: 3, stop_identity: 'stop-identity', end_attempt: true } }]]);
+    assert.deepEqual(ended.told, [['End requested. If Continue is available after the attempt ends, it starts a new '
+        + 'attempt from the record.', 'info']]);
+
+    const again = await pressResume('held-d', { window: offered, pick: 'again' });
+    assert.deepEqual(again.sent, [['held-d', { context_choice: { pause_id: 'park-1', pause_generation: 3, stop_identity: 'stop-identity', try_again: true } }]]);
+    assert.deepEqual(again.told, [['Resuming: the task returns to the queue.', 'info']]);
+
+    const left = await pressResume('held-e', { window: offered });
+    assert.deepEqual([left.sent, left.told], [[], []], 'leaving the dialog sends nothing');
+    assert.equal(resumeEligible('held-e', () => true), true, 'and the work can be resumed again');
+});
+
+test('a hold offers the current overview only while it shows one it has not taken', async () => {
+    noteWindowHolds(censusOf('held-f', 'held-g', 'held-h', 'held-i'));
+    const values = (press) => press.asked[0].choices.map((choice) => choice.value);
+    const plain = await pressResume('held-f', { window: WINDOW, pick: 'again' });
+    assert.equal(plain.asked[0].title, 'The last request did not fit the window');
+    assert.deepEqual(values(plain), ['again', 'end']);
+    const taken = await pressResume('held-g', { window: { ...WINDOW, overview: { ...OFFER, taken: true } }, pick: 'overview' });
+    assert.equal(taken.asked[0].title, 'Your chosen overview is in place');
+    assert.equal(taken.asked[0].choices[0].label, 'Resume with the chosen overview');
+    assert.deepEqual(values(taken), ['again', 'end']);
+    // A confirmed value this dialog did not offer is no step at all: neither that choice nor the plain Resume in its
+    // place. "Try again as it is" is sent only when the owner chose it.
+    assert.deepEqual([taken.sent, taken.told, taken.settled], [[], [HOLD_UNOFFERED], ['held-g']]);
+    for (const pick of ['overview', 'retry', 'Again']) {
+        const unknown = await pressResume('held-f', { window: WINDOW, pick });
+        assert.deepEqual([unknown.sent, unknown.told], [[], [HOLD_UNOFFERED]], pick);
+    }
+    const again = await pressResume('held-g', { window: { ...WINDOW, overview: { ...OFFER, taken: true } }, pick: 'again' });
+    assert.deepEqual(again.sent, [['held-g', { context_choice: { pause_id: 'park-1', pause_generation: 3, stop_identity: 'stop-identity', try_again: true } }]]);
+});
+
+test('a window hold the task\'s own read does not show sends nothing and says so', async () => {
+    // The card shows a window hold (the accepted state says so). The press sends only what a dialog showed and
+    // the owner confirmed: a read that failed, or one that shows no such hold, is never a plain Resume in its place.
+    noteWindowHolds(censusOf('held-h', 'held-i', 'held-n', 'held-o', 'held-p'));
+    const gone = await pressResume('held-h');
+    assert.deepEqual([gone.read, gone.asked, gone.sent, gone.told], [['held-h'], [], [], [HOLD_GONE]]);
+    assert.deepEqual(gone.settled, ['held-h'], 'the reconciling read repaints the card');
+    assert.equal(resumeEligible('held-h', () => true), true, 'and the work can be resumed again');
+    for (const current_stop of [{ window: WINDOW },
+        { window: WINDOW, identity: 'old', queue_freshness: 'stale' },
+        { window: WINDOW, identity: 'unknown', resume_basis: 'unreadable' }]) {
+        const unbound = await pressResume('held-i', { detail: { current_stop }, pick: 'again' });
+        assert.deepEqual([unbound.asked, unbound.sent, unbound.told], [[], [], [HOLD_UNREAD]]);
+    }
+    // A stop the server could not read, or read stale, shows no window either way: a reading to repeat, not a hold
+    // that is gone. A fresh, readable stop with no window is another stop: the hold is known to be gone.
+    for (const current_stop of [{ state: 'unknown', reason: 'control_unreadable', identity: 'u' },
+        { state: 'held', cause: 'pause', identity: 's', queue_freshness: 'stale' },
+        { state: 'held', cause: 'pause', identity: 's', resume_basis: 'unreadable' }]) {
+        const unseen = await pressResume('held-i', { detail: { current_stop }, pick: 'again' });
+        assert.deepEqual([unseen.asked, unseen.sent, unseen.told], [[], [], [HOLD_UNREAD]],
+            JSON.stringify(current_stop));
+    }
+    // An unreadable queue answers the task's record with its warning and no `current_stop` at all.
+    const unqueued = await pressResume('held-i', { pick: 'again',
+        detail: { status: 'scheduled', queue_reconciliation_warning: 'queue snapshot missing or invalid' } });
+    assert.deepEqual([unqueued.asked, unqueued.sent, unqueued.told, unqueued.settled],
+        [[], [], [HOLD_UNREAD], ['held-i']]);
+    const other = await pressResume('held-i', { pick: 'again',
+        detail: { current_stop: { state: 'held', cause: 'pause', identity: 's' } } });
+    assert.deepEqual([other.asked, other.sent, other.told], [[], [], [HOLD_GONE]]);
+    // A readable queue may omit the task without reporting whether its entry is missing or stale.
+    const omitted = await pressResume('held-i', { pick: 'again', detail: { status: 'scheduled' } });
+    assert.deepEqual([omitted.asked, omitted.sent, omitted.told, omitted.settled],
+        [[], [], [HOLD_GONE], ['held-i']]);
+    const unreadable = await pressResume('held-i', { detail: new Error('offline') });
+    assert.deepEqual([unreadable.asked, unreadable.sent, unreadable.told], [[], [], [HOLD_UNREAD]]);
+    assert.deepEqual(unreadable.settled, ['held-i']);
+    const absent = await pressResume('held-n', { detail: null });  // the strict read's 404
+    assert.deepEqual([absent.asked, absent.sent, absent.told], [[], [], [HOLD_GONE]]);
+    for (const window of [{ pause_generation: 3 }, { pause_id: '', pause_generation: 3 }, { pause_id: 'park-1' },
+        { pause_id: 'park-1', pause_generation: '3' }, 'park-1']) {
+        const unnamed = await pressResume('held-o', { window, pick: 'end' });
+        assert.deepEqual([unnamed.asked, unnamed.sent, unnamed.told], [[], [], [HOLD_GONE]], JSON.stringify(window));
+    }
+    // The same press, once the task shows its hold again, asks and sends the confirmed step.
+    const again = await pressResume('held-p', { detail: new Error('offline') });
+    assert.deepEqual(again.sent, []);
+    const shown = await pressResume('held-p', { window: WINDOW, pick: 'end' });
+    assert.deepEqual(shown.sent, [['held-p', { context_choice: { pause_id: 'park-1', pause_generation: 3, stop_identity: 'stop-identity', end_attempt: true } }]]);
+});
+
+test('the card\'s window hold is the accepted snapshot\'s: an older body answering late neither hides it nor sends a plain Resume', async () => {
+    // Two reads of the page's state compete (state_snapshots.js). The one asked first answers last: its body is
+    // older than what the cards were painted from, the sequencer discards it, and the card still shows the hold.
+    const painted = [];
+    const snapshots = createStateSnapshotSequencer((data) => painted.push(data));
+    const older = snapshots.begin(), newer = snapshots.begin();
+    assert.equal(snapshots.apply(newer, censusOf('held-q', 'held-r', 'held-s')), true);
+    const before = { active_chat_activities: [
+        ...['held-q', 'held-r', 'held-s'].map((id) => ({ activity_id: id, phase: 'budget_paused', stop: { cause: 'pause' } }))] };
+    assert.equal(snapshots.apply(older, before), false, 'the late older body is discarded');
+    assert.equal(painted.length, 1);
+    for (const id of ['held-q', 'held-r', 'held-s']) assert.equal(heldOnWindow(id), true, id);
+
+    // The shown hold vanished meanwhile (the task answers 404, or shows another pause): 0 POST, said, reconciled.
+    const absent = await pressResume('held-q', { detail: null, pick: 'again' });
+    assert.deepEqual([absent.read, absent.asked, absent.sent, absent.told, absent.settled],
+        [['held-q'], [], [], [HOLD_GONE], ['held-q']]);
+    const other = await pressResume('held-r', { pick: 'again' });
+    assert.deepEqual([other.asked, other.sent, other.told], [[], [], [HOLD_GONE]]);
+    // It cannot be read: 0 POST.
+    const unread = await pressResume('held-s', { detail: new Error('offline'), pick: 'end' });
+    assert.deepEqual([unread.asked, unread.sent, unread.told, unread.settled], [[], [], [HOLD_UNREAD], ['held-s']]);
+
+    // The reconciling read is accepted next. Where it shows an ordinary pause, that card's Resume is the plain one
+    // it always was, with no read of the task first; where it still shows the window hold, the press asks again.
+    const reconciled = snapshots.begin();
+    assert.equal(snapshots.apply(reconciled, { active_chat_activities: [
+        { activity_id: 'held-q', phase: 'budget_paused', stop: { cause: 'pause' } },
+        { activity_id: 'held-s', phase: 'budget_paused', stop: { rail: 'context_window' } }] }), true);
+    assert.equal(heldOnWindow('held-q'), false);
+    const plain = await pressResume('held-q', { window: WINDOW, pick: 'end' });
+    assert.deepEqual([plain.read, plain.asked, plain.sent], [[], [], [['held-q']]]);
+    assert.deepEqual(plain.told, [['Resuming: the task returns to the queue.', 'info']]);
+    const asked = await pressResume('held-s', { window: WINDOW, pick: 'end' });
+    assert.equal(asked.asked.length, 1);
+    assert.deepEqual(asked.sent, [['held-s', { context_choice: { pause_id: 'park-1', pause_generation: 3, stop_identity: 'stop-identity', end_attempt: true } }]]);
+
+    // A failed or retired read leaves the cards as they were painted, and their hold with them.
+    const failed = snapshots.begin();
+    assert.equal(snapshots.fail(failed), true);
+    snapshots.retire();
+    assert.equal(heldOnWindow('held-s'), true);
+});
+
+test('a reader that paints its own rows asks its own accepted census', () => {
+    const census = censusOf('held-t');
+    assert.equal(windowHeldIn(census, 'held-t'), true);
+    assert.equal(windowHeldIn(census, ' held-t '), true);
+    assert.equal(windowHeldIn(census, 'owner-paused'), false);
+    assert.equal(windowHeldIn(null, 'held-t'), false, 'no accepted census shows no hold');
+    assert.equal(windowHeldIn({ works: [] }, 'held-t'), false);
+    // Activity's two Resume doors read the census its rows were painted from, never the page-wide snapshot.
+    assert.match(activity, /const heldHere = \(taskId\) => windowHeldIn\(lastCensus, taskId\);/);
+    assert.match(activity, /resumeTaskAction\(id, \{ settle: resumeSettled, held: heldHere \}\)/);
+    assert.match(activity, /openWorkControls\(btn, work, \{[^}]*held: heldHere \}\)/);
+    assert.match(workSrc, /resumeTaskAction\(target, \{ settle: reconcile, held \}\)/);
+});
+
+test('a refused step is said in the door\'s own words and is never retried as another request', async () => {
+    noteWindowHolds(censusOf('held-j'));
+    const sent = [], told = [];
+    const refusal = Object.assign(new Error('refused'), { status: 409, payload: {
+        error: 'context_choice_not_offered', message: 'This task\'s current hold does not offer that choice; nothing was changed.' } });
+    await resumeTaskAction('held-j', {
+        resume: async (target, body) => { sent.push([target, body]); throw refusal; },
+        toast: (text, kind) => told.push([text, kind]),
+        askOwner: async () => ({ confirmed: true, value: 'end' }),
+        readTask: async () => ({ current_stop: { window: WINDOW, identity: 'stop-identity' } }) });
+    assert.equal(sent.length, 1, 'one request; no Resume anyway, no plain Resume in its place');
+    assert.equal(told.length, 1);
+    assert.equal(told[0][1], 'error');
+});
+
+test('the dialog says the hold\'s numbers, the overview it holds or may take, and what ending gives up', () => {
+    const numbers = 'At the last check, the request needed 81,500 tokens with room for a reply: '
+        + '1,500 more than the 80,000-token window.';
+    const fits = 'At the last check, the request fit with the ';
+    const count = ' overview: 79,000 tokens with room for a reply.';
+    const ending = 'Ending this attempt gives up its saved state. If Continue is available, it starts a new attempt '
+        + 'from the record.';
+    const said = (...paragraphs) => paragraphs.join('\n\n');  // the dialog's body keeps line breaks (pre-line)
+    assert.equal(windowHoldWords(WINDOW),
+        said(numbers, 'Make room in always-loaded memory or raise the window, then try again.', ending));
+    assert.equal(windowHoldWords({ ...WINDOW, overview: OFFER }), said(numbers,
+        `${fits}current${count} The earlier overview is still in use. The task first retries with the earlier overview. `
+        + 'If that still does not fit and the chosen revision is still current and fits, the task saves it and waits '
+        + 'for another Resume.', ending));
+    assert.equal(windowHoldWords({ ...WINDOW, overview: { ...OFFER, taken: true } }), said(
+        `${fits}chosen${count}`,
+        'At the last check, the request with the earlier overview needed 81,500 tokens with room for a reply: '
+        + '1,500 more than the 80,000-token window.', ending));
+    assert.equal(windowHoldWords({ pause_id: 'park-1', pause_generation: 3 }), said(
+        'The request did not fit the model\'s window at the last check.',
+        'Make room in always-loaded memory or raise the window, then try again.', ending));
+    assert.deepEqual(Object.keys(WINDOW_HOLD_STEPS), ['again', 'overview', 'end']);
 });

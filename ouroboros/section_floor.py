@@ -5,11 +5,13 @@ not a second context-view store or cleanup loop. Unknown producers stay whole.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
-from ouroboros.context_layout import TIER0_ALWAYS_FULL
+from ouroboros.context_layout import TIER0_ALWAYS_FULL, reference_doc_sections
 
 log = logging.getLogger(__name__)
 PROTECTED = TIER0_ALWAYS_FULL
@@ -72,6 +74,9 @@ def labelled_section(section: str, label: Callable[[str], str]) -> str:
                    operative_view=None if section.operative_view is None else label(section.operative_view))
 
 
+EXTENSION_TOOL_CATALOGUE = "extension_tool_catalogue"
+
+
 def relocated_text(section: HostSection, reader: str, *, start_room: Union[bool, str] = False) -> str:
     """``start_room``: the step paid this start's allowance while the physical window held the whole request;
     a mode name says the owner's budget for that mode framed it, ``True`` the start's own room. An empty ``reader``:
@@ -79,6 +84,10 @@ def relocated_text(section: HostSection, reader: str, *, start_room: Union[bool,
     heading and that it is unavailable to this actor: no path or reading instruction it could not follow."""
     soft = f"the owner's {start_room.capitalize()} mode budget" if isinstance(start_room, str) else "this start's room"
     bound = f"{soft}, not for the physical window" if start_room else "the physical window"
+    if section.section_id == EXTENSION_TOOL_CATALOGUE and reader:
+        # These names are live affordances, not the source of any work or permission.
+        # Retain the capture as usual, but do not charge its changing digest to the minimum.
+        return section.operative_view
     if not reader:
         heading = next((line for line in section.full_text.splitlines() if line.startswith("## ")), section.section_id)
         return f"{heading}\n\n[Omitted for {bound}; unavailable to this actor.]"
@@ -116,9 +125,18 @@ def section_views(sections: Iterable[HostSection], receipts: Iterable[Mapping]) 
             if (text := part.view_for_receipt(rows[part.section_id], rows)) is not None}
 
 
-def render_sections(sections: Iterable[HostSection], fallback: str, addressed: Mapping[str, str]) -> str:
+def mode_host_receipts(selected: str, form_mode: str, rows: Iterable[Mapping[str, Any]],
+                       low_maps: Iterable[Mapping[str, Any]], book_maps: Iterable[str]) -> list:
+    if form_mode != "low":
+        return [row for row in rows if not row.get("held_note_form") and row.get("section_id") not in book_maps]
+    seen = {row.get("section_id") for row in rows} if selected == "low" else None
+    return [*rows, *(row for row in low_maps if row.get("section_id") not in seen)] if seen is not None else list(rows)
+
+
+def render_sections(sections: Iterable[HostSection], fallback: str, addressed: Mapping[str, str], *, omit=()) -> str:
     parts = tuple(sections)
-    return "\n\n".join(addressed.get(part.section_id, part.full_text) for part in parts) if parts else fallback
+    return "\n\n".join(addressed.get(part.section_id, part.full_text) for part in parts
+                       if part.section_id not in omit) if parts else fallback
 
 
 def rendered_texts(core: Any, addressed: Mapping[str, str]) -> Any:
@@ -134,11 +152,10 @@ def section_inventory(plan, mode, facts):
     These are producer-owned forms selected by the shared floor, not dialogue
     units the mind can replace with a note. The reader retains the exact full source.
     """
-    from ouroboros.context_fit import _governance_blocks
     from ouroboros.utils import estimate_tokens
 
     core = plan.core
-    governance = _governance_blocks(None, core, mode='low' if mode == 'nano' else mode)
+    governance = _governance_blocks(None, core, mode='low' if mode == 'nano' else mode, reference_docs=reference_doc_sections)
     sections = (*core.semi_stable_sections, *core.dynamic_head_sections, *core.dynamic_sections,
                 *(governance[0] if not isinstance(governance[0], str) else ()))
     receipts = {row['section_id']: row for row in facts.get('host_sections_addressed', ())}
@@ -194,20 +211,20 @@ def with_program_history(rows, data):
 
 def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room: str = "", mode: str = "",
                    addressed: Optional[Mapping[str, str]] = None, story_whole: bool = True,
-                   trace: Any = None) -> List[Dict[str, Any]]:
+                   trace: Any = None, *, omit=()) -> List[Dict[str, Any]]:
     # All stable items precede C; D is its own block only for the full handbook: Max without it carries the
     # handbook's chapter map at the head of B, spending no breakpoint; a compact mode's D is a direct requirement
     # (A' keeps its map). The mode picks the connections map's form in B. Never create an empty cache boundary.
     # B declares what of it other works share (``SHARED_HEAD_KEY``): its head, and its story when that is whole.
     addressed = addressed or {}
     common, *handbook = render_governance(governance, addressed)
-    semi = render_sections(core.semi_stable_sections, core.semi_stable_text, addressed)
-    dynamic = render_sections(core.dynamic_sections, core.dynamic_text, addressed)
+    semi = render_sections(core.semi_stable_sections, core.semi_stable_text, addressed, omit=omit)
+    dynamic = render_sections(core.dynamic_sections, core.dynamic_text, addressed, omit=omit)
     own_block = core.docs_need_development or core.development_required
     connections = core.connections[mode == "nano"]
     shared = "\n\n".join(part for part in (*(() if own_block else handbook), semi, connections) if part)
     stable = (common, *(handbook if own_block else ()), "\n\n".join(part for part in (shared, story) if part))
-    head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, addressed)
+    head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, addressed, omit=omit)
     blocks = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}} for text in stable if text.strip()]
     if shared.strip() and story.strip():
         from ouroboros.llm_messages import SHARED_HEAD_KEY  # here, as its sibling key is: no transport at import time
@@ -219,6 +236,30 @@ def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room
     return blocks + [{"type": "text", "text": changing}]
 
 
+def captured_core_fingerprint(core, user_content: Any) -> str:
+    """Fingerprint the captured sources, before a provider-specific request is prepared."""
+    core_payload = json.dumps({
+        "base_prompt": core.base_prompt, "bible_md": core.bible_md,
+        "architecture_md": core.architecture_md, "development_md": core.development_md,
+        "semi_stable_text": core.semi_stable_text,
+        "host_sections": [part.__getnewargs__() for part in (
+            *core.semi_stable_sections, *core.dynamic_head_sections, *core.dynamic_sections)],
+        "dynamic_head_text": core.dynamic_head_text, "dynamic_text": core.dynamic_text,
+        "memory_view_json": core.memory_view_json,
+        **({"connections": list(core.connections)} if any(core.connections) else {}),
+        **({"supplementary_messages": json.loads(core.supplementary_messages_json)}
+           if json.loads(core.supplementary_messages_json) else {}),
+        "user_content": user_content, "docs_need_development": core.docs_need_development,
+        **({"development_required": True} if core.development_required else {}),
+        "compact_reference_docs": core.compact_reference_docs,
+        "reference_book_errors": core.reference_book_errors,
+        **({"read_failures": list(core.read_failures)} if core.read_failures else {}),
+        "reference_sources": [(book.book_id, source.source_path, source.sha256)
+                              for book in core.reference_books for source in (book.entrypoint, *book.chapters)],
+    }, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(core_payload.encode("utf-8")).hexdigest()
+
+
 def capture_system_projection(core, governance, story, room, mode, addressed, receipts, whole, *, shown, facts):
     """Render normally and keep its pieces for the selected projection, without opening sources again."""
     from ouroboros.context_assembly_trace import observe_system_layout
@@ -227,6 +268,20 @@ def capture_system_projection(core, governance, story, room, mode, addressed, re
     system = _system_blocks(core, governance, story, room, mode, addressed, whole, trace=live.append)
     report = observe_system_layout(core, governance, addressed, receipts, live, system, story_whole=whole, shown=shown)
     return system, {**facts, '_assembly_layout': report}
+
+
+def capture_mode_projections(core, governance, form, sections, receipts, low_maps,
+                             story, room, room_data, whole, shown, receipt, selected, held_price, *, book_maps):
+    """Serialize sibling modes over the one selected memory walk, not separate fits."""
+    contents = {}
+    for mode, book_form in form.items():
+        rows = mode_host_receipts(mode, book_form, receipts, low_maps, book_maps)
+        facts = {**receipt, "held_note_request_tokens": held_price} if held_price is not None and mode == selected else receipt
+        system, observation = capture_system_projection(core, governance[book_form], story, room, mode,
+            section_views(sections[mode], rows), rows, whole, shown=shown,
+            facts={**facts, "host_sections_addressed": rows} if rows else facts)
+        contents[mode] = (system, observation, room_data)
+    return contents
 
 
 def projection_fields(system, facts):
