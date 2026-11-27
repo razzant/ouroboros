@@ -73,6 +73,8 @@ def test_every_address_rebuilds_the_exact_call_and_every_purpose_line_stays(tmp_
     assert re.search(r"\n- foxtrot \([^)]*\): Purpose of foxtrot\.\n  Trigger: When bravo applies\.\n"
                      r"  Instructions: source address unavailable\.\n", shown.operative_view)  # the fallback, unchanged
     assert "Schedule source: bucket='external', skill_name='atlas', path='SKILL.md'." in shown.full_text
+    for form in (shown.full_text, shown.operative_view):  # host syntax first, then the untrusted metadata (pr2rev1 G23)
+        assert form.index(_MANIFEST_READ) < form.index(context_sections._INSTALLED_SKILLS_HEADING[1])
     print(f"\nK7(d) measure: full {view_tokens(spelled.full_text)} -> {view_tokens(shown.full_text)}, "
           f"operative {view_tokens(spelled.operative_view)} -> {view_tokens(shown.operative_view)} est. tokens")
 

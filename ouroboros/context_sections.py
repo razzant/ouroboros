@@ -377,9 +377,9 @@ def _installed_skills_section(env: Any, skills: Any, selected_skill: str = "") -
             lines.append("  Tools: skill_exec")
     _append_unadmitted(lines, operative, summary.get("skills") or [], env.drive_root, _field, off_state, skill_status,
                        summary.get("unreadable_sources") or [], selected_skill)
-    for form in (lines, operative):  # the call each address completes, once per form that names one
+    for form in (lines, operative):  # the call each address completes, once per form, before the untrusted metadata
         if any(line.startswith(_ADDRESSED) or _WHOLE in line for line in form):
-            form.insert(len(_INSTALLED_SKILLS_HEADING), _MANIFEST_READ)
+            form.insert(len(_INSTALLED_SKILLS_HEADING) - 1, _MANIFEST_READ)
     if listed:  # a skill_exec line names no registered tool, and its skill's name loads nothing
         lines.insert(1, 'A "Tools" line that lists a skill\'s registered tools names all of them; '
                         'enable_tools("<skill name>") loads them in one call where their schemas are not in the '

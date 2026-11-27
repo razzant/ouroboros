@@ -48,7 +48,7 @@ def test_the_facts_row_names_what_my_marks_accounts_and_room_cost_on_a_mature_in
     marks = [m for m in snapshot.marks if not m.get("late_review")]
     assert len(marks) == 158 and len(accounts) == 5
     parts = found["parts"]
-    assert f"marks block {mf.tokens_of(mv.json_chars(pieces['marks'])):,} (158 marks)" in parts
+    assert f"my marks block {mf.tokens_of(mv.json_chars(pieces['marks'])):,} (158 marks)" in parts
     assert f"this room's block {mf.tokens_of(mv.json_chars(pieces['room'])):,}" in parts
     # Each account's own lines as the renderer's parts name them (its words, readers, told records and changes).
     from ouroboros.memory_form_facts import memory_composition
@@ -56,7 +56,7 @@ def test_the_facts_row_names_what_my_marks_accounts_and_room_cost_on_a_mature_in
     drawn = [p for p in memory_composition(snapshot, level)["blocks"]["story"]["parts"] if p["kind"] == "account"]
     assert len(drawn) == 5
     told = sum(p["text_json_chars"] + 2 * p["line_joins"] for p in drawn)
-    assert f"selected accounts {mf.tokens_of(told):,} (5)" in parts
+    assert f"my selected accounts {mf.tokens_of(told):,} (5)" in parts
     assert not re.search(r"\b(too|over|large|warn|should|consider|release)\b", found.group(0))  # facts, no advice
     # Measured once per captured view: a later row of the same core carries the same words and date, so it is no new
     # fact every turn and an intact row in view keeps it out of the next one.
@@ -71,7 +71,7 @@ def test_a_part_the_view_does_not_draw_is_named_and_never_a_number():
 
     active = syn.snapshot(room_facts=syn.room("1"), story=syn.pages(2, 400), mark_count=3)
     shown = _resident_text(active, mv.FULL_VIEW)
-    assert "marks block" in shown and "(3 marks)" in shown and "selected accounts none" in shown and "this room's block" in shown
+    assert "my marks block" in shown and "(3 marks)" in shown and "my selected accounts none" in shown and "this room's block" in shown
     inactive = dataclasses.replace(active, store_status={"state": "journal_unreadable", "reason": "x"})
     told = _resident_text(inactive, mv.FULL_VIEW)
     assert "not measured" in told and not re.search(r"\d", told.split("(")[0]) and "marks block" not in told

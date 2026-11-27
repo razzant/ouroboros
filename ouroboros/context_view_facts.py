@@ -149,9 +149,9 @@ def _resident_text(snapshot, level):
     ordinary = [mark for mark in snapshot.marks if not mark.get("late_review")]
     if ordinary:  # the same piece the view's room price keeps (``memory_view._room_parts``)
         chars = snapshot.piece(("marks",), lambda: mv._marks_text(ordinary))
-        sizes.append(f"marks block {floor.tokens_of(chars):,} ({len(ordinary)} marks)")
+        sizes.append(f"my marks block {floor.tokens_of(chars):,} ({len(ordinary)} marks)")
     elif spec.marks != "none":
-        sizes.append("marks none")
+        sizes.append("my marks none")
     if spec.story:
         told: Dict[str, List[Dict[str, Any]]] = {}
         for entry in snapshot.story:
@@ -159,7 +159,7 @@ def _resident_text(snapshot, level):
                 told.setdefault(entry["told_by"], []).append(entry)
         accounts = [entry for entry in snapshot.story if entry.get("kind") == "account" and not entry.get("told_by")]
         chars = sum(mv.json_chars("\n".join(mv._page_lines(entry) + mv._told_lines(entry["id"], told))) for entry in accounts)
-        sizes.append(f"selected accounts {floor.tokens_of(chars):,} ({len(accounts)})" if accounts else "selected accounts none")
+        sizes.append(f"my selected accounts {floor.tokens_of(chars):,} ({len(accounts)})" if accounts else "my selected accounts none")
     room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
     if room:
         steps = tuple((step, gone.get(step, ())) for step in mv._ROOM_STEPS)
