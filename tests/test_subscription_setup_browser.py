@@ -810,7 +810,7 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
     page.wait_for_selector('.summary-card')
     page.wait_for_selector('#skip-presets-btn:not([hidden])')
     page.click('#skip-presets-btn')
-    page.wait_for_function("() => document.querySelector('.wizard-inline-note')?.textContent.includes('Reviewers were assigned to Main')")
+    page.wait_for_function("() => document.querySelector('[data-recovery-note]')?.textContent.includes('Reviewers were assigned to Main')")
     assert not any(path == '/api/onboarding/complete' for path, _ in ui['posts']), 'Recovery is a preview, not a write'
     assert not onboarding.settings_path.exists()
     reviewers = page.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
@@ -822,7 +822,7 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
         walk(page, 'models', 'summary')
         page.wait_for_selector('#skip-presets-btn:not([hidden])')
         assert page.locator('#next-btn').is_enabled()
-        assert 'Main changed; reviewers keep the assignments shown above' in page.locator('.wizard-inline-note').inner_text()
+        assert 'Main changed; reviewers keep the assignments shown above' in page.locator('[data-recovery-note]').inner_text()
         assert 'owner-main' in reviewers.inner_text() and 'new-main' not in reviewers.inner_text()
     elif edit_after_recovery:
         # The reviewers are rows of the Models step's catalog: edit one there.
@@ -877,7 +877,7 @@ def test_failed_main_reviewer_recovery_does_not_latch_finish(subscription_ui):
     assert not any(path == '/api/onboarding/complete' for path, _ in ui['posts'])
     ui['backend'].pop('recovery_error')
     page.click('#skip-presets-btn')
-    page.wait_for_function("() => document.querySelector('.wizard-inline-note')?.textContent.includes('Reviewers were assigned to Main')")
+    page.wait_for_function("() => document.querySelector('[data-recovery-note]')?.textContent.includes('Reviewers were assigned to Main')")
     page.click('#next-btn')
     page.wait_for_url(ui['url'] + '/')
     bodies = [body for path, body in ui['posts'] if path == '/api/onboarding/complete']
