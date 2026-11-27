@@ -881,10 +881,10 @@ def _collect_chat_rows(
             if (attempt := recorded_attempt(entry)) is not None:
                 rec["task_attempt"] = attempt
             _copy_task_summary_metadata(rec, entry)
-            # Lineage, the origin label, the host's card placement (card_row / card_row_id) and a late-review
-            # row's evidence pointer (#1369, stored on that type only) replay verbatim; an absent key is omitted.
+            # Lineage, the origin label, the host's card placement (card_row / card_row_id), a late-review row's evidence
+            # pointer (#1369) and a call's spoken provenance (the live frame's caption identity) replay verbatim, or are absent.
             rec.update({field: entry[field] for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "continue_requester", "place_origin",
-                        "card_row", "card_row_id", "card_row_revision", "late_evidence", "narration") if field in entry})
+                        "card_row", "card_row_id", "card_row_revision", "late_evidence", "narration", "spoken") if field in entry})
             rec.update(notice_view(entry))  # a host notice's step and details, and its line in the install's language
             combined.append(rec)
     except StoreMigrating:
