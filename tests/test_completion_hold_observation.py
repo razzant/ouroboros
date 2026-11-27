@@ -660,11 +660,11 @@ def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch,
     assert _hold_cause(tools._ctx) == case and _hold_cause(tools._ctx) == "", "read once"
 
 
-def _check(code, tag="a"):
+def _check(code, tag="a", *, kind="explicit_command"):
     """A recorded command check exiting ``code``; another ``tag`` is another check."""
     import sys
 
-    return act("verify_and_record", contract_kind="explicit_command",
+    return act("verify_and_record", contract_kind=kind,
                check=[sys.executable, "-c", f"raise SystemExit({code})  # {tag}"])
 
 
@@ -683,6 +683,7 @@ _DOOR_CASES = {
     "declared": (lambda: [_declared(), finish("Answer"), finish("Answer")], ["pre_delivery_notice"], True, None),
     "result_review": (lambda: [act("review_change", subject="result"), finish("Answer")], [], False, None),
     "green_check": (lambda: [_check(0), finish("Answer")], [], False, None),
+    "green_check_padded": (lambda: [_check(0, kind=" explicit_command "), finish("Answer")], [], False, None),
     "red_check": (lambda: [_check(1), finish("Answer"), finish("Answer")], ["red_check_notice"], False, 0),
     "red_then_declared": (lambda: [_check(1), _declared(), finish("Answer"), finish("Answer")],
                           ["red_check_notice"], False, 0),
@@ -734,6 +735,11 @@ def test_the_finish_door_returns_an_unexamined_result_and_a_red_last_check_once_
         assert str(turn.root / "nowhere.md") + ")), and none has passed since" in reminders[0], "where the host looked"
     outcome = derive_loop_outcome(text, usage, trace)
     apply_receipt_absent_flag(outcome, trace, turn.root, "author-task")
+    if case == "green_check_padded":
+        [check] = [row for row in trace["tool_calls"] if row["tool"] == "verify_and_record"]
+        assert check["args"]["contract_kind"] == " explicit_command " and check["is_error"] is False
+        [receipt] = trace["verification_receipts"]
+        assert (receipt["contract_kind"], receipt["status"]) == ("explicit_command", "pass")
     objective = outcome["outcome_axes"]["objective"]
     warnings = objective.get("warnings") or []
     assert ("receipt_absent" in warnings) is unexamined, warnings
