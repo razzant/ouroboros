@@ -1226,7 +1226,7 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
         tools._ctx._completion_observation = completion_observation(tools._ctx, llm_trace)
     tools._ctx._completion_conflict = False
     from ouroboros.tools.tool_discovery import resolve_gateway_call
-    tool_calls = [resolve_gateway_call(tc) for tc in tool_calls]  # a gateway envelope runs as the MCP call it names
+    tool_calls = [resolve_gateway_call(tc, tools._ctx) for tc in tool_calls]  # an envelope runs as its MCP call
     validation = tuple(getattr(tools._ctx, "_request_wire_custom_receipts", ()) or ())
     tools._ctx._request_wire_custom_receipts = ()
     validation_by_id = custom_validation_by_call_id(validation)

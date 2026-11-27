@@ -171,6 +171,39 @@ def test_the_gateway_hands_the_guide_over_before_its_first_call(tmp_path, monkey
     assert sent[-1] == ("mcp_srv04__tool_00", {"id": "2"})
 
 
+
+@pytest.mark.parametrize("mode", ["nano", "low", "max"])
+def test_a_gateway_call_in_a_real_batch_waits_for_its_servers_guide_only_in_nano(tmp_path, monkeypatch, mode):
+    """Through the executor (``loop_tool_execution.execute_tool_batch``), not the handler alone: in a Nano view the
+    first gateway call of a server sends nothing and returns its guide and that tool's schema, and the next call runs;
+    in Low and Max, whose maps hold the guide, the call runs at once as the MCP call it names."""
+    from ouroboros.loop_tool_execution import execute_tool_batch
+
+    registry, guides = scale.mcp_registry(tmp_path, monkeypatch)
+    _nano_actor(registry, mode=mode, gateway=True)
+    sent = _gateway_sends(monkeypatch)
+    (tmp_path / "logs").mkdir(exist_ok=True)
+
+    def batch(call_id):
+        calls = [{"id": call_id, "type": "function", "function": {"name": "call_mcp_tool", "arguments": json.dumps(
+            {"name": "mcp_srv03__tool_00", "arguments": {"id": call_id}})}}]
+        (row,), control = execute_tool_batch(calls, registry, tmp_path / "logs", "gateway-guide", None, {})
+        assert control is None and row["is_error"] is False
+        return row
+
+    first = batch("1")
+    if mode == "nano":
+        assert sent == [] and first["fn_name"] == "call_mcp_tool"
+        text = str(first["result"])
+        assert guides["srv03"] in text and "Nothing was sent to mcp_srv03__tool_00" in text and '"description": "An id"' in text
+        second = batch("2")
+        assert sent == [("mcp_srv03__tool_00", {"id": "2"})] and second["fn_name"] == "mcp_srv03__tool_00"
+        assert guides["srv03"] not in str(second["result"])
+    else:
+        assert sent == [("mcp_srv03__tool_00", {"id": "1"})] and first["fn_name"] == "mcp_srv03__tool_00"
+        assert guides["srv03"] not in str(first["result"])
+
+
 def test_the_ordinary_build_carries_the_nano_form_and_max_keeps_the_guides(tmp_path, monkeypatch):
     """One start's view before and after: through the real build the captured Nano map is the guide-less form and the
     Max view of the same capture holds every guide, so a plan that rebinds to Max mid-run shows them there."""
