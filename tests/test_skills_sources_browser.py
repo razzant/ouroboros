@@ -181,7 +181,9 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         skills.release("/api/skill-catalog/install", fixture("skill_install.json")["trusted"])
         page.wait_for_function("document.querySelector('[data-item=\"ouroboros/duckduckgo\"].marketplace-card').textContent.includes('On · v1.0.0')")
         skills.hold.clear()
-        assert skills.posted("/api/skill-catalog/install") == [{"id": "ouroboros/duckduckgo", "turn_on_when_ready": True}]
+        assert skills.posted("/api/skill-catalog/install") == [
+            {"id": "ouroboros/duckduckgo", "turn_on_when_ready": True,
+             "expected_digest": DIGEST["ouroboros/duckduckgo"]}]
 
         # Review basis: the card says the review runs, and Skip review is one press away.
         skills.answers["/api/skill-catalog/install"] = {"ok": True, "job_id": "job-3", "name": "scholion", "basis": "review"}
@@ -320,7 +322,9 @@ def test_the_hub_rows_are_confirmed_once_with_their_suggested_trust(skills_brows
         _card(page, "ouroboros/duckduckgo").locator('[data-browse-action="install"]').click()
         skills.wait_for_count(("POST", "/api/skill-catalog/install"), 1)
         assert dialog.count() == 0
-        assert skills.posted("/api/skill-catalog/install") == [{"id": "ouroboros/duckduckgo", "turn_on_when_ready": True}]
+        assert skills.posted("/api/skill-catalog/install") == [
+            {"id": "ouroboros/duckduckgo", "turn_on_when_ready": True,
+             "expected_digest": DIGEST["ouroboros/duckduckgo"]}]
 
         # Sources keeps the question open until the owner confirms; the choice is saved row by row.
         _tab(page, "sources")
@@ -391,13 +395,19 @@ def test_browse_words_hold_when_the_source_list_answers_late_with_another_settin
 
 
 @pytest.mark.parametrize("browser_name,width", [("webkit", 1280), ("webkit", 390)])
-def test_one_name_two_sources_compare_and_replace_is_one_install(skills_browser, browser_name, width):
+def test_a_namespaced_registry_offer_installs_beside_a_same_leaf_skill(skills_browser, browser_name, width):
+    from playwright.sync_api import expect
+
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     skills = None
     try:
         page = browser.new_page(viewport={"width": width, "height": 900})
         skills = _open(page)
-        skills.answers["/api/skill-catalog/search"] = fixture("skill_catalog_search.json")
+        search_result = fixture("skill_catalog_search.json")
+        offer = next(item for item in search_result["items"] if item["id"] == "clawhub/steipete/weather")
+        registry_key = "registry:" + "b" * 32
+        offer["source_key"] = registry_key
+        skills.answers["/api/skill-catalog/search"] = search_result
         _tab(page, "browse")
         search = page.locator("[data-browse-search]")
         search.fill("weather")
@@ -406,8 +416,68 @@ def test_one_name_two_sources_compare_and_replace_is_one_install(skills_browser,
         claw.wait_for()
         assert page.locator("[data-browse-sort]").input_value() == "best"
         assert "★ 429 · 171.8k downloads · 6 comments" in claw.inner_text()
-        assert "You have another “weather” (from Ouroboros)" in claw.inner_text()
-        claw.locator('[data-browse-action="compare"]').click()
+        # A registry leaf is not a local install identity: it can neither Compare with nor replace the hub's weather.
+        assert "You have another" not in claw.inner_text()
+        assert claw.locator('[data-browse-action="compare"]').count() == 0
+        def install_registry(_request):
+            # The queue accepts the full slug before the adapter names the installed folder.
+            landed_digest = "b" * 64
+            skills.set_skills([*LISTING, {
+                "name": "steipete__weather", "source": "clawhub", "registry_slug": "steipete/weather",
+                "source_key": registry_key, "version": "1.0.4", "enabled": True, "review_status": "clean",
+                "executable_review": True, "content_hash": landed_digest, "manifest_file": "SKILL.md",
+                "grants": {"all_granted": True},
+                "install": {"source": {"id": "clawhub", "kind": "registry", "name": "ClawHub"},
+                            "release": {"version": "1.0.4", "digest": landed_digest},
+                            "basis": "review", "modified": False},
+            }])
+            return {"ok": True, "job_id": "job-w", "name": "steipete/weather", "basis": "review"}
+
+        skills.answers["/api/skill-catalog/install"] = install_registry
+        claw.locator('[data-browse-action="install"]').click()
+        skills.wait_for_count(("POST", "/api/skill-catalog/install"), 1)
+        # Ordinary registry install: pinned to the shown exact version, no digest supplied, no overwrite, no uninstall.
+        assert skills.posted("/api/skill-catalog/install") == [
+            {"id": "clawhub/steipete/weather", "turn_on_when_ready": True, "version": "1.0.4",
+             "expected_source_key": registry_key}]
+        assert [path for path, _ in skills.posts] == ["/api/skill-catalog/install"], "no separate uninstall"
+        expect(claw).to_contain_text("On · v1.0.4")
+        _tab(page, "installed")
+        expect(page.locator('.skills-card[data-skill="steipete__weather"]')).to_be_visible()
+        expect(page.locator('.skills-card[data-skill="weather"]')).to_be_visible()
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name,width", [("webkit", 1280), ("webkit", 390)])
+def test_one_name_two_sources_compare_and_replace_is_one_install(skills_browser, browser_name, width):
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        # Compare/Replace stays with a non-registry offer against a same-named occupant: a git source's "weather".
+        git_url = "https://example.com/my-git"
+        git_digest = "d" * 64
+        git_key = "git:" + "d" * 32
+        sources = _sources(extra=[{"id": "my-git", "name": "My git", "kind": "git", "url": git_url,
+                                   "ref": "main", "trust": "review", "confirmed": True, "state": "ready"}])
+        catalog = copy.deepcopy(CATALOG)
+        catalog["sources"].append({"id": "my-git", "name": "My git", "state": "ready"})
+        git_weather = {"id": "my-git/weather", "source_id": "my-git", "source_name": "My git", "name": "weather",
+                       "description": "Weather from my own repository.", "category": [], "version": "0.1.0",
+                       "digest": git_digest, "source_key": git_key, "official": False, "recommended": False, "owner": "me",
+                       "updated_at": "2026-11-01T10:00:00+00:00", "signals": None, "withdrawn": None,
+                       "type": "script", "needs_keys": [], "permissions": ["net"], "installed": None,
+                       "trust": "review", "repo_url": git_url}
+        catalog["items"].append(git_weather)
+        skills = _open(page, sources=sources, catalog=catalog)
+        skills.answers["/api/skill-catalog/install"] = {"ok": True, "job_id": "job-git", "name": "weather", "basis": "review"}
+        _tab(page, "browse")
+        git_card = _card(page, "my-git/weather")
+        git_card.wait_for()
+        assert "You have another “weather” (from Ouroboros)" in git_card.inner_text()
+        git_card.locator('[data-browse-action="compare"]').click()
         dialog = page.locator(".skills-dialog")
         dialog.wait_for()
         assert "Two skills are called “weather”" in dialog.inner_text()
@@ -417,13 +487,14 @@ def test_one_name_two_sources_compare_and_replace_is_one_install(skills_browser,
         capture(page, browser_name, width, "compare")
         dialog.locator("[data-dialog-ok]").click()
         assert dialog.count() == 0 and not skills.posts, "keeping yours changes nothing"
-        claw.locator('[data-browse-action="compare"]').click()
+        git_card.locator('[data-browse-action="compare"]').click()
         dialog.locator('[data-choice="replace"]').click()
         assert dialog.locator("[data-dialog-ok]").inner_text() == "Use this one"
         dialog.locator("[data-dialog-ok]").click()
         skills.wait_for_count(("POST", "/api/skill-catalog/install"), 1)
         assert skills.posted("/api/skill-catalog/install") == [
-            {"id": "clawhub/steipete/weather", "turn_on_when_ready": True, "replace": True}]
+            {"id": "my-git/weather", "turn_on_when_ready": True, "replace": True,
+             "expected_digest": git_digest, "expected_source_key": git_key}]
         assert [path for path, _ in skills.posts] == ["/api/skill-catalog/install"], "no separate uninstall"
         assert no_overflow(page)
     finally:
@@ -573,7 +644,8 @@ def test_clawhub_chosen_alone_shows_its_popular_page_and_pages_on(skills_browser
         skills.answers["/api/skill-catalog/install"] = {"ok": True, "job_id": "job-c", "name": "first", "basis": "review"}
         _card(page, "clawhub/first").locator('[data-browse-action="install"]').click()
         skills.wait_for_count(("POST", "/api/skill-catalog/install"), 1)
-        assert skills.posted("/api/skill-catalog/install") == [{"id": "clawhub/first", "turn_on_when_ready": True}]
+        assert skills.posted("/api/skill-catalog/install") == [
+            {"id": "clawhub/first", "turn_on_when_ready": True, "version": "1.0.0"}]
 
         # Changing the order reads the first page of that order.
         sort.select_option("updated")
@@ -896,26 +968,40 @@ def test_the_detail_sheet_reads_the_entry_and_returns_focus(skills_browser, brow
 
 @pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
 def test_the_installed_sheet_takes_access_from_its_own_manifest_never_the_catalog(skills_browser, browser_name):
-    """A source-backed installation, with the catalog cached and its entry fetched, shows what its own loaded manifest
-    and grants say, an id with no friendlier word as declared (card and sheet alike); when that manifest was not read
-    it claims nothing. Browse keeps the catalog's own words and labels and still leaves out an id it gives neither."""
+    """Installed uses its own manifest and grants and only borrows prose for the same release.
+
+    Browse keeps the catalog's own words and labels and leaves out an id it gives neither.
+    """
+    from playwright.sync_api import expect
+
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     skills = None
     try:
         page = browser.new_page(viewport={"width": 390, "height": 900})
         catalog = copy.deepcopy(CATALOG)
         entry = next(item for item in catalog["items"] if item["id"] == "ouroboros/weather")
+        other_release = {key: entry[key] for key in ("version", "digest")}
+        installed = _row("weather")
+        installed.update(catalog_id=entry["id"], source_key="git:" + "a" * 32,
+                         manifest_file="SKILL.md", permissions=["page_module"])
+        installed["install"]["update_available"] = None
+        release = {"version": installed["version"], "digest": installed["content_hash"]}
         # Competing, plausible declarations: a known word, and an id that no word or label names.
-        entry.update(permissions=["net", "cached_unlabeled"], needs_keys=["WEATHER_KEY"])
-        installed = {**_row("weather"), "permissions": ["page_module"]}  # all its manifest declares: no friendlier word
+        entry.update(**release, source_key=installed["source_key"], permissions=["net", "cached_unlabeled"],
+                     needs_keys=["WEATHER_KEY"],
+                     installed={"state": "installed", **release, "modified": False, "update_available": False})
         skills = _open(page, catalog=catalog, listing=[installed])
         detail_path = "/api/skill-catalog/item/ouroboros/weather"
-        skills.answers[detail_path] = {
+        detail = {
+            "item": {**entry, "permissions": ["net", "feed_reader", "fetched_unlabeled"]},
             "about": "Weather from the source.",
             "uses": [{"id": "net", "kind": "permission"},
                      {"id": "feed_reader", "kind": "permission", "label": "Reads the weather feed"},
                      {"id": "fetched_unlabeled", "kind": "permission"},
-                     {"id": "WEATHER_KEY", "kind": "key"}]}
+                     {"id": "WEATHER_KEY", "kind": "key"}],
+            "versions": [{**release, "current": True}],
+        }
+        skills.answers[detail_path] = detail
         _tab(page, "browse")  # the catalog is now cached, so the installed sheet could join it
         _card(page, "ouroboros/weather").wait_for()
         _tab(page, "installed")
@@ -923,10 +1009,15 @@ def test_the_installed_sheet_takes_access_from_its_own_manifest_never_the_catalo
         card = page.locator('.skills-card[data-skill="weather"]')
         can_use = card.locator(".skills-detail-row", has_text="Can use").locator(".skills-detail-value")
 
-        def open_installed():
-            page.locator('.skills-card[data-skill="weather"] .skills-card-name').click()
-            sheet.locator(".skills-sheet-about", has_text="Weather from the source.").wait_for()
-            page.wait_for_function("!document.querySelector('.skills-detail-sheet .skills-sheet-status')")
+        def open_installed(*, accepts_catalog=True):
+            card.locator(".skills-card-name").click()
+            status = sheet.locator(".skills-sheet-status")
+            if accepts_catalog:
+                expect(sheet.locator(".skills-sheet-about")).to_have_text(detail["about"])
+                expect(status).to_have_count(0)
+            else:
+                expect(status).to_contain_text("Showing the installed description.")
+                expect(sheet.locator(".skills-sheet-about")).to_have_text(installed["description"])
             return sheet.inner_text()
 
         text = open_installed()  # a parsed manifest: its own access, with the row's grants (no keys requested)
@@ -939,22 +1030,37 @@ def test_the_installed_sheet_takes_access_from_its_own_manifest_never_the_catalo
         assert can_use.inner_text() == "page_module"  # the card says the same, not "Nothing beyond its own folder"
 
         # An id with no friendlier word stands as declared beside the known words: once, in order, and escaped.
-        mixed = {**installed, "permissions": ["net", "page_module", 'odd"<i>x</i>', "page_module"]}
+        mixed = {**installed, "permissions": ["net", "page_module", 'odd"<i>x</i>', "page_module"],
+                 "grants": {**installed["grants"], "requested_keys": ["LOCAL_FORECAST_KEY"]}}
         skills.set_skills([mixed])
         page.locator("#skills-refresh").click()
         page.wait_for_function("!document.querySelector('#skills-refresh').disabled")
         shown = 'Internet · page_module · odd"<i>x</i>'
         assert can_use.inner_text() == shown and card.locator(".skills-detail-value i").count() == 0
-        assert shown in open_installed() and sheet.locator(".skills-sheet-section i").count() == 0
+        text = open_installed()
+        assert shown in text and sheet.locator(".skills-sheet-section i").count() == 0
+        assert "Your keys: LOCAL_FORECAST_KEY" in text and "WEATHER_KEY" not in text
         page.locator("[data-sheet-close]").click()
 
+        # The address still resolves, but the currently offered files have changed since this copy was installed.
+        skills.answers[detail_path] = {**detail, "item": {**detail["item"], **other_release},
+                                       "about": "Full guide for another release.",
+                                       "versions": [{**other_release, "current": True}]}
+        text = open_installed(accepts_catalog=False)
+        assert "Full guide for another release." not in text
+        assert shown in text and "Your keys: LOCAL_FORECAST_KEY" in text and "WEATHER_KEY" not in text
+        page.locator("[data-sheet-close]").click()
+
+        # Even a match on source and release cannot supply claims for an unread installed manifest.
+        skills.answers[detail_path] = detail
         unread = {**installed, "manifest_file": "", "type": "instruction",
                   "load_error": "manifest parse error: bad", "grants": {}}  # its placeholder permissions declare nothing
         skills.set_skills([unread])
         page.locator("#skills-refresh").click()
         page.wait_for_function("!document.querySelector('#skills-refresh').disabled")
         assert "Can use" not in card.inner_text() and "page_module" not in card.inner_text()
-        text = open_installed()
+        text = open_installed(accepts_catalog=False)
+        assert detail["about"] not in text
         assert "What it can use" not in text and "WEATHER_KEY" not in text and "Your keys" not in text
         assert "Nothing beyond its own folder" not in text and "page_module" not in text
         sheet.locator(".skills-sheet-details > summary").click()
