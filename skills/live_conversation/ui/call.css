@@ -561,6 +561,16 @@
     cursor: default;
 }
 
+/* A call that is one notice line reads it as a System line: the phrase in body weight, its next step under it. */
+.call-card[data-call-card="silent"] .call-card-title {
+    font-weight: inherit;
+}
+
+.call-card-step {
+    flex-basis: 100%;
+    color: var(--text-secondary);
+}
+
 .call-card-details {
     padding: 0 var(--space-4) var(--space-3);
 }

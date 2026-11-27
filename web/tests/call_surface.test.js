@@ -777,3 +777,24 @@ test('a call nobody joined folds to one notice line, and the engine line reads f
     assert.equal(card().querySelector('.call-card-facts').textContent, '19 s · 1 line');
     assert.deepEqual(lines().map(([, text]) => text), ['YouHello?', 'The call did not start: no one joined the call.']);
 });
+
+test('a call that is one notice line reads its phrase as the title and its next step under it', () => {
+    const phrase = 'The call could not start on Grok · xAI: this room needs more input than the model takes.';
+    const step = 'Calls (beta) in Extensions › Skills shows the selected model\'s window.';
+    for (const [sent, title, under] of [[phrase, phrase, step], ['', `${phrase} ${step}`, '']]) {
+        const { feed, cards, card, row } = feedFixture({ live: () => '' });
+        row('system', 'The owner opened this call. Engine: Grok · xAI, grok-voice-3.0; no screen vision.',
+            { clientMessageId: 'call:c8:open', systemType: 'call_open', rowAddress: 'row:1@t#8' }, 1000);
+        // The server sends the line and, beside it, its phrase alone (host_notice.view); an older row has no phrase.
+        const notice = row('system', `${phrase} ${step}`, { taskId: 't8', ...(sent ? { noticePhrase: sent } : {}) }, 2000);
+        const quote = new FakeNode('div', feed.ownerDocument);
+        quote.className = 'chat-quote';
+        quote.dataset.address = 'row:1@t#8';
+        notice.append(quote);
+        cards.scan();
+        assert.equal(card().dataset.callCard, 'silent');
+        assert.equal(card().querySelector('.call-card-title').textContent, title);
+        assert.equal(card().querySelector('.call-card-step').textContent, under);
+        assert.equal(card().querySelector('.call-card-step').hidden, !under);
+    }
+});

@@ -93,16 +93,18 @@ export function createCallCards({ feed, ws = null, doc = feed?.ownerDocument, li
         head.type = 'button';
         const facts = element('span', 'call-card-facts');
         const title = element('span', 'call-card-title', 'Call');
+        // A card that is one notice line reads its phrase as the title and the notice's next step under it.
+        const step = element('span', 'call-card-step');
         // The engine line (from the opening row's "Engine:" sentence) reads under the title.
         const engineLine = element('span', 'call-card-engine');
         // The call's own small sign (the visual's, as on Talk) leads the card.
-        head.append(sign?.() || element('span', 'call-entry-mark'), title, facts, engineLine);
+        head.append(sign?.() || element('span', 'call-entry-mark'), title, facts, step, engineLine);
         const lines = element('div', 'call-card-lines');
         // A card that is one notice line keeps that notice's Details (its folded row carries them) under the line.
         const details = element('div', 'call-card-details');
         node.append(head, details, lines);
-        const card = { id, task: '', call: '', node, head, title, facts, engineLine, lines, details, detailsOf: null,
-            open: null, count: 0, span: 0, engine: '', silent: '', hasNotice: false };
+        const card = { id, task: '', call: '', node, head, title, facts, step, engineLine, lines, details, detailsOf: null,
+            open: null, count: 0, span: 0, engine: '', silent: '', silentStep: '', hasNotice: false };
         head.addEventListener?.('click', () => {
             if (card.silent) return;  // one notice line has nothing to open
             const was = following();
@@ -130,6 +132,8 @@ export function createCallCards({ feed, ws = null, doc = feed?.ownerDocument, li
         const lines = `${card.count} ${card.count === 1 ? 'line' : 'lines'}`;
         card.title.textContent = card.silent || 'Call';
         card.facts.textContent = card.silent ? '' : liveNow ? `Live · ${lines}` : (card.span ? `${callSpan(card.span)} · ${lines}` : lines);
+        card.step.textContent = card.silent ? card.silentStep : '';
+        card.step.hidden = !card.step.textContent;
         card.engineLine.textContent = card.engine;
         card.engineLine.hidden = !card.engine;
     }
@@ -243,6 +247,10 @@ export function createCallCards({ feed, ws = null, doc = feed?.ownerDocument, li
         card.hasNotice = notices.length > 0;
         // Exactly one notice and no words: the call is that line; a second notice keeps an openable card (R15 opus-2).
         card.silent = !isLive(card) && !spoken.length && !streaming.length && noticeTexts.length === 1 ? noticeTexts[0] : '';
+        // The server sends the line's phrase beside it (host_notice.view): the rest of the line is its next step.
+        const phrase = card.silent ? String(noticeRows[0].dataset?.noticePhrase || '') : '';
+        card.silentStep = phrase && card.silent.startsWith(phrase) ? card.silent.slice(phrase.length).trim() : '';
+        if (card.silentStep) card.silent = phrase;
         // Copied once per source row, so a rescan keeps the reader's open Details open.
         const source = card.silent ? noticeRows[0].querySelector?.('.ui-disclosure') || null : null;
         if (source !== card.detailsOf) {

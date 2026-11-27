@@ -62,6 +62,9 @@ def test_the_one_line_joins_the_phrase_and_its_step_each_translated_first(tmp_pa
     _seed(tmp_path, "ru", {phrase: {"text": "Бюджет исчерпан."},
                            "code:notice.step.raise_total_budget": {"text": "Поднимите его."}})
     assert host_notice.notice_line(row, "ru", drive_root=tmp_path) == "Бюджет исчерпан. Поднимите его."
+    # Its phrase alone is sent beside the line, in the same language (the call card sets the step under it).
+    sent = host_notice.view(row, lang="ru", drive_root=tmp_path)["notice"]
+    assert (sent["line"], sent["phrase"]) == ("Бюджет исчерпан. Поднимите его.", "Бюджет исчерпан.")
     # While the phrase has no translation the step stays English too: the line is in one language (RV4 17).
     _seed(tmp_path, "de", {"code:notice.step.raise_total_budget": {"text": "Erhöhen."}})
     assert host_notice.notice_line(row, "de", drive_root=tmp_path) == f"{phrase} {host_notice.STEPS['raise_total_budget']}"
