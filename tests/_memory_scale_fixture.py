@@ -187,14 +187,16 @@ def _page(store, room, i, size):
 def install(drive, shape='fresh'):
     """A synthetic drive the ordinary build reads over the real checkout: authored identity, scratchpad and overview,
     knowledge notes, an activated chronicle whose marks the views keep, Main and other rooms with their rows and
-    accounts. ``fresh``: a new install after a few days of use; ``mature``: ``MATURE``'s shape. Not built here: MCP
-    servers with their instructions and running works with open questions (they reach the request through the tool
-    registry and the task store, which this drive does not carry)."""
+    accounts. ``fresh``: a new install after a few days of use; ``mature``: ``MATURE``'s shape; ``rich``: ``mature``
+    plus the 39 running works of ``tests._live_works_fixture`` (owner questions, Pauses, waits, holds, dated foci) in
+    the task store and queue. MCP servers with their instructions reach the request through the tool registry, not
+    the drive: ``mcp_registry`` (twelve servers), passed to the build as ``tool_registry``. ``fresh`` and ``mature``
+    carry neither, so their numbers stay as they were."""
     from ouroboros import dialogue_store as ds
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.projects_registry import create_project
 
-    sizes = MATURE if shape == 'mature' else FRESH
+    sizes = MATURE if shape in ('mature', 'rich') else FRESH
     memory = drive / 'memory'
     (memory / 'knowledge').mkdir(parents=True, exist_ok=True)
     (drive / 'logs').mkdir(exist_ok=True)
@@ -233,6 +235,10 @@ def install(drive, shape='fresh'):
                           scope='global' if i < sizes['global'] else 'room',
                           quote=text(f'Quote {i}', 120) if i < sizes['quoted'] else None,
                           anchor={'tool': 'read_file'} if i < sizes['anchored'] else None).ok
+    if shape == 'rich':
+        from tests import _live_works_fixture
+
+        _live_works_fixture.build(drive)
     return drive
 
 
