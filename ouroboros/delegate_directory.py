@@ -264,7 +264,7 @@ def prepare_directory_execution(ctx, gateway, target_root, authority, strategy, 
     tells an investigation its one repair, the explicit readonly lowering.
     """
     from dataclasses import replace
-    from ouroboros.workspace_admission import validate_workspace_root
+    from ouroboros.workspace_admission import child_source_refusal, validate_workspace_root
 
     if authority.mode == "plan":
         if not default_shaped_directory_options(strategy, scope_paths):
@@ -276,7 +276,8 @@ def prepare_directory_execution(ctx, gateway, target_root, authority, strategy, 
             validate_workspace_root(target_root, system_repo_dir=ctx.repo_dir, drive_root=custody.custody_root(ctx))
         except ValueError as exc:
             if not investigation:
-                raise
+                raise type(exc)(child_source_refusal(target_root, exc, system_repo_dir=ctx.repo_dir,
+                                                     drive_root=custody.custody_root(ctx))) from exc
             raise ValueError(f"{exc}; an evidence-only investigation has no private copy for this folder, "
                              "so lower this call with access='readonly' to read it in place") from exc
     if investigation:

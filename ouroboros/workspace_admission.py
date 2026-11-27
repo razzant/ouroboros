@@ -172,6 +172,22 @@ def folders_overlap(folder: pathlib.Path, target: pathlib.Path) -> bool:
     return paths_overlap_casefold(left, right) or kept.is_relative_to(guard) or guard.is_relative_to(kept)
 
 
+# What works instead when a writing child's or delegated run's source is a copy inside runtime data: provisioning
+# writes objects, refs and worktree records into that copy's Git store, so the overlap refusal stands.
+CHILD_SOURCE_IN_DATA_HINT = (
+    "A copy kept in runtime data (a task drive) cannot be a writing child's source, since its Git store would be "
+    "written there: put the exact revision in this work's own candidate outside runtime data (prepare_self_change for "
+    "Ouroboros's body, the project's own folder for another repository) and start the child from it, or give a "
+    "read-only child the exact files as input_files.")
+
+
+def child_source_refusal(path: Any, exc: Exception, *, system_repo_dir: Any, drive_root: Any) -> str:
+    """The refusal of a child's source path, naming what works when the path lies in runtime data."""
+    root = pathlib.Path(str(path)).expanduser().resolve(strict=False)
+    inside = protected_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root) == "Ouroboros data drive"
+    return f"{exc}" + (f". {CHILD_SOURCE_IN_DATA_HINT}" if inside else "")
+
+
 def protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> str:
     """Which of Ouroboros's own roots ``root`` (resolved) is inside or around, else ``""``: its system repo or
     data drive, by the one two-way geometry this module owns (``folders_overlap``: case-folded

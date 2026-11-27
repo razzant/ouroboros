@@ -207,3 +207,36 @@ def test_stop_while_a_task_copy_is_still_provisioning_frees_it_only_after_it_ret
     assert row["status"] == "cancelled" and row["workspace_preparation"]["phase"] == "copying"
     assert "half1" not in env.pending_ids() and queue.ADMISSION_RESERVATIONS == {}
     assert not copy.exists() and not [e for e in trees.list_worktrees() if e.get("task_id") == "half1"]
+
+
+def test_a_writing_child_from_a_task_drive_copy_is_refused_with_the_two_arrangements_that_work(tmp_path):
+    """The overlap guard still refuses a writing child's source inside runtime data (its Git store would be written
+    there), and the refusal names what works instead (C11, 27.11: three fixers died on the bare overlap message):
+    the work's own candidate outside runtime data, or exact files for a read-only child. A source overlapping the
+    system repository keeps its plain refusal, and an ordinary folder outside both is admitted."""
+    from types import SimpleNamespace
+
+    data, repo, outside = tmp_path / "data", tmp_path / "repo", tmp_path / "work"
+    copy_ = data / "task_drives" / "root-task" / "candidate"
+    for folder in (copy_, repo, outside):
+        folder.mkdir(parents=True)
+    ctx = SimpleNamespace(REPO_DIR=repo, DRIVE_ROOT=data)
+    refusal = admission._validate_external_workspace(ctx, str(copy_))
+    assert "overlap the Ouroboros data drive" in refusal
+    assert "prepare_self_change" in refusal and "input_files" in refusal
+    plain = admission._validate_external_workspace(ctx, str(repo / "sub"))
+    assert "overlap the Ouroboros system repo" in plain and "input_files" not in plain
+    assert admission._validate_external_workspace(ctx, str(outside)) == ""
+
+
+def test_the_child_source_refusal_names_the_working_arrangements_only_for_runtime_data(tmp_path):
+    """One wording for both child entries (native self_worktree and delegated directory runs): a source inside runtime
+    data gets the two arrangements that work; a source overlapping the system repository keeps its plain refusal."""
+    from ouroboros.workspace_admission import CHILD_SOURCE_IN_DATA_HINT, child_source_refusal
+
+    data, repo = tmp_path / "data", tmp_path / "repo"
+    error = ValueError("workspace_root must not overlap the Ouroboros data drive")
+    inside = child_source_refusal(data / "task_drives" / "t" / "c", error, system_repo_dir=repo, drive_root=data)
+    assert inside.startswith(str(error)) and inside.endswith(CHILD_SOURCE_IN_DATA_HINT)
+    plain = ValueError("workspace_root must not overlap the Ouroboros system repo")
+    assert child_source_refusal(repo / "sub", plain, system_repo_dir=repo, drive_root=data) == str(plain)
