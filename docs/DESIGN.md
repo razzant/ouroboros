@@ -423,8 +423,10 @@ changing the alignment of neighboring controls and their actions.
 (`--checkbox-size`), one shape (`--checkbox-radius`, the single value that
 would make every box square), one white mark on the accent (a white bar on the
 accent when mixed), an edge that holds 3:1 on its surface, one focus ring and
-one disabled look. Under a finger the glyph keeps its size and gains the touch
-minimum as an invisible reach around it. A box stands one `--checkbox-gap` from
+one disabled look. Under a finger the glyph keeps its size, and a person can
+reliably select each box or radio by a target of its own at least the touch
+minimum tall: the label row that holds it, or the space a lone box keeps around
+it, never a strip of its neighbour. A box stands one `--checkbox-gap` from
 its words, which wrap beside it, and sits on their first line. A form's boxes,
 a menu row's, the Panic list's and setup's are inputs; a share part's box and
 an authored task's mark, in the chat and in Share's part picker, are drawn
