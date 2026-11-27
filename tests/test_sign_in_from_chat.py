@@ -124,3 +124,25 @@ def test_a_replayed_return_never_answers_a_newer_offer(world, monkeypatch):  # n
     assert said == [], "a replayed receipt is not a new sign-in"
     _sign_in(provider, owner, CAL)
     assert [(args[0], kwargs["system_type"]) for args, kwargs in said] == [(4242, "sign_in_connected")]
+
+
+def test_an_offer_answers_only_a_sign_in_begun_after_it(tmp_path, monkeypatch):
+    """A sign-in already under way when the mind offered it (a late Finish of an earlier attempt, a sign-in begun on
+    the card) does not answer the offer; the same conversation offering again keeps its first time."""
+    import json
+
+    from supervisor import message_bus
+
+    said = []
+    monkeypatch.setattr(message_bus, "send_with_budget", lambda *a, **k: said.append((a, k)))
+    times = iter(["2026-11-27T10:00:00+00:00", "2026-11-27T10:05:00+00:00", "2026-11-27T10:06:00+00:00"])
+    monkeypatch.setattr(sign_in_offers, "utc_now_iso", lambda: next(times))
+    offers = tmp_path / "state" / "sign_in" / "offers.json"
+    sign_in_offers.note(tmp_path, 4242, [{"label": "Sign in", "place": PLACE}])
+    sign_in_offers.note(tmp_path, 4242, [{"label": "Sign in", "place": PLACE}])  # offered again in the same chat
+    assert json.loads(offers.read_text(encoding="utf-8"))["calendar/google"]["at"] == "2026-11-27T10:00:00+00:00"
+    assert not sign_in_offers.announce(tmp_path, "calendar", "google", "Google", "2026-11-27T09:59:00+00:00")
+    assert said == [] and offers.exists(), "begun before the offer: the offer waits"
+    sign_in_offers.note(tmp_path, 5151, [{"label": "Sign in", "place": PLACE}])  # another conversation, newest
+    assert sign_in_offers.announce(tmp_path, "calendar", "google", "Google", "2026-11-27T10:07:00+00:00")
+    assert [args[0] for args, _ in said] == [5151]

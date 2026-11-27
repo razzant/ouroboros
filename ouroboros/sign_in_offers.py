@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 import pathlib
 import threading
-from typing import Any, Iterable, Mapping
+from datetime import datetime
+from typing import Any, Iterable, Mapping, Optional
 
 from ouroboros.link_actions import sign_in_place
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
@@ -37,35 +38,48 @@ def note(data_dir: Any, chat_id: int, actions: Iterable[Mapping[str, Any]]) -> N
         with _LOCK:
             saved = read_json_dict(_path(data_dir)) or {}
             for skill, service in offered:
-                saved[f"{skill}/{service}"] = {"chat_id": int(chat_id), "at": utc_now_iso()}
+                earlier = saved.get(f"{skill}/{service}")  # the same conversation offering again keeps its first time
+                at = earlier["at"] if isinstance(earlier, dict) and earlier.get("chat_id") == int(chat_id) else utc_now_iso()
+                saved[f"{skill}/{service}"] = {"chat_id": int(chat_id), "at": at}
             atomic_write_json(_path(data_dir), saved)
     except Exception as exc:  # noqa: BLE001 — the links row is delivered either way
         log.warning("A sign-in offer could not be noted (%s)", type(exc).__name__)
 
 
-def open_attempt(returned: Mapping[str, Any]) -> bool:
-    """Whether a provider's return finishes a sign-in still open now (its nonce is the pending attempt's), not a
-    return already filed: a stale tab's second Finish replays its receipt and must not answer a newer offer."""
+def open_attempt(returned: Mapping[str, Any]) -> Optional[str]:
+    """When a provider's return finishes a sign-in still open now (its nonce is the pending attempt's), the time that
+    sign-in began; None for a return already filed (a stale tab's second Finish replays its receipt) or unreadable."""
     from ouroboros import oauth_engine, service_sign_in
 
     try:
         envelope = oauth_engine.envelope(str(returned.get("state") or ""), "sign_in")
         grant = service_sign_in._grant(envelope["sign_in"], envelope["svc"], "pending")
-        return bool(envelope["nonce"]) and (oauth_engine.load(grant).get("pending") or {}).get("nonce") == envelope["nonce"]
+        pending = oauth_engine.load(grant).get("pending") or {}
+        return str(pending.get("started") or "") if envelope["nonce"] and pending.get("nonce") == envelope["nonce"] else None
     except Exception:  # noqa: BLE001 — unreadable: say nothing rather than answer the wrong offer
+        return None
+
+
+def _later(offered: Any, begun: str) -> bool:
+    """Whether an offer was made after the sign-in began: that sign-in did not answer it (unreadable times: it did)."""
+    try:
+        return datetime.fromisoformat(str(offered)) > datetime.fromisoformat(begun)
+    except ValueError:
         return False
 
 
-def announce(data_dir: Any, skill: str, service: str, label: str) -> bool:
-    """One System row «<skill> is signed in to <service> now.» in the conversation that offered this sign-in, if one
-    did; the offer leaves first, so the row is said at most once. Never raises; True when a row was sent."""
+def announce(data_dir: Any, skill: str, service: str, label: str, begun: str = "") -> bool:
+    """One System row «<skill> is signed in to <service> now.» in the conversation that offered this sign-in before it
+    began (``begun``), if one did; the offer leaves first, so the row is said at most once. An offer made after the
+    sign-in began waits for a sign-in begun after it. Never raises; True when a row was sent."""
     key = f"{skill}/{service}"
     try:
         with _LOCK:
             saved = read_json_dict(_path(data_dir)) or {}
-            offer = saved.pop(key, None)
-            if not isinstance(offer, dict) or not offer.get("chat_id"):
+            offer = saved.get(key)
+            if not isinstance(offer, dict) or not offer.get("chat_id") or (begun and _later(offer.get("at"), begun)):
                 return False
+            saved.pop(key)
             atomic_write_json(_path(data_dir), saved)
         from ouroboros import host_notice
 

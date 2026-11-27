@@ -1384,7 +1384,7 @@ export function initSkills(ctx = {}) {
             }
         }
         card.scrollIntoView({ block: 'nearest' });
-        if (requestedService) openInstalledSheet(requestedSkill, card, { service: requestedService, account: '', begin: true });
+        if (requestedService) openInstalledSheet(requestedSkill, card, { service: requestedService, account: null, begin: true });
     }
 
     // Opening Skills may already have started a fresh read. A read started before this request

@@ -535,7 +535,10 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         if (service) {
             const wanted = ask;
             ask = null;
-            if (wanted.begin) openEditor(service, wanted.account, false);
+            // From a conversation (no account named): the one account that needs the owner, with its access asked for,
+            // else a new sign-in; with several, the owner picks one in this group.
+            const needing = wanted.account === null ? list(service.accounts).filter((row) => accountState(service, row).needs) : [];
+            if (wanted.begin && needing.length < 2) openEditor(service, wanted.account ?? needing[0]?.key ?? '', false);
             else groupOf(service.service)?.scrollIntoView?.({ block: 'nearest' });
         }
     }
