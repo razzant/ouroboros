@@ -181,7 +181,7 @@ def test_project_panel_shows_a_slow_first_read_as_loading_and_a_failed_one_as_re
             loading = _wait_recent_state(page, feed, "s.busy && s.button === 'Loading saved history…'")
             assert loading["disabled"] and loading["messages"] == 0, loading
             assert loading["note"] == '', 'one read has one loading indicator'
-            assert page.locator('#project-panel .chat-history-status').count() == 0
+            assert page.locator('#toast-stack .toast').count() == 0
             assert [read for read in _reads(page, slow["chat_id"]) if not read["done"]], \
                 "the loading state is asserted while the read is provably unanswered"
             assert slow["id"] not in acked, "an unpainted revision is never acknowledged"
@@ -203,11 +203,13 @@ def test_project_panel_shows_a_slow_first_read_as_loading_and_a_failed_one_as_re
             feed = _click_project(page, failing)
             failed = _wait_recent_state(page, feed, "!s.busy && s.button === 'Retry loading messages'")
             assert not failed["disabled"] and failed["messages"] == 0, failed
+            # The failure is news, told by the page's notice; the edge keeps the fact and Retry.
             assert failed["note"] == "Some saved history could not be loaded.", failed
-            note = page.locator('#project-panel .chat-history-status')
-            assert note.evaluate('e => getComputedStyle(e).backgroundColor') == 'rgba(0, 0, 0, 0)'
+            note = page.locator('#toast-stack .toast').filter(has_text="Some saved history could not be loaded.")
+            note.wait_for(state="visible")
             for width in (1343, 390):
                 page.set_viewport_size({'width': width, 'height': 876})
+                note.hover()  # a pointer over it holds its time while it is measured
                 page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
                 box = note.bounding_box()
                 assert box['x'] >= 0 and box['x'] + box['width'] <= width + 1
@@ -217,7 +219,10 @@ def test_project_panel_shows_a_slow_first_read_as_loading_and_a_failed_one_as_re
             assert failing["id"] not in acked, "a failed read is never acknowledged"
             _screenshot(page, tmp_path, f"project-first-read-failed-{browser_engine}")
 
-            # The reader's own click, on the visible control, is the recovery.
+            # The notice closed (or timed out), the reader's own click on the edge's visible control is the recovery.
+            note.get_by_role("button", name="Dismiss notice").click()
+            note.wait_for(state="detached")
+            assert "could not be loaded" in page.evaluate(_RECENT_STATE, feed)["note"], "the edge still says it"
             with page.expect_request(_is_seen_ack(failing), timeout=30_000):
                 page.locator(f"{feed} .chat-load-older button").click()
             _idle(page, feed)

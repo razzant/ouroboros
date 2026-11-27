@@ -62,7 +62,8 @@ FACTS = """(pid) => {
     const rows = [...feed.querySelectorAll('.chat-bubble')].map((b) => b.getBoundingClientRect())
         .filter((b) => b.width && b.bottom > r.top && b.top < r.bottom);
     return {...facts, focusVisible: feed.matches(':focus-visible'), outline: s.outlineStyle,
-        note: Boolean(feed.parentElement.querySelector('.chat-panel-statusbar .chat-history-status:not([hidden])')),
+        note: [...document.querySelectorAll('#toast-stack .toast-words')]
+            .some((words) => words.textContent.includes('Some saved history could not be loaded.')),
         feed: {x: r.x, y: r.y, width: r.width, height: r.height, clientWidth: feed.clientWidth,
                offsetWidth: feed.offsetWidth, padTop: parseFloat(s.paddingTop), padLeft: parseFloat(s.paddingLeft),
                padRight: parseFloat(s.paddingRight),
@@ -98,7 +99,7 @@ def room_page(ui, *, width=W, height=H, scheme='dark', panel_width=575, activiti
         chat_id = int(parse_qs(urlparse(route.request.url).query).get('chat_id', ['1'])[0])
         if chat_id == 504:  # a failed read: its note takes the Project's status bar
             return route.fulfill(status=500, json={'error': 'history unavailable'})
-        route.fulfill(json={'messages': HISTORY.get(chat_id, []), 'progress': [], 'has_more': False,
+        route.fulfill(json={'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': HISTORY.get(chat_id, []), 'progress': [], 'has_more': False,
                             'next_cursor': None, 'page_cursor': 'recent',
                             'window': {'complete': True, 'truncated_by': []}})
 
@@ -218,6 +219,12 @@ def settle_frames(page):
     page.evaluate('() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))')
 
 
+def scrolled_up(page, pid, before):
+    """A scroll key's effect lands within a few frames: wait for the transcript to move up from where it was."""
+    page.wait_for_function('([pid, top]) => document.getElementById(`pchat-${pid}-messages`).scrollTop < top',
+                           arg=[pid, before])
+
+
 def corners(facts):
     assert facts['activeIsFeed'] and facts['focusVisible'] and not facts['quiet'], facts
     assert all(facts['arms'].values()) and facts['plain_between'], ('two corners, nothing between them', facts)
@@ -236,6 +243,7 @@ def test_a_pointer_keeps_the_transcript_quiet_and_its_keys_show_the_corners(cue_
     opened = look(ui, page, 'nova', '01-open-by-mouse', full=True)
     quiet(opened)
     page.keyboard.press('ArrowUp')  # the room lands at its newest message: up scrolls
+    scrolled_up(page, 'nova', opened['feed']['scrollTop'])
     shown = look(ui, page, 'nova', '02-arrow-up', full=True)
     assert shown['feed']['scrollTop'] < opened['feed']['scrollTop'], 'the key scrolls the transcript'
     corners(shown)
@@ -251,6 +259,7 @@ def test_a_pointer_keeps_the_transcript_quiet_and_its_keys_show_the_corners(cue_
     page.keyboard.up('Meta')
     quiet(look(ui, page, 'nova', '04-modifiers-and-shortcuts'))
     page.keyboard.press('PageUp')
+    scrolled_up(page, 'nova', pressed['feed']['scrollTop'])
     again = look(ui, page, 'nova', '05-page-up-after-press')
     assert again['feed']['scrollTop'] < pressed['feed']['scrollTop']
     corners(again)
@@ -345,7 +354,8 @@ def test_the_corners_keep_to_the_gutters(cue_ui, case):
         assert outer_left + 8 + 3 <= facts['rowsLeft'] and facts['rowsRight'] <= outer_right - 8 - 3, (
             'rows pass beside the corners', facts)
     if case == 'notice':
-        assert facts['note'] and feed['padTop'] == 8, ('the note above the feed, the corners under it', facts)
+        # The Project's failed read is the page's notice; the feed keeps the header clearance of a room without one.
+        assert facts['note'] and feed['padTop'] >= 50, ('the failure told, the feed under the bar alone', facts)
     if phone:
         assert page.evaluate("document.documentElement.dataset.layout") == 'stack'
 

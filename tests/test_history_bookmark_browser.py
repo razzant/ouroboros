@@ -18,7 +18,24 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 pytestmark = [pytest.mark.ui_browser]
 
 
+
+# Every notice the page shows from the page's start is recorded (a timed notice may come and go while a restoration
+# settles), so a check reads the whole transaction, not one instant.
+_RECORD_NOTICES = """(() => { if (window.__noticeWords) return; window.__noticeWords = [];
+    new MutationObserver(() => document.querySelectorAll('#toast-stack .toast-words').forEach(node => {
+        if (!node.__recorded) { node.__recorded = true; window.__noticeWords.push(node.textContent); }
+    })).observe(document, {childList: true, subtree: true}); })()"""
+
+
+def _history_words(page, feed):
+    """What the room says of its history: its edge (inside the feed's parent) and every notice recorded since the page
+    (re)loaded."""
+    return page.locator(feed).locator('..').inner_text() + page.evaluate(
+        "() => [...(window.__noticeWords || []), ...[...document.querySelectorAll('#toast-stack .toast-words')]"
+        ".map(node => node.textContent)].join(' ')")
+
 def _new_page(page):
+    page.add_init_script(_RECORD_NOTICES)
     page.reload(wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_function("() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)")
 
@@ -44,6 +61,7 @@ def test_a_deep_place_with_an_open_review_and_line_returns_as_it_was_left(direct
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(_RECORD_NOTICES)
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
             card = page.locator(f'{feed} .chat-live-card[data-task-id="deep-review"]')
@@ -78,7 +96,12 @@ def test_a_deep_place_with_an_open_review_and_line_returns_as_it_was_left(direct
             detail.wait_for(state='visible')
             assert line.get_attribute('data-expanded') == '1', 'its disclosures stay open'
             assert abs(detail.evaluate(_OFFSET) - offset) <= 3, 'on the passage it was left at'
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
+            # The positive control: an inexact-return notice that comes and goes is in the record.
+            page.evaluate("""async () => { const {showToast} = await import('/static/modules/toast.js');
+                showToast('Saved position could not be restored exactly.', 'info', {ttl: 50}); }""")
+            page.wait_for_function("() => !document.querySelector('#toast-stack .toast')")
+            assert 'could not be restored exactly' in _history_words(page, feed), 'the record saw the notice that left'
             _screenshot(page, tmp_path, f'reopen-deep-after-{browser_engine}')
         finally:
             browser.close()
@@ -299,6 +322,7 @@ def test_a_card_line_arrives_with_its_source_page_and_a_return_reads_no_older_pa
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(_RECORD_NOTICES)
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
             recent = page.evaluate('id => window.__historyReads.find(r => r.chatId === id).body', cid)
@@ -356,7 +380,7 @@ def test_a_card_line_arrives_with_its_source_page_and_a_return_reads_no_older_pa
                 'source': source, 'recent': recent, 'supplying': supplying, 'reopen': reads}, indent=2))
             assert not [read['cursor'] for read in reads if read['cursor']], 'the return reads no older page'
             assert abs(line.evaluate(_OFFSET) - offset) <= 3, 'it is on the passage it was left at'
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             _screenshot(page, tmp_path, f'source-page-{line_kind}-after-{browser_engine}')
             _down_to_newest(page, feed, 'Reading context 299')
         finally:
@@ -388,6 +412,7 @@ def test_a_moved_newest_window_leaves_a_reader_in_history_in_place_and_a_return_
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(_RECORD_NOTICES)
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
             target = page.locator(f'{feed} [data-client-message-id="rebase-50"]')
@@ -414,7 +439,7 @@ def test_a_moved_newest_window_leaves_a_reader_in_history_in_place_and_a_return_
             cursors = page.evaluate('n => window.__historyReads.slice(n).filter(r => r.cursor).map(r => r.cursor)', before)
             assert cursors == [], cursors
             assert abs(target.evaluate(_OFFSET) - offset) <= 8, 'on the passage it was left at'
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             _screenshot(page, tmp_path, f'composed-rebase-after-{browser_engine}')
             _down_to_newest(page, feed, 'Rebase retained message 0449')
             (tmp_path / f'composed-rebase-reads-{browser_engine}.json').write_text(json.dumps(page.evaluate('() => window.__historyReads'), indent=2))
@@ -455,6 +480,7 @@ def test_a_live_line_keeps_its_node_through_history_adoption_and_reopens_from_it
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(_RECORD_NOTICES)
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
             _emit_ws_frame(page, {**row, 'type': 'chat', 'role': 'assistant', 'is_progress': True})
@@ -497,7 +523,7 @@ def test_a_live_line_keeps_its_node_through_history_adoption_and_reopens_from_it
             feed = _open_project(page, project)
             _idle(page, feed)
             _assert_at_newest(page, feed, 'Live line context 59')
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             for card in (parent, owner):
                 if card.get_attribute('data-expanded') != '1':
                     card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
@@ -546,6 +572,7 @@ def test_a_live_receipt_survives_equal_replay_and_a_reopened_one_takes_only_newe
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(_RECORD_NOTICES)
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
             for row in rows:
@@ -578,7 +605,7 @@ def test_a_live_receipt_survives_equal_replay_and_a_reopened_one_takes_only_newe
             feed = _open_project(page, project)
             _idle(page, feed)
             _assert_at_newest(page, feed, 'Receipt context 59')
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             if card.get_attribute('data-expanded') != '1':
                 card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
             assert lines.count() == 2

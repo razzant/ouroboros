@@ -1104,15 +1104,50 @@ test('a gap notice keeps all its words beside its close button; the page stack i
     assert.deepEqual(observers[0].unobserved, [toast, shortNotice, plain],
         'every observed global notice is unobserved once on dispose');
     assert.deepEqual([...observers[0].observed], [stack], 'only the page stack remains observed');
-    cut = true;  // a room's stack keeps its own place: never the page's scrolling region
-    const host = env.doc.createElement('div');
-    env.doc.body.append(host);
-    const room = showToast('A room notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice', host });
-    assert.ok(!host.querySelector('.toast-stack--room').hasAttribute('tabindex'));
-    assert.equal(observers.length, 1, 'room stacks create no ResizeObserver');
-    assert.ok(!observers[0].observed.has(room), 'room notices are not observed by the page stack observer');
-    room.dispose();
-    assert.deepEqual(observers[0].unobserved, [toast, shortNotice, plain]);
+    // A notice with no host goes to the page's one stack at the top right.
+    assert.equal(env.doc.body.querySelectorAll('.toast-stack').length, 1);
+});
+
+// The toast's close is a small plain × in its top corner: the quiet icon control, without a plate even on hover, never
+// the shell's round capsule; its place beside one line of words is measured in the browser
+// (tests/test_toast_glide_browser.py). The material is guarded with the other floating objects
+// (tests/test_floating_material_static.py). Rules are read parsed, every rule naming the bare selector, so a later
+// override counts.
+function cssDeclarations(css, selector) {
+    const out = {};
+    for (const [, selectors, body] of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        if (!selectors.split(',').map((part) => part.trim().replace(/\s+/g, ' ')).includes(selector)) continue;
+        for (const decl of body.split(';')) {
+            const at = decl.indexOf(':');
+            if (at > 0) (out[decl.slice(0, at).trim()] ||= []).push(decl.slice(at + 1).trim().replace(/\s+/g, ' '));
+        }
+    }
+    return out;
+}
+
+test('a toast\'s close is the plain corner ×, never a plate; a tone is its words\' ink', async (t) => {
+    const { showToast } = await import('../modules/toast.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    t.after(() => env.restore?.());
+    const notice = showToast('Some saved history could not be loaded.', 'danger', { ttl: 0, haptic: false,
+        action: { label: 'Retry', run() {} } });
+    const parts = [...notice.children];
+    const close = parts.at(-1);
+    assert.ok(close.classList.contains('toast-dismiss') && close.classList.contains('btn-ghost'));
+    assert.ok(!close.classList.contains('shell-icon-control'), 'the close is no shell capsule');
+    assert.deepEqual(parts.map((node) => ['toast-words', 'toast-action', 'toast-dismiss']
+        .find((name) => node.classList.contains(name))), ['toast-words', 'toast-action', 'toast-dismiss']);
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.equal(cssDeclarations(css, '.toast > .toast-dismiss')['box-shadow'], undefined);
+    assert.deepEqual(cssDeclarations(css, '.toast > .toast-dismiss:not(:disabled):hover').background, ['transparent'],
+        'no plate on hover either: the ghost control\'s quiet hover fill is taken back');
+    for (const tone of ['.toast-ok', '.toast-danger', '.toast-warn', '.toast-muted']) {
+        const rule = cssDeclarations(css, tone);
+        assert.ok(rule.color, `${tone}: a tone is ink`);
+        assert.equal(Object.keys(rule).some((name) => name.startsWith('border') || name.startsWith('background')), false,
+            `${tone}: a tone is ink, never an edge or a fill`);
+    }
 });
 
 test('two unconfirmed effects are worded in the plural, as on the server', () => {
