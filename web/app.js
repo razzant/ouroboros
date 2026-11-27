@@ -147,6 +147,7 @@ projectPanel?.insertAdjacentHTML('afterbegin', renderPageHeader({
     showMobileNav: false,
     variant: 'project',
     className: 'project-panel-bar project-inspector-header',
+    roomEdge: true,
     trailingHtml: `${panicButtonHtml()}<button id="project-panel-close" class="shell-icon-control project-panel-close" type="button" title="Close project thread" aria-label="Close project thread">${SHELL_ICONS.close}</button>`,
 }));
 const projectHeader = createRoomHeader({ bar: projectPanel?.querySelector('.project-panel-bar'), ws, openDashboardTab, refreshState: refreshProjectsNav });

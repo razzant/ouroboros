@@ -493,7 +493,7 @@ function rowDetailsHtml(row, state, rowKey) {
 }
 
 // An on/off that writes at once is the shared switch; one that is a field of a form with its own Save is a checkbox.
-function toggleHtml(field, label, checked, live, recheckId = '') {
+export function toggleHtml(field, label, checked, live, recheckId = '') {
     const attrs = `type="checkbox" data-subagent-field="${field}"${recheckId ? ` data-recheck-mark="${escapeHtml(recheckId)}"` : ''} aria-label="${escapeHtml(label)}"${checked ? ' checked' : ''}`;
     return live ? `<label class="ui-switch"><input ${attrs} role="switch" aria-checked="${checked}"${field === 'enabled' ? ' data-entry-switch' : ''}><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>`
         : `<input class="ui-checkbox" ${attrs}>`;

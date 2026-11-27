@@ -231,6 +231,10 @@ def test_share_shows_exactly_what_leaves_and_passes_it_on_by_the_ways_this_devic
     parts = sheet.locator(".message-share-part")
     parts.first.wait_for()
     assert parts.count() == 6 and parts.first.get_attribute("role") == "checkbox"
+    # Every part's box is the shared check box, drawn by the one control (DESIGN "Controls and editable choices").
+    boxes = sheet.locator(".message-share-part .message-share-check").evaluate_all(
+        "nodes => nodes.map((node) => [node.classList.contains('ui-checkbox'), getComputedStyle(node).appearance])")
+    assert boxes == [[True, "none"]] * 6, boxes
     parts.nth(1).click()
     parts.nth(2).click()
     assert parts.nth(2).get_attribute("aria-checked") == "true"

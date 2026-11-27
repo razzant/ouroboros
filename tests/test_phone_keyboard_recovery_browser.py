@@ -84,7 +84,7 @@ FIT = """id => {
     const barControls = [...bar.querySelectorAll('button')].filter(shown);
     const controls = [...barControls, ...area.querySelectorAll(
         '.chat-toolbar-row button:not(.chat-capsule-body *), .chat-text-row button')].filter(shown);
-    const edge = Math.round(parseFloat(getComputedStyle(bar, '::before').height) - box(bar).height);
+    const edge = Math.round(parseFloat(getComputedStyle(bar.querySelector(':scope > .room-edge[data-edge="tint"]')).height) - box(bar).height);
     const clearTop = Math.max(box(feed).top, box(bar).bottom + edge);
     const clearBottom = Math.min(box(feed).bottom, box(area).top, visualViewport.height);
     const clear = r => r && r.width > 0 && r.height > 0 && r.top >= clearTop - 0.5 && r.bottom <= clearBottom + 0.5;
