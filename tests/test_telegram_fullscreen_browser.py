@@ -361,6 +361,23 @@ def test_page_notices_keep_their_margin_inside_telegrams_side_insets(shell_ui, w
     page.close()
 
 
+@pytest.mark.parametrize('direction', ['ltr', 'rtl'])
+@pytest.mark.parametrize('insets', [{'left': 59, 'right': 0}, {'left': 0, 'right': 59}], ids=['notch-left', 'notch-right'])
+def test_page_notices_keep_each_sides_own_inset_in_either_direction(shell_ui, direction, insets):
+    """A rotated phone has one side's inset and none on the other. The stack stands at the room's top corner (the right
+    in a left-to-right interface, the left in a right-to-left one) and keeps 18 px from that side's own inset; the far
+    edge stays out of the other side's inset."""
+    page = telegram_page(shell_ui, 844, 390, telegram_sdk(fullscreen='grant', insets={**insets, 'bottom': 21}))
+    boot(page, shell_ui)
+    page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'active'")
+    page.evaluate("dir => { document.documentElement.dir = dir; }", direction)
+    measured = page.evaluate(SIDE_TOAST)
+    facts(f'notice-asymmetric-{direction}-{insets["left"]}-{insets["right"]}-{shell_ui["engine"]}', measured)
+    near, far = ('right', 'left') if direction == 'ltr' else ('left', 'right')
+    assert measured[near] >= insets[near] + 18 - 0.5 and measured[far] >= insets[far] - 0.5, (direction, insets, measured)
+    page.close()
+
+
 # Each visible command of Extensions (the rows of its list, which the tabs were, and the actions that end the band of
 # the open page), and what a press at its centre reaches.
 PRESSES = """() => [...document.querySelectorAll('#page-skills [data-extensions-open], #page-skills > .app-page-header .app-page-toolbar button')]

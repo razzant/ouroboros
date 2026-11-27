@@ -414,3 +414,35 @@ def test_resizing_a_kept_notice_moves_the_fade_with_the_cut_words_below(toast_ui
     finally:
         save_evidence(tmp_path, name, facts)
         page.close()
+
+
+# Under a finger the close's reach (the touch minimum around its small ×) and the action's never overlap: a press
+# anywhere on the visible action, its corners included, runs the action, and the × still takes a press at its centre.
+CORNERS = """() => {
+    const toast = [...document.querySelectorAll('#toast-stack .toast')].at(-1);
+    const action = toast.querySelector('.toast-action'), close = toast.querySelector('.toast-dismiss');
+    const a = action.getBoundingClientRect(), c = close.getBoundingClientRect();
+    const first = (x, y) => document.elementsFromPoint(x, y)[0];
+    const points = [[a.left + 2, a.top + 2], [a.right - 2, a.top + 2], [a.left + 2, a.bottom - 2], [a.right - 2, a.bottom - 2]];
+    return {corners: points.map(([x, y]) => action.contains(first(x, y))),
+            close: close.contains(first(c.left + c.width / 2, c.top + c.height / 2)),
+            coarse: matchMedia('(pointer: coarse)').matches};
+}"""
+
+
+@pytest.mark.parametrize('width', [320, 390])
+@pytest.mark.parametrize('words', ['Module failed.', 'A provider refused the request, so the review stays open.'],
+                         ids=['short', 'long'])
+def test_a_touch_on_the_actions_corner_runs_the_action_never_the_close(toast_ui, width, words):
+    page = _open(toast_ui, width, 844, touch=True)
+    try:
+        page.evaluate("""async (words) => {
+            const { showToast } = await import('/static/modules/toast.js');
+            showToast(words, 'danger', { ttl: 0, haptic: false, action: { label: 'Open Settings', run() {} } });
+        }""", words)
+        page.wait_for_timeout(300)
+        facts = page.evaluate(CORNERS)
+        assert facts['coarse'], facts
+        assert all(facts['corners']) and facts['close'], facts
+    finally:
+        page.close()
