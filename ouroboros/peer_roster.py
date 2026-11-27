@@ -26,9 +26,9 @@ open is named on that row (``unavailable``): the facts it holds are unknown at
 that read, never absent, and its queue facts stay.
 
 The 40-row cap is presentation only -- the addressability gate consults every
-row -- and the cut is disclosed in the note. A full initial note is followed
-by attributed row changes, without copying every unchanged root. If that
-visible base is lost to compaction, the next note supplies the full snapshot.
+row -- and the cut is disclosed in the note. The first note is full, or says only what
+a head's list of running works in view lacks; attributed row changes follow, without copying every
+unchanged root. If that visible base is lost, the next note supplies the full snapshot.
 Notes append as ``[System task message]`` TAIL rows, never rewriting sent rows.
 """
 
