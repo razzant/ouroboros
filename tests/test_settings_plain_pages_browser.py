@@ -249,7 +249,7 @@ def test_reset_request_and_successor_receipt_are_shown_separately(subscription_u
     reset = about.locator("[data-reset-all]")
     reset.click()
     dialog = page.get_by_role("dialog")
-    expect(dialog).to_contain_text("Open diagnostic logs may remain.")
+    expect(dialog).to_contain_text("Some diagnostic logs may remain.")
     # What happens to earlier Project notes is said before anything is deleted, in plain words.
     expect(dialog).to_contain_text("Earlier Project notes (knowledge, workpads and journals) are set aside in a separate "
                                    "folder inside the data folder. New Projects start empty, even with the same name.")
