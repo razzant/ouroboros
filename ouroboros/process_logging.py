@@ -29,6 +29,10 @@ whatever is written to descriptors 1 and 2 themselves (native code, ``sys.__stde
 ``.buffer``, children that inherit them), still goes straight to the launcher's pipe and can
 wait for it, as before; so no write that holds the GIL ever waits for the relay's thread.
 
+A thread that must not wait on a log sink hands its records to a ``RecordHandoff``: one
+ordered, bounded writer thread per handoff (the ASGI loop's socket lifecycle lines use one).
+Every other record still reaches the handlers on its own thread.
+
 The hooks route an unhandled exception of a thread, or of the main thread, into
 ``logging`` instead of the interpreter's raw stderr print, so it is formatted like
 every other record (its message passes the redaction filter; the traceback itself is
@@ -173,6 +177,79 @@ def _log_uncaught(message: str, exc_info: Any) -> bool:
     except Exception:
         return False
     return True
+
+
+class RecordHandoff:
+    """One ordered, bounded handoff of log records from a thread that must not wait on a log sink (the ASGI loop's
+    socket lifecycle lines, ``gateway/ws.py``) to one writer thread.
+
+    ``log`` builds the record on the caller's thread, so its creation time, thread, arguments and exception info
+    are the caller's, and queues it without waiting. The writer, a daemon thread named ``name`` started by the
+    first record and ending when the queue is empty (an idle process keeps none), hands each record to its
+    logger in queue order, where the handlers' redaction filter runs. Message text beyond ``max_bytes`` (the
+    output relay's budget for a reader that is not reading) is dropped and counted, and the count reaches the log
+    as one line at that place in the order once the writer gets there. A record whose writer cannot start is
+    handled on the caller's thread, as before. What the writer has not handled when the process ends (an exit, a
+    kill, Panic) is lost: a bounded tail of these lines only, where a handler for the whole process would lose
+    every thread's (``configure_process_logging`` keeps the synchronous handlers).
+    """
+
+    def __init__(self, name: str, max_bytes: int = OUTPUT_RELAY_MAX_BYTES) -> None:
+        self.name, self.max_bytes = name, max_bytes
+        self.lock = threading.Lock()  # producers append or count a drop; the writer takes; nobody waits under it
+        self.queue: collections.deque = collections.deque()  # (logger, record, bytes), and [logger, dropped] gaps
+        self.held = 0  # message bytes of the records queued
+        self.thread: threading.Thread | None = None
+
+    def log(self, logger: logging.Logger, level: int, msg: str, *args: Any, exc_info: Any = None) -> None:
+        if not logger.isEnabledFor(level):
+            return
+        if exc_info and not isinstance(exc_info, tuple):
+            exc_info = ((type(exc_info), exc_info, exc_info.__traceback__) if isinstance(exc_info, BaseException)
+                        else sys.exc_info())
+        caller = sys._getframe(1)
+        record = logger.makeRecord(logger.name, level, caller.f_code.co_filename, caller.f_lineno, msg, args,
+                                   exc_info or None, caller.f_code.co_name)
+        try:
+            size = len(record.getMessage().encode("utf-8", "replace"))
+        except Exception:  # a broken format reaches its handler, as it would have
+            size = len(str(msg))
+        with self.lock:
+            if self.thread is None:
+                try:
+                    thread = threading.Thread(target=self._run, name=self.name, daemon=True)
+                    thread.start()
+                except RuntimeError:  # no thread now (an exhausted process, an interpreter shutting down)
+                    thread = None
+                self.thread = thread
+            if self.thread is not None:
+                if self.held + size <= self.max_bytes:
+                    self.queue.append((logger, record, size))
+                    self.held += size
+                elif self.queue and isinstance(self.queue[-1], list):
+                    self.queue[-1][1] += 1
+                else:
+                    self.queue.append([logger, 1])
+                return
+        logger.handle(record)
+
+    def _run(self) -> None:
+        while True:
+            with self.lock:
+                if not self.queue:
+                    self.thread = None  # idle: the next record starts a writer again
+                    return
+                item = self.queue.popleft()
+                if isinstance(item, tuple):
+                    self.held -= item[2]
+            try:
+                if isinstance(item, tuple):
+                    item[0].handle(item[1])
+                else:
+                    item[0].warning("%d log records of %s were dropped while the log sink did not keep up",
+                                    item[1], self.name)
+            except Exception:  # a handler reports its own failure (Handler.handleError); the next record goes on
+                pass
 
 
 def copy_capped_output(stream: Any, path: pathlib.Path, *, report: logging.Logger,

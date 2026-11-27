@@ -15,6 +15,8 @@ import pathlib
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 import traceback
 from types import SimpleNamespace
 
@@ -422,3 +424,80 @@ def test_the_bootstrap_is_inert_inside_the_pytest_process(tmp_path):
     configure_process_logging(drive_logs=tmp_path / "logs")
     assert (list(root.handlers), root.level, threading.excepthook, sys.excepthook) == before
     assert not (tmp_path / "logs").exists()
+
+
+class _HeldSink(logging.Handler):
+    """A log sink that waits for ``release`` before every write, as a stalled disk would."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.records: list[logging.LogRecord] = []
+        self.lines: list[str] = []
+
+    def emit(self, record):
+        self.entered.set()
+        assert self.release.wait(10), "the test never released the sink"
+        self.records.append(record)
+        self.lines.append(self.format(record))
+
+
+def _held_logger(name: str):
+    from ouroboros import process_logging
+
+    logger, sink = logging.getLogger(name), _HeldSink()
+    logger.addHandler(sink)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    return process_logging, logger, sink
+
+
+def _settled(predicate, budget: float = 5.0) -> None:
+    end = time.monotonic() + budget
+    while not predicate():
+        assert time.monotonic() < end, "timed out"
+        time.sleep(0.005)
+
+
+def test_a_record_handoff_never_waits_for_its_sink_and_keeps_order_time_thread_and_traceback():
+    process_logging, logger, sink = _held_logger("tests.record_handoff.order")
+    handoff = process_logging.RecordHandoff("test-record-handoff")
+    try:
+        handoff.log(logger, logging.INFO, "first %d", 1)
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            handoff.log(logger, logging.WARNING, "second", exc_info=True)
+        handoff.log(logger, logging.DEBUG, "below the level: never made")
+        handoff.log(logger, logging.INFO, "third")
+        returned = time.time()
+        assert sink.entered.wait(5) and sink.records == [], "the caller went on while the sink was held"
+        sink.release.set()
+        _settled(lambda: len(sink.records) == 3 and handoff.thread is None)
+    finally:
+        sink.release.set()
+        logger.removeHandler(sink)
+    assert [record.getMessage() for record in sink.records] == ["first 1", "second", "third"]
+    assert all(record.created <= returned for record in sink.records), "each keeps its own creation time"
+    assert {record.threadName for record in sink.records} == {threading.current_thread().name}
+    assert sink.records[1].exc_info[0] is ValueError and "ValueError: boom" in sink.lines[1]
+
+
+def test_records_past_the_bound_are_counted_and_said_once_at_their_place():
+    process_logging, logger, sink = _held_logger("tests.record_handoff.bound")
+    handoff = process_logging.RecordHandoff("test-record-handoff-bound", max_bytes=10)
+    try:
+        handoff.log(logger, logging.INFO, "aaaa")
+        assert sink.entered.wait(5), "the writer holds the first record at the sink"
+        for message in ("bbbb", "cccc", "dddd", "eeee", "ff"):  # 4 + 4 fit, 4 and 4 do not, then 2 fit
+            handoff.log(logger, logging.INFO, message)
+        sink.release.set()
+        _settled(lambda: len(sink.records) == 5 and handoff.thread is None)
+    finally:
+        sink.release.set()
+        logger.removeHandler(sink)
+    assert [record.getMessage() for record in sink.records] == [
+        "aaaa", "bbbb", "cccc",
+        "2 log records of test-record-handoff-bound were dropped while the log sink did not keep up", "ff"]
+    assert sink.records[3].levelno == logging.WARNING

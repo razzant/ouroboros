@@ -1623,6 +1623,10 @@ _DETACHED_THREAD_NAME_PREFIXES = (
     # snapshot executor — kept process-global on purpose so a retried completion JOINS an
     # in-flight daemon read (issue #464) instead of starting a second blocked thread.
     "onboarding-snapshot",
+    # ouroboros/server_auth.py: the network gate's process-global reader thread, idle between
+    # reads — every scope's settings read and the first session-key read run there, in order,
+    # off the ASGI loop, and every later request reuses it.
+    "auth-gate-reader",
     # ouroboros/process_scope.py: the task-end cleanup a terminal result write starts
     # (``note_task_terminal_transition``) runs outside the store transaction and is never
     # joined by the writer; a test that must observe its outcome calls

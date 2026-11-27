@@ -1,17 +1,28 @@
-"""Minimal auth gate for non-localhost browser/server access."""
+"""Minimal auth gate for non-localhost browser/server access.
+
+The gate runs on the ASGI loop for every HTTP and WebSocket scope, so nothing it does there waits for the disk: a
+password in the environment needs no read at all, a settings read and the first read or creation of the session
+key run on the gate's own reader thread (``_SettingsReader``), and each scope's fresh resolution takes effect in
+order (``NetworkAuthGate._resolve``). While such a read waits, open sockets, heartbeats and Panic go on.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import html
 import ipaddress
 import os
 import pathlib
+import queue
 import re
 import secrets
+import threading
 import time
+import weakref
 from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode
@@ -48,6 +59,49 @@ def resolve_network_password(env_value: str | None, settings_loader) -> str:
 
 def get_configured_network_password() -> str:
     return resolve_network_password(os.environ.get(NETWORK_PASSWORD_KEY, ""), load_settings)
+
+
+class _SettingsReader:
+    """The gate's own reader thread: the settings document and the session key are read (or the key created) here,
+    one at a time in the order asked, never on the ASGI loop and never behind the loop's shared handler pool. One
+    daemon thread per process, started by the first read: an interpreter exit never waits for it."""
+
+    def __init__(self) -> None:
+        self._jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, read) -> concurrent.futures.Future:
+        """Queue ``read``; RuntimeError when no thread can start (an exhausted process, an interpreter stopping)."""
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._lock:
+            if self._thread is None:
+                thread = threading.Thread(target=self._run, name="auth-gate-reader", daemon=True)
+                thread.start()
+                self._thread = thread
+        self._jobs.put((future, read))
+        return future
+
+    def _run(self) -> None:
+        while True:
+            future, read = self._jobs.get()
+            if future.set_running_or_notify_cancel():
+                try:
+                    future.set_result(read())
+                except BaseException as exc:  # one read's failure is its caller's; the reader goes on
+                    future.set_exception(exc)
+
+
+_READER = _SettingsReader()
+
+
+async def _off_loop(read):
+    """``read()`` on the gate's reader thread; where no thread can start, on the loop as it always was."""
+    try:
+        future = _READER.submit(read)
+    except RuntimeError:
+        return read()
+    return await asyncio.wrap_future(future)
 
 
 def is_loopback_host(host: str | None) -> bool:
@@ -141,6 +195,7 @@ def _headers_map(scope: Scope) -> dict[str, str]:
 # Sessions expire; a leaked cookie is no longer a permanent credential.
 _AUTH_SESSION_TTL_SEC = 30 * 24 * 3600
 _auth_secret_cache: bytes | None = None
+_auth_secret_lock = threading.Lock()
 
 
 def _auth_secret() -> bytes:
@@ -150,32 +205,44 @@ def _auth_secret() -> bytes:
     expiring, and forgeable by anyone who ever saw it. Sessions are now
     HMAC-signed with this key, so they cannot be minted without server state
     and they die with the key file (one re-login after key loss is accepted).
+    Concurrent first uses read or create ONE key; the gate brings it into
+    memory off the ASGI loop (``_session_key``) before a scope needs it.
     """
     global _auth_secret_cache
     if _auth_secret_cache:
         return _auth_secret_cache
-    try:
-        from ouroboros import config as _cfg
-
-        path = pathlib.Path(_cfg.DATA_DIR) / "state" / "auth_secret.key"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            text = path.read_text(encoding="utf-8").strip()
-            if text:
-                _auth_secret_cache = bytes.fromhex(text)
-                return _auth_secret_cache
-        secret = secrets.token_hex(32)
-        path.write_text(secret + "\n", encoding="utf-8")
+    with _auth_secret_lock:
+        if _auth_secret_cache:
+            return _auth_secret_cache
         try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        _auth_secret_cache = bytes.fromhex(secret)
-    except Exception:
-        # No durable key (read-only data dir): fall back to a process-lifetime
-        # key — sessions survive within the run and re-login after restart.
-        _auth_secret_cache = secrets.token_bytes(32)
-    return _auth_secret_cache
+            from ouroboros import config as _cfg
+
+            path = pathlib.Path(_cfg.DATA_DIR) / "state" / "auth_secret.key"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    _auth_secret_cache = bytes.fromhex(text)
+                    return _auth_secret_cache
+            secret = secrets.token_hex(32)
+            path.write_text(secret + "\n", encoding="utf-8")
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            _auth_secret_cache = bytes.fromhex(secret)
+        except Exception:
+            # No durable key (read-only data dir): fall back to a process-lifetime
+            # key — sessions survive within the run and re-login after restart.
+            _auth_secret_cache = secrets.token_bytes(32)
+        return _auth_secret_cache
+
+
+async def _session_key() -> None:
+    """Before a cookie is verified or a session minted: a key not yet in memory is read or created off the loop.
+    A scope without a cookie or a login never touches it."""
+    if not _auth_secret_cache:
+        await _off_loop(_auth_secret)
 
 
 def _session_value(password: str, issued_at: int | None = None) -> str:
@@ -453,8 +520,6 @@ class NetworkAuthGate:
         request, is answered here and never passed on. A refused write is audited; a refused read is not
         (a sender polling a revoked link would add a row each time). True when this method answered or
         forwarded the request; False leaves a request carrying neither header to the branches below."""
-        import asyncio
-
         from ouroboros import peer_links
 
         headers = _headers_map(scope)
@@ -505,21 +570,42 @@ class NetworkAuthGate:
         self.app = app
         self.served_ui = served_ui
         self.widget_assets = WidgetAssetLeases()
+        self._order: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()  # event loop -> its resolution lock
+
+    async def _resolve(self) -> tuple[str, str]:
+        """The password this scope is judged by and its widget-asset epoch, resolved fresh for every scope.
+
+        A non-blank environment value wins with no read (``resolve_network_password``), so nothing waits for it;
+        otherwise the settings document is read on the gate's reader thread while the loop goes on serving. One
+        resolution at a time takes effect, in arrival order, under the serving loop's lock and together with the
+        epoch it implies: an older read never lands after a newer one, so the lease epoch never goes back."""
+        loop = asyncio.get_running_loop()
+        lock = self._order.get(loop)
+        if lock is None:
+            lock = self._order[loop] = asyncio.Lock()
+        async with lock:
+            if (os.environ.get(NETWORK_PASSWORD_KEY) or "").strip():
+                password = get_configured_network_password()
+            else:
+                password = await _off_loop(get_configured_network_password)
+            epoch = hashlib.sha256(password.encode()).hexdigest()
+            self.widget_assets.password_changed(epoch)
+        return password, epoch
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in {"http", "websocket"}:
             await self.app(scope, receive, send)
             return
 
-        password = get_configured_network_password()
+        password, epoch = await self._resolve()
         from ouroboros.gateway.widget_assets import (ASSET_PREFIX, RESOURCE_PREFIX, widget_asset_response,
                                                      widget_resource_response)
 
-        epoch = hashlib.sha256(password.encode()).hexdigest()
-        self.widget_assets.password_changed(epoch)
         scope["widget_asset_leases"] = self.widget_assets
         scope["widget_asset_epoch"] = epoch
         cookie = _cookie_value(scope, AUTH_COOKIE_NAME)
+        if cookie:
+            await _session_key()
         owner = cookie if cookie and _cookie_session_valid(cookie, password) else _candidate_password(scope) or "local"
         scope["widget_asset_owner"] = hashlib.sha256(owner.encode()).hexdigest()
         active = bool(password) and not is_loopback_host(_scope_client_host(scope))
@@ -550,6 +636,8 @@ class NetworkAuthGate:
             if not active:
                 await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
             elif path == "/auth/login":
+                if scope.get("method") == "POST":  # a right password mints a session
+                    await _session_key()
                 await _handle_login(scope, receive, send, password, self.served_ui)
             else:
                 self.widget_assets.revoke_owner(scope["widget_asset_owner"])

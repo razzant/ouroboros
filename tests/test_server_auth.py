@@ -11,14 +11,20 @@ the real resolution order, and it asserts the pre-state it relies on by name so 
 polluted worker fails there, not as a downstream 200/404.
 """
 
+import contextlib
 import pathlib
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 import ouroboros.server_auth as server_auth
 
@@ -224,3 +230,103 @@ def test_every_sign_out_and_ended_session_reaches_the_form_that_releases_the_sav
             assert scripts == [theme, server_auth._END_OF_SESSION_SCRIPT], response.url
     assert f'removeItem("{PREVIEW_KEY}")' in server_auth._END_OF_SESSION_SCRIPT
     assert f'indexOf("{PREVIEW_FAMILY}")===0' in server_auth._END_OF_SESSION_SCRIPT
+
+
+
+def test_a_held_settings_read_leaves_the_loop_serving_and_admits_its_request_when_released(monkeypatch):
+    """The gate reads the settings document for a scope on its own reader thread: while that read waits on the
+    disk, an already-open socket keeps answering on the loop, and the request is admitted when the read returns."""
+    monkeypatch.delenv(server_auth.NETWORK_PASSWORD_KEY, raising=False)
+    entered, release = threading.Event(), threading.Event()
+    reads: list[int] = []
+
+    def settings():
+        reads.append(threading.get_ident())
+        if len(reads) > 1:  # the socket's own handshake read passes; the next scope's read is held
+            entered.set()
+            assert release.wait(10), "the test never released the held read"
+        return {}
+
+    monkeypatch.setattr(server_auth, "load_settings", settings)
+    loop_threads: list[int] = []
+
+    async def echo(websocket):
+        await websocket.accept()
+        loop_threads.append(threading.get_ident())
+        with contextlib.suppress(WebSocketDisconnect):
+            while True:
+                await websocket.send_text(await websocket.receive_text())
+
+    def round_trip(socket):
+        socket.send_text("still here")
+        return socket.receive_text()
+
+    app = server_auth.NetworkAuthGate(Starlette(routes=[Route("/api/secret", endpoint=_ok),
+                                                        WebSocketRoute("/ws", echo)]))
+    with TestClient(app) as client, client.websocket_connect("/ws") as socket, \
+            ThreadPoolExecutor(max_workers=2) as pool:
+        held = pool.submit(client.get, "/api/secret")
+        try:
+            assert entered.wait(5), "the request never reached its settings read"
+            assert pool.submit(round_trip, socket).result(timeout=5) == "still here", "the loop waited for the disk"
+            assert not held.done()
+        finally:
+            release.set()
+        assert held.result(timeout=10).status_code == 200
+    assert loop_threads and loop_threads[0] not in reads, "every settings read ran off the ASGI loop"
+
+
+def test_a_password_in_the_environment_takes_no_settings_read_and_no_reader(monkeypatch):
+    monkeypatch.setenv(server_auth.NETWORK_PASSWORD_KEY, " env-secret ")
+    monkeypatch.setattr(server_auth, "load_settings", lambda: pytest.fail("the environment's password read settings"))
+    monkeypatch.setattr(server_auth._READER, "submit", lambda read: pytest.fail("the environment's password waited"))
+    app = server_auth.NetworkAuthGate(Starlette(routes=[Route("/api/secret", endpoint=_ok)]))
+    with TestClient(app) as remote:
+        assert remote.get("/api/secret").status_code == 401
+        assert remote.get("/api/secret", headers={"x-ouroboros-password": "wrong"}).status_code == 401
+        assert remote.get("/api/secret", headers={"x-ouroboros-password": "env-secret"}).status_code == 200
+    with TestClient(app, client=("127.0.0.1", 50000)) as local:
+        assert local.get("/api/secret").status_code == 200, "loopback stays ungated"
+
+
+def test_the_first_session_key_is_made_off_the_loop_and_only_for_a_cookie_or_a_login(monkeypatch, tmp_path):
+    from ouroboros import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_auth, "_auth_secret_cache", None)
+    calls: list[tuple[str, bool]] = []
+    original = server_auth._auth_secret
+
+    def recording():
+        calls.append((threading.current_thread().name, server_auth._auth_secret_cache is None))
+        return original()
+
+    monkeypatch.setattr(server_auth, "_auth_secret", recording)
+    with _make_client(monkeypatch) as client:
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/secret").status_code == 401
+        assert calls == [], "no cookie, no login: the key is never touched"
+        assert client.post("/auth/login", json={"password": "secret", "next": "/"}).status_code == 200
+        assert client.get("/api/secret").status_code == 200
+    assert calls[0] == ("auth-gate-reader", True), calls
+    assert not any(missing for _thread, missing in calls[1:]), "every later use found the key in memory"
+    key = (tmp_path / "state" / "auth_secret.key").read_text(encoding="utf-8").strip()
+    assert bytes.fromhex(key) == server_auth._auth_secret_cache
+
+
+def test_concurrent_first_uses_read_or_create_one_session_key(monkeypatch, tmp_path):
+    from ouroboros import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_auth, "_auth_secret_cache", None)
+    minted = iter(f"{n:064x}" for n in range(1, 100))
+
+    def slow_token(_nbytes):  # every first use overlaps the others inside the creation
+        time.sleep(0.05)
+        return next(minted)
+
+    monkeypatch.setattr(server_auth.secrets, "token_hex", slow_token)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        keys = list(pool.map(lambda _n: server_auth._auth_secret(), range(4)))
+    assert len(set(keys)) == 1
+    assert (tmp_path / "state" / "auth_secret.key").read_text(encoding="utf-8").strip() == keys[0].hex()

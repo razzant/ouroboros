@@ -10,7 +10,8 @@ the producer pushes are identical with 0 and 2 clients — only the encode and t
 Each socket's one disconnect line says what is known about why it closed: the ASGI close code as
 received (none is ``unknown``), the browser watchdog's own allowlisted reason fields and nothing else
 of a reason, and what the connection kept (last send and kind, a send still awaited, outbox depth,
-the largest loop lateness it lived through, a write error or the server's own close).
+the largest loop lateness it lived through, a write error or the server's own close). The lifecycle
+lines leave the loop through one ordered handoff, so a slow log sink never holds a socket's frames.
 """
 from __future__ import annotations
 
@@ -276,3 +277,48 @@ def test_the_browser_watchdog_closes_with_the_code_and_fields_this_module_parses
     assert re.search(r"export const WATCHDOG_CLOSE_CODE = (\d+);", source).group(1) == str(ws.WATCHDOG_CLOSE_CODE)
     builder = re.search(r"export function watchdogCloseReason\(.*?\n}\n", source, re.S).group(0)
     assert re.findall(r"(\w+)=\$\{", builder) == list(ws._WATCHDOG_REASON_FIELDS)
+
+
+class _HeldSink(logging.Handler):
+    """A log sink that waits for ``release`` before every write, and notes the registry at that moment."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.release = threading.Event()
+        self.lines: list[str] = []
+        self.registry: list[list] = []
+
+    def emit(self, record):
+        assert self.release.wait(10), "the test never released the sink"
+        self.lines.append(record.getMessage())
+        self.registry.append(list(ws._ws_clients))
+
+
+def test_a_held_log_sink_never_holds_the_loop_and_a_retired_client_has_left_before_its_line(server_loop, caplog,
+                                                                                             monkeypatch):
+    """The lifecycle lines leave the loop through one handoff: while the sink waits, the loop goes on handing
+    frames (the heartbeat among them) to a healthy socket; once released, the send-failure line says the count
+    after the dead client left the registry, as the registry itself does when the line is written."""
+    monkeypatch.setattr(ws, "_record_failure", lambda root, row: None)
+    caplog.set_level(logging.INFO, logger=ws.log.name)
+    sink = _HeldSink()
+    ws.log.addHandler(sink)
+    try:
+        dead = _on(server_loop, ws._register, _Socket(fail=True))
+        good = _Socket()
+        kept = _on(server_loop, ws._register, good)
+        ws.broadcast_ws_sync({"type": "log", "data": {"type": "first"}})
+        _until(lambda: dead not in ws._ws_clients)
+        for frame in ({"type": "heartbeat"}, {"type": "log", "data": {"type": "later"}}):
+            ws.broadcast_ws_sync(frame)
+        _until(lambda: len(good.sent) == 3)
+        assert sink.lines == [], "the loop served on while its failure line waited for the sink"
+        sink.release.set()
+        _until(lambda: sink.lines)
+    finally:
+        sink.release.set()
+        ws.log.removeHandler(sink)
+    [line] = sink.lines
+    assert line == f"WebSocket send failed for msg type=log; dropped client {dead.serial} (RuntimeError) (total: 1)"
+    assert sink.registry == [[kept]]
+    _on(server_loop, ws._unregister, kept)

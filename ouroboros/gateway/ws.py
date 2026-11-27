@@ -22,9 +22,14 @@ from ouroboros.asgi_beat import ASGI_BEAT
 from ouroboros.config import DATA_DIR
 from ouroboros.gateway._helpers import run_sync_to_completion, settle_to_completion
 from ouroboros.gateway.completion_gist import short_gist_frame
+from ouroboros.process_logging import RecordHandoff
 from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger(__name__)
+# The socket lifecycle lines this module logs on the ASGI loop (connect, disconnect, send failure, receive
+# errors) leave it through ONE ordered, bounded handoff: a slow log sink never holds a heartbeat, a receive
+# or Panic. Lines keep their creation time; a kill loses the few the writer has not reached.
+_LIFECYCLE_LOG = RecordHandoff("ws-lifecycle-log")
 
 # The close code of the browser's silence watchdog (``web/modules/ws.js``): an application code
 # (RFC 6455 4000-4999) whose reason carries only the fields below, each a bounded integer.
@@ -245,20 +250,22 @@ def _retire(connection: _Connection, msg_type: str, exc: BaseException) -> None:
     The ``broadcast_partial_failure`` row keeps its shape (one dead client per failed writer);
     it used to be appended synchronously inside the broadcast, a file lock and a write on the
     event loop. The default executor takes it now; a full executor only delays the row. The
-    connection's disconnect line, written when its receive loop ends, names the write error."""
+    connection's disconnect line, written when its receive loop ends, names the write error. The dead
+    client leaves the registry before its line is logged, so the line's count is the new one."""
     connection.cause = f"write_error:{type(exc).__name__[:64]}"
-    log.info("WebSocket send failed for msg type=%s; dropping client %d (%s)", msg_type, connection.serial,
-             type(exc).__name__)
     with _ws_lock:
         total_clients = len(_ws_clients)
         if connection in _ws_clients:
             _ws_clients.remove(connection)
+        remaining = len(_ws_clients)
+    _LIFECYCLE_LOG.log(log, logging.INFO, "WebSocket send failed for msg type=%s; dropped client %d (%s) (total: %d)",
+                       msg_type, connection.serial, type(exc).__name__, remaining)
     row = {"ts": utc_now_iso(), "type": "broadcast_partial_failure", "msg_type": msg_type,
            "dead_clients": 1, "total_clients": total_clients}
     try:
         asyncio.get_running_loop().run_in_executor(None, _record_failure, pathlib.Path(DATA_DIR), row)
     except Exception:
-        log.debug("Failed to hand off broadcast_partial_failure", exc_info=True)
+        _LIFECYCLE_LOG.log(log, logging.DEBUG, "Failed to hand off broadcast_partial_failure", exc_info=True)
 
 
 def _record_failure(data_dir: pathlib.Path, row: dict) -> None:
@@ -528,7 +535,7 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
             await websocket.send_text(_initialization_notice(client_message_id, chat_id, reason=reason,
                                                              reason_code=code))
         except Exception:
-            log.debug("WebSocket closed before its chat failure notice", exc_info=True)
+            _LIFECYCLE_LOG.log(log, logging.DEBUG, "WebSocket closed before its chat failure notice", exc_info=True)
 
 
 def watchdog_reason_fields(reason: Any) -> list[str]:
@@ -577,7 +584,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     connection = _register(websocket, profile_scope)
     with _ws_lock:
         total = len(_ws_clients)
-    log.info("WebSocket client connected (total: %d) conn=%d", total, connection.serial)
+    _LIFECYCLE_LOG.log(log, logging.INFO, "WebSocket client connected (total: %d) conn=%d", total, connection.serial)
     # Tail of this socket's chat acceptances: each waits for the one before it,
     # so its chat frames settle in receive order while the loop keeps receiving.
     accepting: asyncio.Task | None = None
@@ -726,11 +733,11 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     except WebSocketDisconnect as exc:
         close_code, close_reason = (exc.code if isinstance(exc.code, int) else None), exc.reason
     except Exception as exc:
-        log.warning("WebSocket error: %s", exc)
+        _LIFECYCLE_LOG.log(log, logging.WARNING, "WebSocket error: %s", exc)
     finally:
         total = _unregister(connection)
-        log.info("WebSocket client disconnected (total: %d) %s", total,
-                 _close_facts(connection, close_code, close_reason))
+        _LIFECYCLE_LOG.log(log, logging.INFO, "WebSocket client disconnected (total: %d) %s", total,
+                           _close_facts(connection, close_code, close_reason))
         if accepting is not None:
             # Received chat frames keep custody through disconnect or cancellation:
             # the socket task returns only after each settled row → queue → echo.
