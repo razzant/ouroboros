@@ -525,9 +525,12 @@ def test_a_chapter_opening_is_selectable_and_a_listing_gives_only_its_matching_l
     # Authored prose is admitted before a listing's lines, which take only what share is left.
     listing = "docs/architecture/01-core.md#opening block 2 (excerpt: its lines naming a touched file)"
     assert inline.index("docs/architecture/01-core.md#Dialogue owner") < inline.index(listing)
-    assert "docs/architecture/01-core.md#opening block 1" in inline
+    # The first paragraph is the chapter's introduction, which the packet navigation already carries: it is not
+    # selected again (no share spent on it), and it reaches the packet once, in the navigation.
+    assert "docs/architecture/01-core.md#opening block 1" not in inline
     assert "docs/architecture/01-core.md#opening block 2 (excerpt: its lines naming a touched file)" in inline
-    assert "The opening names ouroboros/project_dialogue.py before any heading." in context.selected_inline
+    assert "The opening names ouroboros/project_dialogue.py before any heading." not in context.selected_inline
+    assert context.navigation.count("The opening names ouroboros/project_dialogue.py before any heading.") == 1
     assert "the dialogue owner" in context.selected_inline and "ouroboros/other.py" not in context.selected_inline
     assert "An untouched opening paragraph." not in context.selected_inline
     assert "opening block" not in _context(repo, delivery="retrieving").selected_inline
