@@ -572,7 +572,7 @@ try {
         $SavedEnv[$Key] = [Environment]::GetEnvironmentVariable($Key, 'Process')
     }
     try {
-        foreach ($Key in $SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($Key, $null, 'Process') }
+        foreach ($Key in $SavedEnv.Keys) { Remove-Item -LiteralPath "Env:\$Key" -ErrorAction SilentlyContinue }
         $env:OUROBOROS_APP_ROOT = $CliAppRoot
         # Snapshot HKCU:\Environment\Path (unexpanded) before install-ouroboros-cli.cmd so finally restores it cleanly.
         $EnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
@@ -659,7 +659,13 @@ try {
             $ChangingMutex = $null
         }
     } finally {
-        foreach ($Key in $SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($Key, $SavedEnv[$Key], 'Process') }
+        foreach ($Key in $SavedEnv.Keys) {
+            if ($null -eq $SavedEnv[$Key]) {
+                Remove-Item -LiteralPath "Env:\$Key" -ErrorAction SilentlyContinue
+            } else {
+                [Environment]::SetEnvironmentVariable($Key, $SavedEnv[$Key], 'Process')
+            }
+        }
     }
     python (Join-Path $Repo 'scripts\betterleaks_platform_smoke.py') --bundle-root (Join-Path $InstallDir '_internal')
     if ($LASTEXITCODE -ne 0) { throw "Installed Betterleaks runtime smoke failed: $LASTEXITCODE" }

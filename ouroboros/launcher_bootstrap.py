@@ -588,6 +588,8 @@ def ensure_managed_repo(context: BootstrapContext) -> str:
     ``data/archive/managed_repo`` before the first clone. A manifest mismatch on
     a git checkout only refreshes the managed remote metadata; the checkout stays.
     """
+    if not (context.repo_dir.is_absolute() and context.data_dir.is_absolute()):
+        raise RuntimeError("OUROBOROS_REPO_DIR and OUROBOROS_DATA_DIR must be absolute paths; nothing was moved.")
     manifest = load_bundle_manifest(context)
     if not context.repo_dir.exists():
         return _install_managed_repo(context, manifest, reason="missing")
