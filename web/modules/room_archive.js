@@ -318,6 +318,7 @@ export function archiveDoor({ open = openRoomArchive, returnFocus = null,
             restored = owed = true;
         },
         get owed() { return owed && !disposed; },
+        hide: clearHint,  // the room left or covered: the restore notice leaves with it (told once)
         announce(notify) {
             if (!owed || disposed || typeof notify !== 'function') return;
             owed = false;

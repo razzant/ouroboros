@@ -105,6 +105,9 @@ def floating_material_drift(css: str) -> list[str]:
     for selector in SCRIMS:
         if set(_declarations(css, selector).get("backdrop-filter", ["missing"])) != {"var(--scrim-filter)"}:
             found.append(f"{selector} veil")
+    # Forced colours drop the shadow: the toast's transparent outline is the edge they paint.
+    if set(_declarations(css, ".toast").get("outline", ["missing"])) != {"1px solid transparent"}:
+        found.append(".toast forced-colours edge")
     return found
 
 
@@ -129,7 +132,8 @@ def test_floating_material_scanner_sees_drift():
             (".toast { box-shadow: 0 2px 4px red; }", [".toast shadow"]),                   # an override at the end
             (".status-badge { backdrop-filter: blur(8px); }", [".status-badge glass"]),
             (".attach-badge { box-shadow: none; }", [".attach-badge edge"]),
-            (".x, .files-drop-overlay { backdrop-filter: blur(3px); }", [".files-drop-overlay veil"])):
+            (".x, .files-drop-overlay { backdrop-filter: blur(3px); }", [".files-drop-overlay veil"]),
+            (".toast { outline: none; }", [".toast forced-colours edge"])):
         assert floating_material_drift(GOOD + broken) == expected, broken
 
 

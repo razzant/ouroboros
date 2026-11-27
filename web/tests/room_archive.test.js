@@ -283,9 +283,10 @@ test('the restoration is told once, only while Main is the room shown, beside in
     controls.endRecent(null, false, { project_registry: 'restored' });
     controls.showNotice();
     assert.equal(told.filter(n => n.text.startsWith('Project list')).length, 1, 'a later page does not repeat it');
+    controls.hideNotice();
+    assert.equal(told[0].disposed, true, 'Main left or covered: the restore notice leaves with it');
     controls.endRecent(refusal());
     controls.render({ initialized: false });
-    assert.equal(told[0].disposed, true, 'a newer refusal withdraws it');
     assert.equal(controls.olderButton.nextElementSibling?.hidden, false, 'its door stands instead');
 });
 

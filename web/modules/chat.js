@@ -266,7 +266,7 @@ export function createChatInstance({
         onDomWrite: withStableViewport });
     const mainWaiting = isMain ? createMainWaiting({ page, messagesDiv, insertMessageNode, stampNodeTimestamp,
         openSettings, refresh: refreshHeaderControlState, mutate: withStableViewport,
-        decision: () => chatDecision, revealQuestion: (...a) => revealQuestion(...a), reading: () => reading }) : null;
+        decision: () => chatDecision, revealQuestion: (...a) => revealQuestion(...a), reading: () => reading, noticeVisible: () => historyVisible() }) : null;
     const chatDecision = createChatDecision({
         apiFetch,
         frameNode: chatMedia.bubbleFrameNode,
@@ -2806,7 +2806,7 @@ export function createChatInstance({
         && !document.body?.classList.contains('project-panel-open')));
     const archive = isMain && !asPanel ? archiveDoor({ returnFocus: messagesDiv,
         readReceipt, syncHistory, isVisible: historyVisible }) : null;
-    const historyControls = createHistoryControls(messagesDiv, { notify: roomNotice, archive, isVisible: historyVisible });
+    const historyControls = createHistoryControls(messagesDiv, { notify: roomNotice, archive, others: [mainWaiting?.notice], isVisible: historyVisible });
     const coverWatch = watchRoomCover(asPanel ? container?.closest?.('.project-panel') : pageHeader, pageHeader,
         () => (historyVisible() ? historyControls.showNotice() : historyControls.hideNotice()));
     const { olderButton: loadOlderBtn } = historyControls;

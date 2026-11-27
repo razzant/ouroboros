@@ -75,7 +75,7 @@ export function panicCards(data) {
 export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mutate = (fn) => fn(), refresh = () => {},
     onChange = () => {}, resume = resumeTask, now = () => Date.now(), lifetimeMs = RESUME_ANSWER_MS,
     stopControl = null, notify = (text, options) => showToast(text, 'warn', options),
-    isCovered = () => Boolean(globalThis.document?.getElementById?.('onboarding-overlay')),
+    isVisible = () => !globalThis.document?.getElementById?.('onboarding-overlay'),
     storage = globalThis.sessionStorage } = {}) {
     // Task id -> {row, rank, current, unseen, gone, listedAt, checked, answer, card, vouched, view}, shown in
     // first-seen order; `rank` is its place in the latest census. `current`: the latest read named it while the socket
@@ -92,22 +92,34 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
     let census = 'unknown', censusAt = -Infinity, listSaid = '';
     let connected = true, sending = false, showAll = false, view = null, destroyed = false, serial = 0;
     let projects = new Map();   // project id and room chat id -> the Project's name, from the same body
-    // A ready host's own word that its list is not whole, with no row read: one notice per episode, which a whole read
-    // ends (`unread`: the episode is open; `notice`: its toast while it stands). The episode outlives a reload of the same
-    // tab: its host run (`boot.since`, the lifespan's start) is kept in this tab's storage until a whole read.
-    let unread = false, notice = null;
+    // A ready host's own word that its list is not whole, with no row read: Main's notice, told once per episode while
+    // Main is the room shown (`isVisible`; chat.js's room seam, room_notice.js), withdrawn when Main is left or covered
+    // and told again on return while the list still is not whole and the person has not closed it. `unread`: the episode
+    // is open; `owed`: it waits to be told; `notice`: its toast while it stands. The episode outlives a reload of the same
+    // tab: the host run it was told for (`boot.since`, the lifespan's start) is kept in this tab's storage.
+    let unread = false, owed = false, stale = false, run = '', notice = null;
     const withdraw = () => { notice?.dispose?.(); notice = null; };
     const told = { get: () => { try { return storage?.getItem(PANIC_TOLD) || ''; } catch { return ''; } },
         set: (run) => { try { if (run) storage?.setItem(PANIC_TOLD, run); else storage?.removeItem(PANIC_TOLD); } catch { /* no storage */ } } };
     function tell() {
         withdraw();
+        owed = false;
+        told.set(run);
         notice = notify(tx('Saved work could not be checked for anything waiting to resume.'), { ttl: 0, haptic: false,
             // A person's Retry reads again; a read that still is not whole (or fails) says so again.
             action: { label: tx('Retry'), run: async () => {
                 try { await refresh(); } catch { /* answered below */ }
-                if (!destroyed && unread && !records.size && !isCovered()) tell();
+                if (!destroyed && unread && !records.size) { owed = true; if (isVisible()) tell(); }
             } } });
     }
+    // The room seam's view of this notice (chat_render_batch.js `others`). Left or covered, a notice still standing is
+    // withdrawn and owed again (one the person closed is not), but only a fresh read on return may tell it: Main reads
+    // nothing while away, and the host may have recovered meanwhile.
+    const roomNotice = {
+        get owed() { return Boolean(owed && !stale && unread && !records.size && !destroyed); },
+        announce() { if (roomNotice.owed) tell(); },
+        hide() { if (notice) { owed = notice.isConnected && !notice.classList?.contains('is-hiding'); stale = true; withdraw(); } },
+    };
 
     const label = (record) => record.row.task_name || fmt('Task {id}', { id: record.row.task_id.slice(0, 8) });
     const answerOf = (record) => (record.answer?.hold === record.row.panic_hold_id ? record.answer : null);
@@ -512,15 +524,17 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
             // With no row read Main holds no message. A host not ready yet is said by the room bar's Starting…
             // (host_starting_status.js) and the setup wizard covers everything, so nothing more; a ready host's own word
             // that its list is not whole is told once per episode by the page's notice, claiming no Panic, stop or work.
-            if (census === 'complete' || records.size) withdraw();
+            stale = false;
+            if (census === 'complete' || records.size) { withdraw(); owed = false; }
             if (census === 'complete') { unread = false; told.set(''); }
             if (!records.size) {
                 const ready = data.supervisor_ready === true && data.boot?.tasks_ready !== false;
-                const run = typeof data.boot?.since === 'string' ? data.boot.since : '';
-                if (listSaid === 'partial' && ready && !unread && !isCovered()) {
+                if (listSaid === 'partial' && ready && !unread) {
                     unread = true;
-                    if (!run || told.get() !== run) { told.set(run); tell(); }
+                    run = typeof data.boot?.since === 'string' ? data.boot.since : '';
+                    owed = !run || told.get() !== run;
                 }
+                if (roomNotice.owed && isVisible()) tell();
                 remove(); onChange(); return;
             }
             if (!view) mutate(() => { view = build(); return true; });
@@ -544,5 +558,6 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
         // Where the pill's landing puts focus: the first shown box that can be chosen (choosing sends nothing).
         door: () => [...records.values()].find((record) => choosable(record) && !record.view?.item.hidden)?.view?.input || null,
         destroy() { destroyed = true; withdraw(); remove(); records.clear(); },
+        notice: roomNotice,
     };
 }

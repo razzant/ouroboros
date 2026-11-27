@@ -35,7 +35,7 @@ const APPROXIMATE_NOTICE = 'Saved position could not be restored exactly.';
  * being upgraded, a project list it cannot read).
  */
 export function createHistoryControls(messagesDiv, {
-    notify = null, archive = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
+    notify = null, archive = null, others = [], isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
 } = {}) {
     const doc = messagesDiv.ownerDocument;
     const root = doc.createElement('div');
@@ -52,17 +52,17 @@ export function createHistoryControls(messagesDiv, {
     // The recent-window read is the chat's own request, not a pager page, so its in-flight and failed states are carried
     // here and drawn by the same control (issue #1102: an empty feed under a green header read as a dead app).
     let recent = null;
-    // Per kind of event (its words): whether its episode is open, whether it was told in it, and its notice while shown.
-    // A failure's episode ends only with a read that succeeds (a read merely begun is no news either way).
+    // Per kind of event: its episode open, told in it, its notice while shown (a failure's ends on a read that is no failure).
     const episodes = { failed: { words: FAILED_NOTICE }, approximate: { words: APPROXIMATE_NOTICE } };
-    const hideNotice = () => { for (const ep of Object.values(episodes)) { ep.notice?.dispose?.(); ep.notice = null; } };
+    // The room's other notices (the archive's restore, Main's Panic list) keep the same rules: `owed`, `announce`, `hide`.
+    const extra = [archive, ...others].filter(Boolean);
+    const hideNotice = () => { for (const ep of Object.values(episodes)) { ep.notice?.dispose?.(); ep.notice = null; } extra.forEach(x => x.hide?.()); };
     const settle = (ep, open) => { if (!open) { ep.notice?.dispose?.(); ep.told = false; ep.notice = null; } ep.open = open; };
-    // A hidden or covered room spends nothing: a room shown again (chat.js) says what is still owed, once.
     function showNotice() {
         const owed = Object.entries(episodes).filter(([, ep]) => ep.open && !ep.told);
-        if (typeof notify !== 'function' || doc.hidden || !(owed.length || archive?.owed) || !isVisible()) return;
+        if (typeof notify !== 'function' || doc.hidden || !(owed.length || extra.some(x => x.owed)) || !isVisible()) return;
         for (const [kind, ep] of owed) { ep.told = true; ep.notice = notify(ep.words, kind); }
-        archive?.announce(notify);
+        extra.forEach(x => x.announce(notify));
     }
     return {
         olderButton: button,
@@ -96,7 +96,7 @@ export function createHistoryControls(messagesDiv, {
             const edgeState = emptyLoading ? '' : gapText || (!error && !hydrating && coverage.complete ? 'Beginning of saved history' : '');
             const stateText = migrating ? 'Saved history is being upgraded…' : archiveNote || edgeState;
             const failed = Boolean(error) && !migrating && !archiveNote;
-            if (failed || (!error && !loading)) settle(episodes.failed, failed);
+            if (failed || !loading) settle(episodes.failed, failed);  // an upgrade or the archive's refusal ends it too
             settle(episodes.approximate, Boolean(approximate));
             showNotice();
             // The edge keeps the event's explanation while it is true, beside its Retry.

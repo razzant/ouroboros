@@ -93,6 +93,33 @@ test('an inexact return is plain news told once; its explanation stays at the ed
         'the gap stands beside it');
 });
 
+test('a failure turning into an upgrade ends its episode; the room\'s other notices leave with it', () => {
+    const r = noticeRig();
+    const snapshot = { initialized: true, canOlder: true };
+    r.controls.render({ ...snapshot, error: new Error('read failed') }, {});
+    assert.equal(r.notices.length, 1);
+    const migrating = Object.assign(new Error('importing'), { status: 503, body: { reason_code: 'migrating' } });
+    r.controls.render({ ...snapshot, error: migrating }, {});
+    assert.equal(r.notices[0].disposed, true, 'an upgrade is no failure: the failure\'s notice ends');
+    r.state.visible = false;
+    r.controls.render({ ...snapshot, error: new Error('read failed') }, {});
+    r.controls.render({ ...snapshot, error: migrating }, {});
+    r.state.visible = true;
+    r.controls.showNotice();
+    assert.equal(r.notices.length, 1, 'a hidden room keeps no stale failure for its return');
+    // Another notice of the room (the archive's restore, Main's Panic list) is withdrawn by the same call.
+    const hidden = [];
+    const other = { owed: true, announce() { this.owed = false; }, hide() { hidden.push('hide'); } };
+    const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    const controls = createHistoryControls(messages, { notify: () => ({ dispose() {} }), others: [other], isVisible: () => true });
+    controls.render(snapshot, { complete: true });
+    assert.equal(other.owed, false, 'announced while the room shows');
+    controls.hideNotice();
+    assert.deepEqual(hidden, ['hide']);
+});
+
 test('a room tells its history gap at the edge it concerns, never as a notice over its newest rows (U021)', () => {
     const r = noticeRig();
     r.controls.render({ initialized: true, canOlder: true }, { gaps: true });

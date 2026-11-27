@@ -483,7 +483,7 @@ test('Main\'s pill counts the Panic choice as one action and lands on its first 
 function noticeTrack() {
     const told = [];
     const notify = (text, options) => {
-        const notice = { text, options, disposed: false, dispose() { this.disposed = true; } };
+        const notice = { text, options, disposed: false, isConnected: true, dispose() { this.disposed = true; this.isConnected = false; } };
         told.push(notice);
         return notice;
     };
@@ -495,7 +495,7 @@ function noticeTrack() {
 test('a list not whole with no row read is no message: a ready host\'s word is one notice per episode, a starting one none', async (t) => {
     const n = noticeTrack();
     let covered = false;
-    const r = rig(t, { notify: n.notify, extra: { storage: n.storage, isCovered: () => covered } });
+    const r = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => !covered } });
     const told = n.told;
     const READY = { supervisor_ready: true, boot: { tasks_ready: true, since: '2026-11-27T10:00:00Z' } };
     for (const starting of [{ supervisor_ready: false }, { supervisor_ready: true, boot: { tasks_ready: false } }, {}]) {
@@ -539,20 +539,66 @@ test('a list not whole with no row read is no message: a ready host\'s word is o
     assert.deepEqual(r.state.posts, []);
 });
 
+test('the Panic notice is Main\'s: withdrawn when Main is left or covered, told again on return only after a fresh read', async (t) => {
+    const n = noticeTrack();
+    let shown = true;
+    const r = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => shown } });
+    const READY = { supervisor_ready: true, boot: { tasks_ready: true, since: 'run-a' } };
+    r.panic.snapshot(census([], false, READY), 1);
+    assert.equal(n.told.length, 1);
+    // Retry pressed with Main shown reads the state.
+    r.state.onRefresh = () => r.panic.snapshot(census([], false, READY), 2);
+    await n.told[0].options.action.run();
+    assert.deepEqual([r.state.refreshes, n.told.length], [1, 2]);
+    // Main left (Settings, a Project on a phone) or covered: the notice leaves with it.
+    shown = false;
+    r.panic.notice.hide();
+    assert.equal(n.told[1].disposed, true, 'withdrawn');
+    assert.equal(r.panic.notice.owed, false, 'not told again before a fresh read on return');
+    shown = true;
+    r.panic.snapshot(census([], false, READY), 3);
+    assert.equal(n.told.length, 3, 'back and still not whole: told again');
+    // Closed by the person, it is not told again in this episode.
+    n.told[2].isConnected = false;
+    r.panic.notice.hide();
+    r.panic.snapshot(census([], false, READY), 4);
+    assert.equal(n.told.length, 3, 'closed by the person: not again');
+    // A whole read while away means no notice on return.
+    const m = noticeTrack();
+    let seen = true;
+    const s2 = rig(t, { notify: m.notify, extra: { storage: m.storage, isVisible: () => seen } });
+    s2.panic.snapshot(census([], false, { ...READY, boot: { tasks_ready: true, since: 'run-b' } }), 1);
+    seen = false;
+    s2.panic.notice.hide();
+    s2.panic.snapshot(census([], true, READY), 2);
+    seen = true;
+    s2.panic.snapshot(census([], true, READY), 3);
+    assert.equal(m.told.length, 1, 'the list read whole meanwhile: nothing on return');
+    // A hidden Main owes the first telling until it is shown.
+    const h = noticeTrack();
+    let visible = false;
+    const s3 = rig(t, { notify: h.notify, extra: { storage: h.storage, isVisible: () => visible } });
+    s3.panic.snapshot(census([], false, { ...READY, boot: { tasks_ready: true, since: 'run-c' } }), 1);
+    assert.deepEqual([h.told.length, s3.panic.notice.owed], [0, true]);
+    visible = true;
+    s3.panic.notice.announce();
+    assert.equal(h.told.length, 1, 'told when Main is shown');
+});
+
 test('a reload of the same tab is not a new episode; another host run is', (t) => {
     const n = noticeTrack();
     const READY = (since) => ({ supervisor_ready: true, boot: { tasks_ready: true, since } });
-    const first = rig(t, { notify: n.notify, extra: { storage: n.storage, isCovered: () => false } });
+    const first = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
     first.panic.snapshot(census([], false, READY('run-1')), 1);
     assert.equal(n.told.length, 1);
     first.panic.destroy();
-    const reloaded = rig(t, { notify: n.notify, extra: { storage: n.storage, isCovered: () => false } });
+    const reloaded = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
     reloaded.panic.snapshot(census([], false, READY('run-1')), 1);
     assert.equal(n.told.length, 1, 'the same host run in the same tab: already told');
     reloaded.panic.snapshot(census([], false, READY('run-2')), 2);
     assert.equal(n.told.length, 1, 'inside this page the episode is still open');
     reloaded.panic.destroy();
-    const restarted = rig(t, { notify: n.notify, extra: { storage: n.storage, isCovered: () => false } });
+    const restarted = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
     restarted.panic.snapshot(census([], false, READY('run-2')), 1);
     assert.equal(n.told.length, 2, 'a restarted host is a new episode');
     restarted.panic.snapshot(census([], true, READY('run-2')), 2);

@@ -159,7 +159,7 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         assert.equal(sent.length, 0, 'a tap on the chip never toggles anything');
         assert.equal(status.isOpen(), true);
         assert.equal(status.chip.getAttribute('aria-expanded'), 'true');
-        assert.equal(bar.hasAttribute('data-cx-shade'), true, 'Main\'s history note waits behind the open Shade');
+        assert.equal(bar.hasAttribute('data-cx-shade'), true, 'the open Shade covers the room: its notices leave (chat.js)');
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.equal(reads, 1, 'one read of the wakes per opening, no poller');
         const shade = status.shade;
