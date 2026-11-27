@@ -46,11 +46,11 @@ def drive(tmp_path, monkeypatch):
     return scale.install(tmp_path / "drive")
 
 
-def build(drive, route_resolver, *, text="Continue in this room.", mode="nano", ctx=None, task=None):
+def build(drive, route_resolver, *, text="Continue in this room.", mode="nano", ctx=None, task=None, tool_registry=None):
     env, memory = scale.env_on(drive)
     task = task or {"id": "start", "type": "task", "chat_id": 1, "text": text, "_is_direct_chat": True}
     return context.build_context_fit_plan(env, memory, task, preferred_mode=mode, ctx=ctx, tool_schemas=scale.tools(),
-                                          route_resolver=route_resolver)
+                                          route_resolver=route_resolver, tool_registry=tool_registry)
 
 
 def capture_spy(monkeypatch, *, fail=False, before=None):
@@ -137,7 +137,8 @@ REVERSED = ('"' * 400_000, "a" * 400_100)  # the raw-shorter connections form is
 @pytest.mark.parametrize("mode", ["max", "low", "nano"])
 @pytest.mark.parametrize("row", [pytest.param(row, id=row[0]) for row in _distinct_routes()]
                          + [pytest.param(("witness", "gemini_live", "witness"), id="provider-witness-under-1"),
-                            pytest.param(("reversed", "synthetic", "reversed"), id="reversed-connections")])
+                            pytest.param(("reversed", "synthetic", "reversed"), id="reversed-connections"),
+                            pytest.param(("mcp", "synthetic", "mcp"), id="twelve-mcp-servers")])
 @pytest.mark.parametrize("shape", ["fresh", "mature"])
 def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape, row, mode):
     """The identity ``bound <= fitted minimum`` on each route's own basis, working reserve and density: the bound's
@@ -145,8 +146,10 @@ def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape
     alone fills (memory rendered beside it, or first the work room that core wants); and at the window that holds that
     minimum with its reserve the start with the bound enabled gets a plan. Rows: the shipped call routes' distinct
     cases and a hard 85k text route; a provider route with a fresh witness under 1.0 (the bound's density is no higher
-    than the fit's); and a connections pair whose raw-shorter form is the escape-heavier one."""
+    than the fit's); a connections pair whose raw-shorter form is the escape-heavier one; and the owner-shaped twelve MCP
+    servers with long instructions (Nano's map leaves them to their reader, Low/Max keep them)."""
     label, provider, facts = row
+    registry = None
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
     evidence_root = tmp_path / "evidence"
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: evidence_root)
@@ -163,13 +166,16 @@ def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape
     elif facts == "reversed":
         facts = None
         monkeypatch.setattr(context, "_connections", lambda *_a, **_kw: REVERSED)
+    elif facts == "mcp":
+        facts = None
+        registry = scale.mcp_registry(tmp_path / "mcp", monkeypatch)[0]
     drive = scale.installed(tmp_path, shape)
 
     def outcome(window, *, bounded):
         with monkeypatch.context() as patch:
             if not bounded:
                 patch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
-            return build(drive, route_at(provider, facts, window), mode=mode)
+            return build(drive, route_at(provider, facts, window), mode=mode, tool_registry=registry)
 
     def refusal(window, *, bounded=False):
         with pytest.raises(fit.MinimumViewUnfit) as raised:
