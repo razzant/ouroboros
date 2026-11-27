@@ -21,6 +21,7 @@ from ouroboros import usage_ledger as ledger
 from ouroboros import usage_store
 from ouroboros._usage_money import billing_group_key, monetary_scope_key
 from tests import _legacy_usage_rows_oracle as oracle
+from tests._cost_meter import CostMeter, tagged
 from tests._source_scan import parse
 from tests._usage_store_testing import ledger_rows, request, root as root, write_compacted_journal, write_journal
 from tests._cases import chosen_rows
@@ -394,6 +395,54 @@ def test_the_import_is_idempotent_and_reports_its_timing_and_counts(root):
     assert [row["phase"] for row in _supervisor_rows(root)] == ["completed", "already_completed"]
 
 
+def test_revival_with_a_completed_import_does_not_list_the_store_directory(root):
+    write_journal(root, _journal_rows())
+    assert usage_store.migrate_from_journal(root)["status"] == "completed"
+    before = _store_snapshot(root)
+    usage_store.forget(root)
+    directory = (root / usage_store.STORE_REL).parent
+    for name in ("other.sqlite", "preferences.json", "queued-work.note"):
+        (directory / name).write_text("unrelated state", encoding="utf-8")
+    with CostMeter(directory) as meter:
+        report = tagged("revival", lambda: usage_store.migrate_from_journal(root))
+    assert report["status"] == "already_completed" and report["journal"] == "kept"
+    assert _store_snapshot(root) == before
+    counts = meter.snapshot("revival")["counts"]
+    assert counts.get("scandir:root", 0) + counts.get("listdir:root", 0) == 0
+
+
+def test_lifespan_retries_cleanup_left_after_successful_publication(root, monkeypatch):
+    journal = write_journal(root, _journal_rows())
+    stale = journal.parent / "usage.sqlite.import-99999-deadbeef"
+    stale.write_bytes(b"abandoned first build")
+    unlink = pathlib.Path.unlink
+
+    def temporarily_in_use(path, *args, **kwargs):
+        if path == stale:
+            raise PermissionError("stale file is still in use")
+        return unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pathlib.Path, "unlink", temporarily_in_use)
+        assert usage_store.migrate_from_journal(root)["status"] == "completed"
+    store_path = root / usage_store.STORE_REL
+    assert stale.is_file() and store_path.is_file()
+    identity = usage_store._identity
+    stale_at_publication_check = []
+
+    def observe_identity(path):
+        if path == store_path:
+            stale_at_publication_check.append(stale.exists())
+        return identity(path)
+
+    monkeypatch.setattr(usage_store, "_identity", observe_identity)
+    report = usage_store.migrate_from_journal(root, initialize_journal=True)
+    assert report["status"] == "already_completed"
+    assert report["window_index"] == report["dirty_owner_index"] == "present"
+    assert not stale.exists()
+    assert stale_at_publication_check[:1] == [False]
+
+
 def test_a_display_read_never_imports_a_waiting_journal(root):
     """A display read (the providerless /api/state, the loop's status) while the journal awaits the lifecycle
     import reports the store unavailable and leaves the journal alone; the lifecycle job imports it."""
@@ -446,8 +495,10 @@ def test_the_server_imports_the_journal_as_a_boot_step_on_every_door():
 
 def test_an_import_interrupted_before_publication_is_redone_from_scratch(root, monkeypatch):
     journal = write_journal(root, _journal_rows())
-    stale = root / "state" / "usage.sqlite.import-99999-deadbeef"
-    stale.write_bytes(b"a build a crashed process left behind")
+    stale = [journal.parent / f"usage.sqlite.import-99999-deadbeef{suffix}"
+             for suffix in ("", "-journal", "-wal", "-shm")]
+    for path in stale:
+        path.write_bytes(b"a build a crashed process left behind")
     build = usage_store._build
 
     def crash(tmp, *args, **kwargs):
@@ -458,7 +509,7 @@ def test_an_import_interrupted_before_publication_is_redone_from_scratch(root, m
     with pytest.raises(KeyboardInterrupt):
         usage_store.migrate_from_journal(root)
     assert not (root / usage_store.STORE_REL).exists() and journal.exists()
-    assert not stale.exists(), "an unpublished build is discarded"
+    assert not any(path.exists() for path in stale), "an unpublished build and its sidecars are discarded"
     monkeypatch.setattr(usage_store, "_build", build)
     assert usage_store.migrate_from_journal(root)["status"] == "completed"
     assert {row["attempt_id"] for row in ledger_rows(root)} == {"settled", "open", "lost", "wave", "sess"}
