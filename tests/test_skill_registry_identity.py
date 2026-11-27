@@ -25,10 +25,10 @@ def _registry(tmp_path, monkeypatch, dependencies, files=None):
     row = {'id': 'clawhub', 'kind': 'registry', 'name': 'ClawHub', 'trust': 'review', 'confirmed': True}
     monkeypatch.setenv('OUROBOROS_SKILL_SOURCES', json.dumps([row]))
     latest = {'version': '1.0.0'}
-    monkeypatch.setattr(install, '_registry_info', lambda slug: ClawHubSkillSummary(
+    monkeypatch.setattr(install, '_registry_info', lambda slug, *, registry_url=None: ClawHubSkillSummary(
         slug=slug, latest_version=latest['version']))
 
-    def download(slug, *, version=None):
+    def download(slug, *, version=None, registry_url=None):
         version = version or latest['version']
         front = {'name': 'demo', 'description': 'Real adapted registry payload', 'version': version}
         if dependencies:

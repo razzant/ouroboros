@@ -1352,7 +1352,7 @@ export function boundedStatusRefresh(store, { includeModels = true, beatMs = 200
  * sub-second probe. An absent or unread payload answers the honest generic:
  * this caller IS mid-check, it just has no phase evidence yet.
  */
-export function claudexorPreparationLine(payload) {
+export function claudexorPreparationLine(payload, { installing = '' } = {}) {
     const daemon = payload?.daemon || {};
     const runtime = daemon.runtime || {};
     const state = String(runtime.state || '');
@@ -1376,5 +1376,7 @@ export function claudexorPreparationLine(payload) {
         // already be serving.
         return 'Starting the Claudexor daemon…';
     }
-    return 'Checking Claudexor…';
+    // A sign-in whose program was read absent may install it first, on the engine's own host (its control is
+    // loopback-only); nothing says it is installing yet: the engine may first ask for an account's name.
+    return installing ? `Connecting ${installing}; if it is still missing where Claudexor runs, it is installed first…` : 'Checking Claudexor…';
 }

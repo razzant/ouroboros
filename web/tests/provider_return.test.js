@@ -6,8 +6,8 @@ const state = (skill = 'calendar', extra = {}) => Buffer.from(JSON.stringify({ v
 const href = (value = state(), query = 'code=synthetic') => `https://example.test/instance/onboarding/static/provider-return.html?${query}&state=${value}`;
 
 function page() {
-    const nodes = Object.fromEntries(['status', 'detail', 'account', 'home', 'next', 'again'].map((name) => [name, {
-        textContent: '', hidden: true, dataset: {}, setAttribute(key, value) { this[key] = value; },
+    const nodes = Object.fromEntries(['status', 'detail', 'account', 'home', 'next', 'again', 'technical', 'said'].map((name) => [name, {
+        textContent: '', hidden: true, dataset: {}, setAttribute(key, value) { this[key] = value; }, removeAttribute(key) { delete this[key]; },
         addEventListener(type, handler) { this.handlers = { ...this.handlers, [type]: handler }; },
     }]));
     return { nodes, root: { querySelector(selector) { return nodes[selector.match(/data-return-(\w+)/)[1]]; } } };
@@ -164,6 +164,73 @@ test('a saved provider answer is finished again only by the owner pressing Finis
     await mountProviderReturn(bare.root, { href: href(signInState()), history, lifecycle: null,
         send: async () => ({ ok: true, json: async () => ({ ok: false, reason: 'answer_saved', error: 'kept' }) }) });
     assert.equal(bare.nodes.again.hidden, true, 'without the host receipt of an attempt there is nothing to finish');
+});
+
+test('an MCP return stopped before anything changed at the provider is sent again only on the owner\'s press, from memory', async () => {
+    // The host's answer as published: HTTP 200 with ok false (docs/CLIENT_CONTRACT.md "MCP servers").
+    const stopped = { ok: false, server: 'bank', code: 'MCP_UNAVAILABLE', reason: 'not_sent',
+        error: 'Sign-in stopped before anything changed at the provider: the Extra certificate bundle can\'t be used. Fix the file under Extra certificate bundle in Settings → This computer → Advanced, then try again.',
+        detail: 'OUROBOROS_EXTRA_CA_BUNDLE is not readable: /Users/synthetic-owner/bank-root.pem ([Errno 2] No such file or directory)' };
+    const { root, nodes } = page();
+    const sent = [];
+    const replies = [stopped, stopped, { ok: true, server: 'bank', scope: 'mcp' }];
+    let release = null;
+    let held = null;
+    const hosted = [];
+    await mountProviderReturn(root, { href: href(mcpState('bank')), history: { replaceState() {} }, lifecycle: null,
+        translateHost: (text) => { hosted.push(text); return text; },
+        send: async (_url, init) => {
+            sent.push(init.body);
+            const body = replies.shift();
+            if (held) await held;
+            return { ok: true, json: async () => body };
+        } });
+    assert.equal(sent.length, 1, 'no automatic second send');
+    assert.equal(nodes.status.textContent, 'Sign-in not finished yet');
+    assert.equal(nodes.detail.textContent, stopped.error, 'the host\'s fixed words, translated as a host sentence');
+    assert.deepEqual(hosted, [stopped.error]);
+    assert.equal(nodes.detail['data-i18n-authored'], undefined);
+    assert.ok(!nodes.detail.textContent.includes('synthetic-owner'), 'the path stays out of the words');
+    assert.deepEqual([nodes.technical.hidden, nodes.said.textContent], [false, stopped.detail], 'behind Details, never translated');
+    assert.deepEqual([nodes.next.hidden, nodes.again.hidden], [false, false]);
+    assert.match(nodes.next.textContent, /Keep this tab open.*press Finish sign-in here/);
+    // The repair opens another tab of this Ouroboros; this tab, with the return in its memory, stays.
+    assert.deepEqual([nodes.home.href, nodes.home.target, nodes.home.rel, nodes.home.textContent],
+        ['https://example.test/instance/#settings', '_blank', 'noopener', 'Open Settings in a new tab']);
+
+    held = new Promise((resolve) => { release = resolve; });
+    const pressed = nodes.again.handlers.click();
+    await Promise.resolve();
+    assert.deepEqual([nodes.status.textContent, nodes.status.dataset.tone, nodes.detail.textContent, nodes.next.hidden, nodes.again.hidden],
+        ['Completing sign-in…', 'muted', 'Waiting for the connector to confirm this account.', true, true], 'in flight: the earlier refusal is gone');
+    assert.equal(nodes.technical.hidden, true);
+    assert.equal(nodes.detail['data-i18n-authored'], undefined);
+    assert.deepEqual([nodes.home.href, nodes.home.target, nodes.home.textContent],
+        ['https://example.test/instance/', undefined, 'Return to Ouroboros']);
+    release();
+    await pressed;
+    held = null;
+    assert.equal(sent.length, 2);
+    assert.equal(nodes.again.hidden, false, 'still stopped: Finish stays');
+    await nodes.again.handlers.click();
+    assert.deepEqual([sent.length, sent[1], sent[2]], [3, sent[0], sent[0]], 'the same return, from memory');
+    assert.equal(nodes.status.textContent, 'Account connected');
+    assert.equal(nodes.account.textContent, 'bank');
+    assert.equal(nodes.again.hidden, true);
+    assert.equal(nodes.detail['data-i18n-authored'], undefined, 'the confirmation is the page\'s own words');
+    assert.deepEqual([nodes.home.href, nodes.home.target], ['https://example.test/instance/', undefined]);
+
+    for (const [value, reply] of [[state(), stopped], [signInState(), stopped],
+        [mcpState('bank'), { ...stopped, reason: 'token_rejected' }], [mcpState('bank'), { ...stopped, error: undefined }]]) {
+        const other = page();
+        let count = 0;
+        await mountProviderReturn(other.root, { href: href(value), history: null, lifecycle: null,
+            send: async () => { count += 1; return { ok: true, json: async () => reply }; } });
+        assert.equal(count, 1);
+        assert.equal(other.nodes.again.hidden, true, 'only a typed MCP no-send with its words is offered again');
+        assert.equal(other.nodes.status.textContent, 'Could not finish connecting');
+        assert.equal(other.nodes.home.target, undefined, 'any other failure keeps the way home in this tab');
+    }
 });
 
 test('consent repair keeps the three supported return destinations and their instance prefix', () => {

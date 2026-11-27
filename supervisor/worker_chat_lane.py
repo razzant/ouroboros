@@ -1188,7 +1188,7 @@ def auto_resume_after_restart() -> None:
             from supervisor.state import update_state
 
             update_state(_panic_controls, confirm=PANIC_CONTROL_KEYS)
-            update_state(lambda state: state.update({PANIC_RECEIPT: identity}))
+            update_state(lambda state: state.update({PANIC_RECEIPT: identity}), confirm=(PANIC_RECEIPT,))
             remove_received_panic(root, identity)
             return
         if restart:

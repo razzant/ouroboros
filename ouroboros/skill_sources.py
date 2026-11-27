@@ -185,6 +185,61 @@ def source_view(fields: Dict[str, Any]) -> tuple[str, str]:
     return str(fields.get("commit") or fields.get("ref") or ""), _view_folder(fields.get("path"))
 
 
+def resolved_folder(path: Any) -> str:
+    """One absolute spelling of a folder on this computer (``''`` for none); never a key by itself."""
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(pathlib.Path(text).expanduser().resolve())
+    except OSError:
+        return str(pathlib.Path(text).expanduser())
+
+
+def effective_registry_url(override: Any) -> str:
+    """The exact base URL the registry's search and browse use for ``override`` (a row's ``url``, else the
+    configured one): the same resolution ``marketplace.clawhub`` performs, ``''`` when it would be refused."""
+    from ouroboros.marketplace.clawhub import _registry_base_url
+
+    try:
+        return _registry_base_url(str(override or "").strip() or None)
+    except Exception:
+        return ""
+
+
+def source_key(fields: Dict[str, Any]) -> Optional[str]:
+    """The opaque, nonsecret equality key of a source's exact producer origin: a truncated SHA-256 over the
+    origin's fields, so the key itself carries no URL, path or slug and two spellings of one origin compare
+    equal. A git or hub row keys ``kind`` + address + view (commit/ref, folder) and excludes id, name, part
+    and trust, so the Official and Community views of one repository share a key and a refresh (a new fetched
+    commit) never changes it. A local row keys its exact resolved folder. The built-in source has one fixed
+    key. A registry keys the exact effective base URL its search and browse are called with. ``None`` when the
+    origin cannot be named exactly — never a guess."""
+    import hashlib
+
+    kind = str(fields.get("kind") or "")
+    if kind == "builtin":
+        return "builtin"
+    if kind == "local":
+        folder = resolved_folder(fields.get("path"))
+        if not folder:
+            return None
+        return "local:" + hashlib.sha256(folder.encode("utf-8")).hexdigest()[:32]
+    if kind in {"hub", "git"}:
+        url = str(fields.get("url") or "")
+        if not url:
+            return None
+        revision, folder = source_view(fields)
+        material = "\0".join((kind, url, revision, folder))
+        return "git:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    if kind == "registry":
+        url = effective_registry_url(fields.get("url"))
+        if not url:
+            return None
+        return "registry:" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+    return None
+
+
 def standard_skill_dirs(root: pathlib.Path, taken: Any = (), *, listdir: Any) -> List[pathlib.Path]:
     """The skill folders in ``root``'s ``STANDARD_SKILL_FOLDERS``, without the names in ``taken`` (the ordinary
     walk's finds keep their folders). An absent folder holds none; any other folder is read with ``listdir``, the
@@ -420,7 +475,8 @@ def without_source(rows: List[Dict[str, Any]], source_id: str) -> List[Dict[str,
 __all__ = [
     "BUILTIN_ID", "CLAWHUB_ID", "HUB_COMMUNITY_ID", "HUB_OFFICIAL_ID", "KINDS", "LOCAL_ID", "SOURCES_SETTING",
     "STANDARD_SKILL_FOLDERS", "SUGGESTIONS_SETTING", "SkillSourceError", "TRUSTS", "derived_sources", "load_sources",
-    "normalize_source", "parse_sources", "repo_from_catalog_url", "repository_owner", "save_sources",
-    "source_by_id", "source_suggestions", "source_view", "sources_problem", "standard_skill_dirs",
+    "normalize_source", "parse_sources", "repo_from_catalog_url", "repository_owner", "resolved_folder",
+    "save_sources", "source_by_id", "source_key", "source_suggestions", "source_view", "sources_problem",
+    "standard_skill_dirs", "effective_registry_url",
     "validate_git_url", "view_fields", "with_added_source", "with_changed_source", "without_source",
 ]

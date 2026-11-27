@@ -14,12 +14,15 @@ def _continue_in_background(ctx, reason: str = "") -> str:
     return json.dumps(arm_detach(ctx, reason), ensure_ascii=False)
 
 
-def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None, task_ids=None) -> str:
+def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None, task_ids=None,
+                     chosen_hold=None) -> str:
     """One control event per named work. ``task_ids`` (Pause and Resume): the roots, de-duplicated, each as an
     ordinary single event under its own nonce (as if named alone in this call), all marked with this call's id
     (``list_call``); a list Resume is a general one (``general``) and never offers, records or reuses a waiting
     Continue's choice to go on past its predecessor's start of unknown outcome: that is the addressed Resume's alone
-    (``delegate_resume.selects``). Each mails its own outcome; nothing is kept between them."""
+    (``delegate_resume.selects``). Each mails its own outcome; nothing is kept between them. ``chosen_hold`` (Resume
+    of one work, alone): the conditional return on my human's Turn on after Panic, never an ordinary Resume
+    (``supervisor.panic_choice.resume_chosen``)."""
     from ouroboros.task_results import validate_task_id
     from ouroboros.tool_call_log import current_tool_call_id
     from ouroboros.tools.control_events import _emit_control_event
@@ -27,6 +30,10 @@ def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None
 
     if task_ids is not None and not isinstance(task_ids, list):  # checked before the single or list form is chosen
         return json.dumps({"ok": False, "error": "invalid_task_ids", "detail": "task_ids must be a non-empty list."})
+    if chosen_hold is not None and (task_ids or accept_unknown or not isinstance(chosen_hold, str)
+                                    or len(chosen_hold) != 16 or set(chosen_hold) - set("0123456789abcdef")):
+        return json.dumps({"ok": False, "error": "invalid_panic_selection",
+                           "detail": "chosen_hold is the hold your Drive state showed, for one task_id alone."})
     if task_id and task_ids:
         return json.dumps({"ok": False, "error": "invalid_task_ids",
                            "detail": "Name one work in task_id or a non-empty list in task_ids, not both."})
@@ -60,7 +67,8 @@ def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None
             "reason": str(reason or ""), "ts": utc_now_iso(),
             **({"list_call": call_id, **({"general": True} if action == "resume_task" else {})} if batch else {}),
             **({"accept_unknown": [str(value) for value in accept_unknown if value]}
-               if isinstance(accept_unknown, list) and accept_unknown else {})})
+               if isinstance(accept_unknown, list) and accept_unknown else {}),
+            **({"chosen_hold": chosen_hold} if chosen_hold is not None else {})})
         rows.append({"task_id": target, "action_nonce": nonce, "transport": emitted,
                      **({"ok": False, "error": "control_event_serialization_failed"}
                         if emitted == "serialization_failed" else {"ok": True, "status": "requested"})})
@@ -84,8 +92,8 @@ def _pause_task(ctx, task_id: str = "", reason: str = "", task_ids=None) -> str:
     return _request_control(ctx, "pause_task", task_id, reason, task_ids=task_ids)
 
 
-def _resume_task(ctx, task_id: str = "", reason: str = "", accept_unknown=None, task_ids=None) -> str:
-    return _request_control(ctx, "resume_task", task_id, reason, accept_unknown, task_ids)
+def _resume_task(ctx, task_id: str = "", reason: str = "", accept_unknown=None, task_ids=None, chosen_hold=None) -> str:
+    return _request_control(ctx, "resume_task", task_id, reason, accept_unknown, task_ids, chosen_hold)
 
 
 def _continue_task(ctx, task_id: str, reason: str = "") -> str:
@@ -566,6 +574,10 @@ def _accepting_schema(schema: dict) -> dict:
         "description": "IDs from this Resume refusal's acceptable_unknown. Give your reason to resume the saved task. "
                        "Named local calls are never replayed. A delegated start may still work or spend money. "
                        "Its request becomes lookup-only. Live senders stay held."}
+    schema["parameters"]["properties"]["chosen_hold"] = {
+        "type": "string",
+        "description": "Only from a wake your human left the choice after Panic: the hold your Drive state shows "
+                       "beside task_id. A changed stop is refused, never resumed otherwise."}
     return schema
 
 
@@ -600,7 +612,10 @@ def mind_tool_entries() -> list:
              "continue returns what their general request paused; work they paused by name waits for their word "
              "about it or the return they named. "
              "It preserves spent money, clocks and review history; capacity and holds still apply. "
-             "Only the owner can release a Panic hold. A list Resume (task_ids) is a general return: it lifts "
+             "Only the owner can release a Panic hold. When your Drive state says your human left you the choice "
+             "of the work Panic stopped, a wake of your own clock may resume one work it names, alone by task_id "
+             "with its chosen_hold. "
+             "A list Resume (task_ids) is a general return: it lifts "
              "the Pauses Ouroboros itself placed and every other saved stop you may release, and keeps every Pause "
              "Ouroboros did not itself place, whoever is shown as its author now: the owner's "
              "(owner_paused_by_name) and one whose press declared no author (pause_author_unknown, often the "

@@ -435,7 +435,6 @@ def test_toast_focus_timeout_and_disposal(shell_ui):
     }""")
     page.wait_for_timeout(250)
     assert page.get_by_label("Close test notice").count() == 1
-    assert "shell-icon-control" in page.get_by_label("Close test notice").get_attribute("class")
     page.locator("#chat-input").focus()
     page.wait_for_selector("[aria-label='Close test notice']", state="detached")
     page.evaluate("""async () => {

@@ -27,6 +27,7 @@ import { openModelSheet } from './model_sheet.js';
 import { sourceMark } from './model_source_mark.js';
 import { MAIN_ULTRAFAST_SCOPE, MAIN_ULTRAFAST_ROLES, MAIN_ULTRAFAST_ROLLBACK, PIN_OBSERVATION, canChooseTier, confirmMainUltrafast, resolvedTier, routeTiers, tierBinding, tierNamed, tierWord } from './processing_choice.js';
 import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
+import { modalNotice } from './toast.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
 import { clock, workControls } from './work_status.js';
@@ -380,7 +381,8 @@ export function createModelControl({
     // Main's Ultrafast asks first, for Main as it is bound at the press (its route, its account, and the engine
     // store and account fingerprint the catalog names): what it reaches, what that route says of it and what it is
     // listed at where that is told. A Main that moved under the question was not asked about: nothing is written.
-    async function confirmUltrafast() {
+    // `say` is the press's own notice (toast.js `modalNotice`): the sheet's while it stays open, the page's once it has closed.
+    async function confirmUltrafast(say) {
         const fromSheet = sheet;
         const bound = () => tierBinding(store.index(), state.main, accountOf(state.main));
         const route = state.main;
@@ -389,7 +391,7 @@ export function createModelControl({
         const shownSource = store.revisionOf?.(route) ?? null;  // the source whose tiers the sheet showed
         let read;
         try { read = await store.readMainTierSettings(); } catch (error) {
-            if (!state.destroyed) showToast(error?.message || MAIN_TIER_CHANGED, 'error');
+            if (!state.destroyed) say(error?.message || MAIN_TIER_CHANGED, 'error');
             return null;
         }
         if (state.destroyed || sheet !== fromSheet) return null;
@@ -401,16 +403,16 @@ export function createModelControl({
         const stillShown = () => bound() === asked && tiers()?.main === tier && canChooseTier('ultrafast', tiersOf(state.main))
             && (store.revisionOf?.(route) ?? null) === source;
         if (!sameRoute(state.main, route) || !sameRoute(read.route, route) || (pin !== null && read.account !== pin) || read.tier !== tier) {
-            showToast(MAIN_TIER_CHANGED, 'info');
+            say(MAIN_TIER_CHANGED, 'info');
             return null;
         }
         if (source === null) {  // an API connection the read gives no revision for: nothing to bind the yes to
-            showToast('Could not verify the key Main uses. Reload, then choose again.', 'error');
+            say('Could not verify the key Main uses. Reload, then choose again.', 'error');
             return null;
         }
         if (shownSource && shownSource !== source) {  // another source than the one shown: its own word first
             await store.readDetail?.(route);
-            if (!state.destroyed) showToast(fmt(SOURCE_CHANGED, { model: describe(route)?.short || '' }), 'info');
+            if (!state.destroyed) say(fmt(SOURCE_CHANGED, { model: describe(route)?.short || '' }), 'info');
             return null;
         }
         await store.readDetail?.(route);  // this source's endpoints, never another's: the price below is theirs
@@ -418,7 +420,7 @@ export function createModelControl({
         // meanwhile was not a press anyone still makes: nothing opens.
         if (state.destroyed || sheet !== fromSheet) return null;
         if (!stillShown()) {  // the same Main, now known whole: its account does not offer Ultrafast
-            showToast(fmt('Ultrafast is not offered for {model} here. {words}', { model: describe(route)?.short || '',
+            say(fmt('Ultrafast is not offered for {model} here. {words}', { model: describe(route)?.short || '',
                 words: tiersOf(route).explain('ultrafast') }), 'info');
             return null;
         }
@@ -430,7 +432,7 @@ export function createModelControl({
             explain: here.explain('ultrafast'), priceSaid: Boolean(here.priceOf('ultrafast')), doc });
         if (!yes || state.destroyed) return null;
         if (stillShown()) return { pinned, condition: { ...read.binding, ultrafast: asked, ...(source ? { [CONNECTION_CONDITION]: source } : {}) } };
-        showToast('Main changed while you were asked: Ultrafast was not set.', 'info');
+        say('Main changed while you were asked: Ultrafast was not set.', 'info');
         return null;
     }
 
@@ -591,6 +593,7 @@ export function createModelControl({
     /** The scope's own tier ('' = Default): the room's for its new work, or Main's own. It moves nothing else. */
     function chooseTier(tier) {
         if (state.tierSaving || state.destroyed) return state.tierSaving;
+        const say = modalNotice(sheet?.el, showToast);  // named at the press: the sheet it was pressed in, never a later one
         let settle = () => {};
         state.tierSaving = new Promise((resolve) => { settle = resolve; });
         sheet?.paint();  // the strip shows the save in flight before it is sent
@@ -601,7 +604,7 @@ export function createModelControl({
             try {
                 const body = projectId ? { processing: tier, project_id: projectId } : { processing: tier };
                 if (isMain && tier === 'ultrafast') {
-                    const confirmation = await confirmUltrafast();
+                    const confirmation = await confirmUltrafast(say);
                     if (!confirmation || state.destroyed) return;
                     body.if_unchanged = confirmation.condition;
                     pinned = confirmation.pinned;
@@ -616,9 +619,9 @@ export function createModelControl({
             } catch (error) {
                 if (state.destroyed) return;
                 if (isMain && tier === 'ultrafast' && error?.body?.code === 'settings_changed_elsewhere') {
-                    showToast(MAIN_TIER_CHANGED, 'info');
+                    say(MAIN_TIER_CHANGED, 'info');
                     await readChangedMain(pinned);
-                } else showToast(error?.message || 'Could not change the processing tier.', 'error');
+                } else say(error?.message || 'Could not change the processing tier.', 'error');
             } finally {
                 state.tierSaving = null;
                 if (!state.destroyed) { render(); refreshState(true); }
@@ -628,10 +631,11 @@ export function createModelControl({
         return saving;
     }
     async function setPinned(route, pinned) {
+        const say = modalNotice(sheet?.el, showToast);
         try {
             await store.setPinned(route, pinned);
         } catch (error) {
-            if (!state.destroyed) showToast(error?.message || 'Could not change the pinned models.', 'error');
+            if (!state.destroyed) say(error?.message || 'Could not change the pinned models.', 'error');
         }
     }
 

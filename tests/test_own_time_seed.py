@@ -502,8 +502,8 @@ def test_a_panic_pending_after_an_accepted_start_writes_nothing_and_the_debt_wai
     panic = install.root / "state" / "panic_stop.flag"
     accepting = clock_module._persist_start
 
-    def then_panic(source):
-        answer = accepting(source)
+    def then_panic(source, *args, **kwargs):
+        answer = accepting(source, *args, **kwargs)
         panic.write_text("panic", encoding="utf-8")
         return answer
 

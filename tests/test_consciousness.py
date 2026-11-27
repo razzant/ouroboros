@@ -1154,6 +1154,7 @@ def test_panic_and_an_unrecorded_stop_need_the_owners_start(held):
     clock.stop(source=AGENT_STOP)
     assert held.saved() == ((True, False), (True, "panic"))
     assert clock.start(source=AGENT_STOP) == held_stop_text("panic") and "Panic turned it off" in held_stop_text("panic")
+    assert "Turn on in the desktop app (Dashboard › Consciousness)" in held_stop_text("panic") and "Telegram" in held_stop_text("owner")
     # Migration: off with no recorded source (an earlier body's stop) is unknown until the owner starts it once.
     held.state.update_state(lambda st: st.pop(clock_module.STOP_SOURCE_KEY))
     assert clock.start(source=AGENT_STOP) == held_stop_text("")
@@ -1178,7 +1179,11 @@ def test_only_my_humans_start_after_a_panic_returns_what_linked_ouroboroses_are_
     assert held.saved()[1] == (True, "panic")
     clock.start(source=AGENT_STOP)
     assert returned == [] and clock.enabled is False
-    assert clock.start().startswith("Consciousness on:") and returned == [{}]
+    # After Panic a plain Start is not applied; the desktop native confirmation's basis is (supervisor/panic_choice.py).
+    from supervisor.panic_choice import STOP_STANDS, preview_start
+    assert clock.start() == STOP_STANDS and returned == [] and clock.enabled is False
+    assert clock.start(basis=preview_start(held.root)["basis"]).startswith("Consciousness on:")
+    assert returned == [{}]
 
 
 def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_holds_here(held, monkeypatch):
@@ -1193,7 +1198,10 @@ def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_
     held.state.update_state(recovered)
     clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
     assert clock.start(source=AGENT_STOP) == held_stop_text("") and clock.enabled is False
-    assert clock.start().startswith("Consciousness on:")  # the owner's start confirms both again
+    from supervisor.panic_choice import STOP_STANDS, preview_start
+    assert clock.start() == STOP_STANDS and clock.enabled is False  # how it was stopped cannot be read
+    # the owner's desktop-confirmed press of the switch confirms both again
+    assert clock.start(basis=preview_start(held.root)["basis"]).startswith("Consciousness on:")
     real = held.state.update_state
 
     def unwritable(*_args, **_kwargs):

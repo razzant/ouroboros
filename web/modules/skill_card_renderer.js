@@ -972,6 +972,10 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
         if (next.hasAttribute(name)) card.setAttribute(name, next.getAttribute(name));
         else card.removeAttribute(name);
     }
+    // A listing that learned a new title for the skill (its source's entry, a rename) corrects the heading in
+    // place: the element (and the focus in it) stays where the reader left it, only its words change.
+    const heading = card.querySelector('.skills-card-name'), nextHeading = next.querySelector('.skills-card-name');
+    if (heading && nextHeading && heading.innerHTML !== nextHeading.innerHTML) heading.innerHTML = nextHeading.innerHTML;
     for (const selector of ['.skills-card-status', '[data-skill-trays]', '[data-skill-errors]', '.skills-card-who', '.skills-card-marks', '.skills-card-purpose',
         '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-contributions]', '[data-skill-detail-facts]', '[data-skill-detail-source-notes]']) {
         const target = card.querySelector(selector), source = next.querySelector(selector);

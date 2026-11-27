@@ -212,6 +212,7 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
     const known = typeof enabled === 'boolean' ? enabled : typeof bg.enabled === 'boolean' ? bg.enabled : null;
     return {
         enabled: known,
+        panicChoiceAvailable: known === true && bg.panic_choice_available === true,
         status: text(bg.status),
         detail: text(bg.detail),
         // The switch's position by meaning and its gloss, in the host's words (consciousness_view.position_words).
@@ -292,7 +293,20 @@ export async function readSwitchPreview(to, { lifetimeMs = SWITCH_PREVIEW_LIFETI
     const places = data.places === null ? null : data.places.map((row) => ({ id: text(row?.place_id), label: text(row?.label),
         state: text(row?.state), people: count(row?.people), atLeast: row?.people_capped === true })).filter((row) => row.id.trim() || row.label.trim());
     if (places && places.length < data.places.length) throw new Error('The switch preview named a place it could not read.');
-    return { lines: data.lines.map(text).filter(Boolean), places };
+    // `after_panic`: after Panic the host's lines say what turning consciousness on (or handing over remaining
+    // Panic-stopped tasks in this run when consciousness is already on) means; only the desktop shell's native
+    // confirmation can submit it.
+    let afterPanic = null;
+    if (data.after_panic !== undefined && data.after_panic !== null) {
+        if (!object(data.after_panic) || !['panic', 'unknown', 'held'].includes(data.after_panic.why)
+            || typeof data.after_panic.choice !== 'boolean'
+            || !(data.after_panic.held === null || (Number.isSafeInteger(data.after_panic.held) && data.after_panic.held >= 0))) {
+            throw new Error('The switch preview could not be read.');
+        }
+        const basis = typeof data.after_panic.basis === 'string' && /^[0-9a-f]{32}$/.test(data.after_panic.basis) ? data.after_panic.basis : '';
+        afterPanic = { why: data.after_panic.why, choice: data.after_panic.choice, held: data.after_panic.held, basis };
+    }
+    return { lines: data.lines.map(text).filter(Boolean), places, afterPanic };
 }
 
 /** The status the Dashboard falls back to when the full snapshot cannot be read: `/api/state`. */

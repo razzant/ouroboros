@@ -389,6 +389,16 @@ test('keyboard opening skips a disabled or hidden toggle and lands on Dashboard'
         assert.equal(status.isOpen(), true);
         assert.equal(status.shade.querySelector('.cx-toggle').hidden, true);
         assert.equal(doc.activeElement, status.shade.querySelector('.cx-door'), 'unknown-state keyboard open skips hidden toggle');
+
+        // Already-on consciousness with remaining Panic-stopped tasks exposes Allow Panic resume beside Turn off.
+        status.close();
+        status.update(answer({ panic_choice_available: true }));
+        status.chip.click();
+        const panicBtn = status.shade.querySelector('.cx-panic-choice');
+        assert.equal(panicBtn.hidden, false);
+        assert.equal(panicBtn.textContent, 'Allow Panic resume');
+        status.update(answer());
+        assert.equal(panicBtn.hidden, true);
     } finally {
         status?.destroy();
         restoreDom(env.prior);

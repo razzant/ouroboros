@@ -473,7 +473,7 @@ def _ordinary_memory(ctx, observed, *, continuation_page):
         return unavailable("metadata_source_unavailable")
 
 
-def _inspect(ctx, observed: dict, *, offset: int) -> str:
+def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     """A bounded inventory of the observed view: counts and sizes by kind, then one page of
     units from ``offset`` within the tool's producer page size (``tool_result_limit``), naming
     ``next_offset`` while units remain. The reader rebuilds a restore reference from the one
@@ -482,7 +482,8 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
     its units, the paging, the view revision, the ``restore_checkpoint`` of the observation it lists (a newer
     observation has its own, so a listed unit always restores from its page) and the retained ordinary-memory
     map (``_ordinary_memory``'s continuation read). A page holds at least one unit, so paging always advances:
-    only page one's shared fields can leave no room for it."""
+    only page one's shared fields can leave no room for it, and then page one says so first (``limitation``).
+    ``not_applied`` names the note and selectors this call carried: inspection lists the view and applies none."""
     from ouroboros.context_compaction import (_capsule_metadata, _first_line, context_units, note_written,
                                               owner_protected_unit_ids, unit_kind)
     from ouroboros.review_history_view import attachment_transfer_options, review_note_options
@@ -585,8 +586,12 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
                  "and newer owner/tool messages stay whole."),
     }
 
-    def render(page: list, next_offset) -> str:
-        return json.dumps({**body, "offset": start, "total": len(rows), "units": page,
+    told = {"not_applied": ", ".join(not_applied) + ": inspection lists the view and applies nothing; send them again "
+            "with inspect=false."} if not_applied else {}
+
+    def render(page: list, next_offset, over="") -> str:
+        return json.dumps({**({"limitation": over} if over else {}), **told, **body, "offset": start,
+                           "total": len(rows), "units": page,
                            **({"next_offset": next_offset} if next_offset is not None else {})},
                           ensure_ascii=False, separators=(",", ":"))
 
@@ -597,7 +602,15 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
             break
         page = candidate
     end = start + len(page)
-    return render(page, end if end < len(rows) else None)
+    following = end if end < len(rows) else None
+    whole = render(page, following)
+    if len(whole) <= limit:
+        return whole
+    # A page over the limit holds one unit (none past the end): the fields every page carries and that unit.
+    why = "the fields every page carries and its one unit" if page else "the fields every page carries"
+    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): {why} "
+                  "are longer than a page." + (" Continue at next_offset." if following is not None else
+                                               " It holds every remaining unit; there is no next page."))
 
 
 def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = False, offset: int = 0,
@@ -630,7 +643,12 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_REPORTED_FAILURE",
                 text="Context view unavailable: this actor has no recorded model-send observation yet."))
         ctx._inspected_context_view = observed
-        return _inspect(ctx, observed, offset=offset)
+        carried = (("working_note", working_note), ("keep_last_n", keep_last_n), ("keep_unit_ids", keep_unit_ids),
+                   ("replace_note_ids", replace_note_ids), ("restore_unit_refs", restore_unit_refs),
+                   ("schema_names", schema_names), ("review_transfers", review_transfers),
+                   ("review_notes", review_notes), ("view_address", view_address), ("fold_last_n", fold_last_n),
+                   ("expected_view_revision", expected_view_revision or None))  # it lists the producing send's view
+        return _inspect(ctx, observed, offset=offset, not_applied=[name for name, value in carried if value is not None])
     if working_note is None and restore_unit_refs:
         if (any(value is not None for value in (keep_last_n, keep_unit_ids, replace_note_ids, schema_names, fold_last_n))
                 or review_transfers or review_notes):

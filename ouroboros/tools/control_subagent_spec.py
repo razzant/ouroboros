@@ -135,7 +135,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         },
         "scope_paths": {
             "type": "array", "items": {"type": "string"},
-            "description": "Agent-session ordinary folders: relative inputs for copy (nonempty required), or direct capture footprint including future outputs. ['.'] selects the whole folder. Acting children only, like directory_strategy. Native children declare outputs on file/process tools.",
+            "description": "Agent-session ordinary folders: relative inputs for copy (nonempty required), or direct capture footprint including future outputs. ['.'] selects the whole folder. Native children declare outputs on file/process tools.",
         },
         **attachment_parameters(
             "Your retained inputs, for an agent_session child only (API children refuse both): the first start of "

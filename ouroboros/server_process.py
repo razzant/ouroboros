@@ -430,6 +430,28 @@ def server_stop_cause(restart_requested: bool | None = None) -> str:
     return "restart_requested" if restart else _stop_source
 
 
+def _consume_launcher_pipe(private: Any, on_panic_start: Callable[[str], Any]) -> str:
+    """Read lines from the private launcher control pipe until ``quit\\n``, EOF or pipe failure."""
+    source = "launcher_gone"
+    with private:
+        try:
+            while line := private.readline(256):
+                if not line.endswith(b"\n"):
+                    while chunk := private.readline(256):
+                        if chunk.endswith(b"\n"):
+                            break
+                    continue
+                if line == b"quit\n":
+                    return "launcher_quit"
+                if line.startswith(b"panic_start "):
+                    parts = line.decode("ascii", "ignore").split()
+                    if len(parts) == 2:
+                        on_panic_start(parts[1])
+        except (OSError, ValueError):
+            log.warning("Launcher stop pipe failed; treating it as the launcher's end", exc_info=True)
+    return source
+
+
 class _SignalStopServer(uvicorn.Server):
     """uvicorn.Server whose SIGTERM/SIGINT handler stops the supervisor loop AT THE SIGNAL.
 
@@ -500,15 +522,9 @@ class _SignalStopServer(uvicorn.Server):
             raise
 
         def receive() -> None:
-            source = "launcher_gone"
-            with private:
-                try:
-                    while line := private.readline(64):
-                        if line == b"quit\n":
-                            source = "launcher_quit"
-                            break
-                except (OSError, ValueError):
-                    log.warning("Launcher stop pipe failed; treating it as the launcher's end", exc_info=True)
+            from supervisor.panic_choice import receive_launcher_start
+
+            source = _consume_launcher_pipe(private, receive_launcher_start)
             self.request_shutdown(source)
             _arm_stop_backstop(source)
 

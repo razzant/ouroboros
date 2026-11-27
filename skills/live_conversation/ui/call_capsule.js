@@ -87,6 +87,10 @@ const ENDINGS = {
     backpressure: { words: 'The call fell behind the voice stream', action: 'retry' },
     engine_refused: { words: 'The call could not start: {detail}', bare: 'The call could not start',
         action: 'settings', settings: MODEL },
+    // The room does not fit the engine's window: a fact. Only the start refusal (its closed state sends
+    // `action: 'settings'`) leaves the numbers in the room's System line; a serving call that could not renew does not.
+    context_capacity: { words: 'This room does not fit the selected voice engine; the room has the numbers', calm: true,
+        action: 'settings', settings: MODEL },
     // Admission refusals the server words itself; the table adds only the next step.
     call_model_missing: { action: 'settings', settings: MODEL },
     permission_denied: { sheet: true, words: 'Allow the microphone for Ouroboros in System Settings → Privacy & Security → '
@@ -111,6 +115,8 @@ const ENDINGS = {
     no_live_audio: { sheet: true, words: 'This browser can’t play live audio. Open Ouroboros in a current browser.' },
     no_call_socket: { sheet: true, words: 'This browser can’t open call connections.' },
 };
+const CAPACITY_RENEWAL = { words: 'This room no longer fits the selected voice engine', calm: true, action: 'settings',
+    settings: MODEL };
 const ACTION_LABELS = { retry: 'Try again', settings: 'Open Settings', reveal: 'Go to the call',
     open_browser: 'Open in browser', get_app: 'Get the new app' };
 
@@ -162,13 +168,15 @@ export function callPresentation(view, live = {}) {
 
 function ending(view) {
     const { kind, detail: codeDetail } = reason(view.code);
-    const entry = ENDINGS[kind];
+    const entry = kind === 'context_capacity' && view.action !== 'settings' ? CAPACITY_RENEWAL : ENDINGS[kind];
     const detail = String(view.detail || codeDetail || '').trim();
     const sheet = { mode: 'sheet', light: 'still', voice: '', tone: '', sub: '', small: '', formatted: false, actions: [] };
     const steps = names => names.map(name => name && actionFor(name, entry)).filter(Boolean);
     // An admission refusal is already in the owner's words; this page adds the one next step.
     if (view.words) return { ...sheet, tone: 'error', light: 'error', title: tx(view.words), formatted: true,
         actions: steps([view.action || entry?.action || 'retry']) };
+    // The owner's End with the server's own sentence (a call that never opened has no transcript): that sentence, calm.
+    if (kind === 'finished' && detail) return { ...sheet, title: tx(detail), formatted: true };
     if (!detail && (!view.code || kind === 'finished')) return { ...sheet, title: 'The call ended', sub: 'The room has its transcript' };
     if (!entry?.words) return { ...sheet, title: detail || 'The call ended', formatted: Boolean(detail),
         tone: detail ? 'error' : '', light: detail ? 'error' : 'still', actions: steps([view.action || entry?.action]) };

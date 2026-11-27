@@ -44,7 +44,7 @@ def _provider(monkeypatch, answer):
         seen.append(request)
         return answer(request)
 
-    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(oauth_engine, "http_client", lambda **_options: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     return seen
 
 
@@ -185,6 +185,91 @@ def test_an_identity_callback_files_the_sign_in_under_its_account(monkeypatch, t
     itself = asyncio.run(oauth_engine.complete(pending, {"state": asked["state"], "code": "c3", "iss": ISSUER}))
     assert itself == oauth_engine.load(pending) and itself["tokens"]["access_token"] == "account-access"
     assert "pending" not in itself and "account" not in itself
+
+
+def _refused_certificate(request):
+    """A certificate refused while connecting, typed as httpx raises it (``ConnectError`` caused by the TLS error)."""
+    import ssl
+
+    try:
+        raise ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (synthetic)")
+    except ssl.SSLCertVerificationError as cause:
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] synthetic", request=request) from cause
+
+
+def _says_refused(request):  # the same words without the typed cause: text is no proof
+    raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed", request=request)
+
+
+def _pool_reraised(request):  # httpcore's pool re-raises without the cause: the TLS error stays its context
+    import ssl
+
+    try:
+        raise ssl.SSLCertVerificationError(1, "synthetic")
+    except ssl.SSLCertVerificationError:
+        try:
+            raise httpx.ConnectError("synthetic", request=request) from None
+        except httpx.ConnectError as inner:
+            raise httpx.ConnectError("synthetic", request=request) from inner
+
+
+def _handshake_failed(request):  # another TLS failure: the narrow rule keeps the mark
+    import ssl
+
+    try:
+        raise ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number (synthetic)")
+    except ssl.SSLError as cause:
+        raise httpx.ConnectError("synthetic", request=request) from cause
+
+
+def _timed_out(request):  # sent, its answer never read: the provider may have used the code
+    raise httpx.ReadTimeout("synthetic", request=request)
+
+
+def _connection_refused(request):  # not a certificate: kept by the narrow rule
+    raise httpx.ConnectError("[Errno 61] Connection refused", request=request) from ConnectionRefusedError(61, "refused")
+
+
+@pytest.mark.parametrize("failure, lifted", [(_refused_certificate, True), (_pool_reraised, True), (_says_refused, False),
+                                             (_handshake_failed, False), (_timed_out, False), (_connection_refused, False)],
+                         ids=["certificate", "pool-reraised", "message-only", "other-tls", "read-timeout",
+                              "connection-refused"])
+def test_only_a_refused_certificate_proves_an_exchange_never_left_and_lifts_its_mark(monkeypatch, tmp_path, failure,
+                                                                                    lifted):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    pending = _grant(tmp_path, "pending")
+    answers = [failure, _token_endpoint]
+    calls = _provider(monkeypatch, lambda request: answers.pop(0)(request))
+    asked = _begin(pending)
+    returned = {"state": asked["state"], "code": "one-time", "iss": ISSUER}
+    with pytest.raises(oauth_engine.CertificateRefused if lifted else httpx.HTTPError) as raised:
+        asyncio.run(oauth_engine.complete(pending, returned))
+    assert isinstance(raised.value, httpx.ConnectError) or failure is _timed_out  # a consumer's connect handling holds
+    assert ("exchange" in oauth_engine.load(pending)["pending"]) is not lifted
+    if lifted:
+        done = asyncio.run(oauth_engine.complete(pending, returned))  # the same return completes
+        assert done["tokens"]["access_token"] == "account-access" and len(calls) == 2
+    else:
+        with pytest.raises(oauth_engine.SignInRequired, match="exchange_not_reusable"):
+            asyncio.run(oauth_engine.complete(pending, returned))
+        assert len(calls) == 1  # an uncertain code is never sent again
+
+
+def test_a_refused_certificate_never_lifts_the_mark_of_another_sign_in(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    pending = _grant(tmp_path, "pending")
+
+    def replaced_then_refused(request):  # a later begin replaced this sign-in while its exchange was connecting
+        doc = oauth_engine.load(pending)
+        later = {key: value for key, value in doc["pending"].items() if key != "exchange"}
+        oauth_engine.save(pending, {**doc, "pending": {**later, "nonce": "a-later-sign-in"}})
+        _refused_certificate(request)
+
+    _provider(monkeypatch, replaced_then_refused)
+    asked = _begin(pending)
+    with pytest.raises(httpx.ConnectError):
+        asyncio.run(oauth_engine.complete(pending, {"state": asked["state"], "code": "one-time", "iss": ISSUER}))
+    assert oauth_engine.load(pending)["pending"]["nonce"] == "a-later-sign-in"
 
 
 def test_a_declared_issuer_is_discovered_through_openid_configuration_and_another_is_refused(monkeypatch):

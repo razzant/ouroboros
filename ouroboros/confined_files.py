@@ -194,6 +194,25 @@ class ConfinedDirectory:
         observed = os.fstat(self.handle)
         return observed.st_dev, observed.st_ino, observed.st_mtime_ns
 
+    def identity(self, name: str = "", *, held: Any = None) -> tuple:
+        """One identity for telling an open file from this folder's entries: of the regular file HELD open (the
+        object its descriptor holds, whatever its name reaches now), else of the plain entry NAME here, no link
+        followed and no byte read. Both come from one primitive (POSIX ``fstat``/``fstatat``; Windows
+        ``GetFileInformationByHandle``, on the descriptor's own handle or the attribute-only handle ``_wal_index``
+        asks, a regular file's alone), so they are equal exactly for one object. Compare neither with ``open``'s
+        ``fstat`` result: on Windows it reports another volume-serial width (CPython 3.12+)."""
+        if held is not None:
+            if self.api:
+                return self.api.held_identity(held.fileno())
+            observed = os.fstat(held.fileno())
+        elif not native_name(name):
+            raise OSError(errno.EINVAL, "not a plain file component")
+        elif self.api:
+            return self.api.identity(self.handle, name)
+        else:
+            observed = os.stat(name, dir_fd=self.handle, follow_symlinks=False)
+        return observed.st_dev, observed.st_ino
+
     def open(self, name: str) -> Tuple[BinaryIO, os.stat_result]:
         if not native_name(name):
             raise OSError(errno.EINVAL, "not a plain file component")
@@ -595,12 +614,19 @@ class _Win32Files:
         access ``os.stat`` takes here, which reads nothing and meets no share mode."""
         handle = self.open_relative(parent, name, directory=False, metadata=True)
         try:
-            info = self._info_type()
-            if not self._info(handle, self._ctypes.byref(info)):
-                raise self._error("GetFileInformationByHandle")
-            return info.volume, info.index_high, info.index_low
+            return self._identity(handle)
         finally:
             self.close(handle)
+
+    def held_identity(self, fd: int) -> Tuple[int, int, int]:
+        """``identity`` of the file an open descriptor holds, asked of that descriptor's own handle."""
+        return self._identity(self._msvcrt.get_osfhandle(fd))
+
+    def _identity(self, handle: int) -> Tuple[int, int, int]:
+        info = self._info_type()
+        if not self._info(handle, self._ctypes.byref(info)):
+            raise self._error("GetFileInformationByHandle")
+        return info.volume, info.index_high, info.index_low
 
     def directory_revision(self, handle: int) -> tuple:
         info = self._info_type()

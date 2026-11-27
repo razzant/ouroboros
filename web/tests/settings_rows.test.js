@@ -459,9 +459,22 @@ test('a checker key goes through the owner\'s checker transaction; a roster with
     assert.deepEqual(sent, [{ settings: { OUROBOROS_MODEL_SAFETY: 'model-b' } },
         { settings: { OUROBOROS_MODEL_SAFETY: 'model-b' }, allow_empty_review_pool: true }]);
     assert.equal(asked[0].body, 'This leaves no agent that reviews.');
-    assert.equal(again.line(CHECKER), 'Saved · applies from the next model call · was model-a · Undo');
+    assert.doesNotMatch(again.line(CHECKER), /was model-a/);
+    const result = again.container.querySelector('[data-setting-result]');
+    assert.equal(result.querySelector('.ui-result-details')?.textContent, 'model-a');
     await again.press(again.undo());
     assert.deepEqual(sent.at(-1), { settings: { OUROBOROS_MODEL_SAFETY: 'model-a' }, if_unchanged: { OUROBOROS_MODEL_SAFETY: 'S@2' } });
+});
+
+test('the Extra CA receipt keeps a previous path in raw Details and Undo, not in its translatable words', () => {
+    const row = rowById('OUROBOROS_EXTRA_CA_BUNDLE');
+    const old = '/tmp/My Bundle.pem';
+    const line = outcomeLine(row, { state: 'saved', effect: 'next_task', old, token: 't' });
+    assert.equal(line.text, 'Saved · applies to new tasks');
+    assert.equal(line.details, old);
+    assert.equal(line.undo, true);
+    assert.equal(outcomeLine(row, { state: 'saved', effect: 'next_task', old: '', token: 't' }).text,
+        'Saved · applies to new tasks · was none');
 });
 
 test('writeEntry changes one entry of a fresh read with its token, and a stale list is refused, never retried', async (t) => {

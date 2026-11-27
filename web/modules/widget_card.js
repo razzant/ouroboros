@@ -282,7 +282,7 @@ export function renderWidgetFacade(mount, tab, height = 0) {
     const glyph = !icon || ICON_NAME.test(icon) ? PAGE_ICONS.widgets : escapeHtml(icon);
     mount.innerHTML = `<div class="widgets-facade" data-widget-facade>
         <span class="widgets-facade-icon" aria-hidden="true">${glyph}</span>
-        <strong class="widgets-facade-title">${escapeHtml(title)}</strong>
+        <strong class="widgets-facade-title" data-i18n-authored>${escapeHtml(title)}</strong>
     </div>`;
     setFrameHeight(mount.firstElementChild, height || frameHeight(tab.render || {}));
 }

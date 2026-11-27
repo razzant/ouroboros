@@ -83,7 +83,8 @@ from ouroboros.launcher_onboarding import (
     setup_recovery_menu,
 )
 from ouroboros.launcher_background import (Background, DesktopApi, activate_running_instance, background_env, other_copy_line,
-                                           request_tray_cleanup, restore_tray_after_handoff, stop_tray_before_exit)
+                                           request_panic_consciousness_start, request_tray_cleanup,
+                                           restore_tray_after_handoff, stop_tray_before_exit)
 from ouroboros.launcher_server_reaper import QuitEngineStop, reap_same_install_strays as _reap_same_install_strays_impl
 from ouroboros.launcher_context_menu import attach_every_window, enable_quote_menu
 from ouroboros.launcher_readiness import wait_for_server as _wait_for_server
@@ -548,6 +549,22 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> Optional[subprocess.Popen]:
     threading.Thread(target=copy_capped_output, args=(proc.stdout, DATA_DIR / "logs" / "agent_stdout.log"),
                      kwargs={"report": log}, name="agent-output-copy", daemon=True).start()
     return proc
+
+
+def _send_agent_stdin_line(line: bytes) -> bool:
+    """Write one control line to the live server's private stdin pipe; False if unavailable or stopping."""
+    with _agent_lock:
+        proc = (_agent_proc if _agent_proc is not None and _agent_stopping is not _agent_proc
+                and _agent_start is None and not _shutdown_event.is_set() else None)
+    stdin = getattr(proc, "stdin", None) if proc is not None and proc.poll() is None else None
+    if stdin is None:
+        return False
+    try:  # no lock Quit could wait on: a write after its close only fails here (ValueError)
+        stdin.write(line)
+        stdin.flush()
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def stop_agent() -> bool:
@@ -1425,6 +1442,14 @@ def main(argv=()):
         @staticmethod
         def _native_confirm(title: str, message: str) -> bool:
             return bool(_webview_window and _webview_window.create_confirmation_dialog(title, message))
+
+        def request_panic_consciousness_start(self) -> dict:
+            try:
+                return request_panic_consciousness_start(
+                    _generation_port or actual_port, self._native_confirm, _send_agent_stdin_line)
+            except Exception as exc:
+                log.warning("Post-Panic consciousness confirmation failed: %s", exc, exc_info=True)
+                return {"submitted": False, "error": f"Native confirmation failed: {exc}"}
 
         def request_runtime_mode_change(self, mode: str) -> dict:
             try:

@@ -460,7 +460,6 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             action = parts[1] if len(parts) > 1 else "status"
             if action in ("start", "on", "1", "stop", "off", "0"):
                 from ouroboros.consciousness import OWNER_STOP
-
                 on = action in ("start", "on", "1")  # the owner's door: the app, Telegram and a custom setup page send /bg
                 result = ctx.consciousness.start() if on else ctx.consciousness.stop(source=OWNER_STOP)
                 reply(f"🧠 {result}")
@@ -748,7 +747,8 @@ def _run_supervisor(settings: dict) -> None:
         _consciousness = BackgroundConsciousness(  # wakes speak in the bound chat, or Main while it is known empty
             drive_root=DATA_DIR, repo_dir=REPO_DIR, owner_chat_id_fn=lambda: owner_chat_of(load_state()),
             routing_metadata_fn=lambda cid: main_lane_routing_metadata(_event_ctx, cid))  # _event_ctx is built below
-
+        from supervisor.panic_choice import bind_launcher_start
+        bind_launcher_start(lambda: _consciousness if _supervisor_ready.is_set() else None)
         # A boot grant needs a KNOWN True and no unconsumed Panic flag (#1307).
         from ouroboros.installation_stop import installation_panic
         if control_is(load_state(), "bg_consciousness_enabled", True) and not installation_panic(DATA_DIR):

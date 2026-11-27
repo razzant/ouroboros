@@ -16,6 +16,7 @@
 
 import { apiFetch } from './api_client.js';
 import { fmtInto } from './i18n.js';
+import { disposeNotices, showToast } from './toast.js';
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
@@ -782,6 +783,12 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
             target.addEventListener(type, handler);
             current.disposers.push(() => target.removeEventListener(type, handler));
         };
+        // The page behind a modal is inert, so what an action answers is this dialog's own notice and leaves with it. An
+        // answer that outlives this opening (a native close included, its event still queued) is the page's, never a
+        // later reader's.
+        const notice = (message, tone) => showToast(message, tone,
+            session === current && dialog.open ? { host: dialog } : {});
+        current.disposers.push(() => disposeNotices(dialog));
         listen(doc.defaultView, 'resize', () => {
             if (current.kind !== 'image') return;
             current.viewport?.relayout();
@@ -801,7 +808,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
                 void load(current);
                 current.body.focus();
             }
-            else if (action === 'open' || action === 'download' || action === 'copy') void actions[action]?.(file);
+            else if (action === 'open' || action === 'download' || action === 'copy') void actions[action]?.(file, notice);
             else if (view && view !== current.view && current.loaded) {
                 current.view = view;
                 showContent(current);
