@@ -10434,7 +10434,7 @@ html[data-layout="stack"] .project-panel {
 .settings-disclosure-caret { flex: none; transition: transform 0.18s ease; }
 .settings-disclosure[aria-expanded="true"] .settings-disclosure-caret { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .settings-disclosure-caret { transition: none; } }
-/* Who an unpinned run would take next: a quiet fact of the family head, not a second status. */
+/* A quiet fact of the family head, not a second status: who an unpinned run takes next, or that Connect waits for the program. */
 .agent-family-next { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* Accounts are grouped by FAMILY, one card each (owner: "все акки клод кода
    должны быть эквивалентны", "в каждой секции добавить кнопку"). The card
@@ -10540,8 +10540,8 @@ html[data-layout="stack"] .project-panel {
 .harness-maintenance-details dd { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-1); color: var(--text-primary); }
 .harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .harness-model-program { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
-/* A press's failure reason on the program line, in the chooser footer and on a setup family row alike (as the Accounts notice). */
-.harness-model-program [data-tone="warn"] { color: var(--status-warn-fg); }
+/* A press's failure reason on the program line, in the chooser footer, on a setup family row and its programs line alike. */
+:is(.harness-model-program, .agent-other-programs) [data-tone="warn"] { color: var(--status-warn-fg); }
 .harness-model-latest { white-space: nowrap; }
 .ui-model-options[data-model-popup] { display: flex; flex-direction: column; overflow: hidden; }
 .ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }

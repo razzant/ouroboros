@@ -46,6 +46,9 @@ class ClaudexorStatusResponse(TypedDict, total=False):
     # Full Accounts adds profiles.login_capable_harnesses (list[str] | None):
     # login eligibility from the catalog's setupLogin (the manifests when the
     # catalog is not current evidence); None retains the unread fail-open.
+    # A saved subscription account is NOT in this list: it keeps its own row
+    # (per profile, by credential_kind) while the list stays the capability,
+    # so an api_key profile of the same harness gains no sign-in from it.
     profiles: Dict[str, Any]
     quota: List[Dict[str, Any]]
     quota_absences: List[Dict[str, Any]]

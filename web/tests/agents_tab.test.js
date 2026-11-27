@@ -119,12 +119,14 @@ test('Cursor auth and agent catalog access do not certify either execution surfa
 
 test('a fresh install still shows every family, each with its own way in', () => {
     // Discovery needs a running daemon and a first run has none, so with the
-    // catalogue empty the three bootstrap families must still be reachable —
-    // otherwise the whole onboarding path is a dead end.
+    // catalogue empty the subscription families must still be reachable —
+    // otherwise the whole onboarding path is a dead end. Antigravity among
+    // them: discovery hides a family whose program is missing, so it was
+    // nowhere to be found before its program was installed by hand.
     const groups = accountGroups(payload({ daemon: { state: 'not_provisioned', runtime: {} } }),
         { accountsRead: 'not_read' });
-    assert.deepEqual(groups.map((g) => g.harness), ['codex', 'claude', 'cursor']);
-    assert.deepEqual(groups.map((g) => g.label), ['Codex', 'Claude Code', 'Cursor']);
+    assert.deepEqual(groups.map((g) => g.harness), ['codex', 'claude', 'cursor', 'agy']);
+    assert.deepEqual(groups.map((g) => g.label), ['Codex', 'Claude Code', 'Cursor', 'Antigravity']);
     for (const group of groups) {
         assert.deepEqual(group.rows, []);
         // BIBLE P1: an idle daemon was never asked, so "no account connected"
@@ -327,6 +329,28 @@ test('the family button keeps its ADD intent even when the runtime needs repair'
     // An EMPTY family has no add intent to protect, so it does carry the runtime.
     const empty = { rows: [] };
     assert.equal(familyActionLabel(empty, broken), 'Fix & connect');
+    // Its program read as absent: Connect installs it first and is named for both steps. Where the engine cannot
+    // install it here the card promises no sign-in, an empty family or one holding accounts alike (its program row says
+    // why and offers Check again); the account words stay the accounts'.
+    assert.equal(familyActionLabel(empty, payload(), { installable: true }), 'Install & connect');
+    assert.equal(familyActionLabel(empty, payload(), { installable: false }), '');
+    assert.equal(familyActionLabel(populated, payload(), { installable: true }), 'Add account', 'a named add keeps its intent');
+    assert.equal(familyActionLabel(populated, payload(), { installable: false }), '', 'a named add promises nothing the engine cannot run');
+    const group = { harness: 'agy', label: 'Antigravity', rows: [], status: { tone: 'muted', label: 'No account connected' } };
+    const offered = harnessFamilyMarkup(group, payload(), { accountsRead: 'ok', missing: { installable: true } });
+    assert.match(offered, /data-family-add>Install &amp; connect</);
+    const waiting = harnessFamilyMarkup(group, payload(), { accountsRead: 'ok', missing: { installable: false } });
+    assert.doesNotMatch(waiting, /data-family-add|data-program-first|Connect once/, 'no button, and no promise of one');
+    assert.match(waiting, /No account connected<\/span>/);
+    // The family's named accounts stay on the page and keep their own controls; only the add promise goes.
+    const stuck = harnessFamilyMarkup(populated, payload(), { accountsRead: 'ok', missing: { installable: false } });
+    assert.doesNotMatch(stuck, /data-family-add/);
+    assert.equal((stuck.match(/class="ui-row harness-account-row/g) || []).length, populated.rows.length, 'every named account is still there');
+    assert.match(stuck, /data-harness-toggle/);
+    assert.match(stuck, /data-harness-remove/);
+    // Accounts not read, or an engine on the retired account model, make the absence no reason to say Install & connect.
+    assert.match(harnessFamilyMarkup(group, payload(), { accountsRead: 'failed', missing: { installable: true } }), /data-family-add>Connect</);
+    assert.doesNotMatch(harnessFamilyMarkup(group, payload(), { accountsRead: 'failed', accountsUnsupported: true, missing: { installable: true } }), /data-family-add/);
 });
 
 test('a row offers what it can actually do, and runtime work outranks it', () => {

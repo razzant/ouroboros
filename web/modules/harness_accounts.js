@@ -43,7 +43,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { planLabel } from './harness_presentation.js';
 import { createLoginCardController, normalizeProfileName } from './harness_login_cards.js';
 import { refreshMaintenanceCatalogs } from './settings_catalog.js';
-import { createHarnessMaintenanceController } from './harness_maintenance.js';
+import { createHarnessMaintenanceController, currentMissing, maintenanceOperationPending } from './harness_maintenance.js';
 import { formatRelativeAge } from './ui_helpers.js';
 import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
 
@@ -473,13 +473,12 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
     // own the line and the staged update is a footnote — "Engine X keeps
     // running" was a positive claim about a daemon that, in that window,
     // answered nothing, printed over a button offering to START it.
-    if (runtimeState === 'update_staged' && !unread.length) {
-        const target = runtime.staged_version || runtime.target_version || '?';
-        const current = daemon.engine_version || runtime.version || '?';
-        return { tone: 'warn', text: `Claudexor ${target} is ready and will activate after the daemon next restarts. Engine ${current} keeps running until then.` };
-    }
     if (runtimeState === 'update_staged') {
         const target = runtime.staged_version || runtime.target_version || '?';
+        if (!unread.length) {
+            const current = daemon.engine_version || runtime.version || '?';
+            return { tone: 'warn', text: `Claudexor ${target} is ready and will activate after the daemon next restarts. Engine ${current} keeps running until then.` };
+        }
         const gap = gapNames ? `${capitalize(gapNames)} were not read` : 'The status answer did not complete';
         return { tone: 'warn', text: `${gap}${daemon.last_error ? `: ${daemon.last_error}` : ''}. Claudexor ${target} is staged and activates after the daemon next restarts.` };
     }
@@ -514,9 +513,9 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
         return { tone: recovering ? 'warn' : 'ok', text: `Claudexor ${recovering ? 'running' : 'ready'}`,
             version: `engine ${daemon.engine_version || '?'}` };
     }
+    const version = runtime.version ? ` ${runtime.version}` : '';
     if (status === 'not_provisioned') {
         if (runtimeState === 'ready') {
-            const version = runtime.version ? ` ${runtime.version}` : '';
             return { tone: 'muted', explainsUnread: true, text: `Claudexor${version} is ready. Connect an account to start Ouroboros’s own agent daemon.` };
         }
         return { tone: 'muted', explainsUnread: true, text: 'No accounts connected yet. Connect installs Claudexor and starts Ouroboros’s own agent daemon automatically.' };
@@ -525,7 +524,6 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
         // An idle owned home and an observed crash share this liveness state.
         // daemonStatusLine appends any saved exit fact without changing tone;
         // the next explicit wake or delegated run still owns restart policy.
-        const version = runtime.version ? ` ${runtime.version}` : '';
         return { tone: 'muted', explainsUnread: true, text: `Claudexor${version} is installed; the agent daemon is not running. It starts automatically on the next login or delegated run.` };
     }
     if (status === 'foreign_daemon') {
@@ -543,15 +541,12 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
     return { tone: 'error', text: `Daemon ${status}${daemon.last_error ? `: ${daemon.last_error}` : ''}` };
 }
 
-// The agent families a fresh install can connect BEFORE the daemon exists.
-// Discovery needs a running daemon, and on first run there is none — so with
-// nothing discovered the UI still offers a Connect affordance, and the first
-// Connect is exactly what provisions the owned daemon (D30). Presentation
-// only; the login flow itself stays harness-agnostic. agy (Antigravity) is
-// deliberately NOT bootstrapped: it has no engine-default credential store,
-// so a pre-discovery card could only refuse — its card appears from live
-// discovery the moment the engine answers.
-export const BOOTSTRAP_HARNESSES = ['codex', 'claude', 'cursor'];
+// The subscription families Ouroboros offers (the setup wizard's rows too), each
+// standing before and without discovery: a first run has no daemon, and the first
+// Connect provisions it (D30); discovery hides a family whose program is missing,
+// and Connect installs that program first. Antigravity keeps no default account,
+// so Connect asks for a name. Presentation only; the flow stays harness-agnostic.
+export const BOOTSTRAP_HARNESSES = ['codex', 'claude', 'cursor', 'agy'];
 
 // The display name comes from the store, which owns the payload it reads and is
 // imported by BOTH this tab and the onboarding wizard. Re-exported so this
@@ -687,7 +682,7 @@ export function accountGroups(payload, {
 } = {}) {
     // One group per family, in a stable order: discovered families first (the
     // engine's own order), then any bootstrap family still missing, so a fresh
-    // install shows all three cards and every one of them can be connected.
+    // install shows a card for every bootstrap family, each one connectable.
     // An engine on the retired account model lists nothing, held rows included.
     const rows = accountsUnsupported ? [] : accountRows(payload);
     const order = [];
@@ -710,7 +705,7 @@ export function accountGroups(payload, {
 
 const familyAccountCommand = group => group.rows.length ? 'named' : 'default';
 
-export function familyActionLabel(group, payload) {
+export function familyActionLabel(group, payload, missing = null, { rosterKnown = true } = {}) {
     // The card's OWN button, and the fix for "позиции кнопок нелогичные": the
     // add affordance lives in the family header instead of hanging off one
     // privileged row. An empty family connects its default CLI login first
@@ -726,8 +721,15 @@ export function familyActionLabel(group, payload) {
     // dropping the name step would remove the add intent this card exists for.
     // The repair is a PREREQUISITE, not the destination: the login card
     // performs it in the foreground and reports it there, and the tab's service
-    // banner already names the fault above.
-    return familyAccountCommand(group) === 'named' ? 'Add account' : runtimeActionLabel(payload);
+    // banner already names the fault above. A program read as absent (`missing`): Connect installs it first, so the
+    // button names both steps; one the engine cannot install here promises no sign-in, whatever accounts the family
+    // holds (they stay on the page): its program row says why and offers Check again.
+    if (missing && !missing.installable) return '';
+    if (familyAccountCommand(group) === 'named') return 'Add account';
+    // The no-install withhold above stands on the program's own read whatever the roster says. The naming does not:
+    // Install & connect claims a family read empty (unread accounts may hold one a first sign-in would duplicate),
+    // so an unread roster keeps the runtime's own words instead.
+    return missing && rosterKnown ? 'Install & connect' : runtimeActionLabel(payload);
 }
 
 export function rowActionLabel(row, payload) {
@@ -991,6 +993,11 @@ const state = {
     paintOverview: null, // the provider's own blocks above the list, inside the same reading-place capture
 };
 
+// One place clears the row-level notices: a new owner action supersedes the last one's wording.
+const clearNotices = () => { state.removeError = ''; state.removeNotice = ''; state.restart?.clear(); };
+// The provider's own name, as this page's store reads it.
+const providerName = (harness) => familyLabel(harness, state.store.snapshot || {}, { catalogKnown: state.store.catalogKnown });
+
 // The disclosure's quiet chevron (it turns when open).
 const DISCLOSURE_CARET = '<svg class="settings-disclosure-caret" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M3.5 2 7 5 3.5 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
 
@@ -1080,13 +1087,16 @@ function rowHtml(row, payload, facets = {}) {
     const loginAction = rowLoginAction(row, payload);
     const pending = facets.store?.profileAction?.(row.harness, row.profile_id);
     const on = pending?.busy ? pending.requestedEnabled : row.enabled !== false;
-    // Row ACTIONS follow the engine's own routes: every named registry row has the PATCH Enabled toggle (its place in
-    // rotation, a switch that acts at once) and DELETE Remove. The switch and More keep the row's end at every width;
-    // Sign in stands on a line under the words while the account is not signed in, and what is rare (Sign in again,
-    // Remove) shows on that line with More, whose panel holds the account's resources. A login that
-    // is verified is the quiet case and says nothing: the card's first line counts them, and a row speaks of trouble.
+    // Row ACTIONS follow the engine's own routes: every named registry row has the PATCH Enabled
+    // toggle (its place in rotation, at once) and DELETE Remove; the switch and More keep the row's
+    // end at every width. Sign in stands on a line under the words while the account is not signed
+    // in; the rare (Sign in again, Remove) share that line with More, whose panel holds resources.
+    // A verified login is the quiet case: the first line counts them, and a row speaks of trouble.
     const rare = String(row?.status?.verification || '') === 'passed';
-    const login = `<button type="button" class="btn btn-default btn-sm" data-login-command="${loginAction.refresh ? 'refresh' : 'login'}" data-harness-login${rare ? ' data-rare' : ''}>${escapeHtml(loginAction.label)}</button>`;
+    // The engine cannot install a program a current read finds absent: the family promises no new
+    // sign-in (§7); Check status, the toggle, Remove and a job already running keep their controls.
+    const withheld = Boolean(facets.missing) && !facets.missing.installable && !loginAction.refresh;
+    const login = withheld ? '' : `<button type="button" class="btn btn-default btn-sm" data-login-command="${loginAction.refresh ? 'refresh' : 'login'}" data-harness-login${rare ? ' data-rare' : ''}>${escapeHtml(loginAction.label)}</button>`;
     return `
         <div class="ui-row harness-account-row${quota.exhausted ? ' harness-exhausted' : ''}" data-harness="${escapeHtml(row.harness)}" data-profile="${escapeHtml(row.profile_id)}" data-kind="${escapeHtml(row.kind)}"${on && badge.tone === 'error' ? ' data-tone="warn"' : ''}>
             <span class="harness-account-mark" aria-hidden="true">${facets.mark?.({ row, badge, quota }) || ''}</span>
@@ -1111,15 +1121,19 @@ export function harnessFamilyMarkup(group, payload, facets) {
     const known = (facets?.accountsRead ?? READ_OK) === READ_OK;
     const body = [...group.rows].sort((a, b) => Number(needsSignIn(b, known)) - Number(needsSignIn(a, known)))
         .map((row) => rowHtml(row, payload, facets)).join('');
-    const nextUp = nextUpBadge(payload, group.harness,
-        { accountsRead: facets?.accountsRead ?? READ_OK });
+    const nextUp = nextUpBadge(payload, group.harness, { accountsRead: facets?.accountsRead ?? READ_OK });
+    // The account facts stay the accounts'; a missing program words the button (or withholds it: its card says why).
+    // The program's read decides the withhold on its own: an unread roster never turns a known-absent, un-installable
+    // program into a connectable one. Only the Install & connect naming waits for a roster read empty.
+    const action = group.maintenanceOnly || facets?.accountsUnsupported ? ''
+        : familyActionLabel(group, payload, facets?.missing, { rosterKnown: known });
     return `
         <section class="agent-family-card" data-family="${escapeHtml(group.harness)}">
             <div class="ui-card settings-card agent-family-program" data-family-maintenance="${escapeHtml(group.harness)}"></div>
             <div class="ui-card settings-card agent-family-accounts"${group.maintenanceOnly ? ' hidden' : ''}>
                 <div class="settings-card-head agent-family-head">
                     <h3 class="settings-card-title">Accounts</h3>
-                    ${group.maintenanceOnly || facets?.accountsUnsupported ? '' : `<button type="button" class="btn btn-default btn-sm" data-family-command="${familyAccountCommand(group)}" data-family-add>${escapeHtml(familyActionLabel(group, payload))}</button>`}
+                    ${action ? `<button type="button" class="btn btn-default btn-sm" data-family-command="${familyAccountCommand(group)}" data-family-add>${escapeHtml(action)}</button>` : ''}
                 </div>
                 <p class="settings-card-lead agent-family-id">
                     ${group.maintenanceOnly ? '' : `<span class="ui-status" data-tone="${group.status.tone}">${escapeHtml(group.status.label)}</span>`}
@@ -1154,6 +1168,16 @@ function preservePage(update) {
 function renderRows() {
     preservePage(paintRows);
 }
+
+// The family's program as this page's current reads say: absent (harness_maintenance.js `currentMissing`), else null.
+// A pending install of it stands as not installable: nothing on this page installs it a second time, also where a refused or shortened read proves no absence and no current read shows it installed.
+const programMissing = (harness) => {
+    const view = state.maintenance?.view(harness);
+    const missing = currentMissing(view);
+    const pending = Boolean(view?.request || maintenanceOperationPending(view?.operation || view?.entry?.operation));
+    if (!pending || (view?.entry?.selection?.path && view.listed !== false && !view.inspectionError && !view.inventoryError)) return missing;
+    return missing ? { ...missing, installable: false, pending: true } : { installable: false, failed: false, byHand: false, pending: true };
+};
 
 function paintRows(host, control) {
     // The wake error expires HERE, on the one condition that makes it moot: a
@@ -1209,8 +1233,8 @@ function paintRows(host, control) {
         });
     }
     paintAccountFamilies(host, groups.filter((group) => !state.family || group.harness === state.family)
-        .map((group) => harnessFamilyMarkup(group, payload,
-            { accountsRead, quotaRead, store: state.store, accountsUnsupported, mark: state.mark })).join(''), control);
+        .map((group) => harnessFamilyMarkup(group, payload, { accountsRead, quotaRead, store: state.store,
+            accountsUnsupported, mark: state.mark, missing: programMissing(group.harness) })).join(''), control);
     state.resources?.mount(host, accountsUnsupported ? [] : accountRows(payload), payload, quotaRead);
     host.querySelectorAll('[data-harness-login]').forEach((button) => {
         const command = button.dataset.loginCommand;
@@ -1242,12 +1266,8 @@ function paintRows(host, control) {
             if (!state.initialized) return;
             const harness = button.closest('[data-family]')?.dataset.family;
             if (command === 'default') { startLogin(harness, ''); return; }
-            const profile = await promptProfileName({
-                family: familyLabel(harness, state.store.snapshot || {}, {
-                    catalogKnown: state.store.catalogKnown,
-                }),
-            });
-            if (profile) startLogin(harness, profile);
+            const profile = await promptProfileName({ family: providerName(harness) });
+            if (profile) startLogin(harness, profile, { add: true });
         });
     });
     state.loginCard?.render();
@@ -1269,9 +1289,7 @@ async function toggleAccountEnabled(harness, profileId, enabled) {
     // box as removal, and the fresh read repaints the row from engine truth.
     if (!harness || !profileId) return;
     const name = rowName(state.store, harness, profileId);
-    state.removeError = '';
-    state.removeNotice = '';
-    state.restart?.clear();
+    clearNotices();
     try {
         const receipt = await state.store.setEnabled(harness, profileId, enabled);
         const action = state.store.profileAction(harness, profileId);
@@ -1309,9 +1327,7 @@ export async function confirmRemoveAccount(harness, profileId, {
         danger: true,
     });
     if (answer !== true) return;
-    state.removeError = '';
-    state.removeNotice = '';
-    state.restart?.clear();
+    clearNotices();
     let refused = false;
     try {
         const receipt = await removeImpl(harness, profileId);
@@ -1388,25 +1404,52 @@ function ensureLoginCard() {
         // the collapsed Advanced terminal fallback, Close.
         mode: 'full',
         preservePlace: preservePage,
+        // The sign-in installs a program read as absent first, and each answer reads that program again;
+        // the open sign-in stays as it is. A program the engine cannot install withholds the sign-in
+        // outright — the rows' own decision, asked at every start and submit, a name face included.
+        installing: (harness) => (programMissing(harness)?.installable ? providerName(harness) : ''),
+        signInWithheld: (harness) => {
+            const missing = programMissing(harness);
+            const name = providerName(harness);
+            // An unresolved install is followed through ITS receipt, not a new sign-in that installs again: the sentence names that state, never an installer this page cannot currently see.
+            if (missing?.pending) return `An installation for ${name} is unresolved. Check its result in the program row above.`;
+            return missing && !missing.installable ? `${name} is not installed where Claudexor runs and cannot be installed here.` : '';
+        },
+        onAnswer: (harness) => {
+            const view = state.maintenance?.view(harness);  // not read installed now: the sign-in may have installed it
+            if (view && !(view.entry?.selection?.path && !view.inspectionError && !view.inventoryError)) void state.maintenance.refresh({ harness, fresh: true });
+        },
         onSettled: () => renderRows(),
     });
     return (state.loginCard = card);
 }
 
 /**
- * Start (or restart) a login for one account row. Exported because the account
- * rows, the Add-account dialog and the browser smoke tests all drive it.
+ * Start (or restart) a login for one account row: `profile` names the saved account it signs in ('' the family's
+ * default sign-in); `add` marks the name the Add-account dialog has just taken, which no roster lists yet. Exported
+ * because the account rows, the Add-account dialog and the browser smoke tests all drive it.
  */
-export async function startLogin(harness, profile) {
+export async function startLogin(harness, profile, { add = false } = {}) {
     if (!harness || !state.initialized) return;
-    // The command shows its card, or the open sign-in that would not yield, where the owner can act on it.
-    // The create's answer and every poll after it are ordinary repaints (DESIGN §10).
+    // The command shows its card, or the open sign-in that would not yield, where the owner can act on it — or the
+    // card's refusal (§7), decided by the card at every start. The create's answer and every poll after it are
+    // ordinary repaints (DESIGN §10).
     const show = state.resources?.command();
     const card = ensureLoginCard();
-    await card.start(harness, profile, '', paint => {
+    await (add ? card.addAccount : card.start)(harness, profile, '', paint => {
         paint();
         show?.(loginHost(card.active?.harness));
     });
+}
+
+/** A list head's press (settings_accounts.js) on this family's page: `install` is the program row's Install (it stays an
+ *  install, whatever the page has read since), `connect` the ordinary Connect, which installs a missing program first.
+ *  False when no page of that family stands. */
+export function familyAction(harness, action) {
+    if (!state.initialized || state.family !== harness) return false;
+    if (action === 'install') void state.maintenance?.act(harness, 'install');
+    else void startLogin(harness, '');
+    return true;
 }
 
 /** Read the shared status once for passive consumers and first paint. */
@@ -1458,8 +1501,7 @@ async function _init(store, restartDeps, page) {
     Object.assign(state, { store, family: String(page.family || ''), mark: page.mark, paintOverview: page.paintOverview,
         path: String(page.path || `accounts/${page.family || ''}`) });
     state.resources = createAccountResourcesController({ store });
-    state.removeError = '';
-    state.removeNotice = '';
+    clearNotices();
     state.wakeError = '';
     state.wakeBusy = false;
     // Restart Claudexor (`claudexor_restart.js`): preview, the in-app confirmation, then the restart.
@@ -1522,8 +1564,7 @@ async function refreshAllAccounts() {
     void state.store.refresh({ afterCurrent: true });
     if (state.store.resourceAction(null).busy) return;
     // A new owner action ends the line about an earlier row request; that request's outcome stays unknown.
-    state.removeError = state.removeNotice = '';
-    state.restart?.clear();
+    clearNotices();
     const result = await state.store.refreshResources();
     if (!result) state.removeError = state.store.resourceAction(null).error || 'Account refresh did not complete';
     else void (state.store.observe?.({ afterCurrent: true }) || state.store.refresh());

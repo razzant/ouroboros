@@ -5,7 +5,7 @@
 import { apiClient } from './api_client.js';
 import { ACCOUNTS_UNSUPPORTED_STATUS, claudexorStatus, accountRows, familyLabel } from './claudexor_status_store.js';
 import { LOGIN_CARD_FULL, SIGN_IN_SCOPE_NOTE, createLoginCardController } from './harness_login_cards.js';
-import { familyStatus } from './harness_accounts.js';
+import { BOOTSTRAP_HARNESSES, familyStatus } from './harness_accounts.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import { bindFamilyPrograms } from './model_program.js';
 import {
@@ -15,21 +15,13 @@ import {
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY } from './route_editor_primitives.js';
 
-// Every supported task harness in the linear Available-subagents compiler.
-// Reviewer policy remains a separate core-only projection: Agy is task-only and
-// must never be omitted here merely because it creates no reviewer seats.
-export const AGENT_FAMILIES = [
-    { harness: 'codex' },
-    { harness: 'claude' },
-    { harness: 'cursor' },
-    { harness: 'agy' },
-];
+// Every supported task harness in the linear Available-subagents compiler; reviewer policy stays a separate core-only projection (Agy is task-only, never omitted here).
+export const AGENT_FAMILIES = BOOTSTRAP_HARNESSES.map((harness) => ({ harness }));
 
 const REVIEW_CAPABLE_AGENT_HARNESSES = new Set(['claude', 'codex', 'cursor']);
 
-// Completion must not hang on an engine that is down. Three attempts over
-// roughly 1.2 seconds convert a transport blip into a proven cancel; anything
-// longer stops being a blip.
+// Completion must not hang on an engine that is down: three attempts over roughly 1.2 seconds convert a
+// transport blip into a proven cancel; anything longer stops being a blip.
 const LOGIN_RELEASE_RETRIES = 2;
 const LOGIN_RELEASE_RETRY_MS = 600;
 
@@ -68,14 +60,8 @@ export const LADDER_FOOTNOTE =
 // ---------------------------------------------------------------------------
 
 export function connectedHarnesses(snapshot) {
-    // Which preset families the daemon vouches a signed-in account for, in the
-    // stable family order. `accountRows` is the SSOT projection of the status
-    // payload, so this step and the accounts panel can never disagree about
-    // "connected".
-    // An account the owner switched OFF is skipped however healthy its login:
-    // rotation never takes it, so counting it here would declare a family
-    // connected on a pool the engine will not use. Absent stays connected —
-    // the same fail-open `enabled` projection the accounts panel applies.
+    // Which preset families the engine vouches a signed-in account for, in family order, from `accountRows` — the SSOT
+    // projection — so this step and the accounts panel never disagree about "connected"; an OFF account is skipped, absent fail-open.
     const passed = new Set(
         accountRows(snapshot)
             .filter((row) => row?.enabled !== false
@@ -86,11 +72,9 @@ export function connectedHarnesses(snapshot) {
 }
 
 export function familyLabels(harnesses, snapshot, { catalogKnown = false } = {}) {
-    // ONE authority, shared with the Agents tab: prefer the engine's own
-    // display_name, fall back to the bootstrap product names. Passing the
-    // snapshot keeps this pure and node-testable like the helpers around it;
-    // without it the wizard would print a raw `claude` the day the engine
-    // renames a family or adds a fourth.
+    // ONE authority, shared with the Agents tab: prefer the engine's own display_name, fall back to
+    // the bootstrap product names. Passing the snapshot keeps this pure and node-testable; without
+    // it the wizard would print a raw `claude` the day the engine renames a family or adds a fourth.
     return (harnesses || []).map(
         (harness) => familyLabel(harness, snapshot, { catalogKnown }),
     );
@@ -104,10 +88,9 @@ function joinLabels(labels) {
 /**
  * The declaration the wizard posts with the completion payload.
  *
- * `subscriptionsConnected` is a REQUEST ("go look at the daemon"), never an
- * authority: the endpoint re-reads live account state and compiles the preset
- * from live discovery. It is set from what this step actually OBSERVED, so an
- * unread account facet declares nothing (BIBLE P1: a gap is not a zero).
+ * `subscriptionsConnected` is a REQUEST ("go look at the daemon"), never an authority: the endpoint
+ * re-reads live account state. It is set from what this step OBSERVED, so an unread account facet
+ * declares nothing (BIBLE P1: a gap is not a zero).
  */
 export function subscriptionDeclaration({ connected = [], skipPresets = false } = {}) {
     return {
@@ -215,17 +198,13 @@ export const EARLIER_SAVE_OTHER_VALUES_TEXT = 'The earlier save is confirmed, bu
     + 'Start Ouroboros to save them.';
 
 /**
- * How the wizard READS the completion endpoint's answer. Pure, so every branch
- * is asserted without a transport.
+ * How the wizard READS the completion endpoint's answer. Pure, so every branch is asserted without a transport.
  *
- * A 2xx is NOT a completion by itself. The success envelope carries the two
- * facts everything downstream needs — the saved runtime mode and whether it
- * needs a restart — so a shape-blind `ok` would announce a finished setup while
- * silently discarding them. A body that will not parse is UNKNOWN, not empty:
- * substituting `{}` made a 200 carrying HTML (a proxy error page, a login
- * redirect) look like success, because `{}` is truthy. Neither that body nor
- * an error page the endpoint did not write says whether the save landed:
- * both read as `saved: null`, which only this attempt's read-back settles.
+ * A 2xx is NOT a completion by itself: the success envelope carries the saved runtime mode and whether a restart is
+ * needed, so a shape-blind `ok` would announce a finished setup while discarding them. A body that will not parse is
+ * UNKNOWN, not empty — substituting `{}` made a 200 carrying HTML (a proxy error page, a login redirect) look like
+ * success, because `{}` is truthy. Neither that body nor an error page the endpoint did not write says whether the
+ * save landed: both read as `saved: null`, which only this attempt's read-back settles.
  *
  * @returns {{receipt: object}|{failure: object}}
  */
@@ -335,27 +314,14 @@ export async function readCompletionAttempt(attemptId, fetchImpl = fetch) {
 }
 
 export function completionFailureNotice(error) {
-    // What the wizard SHOWS when completion did not succeed, and whether the
-    // finish-without-agent-defaults escape is genuinely on offer.
+    // What the wizard SHOWS when completion did not succeed, and whether the finish-without-agent-defaults escape is
+    // genuinely on offer. A typed refusal (engine unreachable, no seat satisfying a live model id, an install that
+    // stopped being first-run) carries its own sentence in `detail`, and collapsing it into one generic "failed to
+    // save" would leave the owner with a wizard that will not finish and no way to know why.
     //
-    // The endpoint answers typed refusals — the daemon is unreachable, a seat
-    // no live model id satisfies, an install that stopped being first-run — and
-    // each carries the engine's own sentence in `detail`. Collapsing those into
-    // one generic "failed to save" leaves the owner holding a wizard that will
-    // not finish and no way to know why, which is precisely the state the
-    // atomic endpoint was built to avoid.
-    //
-    // `saved` is read HONESTLY. A refusal persisted nothing; a failure in a
-    // post-commit stage did persist, and telling the owner otherwise would
-    // repeat one layer up the exact dishonesty the atomic write removed. The
-    // escape hatch is only offered when nothing is on disk — once settings
-    // exist, "finish without agent defaults" would be a second write, not an
-    // alternative to the first.
-    //
-    // `saved === null` is the third state (503 `settings_save_timeout`, or an
-    // answer that never arrived or was not the endpoint's): neither "written"
-    // nor "nothing saved" is known. The wizard offers "Check status" for that
-    // attempt instead of a retry, a second write over an unknown first.
+    // `saved` is read HONESTLY: a refusal persisted nothing and a post-commit failure did persist, so the escape hatch
+    // is offered only when nothing is on disk. `saved === null` is the third state (503 `settings_save_timeout`, or an
+    // answer that never arrived or was not the endpoint's): the wizard offers "Check status" there rather than a retry — a second write over an unknown first is what it forbids.
     const message = String(error?.message || error || 'Failed to save onboarding settings.');
     const detail = String(error?.detail || '').trim();
     const saved = error?.saved === null ? null : Boolean(error?.saved);
@@ -460,24 +426,15 @@ export function subagentPreviewStatusSignature(view, snapshot) {
 // The rotation diagram: ONE static SVG, no script, no animation.
 // ---------------------------------------------------------------------------
 
-// Ids are page-unique by prefix: the wizard mounts this beside other inline SVG
-// one day, and a duplicate marker id silently repaints someone else's arrows.
+// Ids are page-unique by prefix: a duplicate marker id silently repaints someone else's arrows.
 const ARROW_ID = 'ouro-agents-rotation-arrow';
 
 export function rotationDiagramSvg() {
-    // Top to bottom in one glance: the API/local source runs the main agent,
-    // the stack of agent accounts runs subagents (and eligible plans run
-    // reviews), and both feed the
-    // one Ouroboros in the middle. The cycle glyph beside the stack plus its
-    // caption say what rotation MEANS — "one window spent, the next takes
-    // over". Stacked rather than side-by-side because the figure lives in a
-    // ~360px column of the step: a wide composition scaled its labels down to
-    // an unreadable size, and readability at a glance is the whole point.
-    //
-    // The coordinate space is authored at roughly the rendered width, so the
-    // 12px CSS text lands at 12px on screen instead of being scaled by the
-    // viewBox. Strokes are `currentColor` (the figure inherits the wizard's
-    // ink); the accent is spent once, on the thing everything points at.
+    // Top to bottom in one glance: the API/local source runs the main agent, the stack of agent accounts runs subagents (and
+    // eligible plans run reviews), and both feed the one Ouroboros in the middle. The cycle glyph beside the stack plus its
+    // caption say what rotation MEANS — "one window spent, the next takes over". Stacked rather than side-by-side because the
+    // figure lives in a ~360px column (a wide composition scaled its labels past reading); the space is authored at roughly the
+    // rendered width, so 12px CSS text lands at 12px on screen, and strokes are `currentColor`, the accent spent once on the point.
     return `
 <svg class="agents-rotation-svg" viewBox="0 0 360 200" role="presentation" aria-hidden="true" focusable="false">
   <defs>
@@ -539,26 +496,30 @@ export function ladderHtml() {
     `;
 }
 
-export function familyRowHtml(family, { status, connected = false, connectable = true, program = '' }) {
-    // Equivalent rows (docs/DESIGN.md §6): no family gets extra weight for being
-    // first or already connected — only its status text and its action change.
-    // An engine on the retired account model gets no Connect: no connection
-    // made there could be listed or confirmed.
+export function familyRowHtml(family, { status, connected = false, connectable = true, program = '', missing = null, profile = '', choices = null, picked = '', newAccount = false }) {
+    // Equivalent rows (docs/DESIGN.md §6): only status text and action differ; a missing program is said and its press installs it first.
+    // `choices` is the explicit pick of an existing saved account (§7): no profile is guessed onto the one press, a switched-off account
+    // is listed as a disabled option — never used or re-enabled — and an empty choice cannot act; `newAccount` is the row's one press
+    // that starts a NEW unnamed sign-in instead. A fresh row starts on the placeholder, never on the first option.
+    const absent = Boolean(missing) && !connected;
+    const said = absent ? { tone: 'muted', text: 'Not installed where Claudexor runs' } : status;
+    const action = connected || newAccount ? 'Add another' : absent ? (missing.installable ? 'Install & connect' : '') : 'Connect';
+    const pick = choices?.some((choice) => choice.id === picked && !choice.disabled) ? picked : '';
+    const accountSelect = choices?.length ? `<select class="ui-control agent-account-choice" data-agent-account aria-label="Account">`
+        + `${pick ? '' : '<option value="" disabled selected>Account…</option>'}`
+        + `${choices.map((choice) => `<option value="${escapeHtml(choice.id)}"${choice.disabled ? ' disabled' : ''}${choice.id === pick ? ' selected' : ''}>${escapeHtml(choice.id)}</option>`).join('')}</select>` : '';
     return `
         <div class="agent-family-row" data-agent-family="${escapeHtml(family.harness)}">
             <span class="agent-family-identity">
                 <span class="agent-family-heading">
-                ${harnessIdentityMarkup(family.harness, {
-                    label: family.label,
-                    className: 'agent-family-name',
-                })}
+                ${harnessIdentityMarkup(family.harness, { label: family.label, className: 'agent-family-name' })}
                 <span class="agent-family-purpose">${family.harness === 'codex' ? 'Models + agents · Recommended' : 'Agents'}</span>
                 </span>
-                <span class="agent-family-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</span>
+                <span class="agent-family-status" data-tone="${escapeHtml(said.tone)}">${escapeHtml(said.text)}</span>
                 ${program}
             </span>
-            ${connectable ? `<button type="button" class="btn btn-default" data-agent-connect="${escapeHtml(family.harness)}">
-                ${escapeHtml(connected ? 'Add another' : 'Connect')}
+            ${connectable && action ? `${accountSelect}<button type="button" class="btn btn-default"${accountSelect && !pick && !newAccount ? ' disabled' : ''} data-agent-connect="${escapeHtml(family.harness)}"${newAccount ? ' data-agent-new' : ''}${!connected && profile ? ` data-agent-profile="${escapeHtml(profile)}"` : ''}>
+                ${escapeHtml(action)}
             </button>` : ''}
         </div>
     `;
@@ -569,23 +530,52 @@ export function familyListHtml(snapshot, {
     accountsUnsupported = false,
     catalogKnown = false,
     programLine = () => '',
+    programMissing = () => null,
+    others = '',  // the engine's other programs it lacks, each installed by its own press (model_program.js `others`)
+    chosen = {},  // the account each family's row is standing on (§7), so a rebuild re-renders the same pick
 } = {}) {
     const connected = new Set(accountsKnown ? connectedHarnesses(snapshot) : []);
-    return AGENT_FAMILIES.map((family) => familyRowHtml({
-        ...family,
-        label: familyLabel(family.harness, snapshot, { catalogKnown }),
-    }, {
-        status: familyStatusText(snapshot, family.harness, { accountsKnown, accountsUnsupported }),
-        connected: connected.has(family.harness),
-        connectable: !accountsUnsupported,
-        program: programLine(family.harness),
-    })).join('');
+    return AGENT_FAMILIES.map((family) => {
+        const own = accountRows(snapshot).filter((row) => row.harness === family.harness), missing = programMissing(family.harness);
+        const connectedFamily = connected.has(family.harness);
+        // The one press may carry a named profile only from a CURRENT roster read, and only for a
+        // single account the owner has not switched off: a remembered row is no one's choice, and a
+        // disabled account is installed for, never silently signed back in (§7). Elsewhere the saved
+        // accounts become an explicit choice; a missing program installs from the row's press only
+        // where that single usable account (or a read empty) leaves nothing to choose between.
+        // The shortcut is NATURAL only on a fresh row: an answer the owner gave that this roster no
+        // longer offers must not turn the sole survivor into the press's silent profile — the survivor
+        // renders as that explicit choice (placeholder until the owner names it), never as a substitute.
+        const remembered = String(chosen?.[family.harness] || '');
+        const sole = own.length === 1 ? String(own[0].profile_id || '') : '';
+        const profile = accountsKnown && own.length === 1 && own[0].enabled !== false
+            && (!remembered || remembered === sole) ? sole : '';
+        const row = Boolean(missing) && !connectedFamily && accountsKnown && own.length <= 1 && (own.length === 0 || profile);
+        // The picker names every saved account, the switched-off ones among them as disabled options (§7).
+        const choices = accountsKnown && !connectedFamily && !profile && own.length && !missing
+            ? own.map((candidate) => ({ id: String(candidate.profile_id || ''), disabled: candidate.enabled === false }))
+                .filter((choice) => choice.id) : null;
+        // A remembered pick survives only while the CURRENT roster still offers it ENABLED — never a removed or switched-off stand-in.
+        const picked = choices?.some((choice) => choice.id === chosen?.[family.harness] && !choice.disabled)
+            ? chosen[family.harness] : '';
+        // Nothing enabled left to choose with the program installed: the ordinary Add another is the separate step to a NEW account (§7).
+        const newAccount = Boolean(choices) && !choices.some((choice) => !choice.disabled);
+        // The press is withheld for an absent program the engine cannot install, and while the program is missing
+        // with saved accounts but no single usable default: the line installs only, and a Connect there would
+        // start an unnamed second account (§7). A connected family keeps its Add another — its sign-in proved the program runs.
+        const pressable = !accountsUnsupported && !(missing && !missing.installable)
+            && !(Boolean(missing) && !connectedFamily && !row && own.length > 0);
+        return familyRowHtml({ ...family, label: familyLabel(family.harness, snapshot, { catalogKnown }) }, { connectable: pressable,
+            status: familyStatusText(snapshot, family.harness, { accountsKnown, accountsUnsupported }), connected: connectedFamily,
+            program: programLine(family.harness, { install: Boolean(missing) && !row }),
+            missing: row ? missing : null, profile, choices, picked, newAccount,
+        });
+    }).join('') + others;
 }
 
 export function agentsStepHtml({ compact = false, showRoster = true } = {}) {
-    // The static skeleton. Everything that moves (family rows, the service
-    // note, the outcome sentence) is patched in place afterwards, so a status
-    // tick never rebuilds the login card mounted between them.
+    // The static skeleton. Everything that moves (family rows, the service note, the outcome
+    // sentence) is patched in place afterwards, so a status tick never rebuilds the login card.
     return `
         ${compact ? '' : `<div class="panel-card agent-ladder-card">
             <h3>What an agent plan changes</h3>
@@ -652,6 +642,7 @@ export function createAgentsStep({
         pageHideTarget: null,
         listHtml: null,
         previewGeneration: 0,
+        accountChoice: {},
         previewAppliedSignature: '',
         previewPending: false,
         previewFailure: null,
@@ -666,12 +657,10 @@ export function createAgentsStep({
         return Boolean(store.accountsKnown);
     }
 
-    // FULL, not compact (phase 2 disclosed the gap): compact omits the
-    // paste-code entry and the collapsed terminal fallback, so a Claude login
-    // whose localhost callback cannot complete — the owner's browser on another
-    // machine, exactly the remote/headless first run — would have no way to
-    // finish. A dead end is worst at first run, so onboarding mounts the same
-    // card Settings mounts.
+    // FULL, not compact (phase 2 disclosed the gap): compact omits the paste-code entry and the
+    // collapsed terminal fallback, so a Claude login whose localhost callback cannot complete —
+    // exactly the remote/headless first run — would have no way to finish. Onboarding mounts the
+    // same card Settings mounts.
     function createLogin() {
         return createLoginCardController({
             host: () => el('agents-login-host'),
@@ -679,14 +668,31 @@ export function createAgentsStep({
             mode: LOGIN_CARD_FULL,
             doc: getDoc,
             ...(fetchImpl ? { fetchImpl } : {}),
+            ...programs.loginHooks(),
+            // The rows' own decision (§7), honoured inside the card too — an open name face's submit included.
+            signInWithheld: (harness) => {
+                const missing = programs.missing(harness);
+                if (missing && !missing.installable) {
+                    return `${familyLabel(harness, store.snapshot || {}, { catalogKnown: Boolean(store.catalogKnown) })} is not installed where Claudexor runs and cannot be installed here.`;
+                }
+                // The competing-install fence lives HERE, at the one boundary every sign-in of this
+                // step passes (Connect, Add another, the name form, a retry): while this family's
+                // install is unresolved and its program is not observed installed, a new create would
+                // orphan one of the two jobs.
+                if (programs.competingInstall?.(harness)) {
+                    return `${familyLabel(harness, store.snapshot || {}, { catalogKnown: Boolean(store.catalogKnown) })} is still being installed. Connect once that install finishes.`;
+                }
+                return '';
+            },
+            refuseDisabled: true,
             onSettled: () => { store.refresh(); void programs.read(); paint(); },
         });
     }
 
-    let login = createLogin();
     // Each family's program line (docs/DESIGN.md §7), the same one an opened model chooser shows.
     const programs = bindFamilyPrograms({ harnesses: AGENT_FAMILIES.map((f) => f.harness), store, api: maintenanceApi,
         visible: () => isVisible() && Boolean(el('agents-family-list')), onChange: () => paint() });
+    let login = createLogin();
     const subagents = createAvailableSubagentsEditor({
         hostId: 'onboarding-available-subagents',
         doc: getDoc,
@@ -769,15 +775,20 @@ export function createAgentsStep({
         const unsupported = Boolean(store.accountsUnsupported);
         const list = el('agents-family-list');
         if (list) {
-            // Rebuild ONLY on a real change. The status store settles every few
-            // seconds; replacing three unchanged rows on every tick is pointless
-            // churn, and it opens a window where a click lands on a button that
-            // is being replaced.
+            // The standing rows hold the owner's own account picks: read them BEFORE the list is replaced, so a later rebuild renders that same account (§7).
+            list.querySelectorAll('[data-agent-account]').forEach((select) => {
+                const row = select.closest?.('[data-agent-family]');
+                if (row && select.value) state.accountChoice[row.getAttribute('data-agent-family')] = select.value;
+            });
+            // Rebuild ONLY on a real change: the store settles every few seconds, and replacing unchanged rows is churn.
             const html = familyListHtml(snapshot, {
                 accountsKnown: known,
                 accountsUnsupported: unsupported,
                 catalogKnown: Boolean(store.catalogKnown),
                 programLine: programs.line,
+                programMissing: programs.missing,
+                others: programs.others(),
+                chosen: state.accountChoice,
             });
             if (html !== state.listHtml) {
                 state.listHtml = html;
@@ -804,18 +815,36 @@ export function createAgentsStep({
         login?.render();
     }
 
-    // A rebuild keeps the focused Connect or Update: the same control of the same family takes it back (docs/DESIGN.md
-    // principle 6), so a line arriving for one family never drops a keyboard reader off another's button.
+    // A rebuild keeps the focused control of the same family (docs/DESIGN.md principle 6).
     function rebuildList(list, html) {
         const active = getDoc()?.activeElement;
-        const control = list.contains(active) && ['data-agent-connect', 'data-program-action'].find((name) => active.hasAttribute(name));
-        const family = control && active.closest('[data-agent-family]')?.dataset.agentFamily;
+        const control = list.contains(active) && ['data-agent-connect', 'data-program-action', 'data-agent-account'].find((name) => active.hasAttribute(name));
+        const home = control && active.closest('[data-program], [data-agent-family], [data-programs-unknown]');
+        const where = home && ['program', 'agentFamily'].map((key) => home.dataset[key] && `[data-${key === 'program' ? 'program' : 'agent-family'}="${home.dataset[key]}"]`).find(Boolean);
         list.innerHTML = html;
+        // Naming the account opens the row's own press, and the answer is remembered the moment it is given: a
+        // rebuild that replaces the step's DOM cannot read the standing row, so the pick would fall back to
+        // whatever an earlier paint saved; the new-account press is never the named pick's gate (§7).
+        list.querySelectorAll('[data-agent-account]').forEach((select) => select.addEventListener('change', () => {
+            const row = select.closest?.('[data-agent-family]');
+            if (row) state.accountChoice[row.getAttribute('data-agent-family')] = select.value;
+            const press = row?.querySelector('[data-agent-connect]');
+            if (press && !press.hasAttribute('data-agent-new')) press.disabled = !select.value;
+        }));
         list.querySelectorAll('[data-agent-connect]').forEach((button) => button.addEventListener('click', () => {
-            if (!state.disposed) ensureLogin().start(button.getAttribute('data-agent-connect'), '');
+            if (state.disposed) return;
+            // The competing-install fence is the card's own `signInWithheld` boundary above, so
+            // every press of this row (Connect, Add another) meets it and none can bypass it.
+            // An explicit account choice names the profile the press starts with; the remembered single
+            // default (data-agent-profile) is the other path. No choice and no default ever starts an unnamed
+            // login — the press waits; the separate new-account press is the one unnamed sign-in this row offers.
+            const pick = button.closest?.('[data-agent-family]')?.querySelector('[data-agent-account]')?.value;
+            if (pick === '' && !button.hasAttribute('data-agent-new')) return;
+            ensureLogin().start(button.getAttribute('data-agent-connect'), pick || button.dataset?.agentProfile || '');
         }));
         programs.bind(list);
-        if (family) list.querySelector(`[data-agent-family="${family}"] [${control}]`)?.focus({ preventScroll: true });
+        if (home) list.querySelector(control === 'data-agent-account' && where
+            ? `${where} [data-agent-account]` : `${where || '[data-programs-unknown]'} [${control}="${active.getAttribute(control)}"]`)?.focus({ preventScroll: true });
     }
 
     function adopt(view) {
@@ -841,11 +870,10 @@ export function createAgentsStep({
             state.unsubscribe = store.subscribe(adopt, { visible: isVisible });
             const pageHideTarget = getDoc()?.defaultView;
             if (pageHideTarget?.addEventListener) {
-                // The wizard never unmounts itself, so the ONE listener this
-                // controller holds is released on a real unload as well as by
-                // dispose(). A bfcache hide (`persisted`) is NOT an unload: the
-                // page can come back, and tearing down here would restore a
-                // wizard whose Agents step no longer reads anything.
+                // The wizard never unmounts itself, so this ONE listener is released on a real
+                // unload as well as by dispose(). A bfcache hide (`persisted`) is NOT an unload:
+                // the page can come back, and tearing down here would restore a wizard whose
+                // Agents step no longer reads anything.
                 state.pageHideTarget = pageHideTarget;
                 state.pageHideBound = (event) => {
                     if (event?.persisted !== true) detach();
@@ -858,9 +886,8 @@ export function createAgentsStep({
         programs.observe({ remount: true });
         paint();
         subagents.mount();
-        // The wizard's API keys are typed on the Accounts step, so the provider
-        // list is re-derived on every entry into a step that shows these rows —
-        // never once at construction, when no key exists yet.
+        // The wizard's API keys are typed on the Accounts step, so the provider list is re-derived
+        // on every entry into a step that shows these rows — never at construction, when no key exists yet.
         applySourceContext();
         refreshSubagentsPreview();
         store.refresh();
@@ -875,27 +902,22 @@ export function createAgentsStep({
     }
 
     /**
-     * Ask the login controller for its exact custody result.
-     *
-     * Cleanup and local departure are deliberately separate. `retained` means
-     * another cancel is pointless; `unknown` remains retryable for the wizard's
-     * existing bounded window. Neither result is rewritten as release proof.
+     * Ask the login controller for its exact custody result: cleanup and local departure are deliberately separate,
+     * `retained` means another cancel is pointless, and `unknown` stays retryable within the wizard's bounded window.
      *
      * @returns {Promise<'released'|'retained'|'unknown'>}
      */
     async function dispose() {
         if (state.disposed) return 'unknown';
-        // The controller remains the custody SSOT even after its own
-        // recovery-face Close: repeated dispose returns its remembered honest
-        // detach status without sending another lifecycle request.
+        // The controller remains the custody SSOT even after its own recovery-face Close:
+        // repeated dispose returns its remembered honest detach status without another request.
         return login ? login.dispose() : 'released';
     }
 
     /** Resolve sign-in custody as far as the bounded completion window proves. */
     async function disposeForCompletion() {
-        // A known retained job cannot be improved by repeating cancel; only an
-        // unknown transport result remains retryable. Local detach still makes
-        // no claim that the daemon released process custody.
+        // A known retained job cannot be improved by repeating cancel; only an unknown transport
+        // result remains retryable. Local detach still makes no claim the daemon released custody.
         let custody = await dispose();
         for (let attempt = 0; custody === 'unknown' && attempt < LOGIN_RELEASE_RETRIES; attempt += 1) {
             await new Promise((resolve) => setTimeout(resolve, LOGIN_RELEASE_RETRY_MS));
@@ -938,11 +960,9 @@ export function createAgentsStep({
         disposeForCompletion,
         detach,
         get connected() { return [...state.connected]; },
-        // The payload the family names are spoken from. The wizard's review
-        // step renders the SAME families one screen later, and without this it
-        // fell back to the bootstrap product names — so an engine rename showed
-        // up on the Agents step and then silently un-renamed itself in the
-        // summary. Same store, same snapshot, one spelling.
+        // The payload the family names are spoken from. The wizard's review step renders the SAME
+        // families one screen later, and without this it fell back to the bootstrap product names —
+        // so an engine rename showed up here and silently un-renamed itself in the summary.
         get snapshot() { return store?.snapshot || null; },
         get catalogKnown() { return Boolean(store?.catalogKnown); },
         get accountsKnown() { return accountsKnown(); },

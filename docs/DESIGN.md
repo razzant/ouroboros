@@ -3007,9 +3007,21 @@ move/remove controls and the group's Add action.
 
 Accounts has one program row per family, regardless of account count. Installed and
 newest versions keep one place; operation state and Details keep another. The engine's
-verdict reads “X available”, “Up to date” or “Latest unknown”. Update is present for
-newer/unknown versions only; Install for absence, exactly when the engine allows it.
-Nothing updates itself. An unavailable action names the engine's reason. Details holds
+verdict reads “X available”, “Up to date” or “Latest unknown” (absent: a read newest only).
+Update is present for newer/unknown versions only; Install for absence, when the engine allows it.
+An Install press is an install, never an Update (`latest` updates a program found installed): it
+reads that program once more, and only an answer naming it that still finds it absent is sent; a
+press under way is rejoined as it was. Nothing updates itself. An
+unavailable action or a failed install gives the engine's reason and Check again; by hand only a
+verified step for the line the engine runs (OpenCode: `opencode-ai@1`), else the way out. Where the
+engine cannot install an absent program, its family promises no sign-in: no Connect or Add account,
+its accounts stay, and each saved account's row offers no new Sign in either — Check status (the
+shared Refresh path), the Enabled toggle and Remove stay, a sign-in already running keeps its card,
+and an open name-a-account face honours the same decision at its submit. The list
+names each program of the newest answered inventory: one lacked says “Not installed where Claudexor
+runs” or the reason, with one press (Install & connect for a family read without accounts, else
+Install: no second account). Stopped, it says once that Connect installs a missing program first,
+beside the press that starts the agent daemon (refused: the engine's words). Details holds
 Check latest, paths, override, command/script evidence, vendor lines, limitations and
 release notes through the host opener, keeping the app open. “Ran” appears only if
 different from “Command”; show time, never an
@@ -3026,15 +3038,30 @@ same line under a family's status, led by its program's version (“Program 0.50
 available”, then Update), only when there is something to act on (an update, a refused update
 with the engine's reason, an operation under way or the error of one the owner started) and
 the newest-release read has answered; without a Details disclosure. Its silence otherwise is
-intentional: an up-to-date program, a family with no program (Connect installs it), an engine
-that is not running or a read the engine refused say nothing there, while Accounts keeps
-“Program X · Up to date”. The owner's own unresolved press or operation is the exception: its
-reason and its recovery (Retry same request, Check operation) stay through a failed read or one
-that finds no program, and an Update the engine never received (not submitted) keeps its reason,
-in warn ink, beside Update, a new press, while that update is still offered.
+intentional: an up-to-date program, an engine that is not running or a read the engine
+refused say nothing there (under the rows: the list's one line), while Accounts keeps “Program X ·
+Up to date”. A program the running engine lacks says so on a row read empty or holding one account
+the owner has not switched off, whose press, Install & connect, signs exactly that one in — from a
+CURRENT roster read (a remembered row is no one's choice) and never a disabled account, which the
+line installs for only. Elsewhere the saved accounts become an explicit choice: a select names each
+one, the press starts exactly the account it names, and none is guessed onto it. The answer is
+remembered the moment it is given: a rebuild that replaces the step's DOM renders the account the
+owner last chose, never the name an earlier paint happened to save, and an account the roster no
+longer offers — removed or switched off — never has another stand in as the answer. The select lists
+switched-off accounts among the choices as disabled options — visible, never used or re-enabled by
+the wizard; when nothing enabled is left to choose and the program is installed, the row's press is
+the ordinary Add another, the separate explicit step to a new account, and the off accounts stay
+listed — while the program is missing with saved accounts and no single usable default, the row
+offers no press at all (the line installs, and an unnamed Connect would create a second account). Uninstallable: the line's reason and
+Check again; elsewhere the line installs it, only on a read that stands (none refused, the program
+listed; else its reason and Check again). Other programs share one “More programs” line. The
+owner's own unresolved press or operation is the exception: its reason and its recovery (Retry
+same request, Check operation) stay through a failed read or one that finds no program, and an
+Update the engine never received (not submitted) keeps its reason, in warn ink, beside Update, a
+new press, while that update is still offered.
 After a failed Connect that line is the offer, with no claim about
-the cause (owner decision 2026-11-20). A line arriving for one family keeps focus on another's
-Connect. Mouse, touch and keyboard Update
+the cause (owner decision 2026-11-20). A line arriving keeps focus on the control another family
+or program line held. Mouse, touch and keyboard Update
 keep the list open through progress and result, then refresh its suggestions. Typed
 values/carets survive; “Custom ID · Not in this list” stays under an unlisted input.
 Full evidence stays in Accounts. Flex gaps wrap facts without an orphan separator; the

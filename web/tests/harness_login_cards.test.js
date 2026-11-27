@@ -1237,8 +1237,9 @@ test('create-400 on an EMPTY family becomes the name-the-account face, and its s
     await store.refresh();
     const host = fakeHost();
     const posts = [];
+    const answered = [];  // each create's answer, the named one too: it may have installed the family's program
     const ctl = createLoginCardController({
-        host, store,
+        host, store, onAnswer: (harness) => answered.push(harness),
         fetchImpl: async (url, init = {}) => {
             if (url === '/api/claudexor/login' && init.method === 'POST') {
                 const body = JSON.parse(init.body);
@@ -1251,12 +1252,17 @@ test('create-400 on an EMPTY family becomes the name-the-account face, and its s
         },
     });
     await ctl.start('zephyr', '');
+    assert.deepEqual(answered, ['zephyr']);
     // The engine's own sentence, verbatim (quotes render HTML-escaped).
     assert.ok(host.innerHTML.includes('has no default credential store: '
         + 'sign in from a named account (add one first, then start the login from it)'),
         `the engine's own sentence is shown: ${host.innerHTML}`);
     assert.equal(ctl.active.needsProfile.message, ENGINE_SAID,
         'the card holds the engine sentence untouched');
+    // That refusal is the family's ordinary first step: said calmly, the engine's own sentence kept under Details.
+    assert.match(host.innerHTML, /data-login-name-lead>[^<]+ keeps each account under its own name\.</);
+    assert.doesNotMatch(host.innerHTML, /data-tone="error"/, 'an ordinary first step is not an error');
+    assert.match(host.innerHTML, /<details class="harness-advanced" data-login-engine-said><summary>Details<\/summary><p>[^<]*has no default credential store/);
     assert.match(host.innerHTML, /data-profile-name-input/);
     assert.match(host.innerHTML, /data-profile-name-submit/);
     assert.ok(!host.innerHTML.includes('data-login-retry'),
@@ -1280,10 +1286,64 @@ test('create-400 on an EMPTY family becomes the name-the-account face, and its s
     assert.equal(posts.length, 2);
     assert.equal(posts[1].harness, 'zephyr');
     assert.equal(posts[1].profile_id, 'work-laptop');
+    assert.deepEqual(answered, ['zephyr', 'zephyr'], 'the named create\'s answer is heard too');
     assert.ok(host.innerHTML.includes('(work-laptop)'), `the card now runs the named login: ${host.innerHTML}`);
     assert.ok(!host.innerHTML.includes('data-profile-name-input'), 'the name face was replaced');
     await ctl.dispose();
     store.dispose();
+});
+
+test('a name that names the roster\'s switched-off saved account is refused, not signed in idempotently', async () => {
+    // The Carbon W5 seam: "Add another" with a name EQUAL to a saved disabled account. The engine
+    // answers credential_profile_exists idempotently (it signs into that disabled account), so the
+    // owner would read "Signed in" while Continue stays locked. The card refuses with the account
+    // named; a NEW name, a re-enabled row and a removed last-good row all still open the sign-in.
+    let roster = [{ profile: { harness_id: 'zephyr', profile_id: 'old-off', enabled: false },
+        status: { verification: 'failed' } }];
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, { ...nameFaceStatusPayload([]),
+            reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' },
+            profiles: { profiles: roster, harnessAccounts: [], accountPools: [] } }),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    });
+    await store.refresh();
+    const posts = [];
+    const host = fakeHost();
+    const ctl = createLoginCardController({
+        host, store,
+        fetchImpl: async (url, init = {}) => {
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                posts.push(JSON.parse(init.body));
+                if (!init.body || !JSON.parse(init.body).profile_id) return json(400, REQUIRED_PROFILE);
+                return json(200, { job_id: 'n', job: { state: 'running' } });
+            }
+            return json(200, { job: { state: 'running' } });
+        },
+    });
+    try {
+        await ctl.start('zephyr', '');
+        assert.ok(ctl.active?.needsProfile, 'the name face opens');
+        assert.equal(posts.length, 1, 'the opening create went out (refused: no name)');
+        posts.length = 0;
+        ctl.active.profileNameValue = 'old-off';
+        ctl.submitProfileName();
+        await flush();
+        assert.equal(posts.length, 0, 'the disabled name was not submitted');
+        assert.ok(ctl.active?.needsProfile, 'the face stays, the refusal beside it');
+        assert.match(String(host.innerHTML), /switched off here/i);
+        // The same name re-enabled on the roster opens the named sign-in.
+        roster = [{ profile: { harness_id: 'zephyr', profile_id: 'old-off', enabled: true },
+            status: { verification: 'failed' } }];
+        await store.refresh();
+        await flush();
+        ctl.submitProfileName();
+        await flush();
+        assert.equal(posts.length, 1, 'a re-enabled row signs in');
+        assert.equal(posts[0].profile_id, 'old-off');
+    } finally {
+        await ctl.dispose();
+        store.dispose();
+    }
 });
 
 test('the name-the-account continuation preserves an explicit client_pty transport', async () => {
@@ -1627,4 +1687,407 @@ test('slotMask hides only the volatile job words: a same-job re-word keeps the c
     const advanced = (advancedOpen) => ({ ...pending('C'), attachCommand: 'fixture-attach', engineDegraded: true, advancedOpen });
     assert.match(loginCardHtml(advanced(true), 0), /<details class="harness-advanced" data-login-advanced>/);
     assert.equal(loginCardHtml(advanced(true), 0), loginCardHtml(advanced(false), 0));
+});
+
+
+// ---------------------------------------------------------------------------
+// signInWithheld (W2): the decision the rows show is honoured inside the card
+// too — at every start, submit and retry, an open name face included.
+// ---------------------------------------------------------------------------
+
+test('signInWithheld refuses a start with its sentence and sends no request', async () => {
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, statusPayload(false)),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    });
+    const host = fakeHost();
+    let requests = 0;
+    const ctl = createLoginCardController({
+        host, store,
+        fetchImpl: async () => { requests += 1; return json(500, {}); },
+        signInWithheld: (harness) => (harness === 'codex'
+            ? 'Codex is not installed where Claudexor runs and cannot be installed here.' : ''),
+    });
+    await ctl.start('codex', '');
+    assert.equal(requests, 0, 'no request left the card');
+    assert.ok(host.innerHTML.includes('cannot be installed here'), `the refusal is said: ${host.innerHTML}`);
+    assert.ok(host.innerHTML.includes('data-tone="error"'), 'the refusal renders the error face');
+    assert.equal(ctl.active?.jobId, '', 'no job was created');
+    assert.ok(ctl.active?.absent, 'no request means honestly absent custody');
+    assert.equal(ctl.active?.custodyStatus, LOGIN_CUSTODY_RELEASED);
+    assert.equal(store.polling, false, 'nothing holds the status poll for a refused start');
+    ctl.dispose();
+    store.dispose();
+});
+
+test('an open name face honours a withhold that arrives after it opened', async () => {
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, statusPayload(false)),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    });
+    const host = fakeHost();
+    let withheld = false;
+    let posts = 0;
+    const ctl = createLoginCardController({
+        host, store,
+        fetchImpl: async (url, init = {}) => {
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                posts += 1;
+                return json(400, { error: 'credential_profile_required', code: 'credential_profile_required',
+                    required_actions: ['add_named_account'] });
+            }
+            return json(404, {});
+        },
+        signInWithheld: () => (withheld ? 'The engine cannot install the program this sign-in needs.' : ''),
+    });
+    await ctl.start('codex', '');
+    assert.ok(host.innerHTML.includes('data-profile-name-entry'), 'the name face opened while nothing was withheld');
+    // The state flips (the program read landed): the submit the name face's button runs — a named
+    // start — must honour the same decision instead of sending a second create.
+    withheld = true;
+    await ctl.start('codex', 'work');
+    assert.equal(posts, 1, 'only the first create was ever sent');
+    assert.ok(host.innerHTML.includes('The engine cannot install the program this sign-in needs.'),
+        'the refusal replaced the name face');
+    assert.ok(!host.innerHTML.includes('data-profile-name-entry'), 'the name face is gone');
+    assert.equal(ctl.active?.jobId, '', 'the refused submit created no job');
+    assert.ok(ctl.active?.absent, 'the refused submit owns no custody');
+    ctl.dispose();
+    store.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Refusals decided before any request (LIFECYCLE CONTRACT): whatever job id the
+// card held, a withhold or a saved account the newest roster read no longer
+// lists sends no create and no DELETE; a sign-in still running keeps its card,
+// and the ordinary paths — a default or typed-name start, the explicit external
+// continuation, a repeated press — stay as they were.
+// ---------------------------------------------------------------------------
+
+const NOT_HERE = (name) => `${name} is not installed where Claudexor runs and cannot be installed here.`;
+
+test('a withhold reaches a card that still holds its reconciled job id: Connect again creates and cancels nothing', async (t) => {
+    // The card used to skip the withhold whenever it held a job id, so the reconciled face's Connect again sent a
+    // create for a program the engine cannot install. A released job is no running sign-in to keep.
+    const requests = [];
+    let creates = 0;
+    let withheld = false;
+    const host = interactiveHost();
+    const ctl = createLoginCardController({
+        host, store: null,
+        signInWithheld: () => (withheld ? NOT_HERE('Codex') : ''),
+        fetchImpl: async (url, init = {}) => {
+            requests.push(`${init.method || 'GET'} ${url}`);
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                creates += 1;
+                return json(200, { job_id: `job-${creates}`, job: creates === 1
+                    ? { state: 'interrupted_unknown', outcome: { reason: 'termination_unconfirmed' } }
+                    : { state: 'running', phase: 'awaiting_user' } });
+            }
+            if (url.endsWith('/reconcile')) {
+                return json(200, { job: { state: 'interrupted_unknown', outcome: { reason: 'termination_unconfirmed' },
+                    terminationReconciliation: { status: 'empty' } } });
+            }
+            return json(200, { job: { state: 'running', phase: 'awaiting_user' } });
+        },
+    });
+    t.after(() => ctl.detach());
+    await ctl.start('codex', '');
+    await ctl.reconcile(ctl.active);
+    assert.match(host.innerHTML, /data-login-retry>Connect again</);
+    assert.equal(ctl.active.jobId, 'job-1', 'the reconciled card still holds its job id');
+    withheld = true;
+    const before = requests.length;
+    host.click('[data-login-retry]');
+    await flush();
+    assert.deepEqual(requests.slice(before), [], 'no create and no DELETE left the card');
+    assert.match(host.innerHTML, /cannot be installed here/);
+    assert.equal(ctl.active.jobId, '', 'the refusal is a card of its own, owning no job');
+    assert.equal(ctl.active.custodyStatus, LOGIN_CUSTODY_RELEASED);
+    // The withhold lifts (the program installed by hand): the refusal's Try again is the ordinary create.
+    withheld = false;
+    host.click('[data-login-retry]');
+    await flush();
+    assert.deepEqual(requests.slice(before), ['POST /api/claudexor/login']);
+    assert.equal(ctl.active.jobId, 'job-2');
+    ctl.detach();
+});
+
+test('Continue in external terminal is refused like any start while withheld, and stays the explicit continuation once it lifts', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const bodies = [];
+    let deletes = 0;
+    let withheld = false;
+    const host = interactiveHost();
+    const ctl = createLoginCardController({
+        host, store: null,
+        signInWithheld: () => (withheld ? NOT_HERE('One') : ''),
+        fetchImpl: async (url, init = {}) => {
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                bodies.push(JSON.parse(init.body));
+                return json(200, { job_id: `job-${bodies.length}`, job: { state: 'running' },
+                    ...(bodies.at(-1).transport === 'client_pty'
+                        ? { attach_command: 'claudexor setup attach job-2', attach_shell: 'posix' } : {}) });
+            }
+            if (init.method === 'DELETE') {
+                deletes += 1;
+                return json(200, { job: { state: 'cancelled' } });
+            }
+            return json(200, { job: { state: 'failed', outcome: { reason: 'command_failed' },
+                nativeCommand: { errorCode: 'terminal_transport_failed' } } });
+        },
+    });
+    t.after(() => ctl.detach());
+    await ctl.start('one', '');
+    t.mock.timers.tick(3000);
+    await flush();
+    assert.match(host.innerHTML, /data-login-external-terminal/, 'the settled job offers the external continuation');
+    withheld = true;
+    host.click('[data-login-external-terminal]');
+    await flush();
+    assert.equal(bodies.length, 1, 'the withheld continuation sent no create');
+    assert.equal(deletes, 0, 'and cancelled nothing');
+    assert.match(host.innerHTML, /cannot be installed here/);
+    // Lifted, the refusal's Try again repeats exactly what was chosen: the external terminal.
+    withheld = false;
+    host.click('[data-login-retry]');
+    await flush();
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[1].transport, 'client_pty', 'the explicit external continuation is what the retry repeats');
+    assert.match(host.innerHTML, /data-login-external-command/);
+    assert.equal(await ctl.dispose(), LOGIN_CUSTODY_RELEASED);
+    assert.equal(deletes, 1, 'only the dispose cancels, and only the job it created');
+    t.mock.timers.reset();
+});
+
+test('a refused start never touches a sign-in still running: no DELETE, no create, its poll and verdict carry on', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const requests = [];
+    const said = [];
+    let jobState = 'running';
+    const host = fakeHost();
+    const ctl = createLoginCardController({
+        host, store: null,
+        signInWithheld: (harness) => (harness === 'agy' ? NOT_HERE('Antigravity') : ''),
+        notify: (sentence) => said.push(sentence),
+        fetchImpl: async (url, init = {}) => {
+            requests.push(`${init.method || 'GET'} ${url}`);
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                return json(200, { job_id: 'codex-job', job: { state: 'running', phase: 'awaiting_user' } });
+            }
+            return json(200, { job: { state: jobState } });
+        },
+    });
+    t.after(() => ctl.detach());
+    await ctl.start('codex', '');
+    const running = ctl.active;
+    const before = requests.length;
+    const refused = ctl.start('agy', '');
+    assert.equal(ctl.start('agy', ''), refused, 'a repeated refused press rejoins the one operation');
+    await refused;
+    assert.deepEqual(requests.slice(before), [], 'nothing left the card: no DELETE of the running job, no create');
+    assert.equal(ctl.active, running, 'the running sign-in keeps its card');
+    assert.deepEqual(said, [NOT_HERE('Antigravity')], 'the refusal is said once, beside it');
+    jobState = 'succeeded';
+    t.mock.timers.tick(3000);
+    await flush();
+    assert.deepEqual(requests.slice(before), ['GET /api/claudexor/login/codex-job'], 'its poll was never disarmed');
+    assert.match(host.innerHTML, /Signed in\./, 'and its own verdict landed');
+    ctl.dispose();
+    t.mock.timers.reset();
+});
+
+test('a refusal that replaces a settled card mid re-check releases the status poll that card held', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, statusPayload(false)),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+        pollMs: 5000,
+    });
+    let withheld = false;
+    let creates = 0;
+    const host = fakeHost();
+    const ctl = createLoginCardController({
+        host, store,
+        signInWithheld: () => (withheld ? NOT_HERE('Codex') : ''),
+        fetchImpl: async (url, init = {}) => {
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                creates += 1;
+                return json(200, { job_id: 'race-job', job: { state: 'running' } });
+            }
+            return json(200, { job: { state: 'failed', outcome: { reason: 'auth_not_ready' } } });
+        },
+    });
+    t.after(() => { ctl.detach(); store.dispose(); });
+    await ctl.start('codex', '');
+    t.mock.timers.tick(3000);
+    await flush();
+    assert.equal(ctl.active.confirming, true, 'the verification race is being re-checked against live status');
+    assert.equal(store.polling, true, 'the re-check holds the shared status poll');
+    withheld = true;
+    await ctl.start('codex', '');
+    assert.equal(creates, 1, 'the refused start created nothing');
+    assert.match(host.innerHTML, /cannot be installed here/);
+    assert.equal(store.polling, false, 'the replaced card no longer holds the status poll');
+    t.mock.timers.tick(10000);
+    await flush();
+    assert.match(host.innerHTML, /cannot be installed here/, 'the stale re-check repaints nothing over the refusal');
+    ctl.dispose();
+    store.dispose();
+    t.mock.timers.reset();
+});
+
+test('Try again on a saved account the newest roster no longer lists creates nothing, and a failed read since keeps that proof', async (t) => {
+    // The press chose a saved account; the engine creates a missing profile under the name it is given, so a retry
+    // after the owner removed it would bring the account back. A failed read with no earlier proof proves nothing, but
+    // it does not undo the card's own proof either: only an answered roster listing the account again, or a name the
+    // owner types as new, lets a create go out.
+    let roster = ['work'];
+    let accountsRead = 'failed';
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, { ...statusPayload(false), reads: { catalog: 'ok', accounts: accountsRead, quota: 'ok' },
+            profiles: { profiles: roster.map((id) => ({ profile: { harness_id: 'codex', profile_id: id },
+                status: { verification: 'failed' } })), harnessAccounts: [], accountPools: [] } }),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    });
+    const bodies = [];
+    const host = interactiveHost();
+    const ctl = createLoginCardController({
+        host, store,
+        fetchImpl: async (url, init = {}) => {
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                bodies.push(JSON.parse(init.body));
+                return json(503, { error: 'engine busy' });
+            }
+            return json(404, {});
+        },
+    });
+    t.after(() => { ctl.detach(); store.dispose(); });
+    const read = async (state, ids) => { accountsRead = state; roster = ids; await store.refresh(); };
+    const retry = async () => { host.click('[data-login-retry]'); await flush(); };
+    await read('failed', []);
+    await ctl.start('codex', 'work');
+    assert.equal(bodies.length, 1, 'a failed read with no earlier proof proves no absence');
+    await read('ok', []);
+    await retry();
+    assert.equal(bodies.length, 1, 'Try again created nothing: the create would bring the removed account back');
+    assert.match(host.innerHTML, /no longer saved here/);
+    assert.equal(ctl.active.custodyStatus, LOGIN_CUSTODY_UNKNOWN,
+        'the refused retry sent nothing, and the earlier create died 503: its unknown outcome is not fabricated into release');
+    await read('failed', []);
+    await retry();
+    assert.equal(bodies.length, 1, 'one failed read since does not let the retry restore it');
+    assert.match(host.innerHTML, /no longer saved here/);
+    // The standing card is still the EXISTING-account start, so its Try again meets the same proof.
+    await read('ok', []);
+    await ctl.start('codex', 'work');
+    await read('failed', []);
+    await retry();
+    assert.equal(bodies.length, 1, 'proved removed again, the proof outlasts the failed read');
+    await read('ok', ['work']);
+    await retry();
+    assert.equal(bodies.length, 2, 'an answered roster listing it lets it sign in');
+    // The owner's own named add is the one press that may register the name again, whatever the roster proved.
+    await ctl.addAccount('codex', 'work');
+    assert.deepEqual(bodies.map((body) => body.profile_id), ['work', 'work', 'work'],
+        'the same name typed as a new account is the owner\'s own add');
+});
+
+test('a failed create whose roster answered empty keeps the refusal through a dead read and back', async (t) => {
+    // The Astra seam: the create died, the roster ANSWERED empty (the owner had removed the account), and only
+    // then the status read died. The refusal card repaints through that failure; Try again must not re-register
+    // the removed name from the older successful roster — the answered empty stays the membership proof until a
+    // later ANSWERED roster lists the account again.
+    let accountsRead = 'failed';
+    let roster = ['work'];
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, { ...statusPayload(false),
+            reads: { catalog: 'ok', accounts: accountsRead, quota: 'ok' },
+            profiles: { profiles: roster.map((id) => ({ profile: { harness_id: 'codex', profile_id: id },
+                status: { verification: 'failed' } })), harnessAccounts: [], accountPools: [] } }),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    });
+    const bodies = [];
+    const host = interactiveHost();
+    const ctl = createLoginCardController({
+        host, store,
+        fetchImpl: async (url, init = {}) => {
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                bodies.push(JSON.parse(init.body));
+                return json(503, { error: 'engine busy' });
+            }
+            return json(404, {});
+        },
+    });
+    t.after(() => { ctl.detach(); store.dispose(); });
+    const read = async (state, ids) => { accountsRead = state; roster = ids; await store.refresh(); };
+    const retry = async () => { host.click('[data-login-retry]'); await flush(); };
+    // The create runs against an answered roster that still lists the account: it goes out and dies 503.
+    await read('ok', ['work']);
+    await ctl.start('codex', 'work');
+    assert.equal(bodies.length, 1, 'the answered roster listed the account, so the create went out');
+    // The roster answers EMPTY (the owner removed it on another client) and repaints the standing error card;
+    // then the status read dies. Neither may unmake the answered empty.
+    await read('ok', []);
+    assert.equal(bodies.length, 1);
+    ctl.render();
+    await read('failed', []);
+    await retry();
+    assert.equal(bodies.length, 1, 'Retry created nothing: the answered empty outlived the dead read');
+    assert.match(host.innerHTML, /no longer saved here/);
+    // Only an ANSWERED roster listing the account again lets the name sign back in.
+    await read('ok', ['work']);
+    await retry();
+    assert.equal(bodies.length, 2, 'an answered roster listing it again lets the retry sign in');
+});
+
+test('a decision that flips while the earlier sign-in is being cancelled withholds the create; the DELETE stands as answered', async (t) => {
+    // Running C, then A: A is allowed, so C's DELETE goes out and waits. Meanwhile A becomes withheld, or its saved
+    // account leaves the answered roster. The cancel C asked for stands as the engine answered it; A's create, on its
+    // threshold, is withheld by the same local decision — no network read is added for it.
+    for (const flip of ['withheld', 'removed']) {
+        let withheld = false;
+        let roster = ['work'];
+        const store = createClaudexorStatusStore({
+            fetchImpl: async () => json(200, { ...statusPayload(false), reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' },
+                profiles: { profiles: roster.map((id) => ({ profile: { harness_id: 'agy', profile_id: id },
+                    status: { verification: 'failed' } })), harnessAccounts: [], accountPools: [] } }),
+            doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+        });
+        await store.refresh();
+        let releaseDelete = () => {};
+        const deleteGate = new Promise((resolve) => { releaseDelete = resolve; });
+        const requests = [];
+        const host = fakeHost();
+        const ctl = createLoginCardController({
+            host, store,
+            signInWithheld: (harness) => (withheld && harness === 'agy' ? NOT_HERE('Antigravity') : ''),
+            fetchImpl: async (url, init = {}) => {
+                requests.push(`${init.method || 'GET'} ${url}`);
+                if (url === '/api/claudexor/login' && init.method === 'POST') {
+                    return json(200, { job_id: 'c-job', job: { state: 'running', phase: 'awaiting_user' } });
+                }
+                if (init.method === 'DELETE') {
+                    await deleteGate;
+                    return json(200, { job: { state: 'cancelled' } });
+                }
+                return json(200, { job: { state: 'running', phase: 'awaiting_user' } });
+            },
+        });
+        t.after(() => { ctl.detach(); store.dispose(); });
+        await ctl.start('codex', '');
+        const running = ctl.active;
+        const started = ctl.start('agy', 'work');
+        await flush();
+        assert.deepEqual(requests.at(-1), 'DELETE /api/claudexor/login/c-job', `${flip}: A was allowed, so C's cancel went out`);
+        if (flip === 'withheld') withheld = true;
+        else { roster = []; await store.refresh(); }
+        releaseDelete();
+        await started;
+        assert.equal(requests.filter((request) => request === 'POST /api/claudexor/login').length, 1, `${flip}: only C was created`);
+        assert.equal(requests.filter((request) => request.startsWith('DELETE')).length, 1, `${flip}: the one DELETE sent`);
+        assert.equal(running.envelope.job.state, 'cancelled', `${flip}: C's cancel stands as the engine answered it`);
+        assert.equal(ctl.active.jobId, '', `${flip}: A's refusal is the card, owning no job`);
+        assert.match(host.innerHTML, flip === 'withheld' ? /cannot be installed here/ : /no longer saved here/);
+    }
 });
