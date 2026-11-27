@@ -1117,6 +1117,89 @@ test('Circles statusReads and Place sheet isolate telegram-bot:owner_bot from te
     assert.doesNotMatch(dialog.textContent, /@separate_bot|@newer_owner_bot/);
 });
 
+test('connecting the first personal Telegram group refreshes a cached Off only for that bot', async (t) => {
+    const cleanups = [];
+    const { routes, calls, document } = setup({ after: (fn) => cleanups.push(fn) });
+    const priorCss = globalThis.CSS;
+    globalThis.CSS = { escape: (value) => value };
+    t.after(() => { globalThis.CSS = priorCss; });
+    const content = document.createElement('div');
+    content.id = 'content';
+    document.body.appendChild(content);
+
+    const account_id = '101';
+    const identity = { sends_as: { id: account_id, label: '@mybot', kind: 'bot' } };
+    const group = { account_id, conversation_id: '-10042', label: 'Book group' };
+    const ownerStatus = '/api/extensions/telegram-bot/owner_bot_status';
+    const separateStatus = '/api/extensions/telegram-bot/status';
+    const feed = '/api/extensions/telegram/group_feed';
+    const places = [];
+    let allowed = false, intake = false;
+    const ok = (data) => ({ ok: true, json: async () => data });
+    const readLabels = () => intake
+        ? { v: 1, enabled: true, account_id, identity, connect: [group] }
+        : { v: 1, enabled: false, reason: 'feed_off', account_id: '', connect: null };
+    const callsTo = (url) => calls.filter((entry) => entry === url).length;
+    routes.set('/api/places', (_url, init) => {
+        if (init?.method === 'POST') {
+            const created = { ...rawTgOwnerBotConnector, ...group, place_id: 'book-group', provider: 'telegram', state: 'silent', revision: 1 };
+            places.push(created);
+            return ok({ ok: true, place: created });
+        }
+        return ok({ circles: [], places, connectors: [rawTgPlaceConnector, rawTgOwnerBotConnector] });
+    });
+    routes.set(ownerStatus, () => ok(readLabels()));
+    routes.set(`${ownerStatus}?account_id=${account_id}`, () => ok(readLabels()));
+    routes.set(separateStatus, () => ok({ text: 'Ready', tone: 'ok', connect: [] }));
+    routes.set('/api/extensions', () => ok({ skills: [{ name: 'telegram', enabled: true, live_loaded: true },
+        { name: 'telegram-bot', enabled: true, live_loaded: true }] }));
+    routes.set(feed, (_url, init) => {
+        if (init?.method === 'POST') {
+            allowed = JSON.parse(init.body).enabled;
+            if (!allowed) intake = false;
+        }
+        return ok({ ok: true, v: 1, state: 'ready', owner_bound: true, capable: true, account_id, identity,
+            enabled: allowed, intake_ready: intake, consent_account_id: allowed ? account_id : '' });
+    });
+    let add;
+    const circles = initCircles({ state: { activePage: 'circles' },
+        openConnect: (options) => { add = openConnectPlace({ ...options, openPlace: () => {} }); },
+        contributions: { onLifecycle: () => () => {} } });
+    t.after(() => { add?.close(); circles.destroy(); cleanups.forEach((fn) => fn()); });
+    const click = async (act) => {
+        const target = add.body.querySelector(`[data-connect-act="${act}"]`);
+        assert.ok(target, act);
+        await add.body.fire('click', { target });
+        await flushAsync(8);
+    };
+    const startAdd = async () => {
+        await circles.page.fire('click', { target: circles.page.querySelector('[data-circles-act="add-place"]') });
+        await typeWords(add, 'Answer when asked.');
+        await click('next');
+        await click('open-tg-groups');
+    };
+    const row = () => circles.page.querySelector('[data-place-open="book-group"]')?.textContent;
+
+    await flushAsync(8);
+    await startAdd();
+    await click('tg-opt-in');
+    assert.equal(callsTo(ownerStatus), 2, 'Allow triggered a read while intake was still off');
+    intake = true;
+    await click('tg-refresh');
+    assert.equal(callsTo(ownerStatus), 2, 'Add read its own scoped status, not the list cache');
+    await click('connect');
+    assert.match(row(), /silent/);
+    assert.doesNotMatch(row(), /feed off in Telegram/i);
+    assert.equal(callsTo(ownerStatus), 3, 'Connect asked for one fresh personal bot status');
+    assert.equal(callsTo(separateStatus), 1, 'the separate bot keeps its cached status');
+
+    await circles.refresh();
+    assert.equal(callsTo(ownerStatus), 3, 'an ordinary refresh does not reread the status');
+    await startAdd();
+    await click('tg-opt-out');
+    assert.match(row(), /Group feed off in Telegram/);
+});
+
 test('A -> B -> A race while initial group_feed is held: B loads without waiting for A, late A does not overwrite B, and returning to A recovers and connects once', async (t) => {
     const { routes } = setup(t);
     let releaseFirstGroupFeed = null;

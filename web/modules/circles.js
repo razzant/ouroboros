@@ -573,7 +573,10 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         addPlace((setup.circle && circleById(setup.circle.id)) || setup.circle, setup.draft);
     };
     const onChanged = (event) => {
-        if (event?.detail?.telegramGroupFeed) statusReads.delete('telegram-bot:owner_bot');
+        const place = event?.detail?.place;
+        // Allow can refresh the status before group intake is ready. Refresh this one route when the new place lands.
+        if (event?.detail?.telegramGroupFeed || (place && isOwnerBotPair(place)
+            && !view?.places?.some((entry) => entry.id === place.id))) statusReads.delete('telegram-bot:owner_bot');
         if (shown()) void refresh(); else behind = true;
     };
     const onVisibility = () => { if (behind && shown()) void refresh(); };
