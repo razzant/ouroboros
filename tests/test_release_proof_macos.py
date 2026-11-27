@@ -16,13 +16,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.test_release_proof import REPO, _assemble_windows, _fixture_release, _run_cli, release_proof
+from tests.test_release_proof import REPO, SIGNER, _assemble_windows, _fixture_release, _run_cli, release_proof
 
 
 @pytest.mark.parametrize("notarized", [False, True])
 def test_macos_notarization_state_reaches_evidence_and_notes(tmp_path: Path, notarized: bool):
-    release_dir, version_file, readme = _fixture_release(tmp_path, notarized=notarized)
-    _, notes = _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER, notarized=notarized)
+    _, notes = _assemble_windows(tmp_path, release_dir, version_file, readme, signer=SIGNER)
     evidence = json.loads((release_dir / "release-evidence.json").read_text(encoding="utf-8"))
     macos = next(row for row in evidence["artifacts"] if row["proofId"] == "macos-arm64")
 
@@ -49,7 +49,7 @@ def test_macos_notarization_state_reaches_evidence_and_notes(tmp_path: Path, not
     ],
 )
 def test_macos_notarization_state_must_be_consistent(tmp_path: Path, notarized: bool, mutate: str):
-    release_dir, version_file, readme = _fixture_release(tmp_path, notarized=notarized)
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER, notarized=notarized)
     path = release_dir / "release-smoke-macos-arm64.json"
     receipt = json.loads(path.read_text(encoding="utf-8"))
     if mutate == "drop-gatekeeper":
@@ -65,7 +65,7 @@ def test_macos_notarization_state_must_be_consistent(tmp_path: Path, notarized: 
     path.write_text(json.dumps(receipt), encoding="utf-8")
 
     with pytest.raises(ValueError, match="consistent notarization state"):
-        _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+        _assemble_windows(tmp_path, release_dir, version_file, readme, signer=SIGNER)
     assert not (release_dir / "release-evidence.json").exists()
 
 

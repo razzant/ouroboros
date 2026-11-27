@@ -31,7 +31,9 @@ from ouroboros.process_interpreters import (
     apply_env_path_prepend,
     interpreter_path_overlay,
 )
-from ouroboros.shell_parse import POSIX_SHELL_HEADS, normalize_check_argv, shell_tokens_typed
+from ouroboros.shell_parse import (
+    POSIX_SHELL_HEADS, VERIFY_RUN_KINDS, normalize_check_argv, normalize_verification_kind, shell_tokens_typed,
+)
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     active_tool_profile,
@@ -130,15 +132,8 @@ def _receipt_custody_failure(kind: str, detail: str = "") -> str:
         f"recovers.{suffix}"
     )
 
-_CONTRACT_KINDS = (
-    "visible_verifier",
-    "explicit_command",
-    "explicit_metric",
-    "artifact_observation",
-    "no_visible_machine_contract",
-    "delegation_zero_run",
-)
-_RUN_KINDS = frozenset({"visible_verifier", "explicit_command", "explicit_metric"})
+_RUN_KINDS = VERIFY_RUN_KINDS
+_CONTRACT_KINDS = (*_RUN_KINDS, "artifact_observation", "no_visible_machine_contract", "delegation_zero_run")
 # WRITE vocabulary only — hydration reads keep historical "complete" valid
 # through ZERO_RUN_READ_DECISIONS in the same SSOT module.
 _ZERO_RUN_DECISIONS = ZERO_RUN_WRITE_DECISIONS
@@ -150,15 +145,45 @@ _ZERO_RUN_DECISIONS = ZERO_RUN_WRITE_DECISIONS
 _EXPECTED_MATCH_KINDS = ("substring", "exact", "exact_line", "json_equals", "bytes_equal")
 
 
-def _missing_check_refusal(kind: str, check: Any) -> str:
-    """A run kind sent without a command: what arrived, a ready call, the kinds that need none."""
-    received = "this call sent none" if check is None else f"check={repr(check)[:120]} holds no command"
-    return (
+def _verification_command(kind: str, check: Any, *, echo_check: bool = True) -> tuple[list[str] | None, str]:
+    """Return the required argv or its refusal. A non-run kind needs neither."""
+    if kind not in _RUN_KINDS:
+        return None, ""
+    argv = _normalize_check(check)
+    if argv:
+        return argv, ""
+    received = "this call sent none" if check is None else "the supplied check holds no command"
+    if check is not None and echo_check:
+        received = f"check={repr(check)[:120]} holds no command"
+    return None, (
         f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check`, and {received}. "
         'Send the command the host should run, e.g. check=["pytest","-q"] or check="pytest -q"; with no '
         "command to run use contract_kind=artifact_observation (artifact_paths) or "
         "no_visible_machine_contract. Nothing ran; no receipt was written."
     )
+
+
+def _readonly_verification_refusal(ctx: ToolContext, kind: str) -> str:
+    """The read-only exception is a typed zero-run receipt before leaf start."""
+    if active_tool_profile(ctx) != "local_readonly_subagent":
+        return ""
+    bootstrap = getattr(ctx, "_configured_actor_bootstrap", None)
+    if kind == "delegation_zero_run" and isinstance(bootstrap, dict) and not bool(bootstrap.get("physical_started")):
+        return ""
+    return (
+        "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this profile may record only a "
+        "delegation_zero_run receipt before its selected physical leaf starts."
+    )
+
+
+def verify_command_argument_error(ctx: ToolContext, args: dict[str, Any]) -> str:
+    kind = normalize_verification_kind(args.get("contract_kind"))
+    if kind not in _CONTRACT_KINDS:
+        return ("⚠️ TOOL_ARG_ERROR (verify_and_record): "
+                f"contract_kind must be one of {', '.join(_CONTRACT_KINDS)}.")
+    # Before Settings selection, caller text that would need masking cannot be echoed.
+    error = _verification_command(kind, args.get("check"), echo_check=not args.get("env_from_settings"))[1]
+    return (_readonly_verification_refusal(ctx, kind) or error) if error else ""
 
 
 def _expected_matches(out: str, expected: str, mode: str) -> bool:
@@ -664,24 +689,12 @@ def _verify_and_record(
     criterion_basis = kwargs.get("criterion_basis", "")
     bucket = str(kwargs.get("bucket") or "")
     skill_name = str(kwargs.get("skill_name") or "")
-    kind = str(contract_kind or "").strip()
+    kind = normalize_verification_kind(contract_kind)
     if kind not in _CONTRACT_KINDS:
         return f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind!r} must be one of {', '.join(_CONTRACT_KINDS)}."
-    if active_tool_profile(ctx) == "local_readonly_subagent":
-        # Read-only actor-first sessions need a host-owned zero-run disclosure,
-        # not the general command/artifact verification surface.  Keep the
-        # profile and lifecycle checks here as defense in depth for stale schemas
-        # or forced dispatches after the physical leaf has started.
-        bootstrap = getattr(ctx, "_configured_actor_bootstrap", None)
-        if (
-            kind != "delegation_zero_run"
-            or not isinstance(bootstrap, dict)
-            or bool(bootstrap.get("physical_started"))
-        ):
-            return (
-                "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this profile may record only a "
-                "delegation_zero_run receipt before its selected physical leaf starts."
-            )
+    # Keep this check for direct callers as well as registry dispatch.
+    if refusal := _readonly_verification_refusal(ctx, kind):
+        return refusal
     match_mode = str(expected_match or "substring").strip().lower() or "substring"
     if match_mode not in _EXPECTED_MATCH_KINDS:
         return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match={match_mode!r} must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
@@ -739,10 +752,10 @@ def _verify_and_record(
     if _basis:
         receipt["criterion_basis"] = _basis[:500]
 
-    if kind in _RUN_KINDS:
-        argv = _normalize_check(check)
-        if not argv:
-            return _missing_check_refusal(kind, check)
+    argv, command_error = _verification_command(kind, check)
+    if command_error:
+        return command_error
+    if argv:
         if match_mode == "bytes_equal" and len(artifact_paths) != 2:
             return (
                 "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal requires "
@@ -759,7 +772,7 @@ def _verify_and_record(
         if refusal := command_start_refusal(ctx, "verify_and_record", kwargs.get("timeout_sec")):
             return refusal
         try:
-            binding = _resolved_binding or build_resolved_resource_binding(
+            binding = _resolved_binding if _resolved_binding is not None else build_resolved_resource_binding(
                 ctx,
                 operation="shell",
                 process_cwd=cwd,

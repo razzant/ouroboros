@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.5.0
+version: 1.5.1
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
