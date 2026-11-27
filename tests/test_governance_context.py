@@ -324,7 +324,7 @@ def test_the_architecture_map_is_never_inlined_whole(repo):
                   if path.startswith("docs/architecture/") and "#" not in path]
     assert whole_arch == []
     assert "docs/ARCHITECTURE.md" in _paths(context, "navigation", tier=3)
-    assert "docs/architecture/02-web.md" in context.navigation
+    assert "Chapters in `docs/architecture/`:" in context.navigation and "\n02-web.md" in context.navigation
 
 
 def test_a_packet_row_receives_the_sections_that_name_a_touched_file(repo):

@@ -65,12 +65,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional
 
 from ouroboros.runtime_limits import REVIEW_GOVERNANCE_INLINE_SHARE
-from ouroboros.tools import governance_module_rows as gmr
 from ouroboros.utils import estimate_tokens
 
 BIBLE_PATH = "BIBLE.md"
@@ -200,7 +199,6 @@ class GovernanceContext:
     selected_inline: str = ""
     inline_whole_documents: dict = field(default_factory=dict)
     layer: str = BODY_LAYER
-    path_owner_rows: int = 0  # owner rows inlined in ``selected_inline`` (``yield_module_rows`` removes them)
 
 
 def _normalize(path: Any) -> str:
@@ -389,9 +387,6 @@ def navigation_material(layer: str, delivery: str) -> list:
             pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note, compact=delivery == PACKET_DELIVERY)
                             for note in _DESIGN_REVIEW_MAP.values())
             pointers.append(_INVARIANTS_UNAVAILABLE)
-            if delivery == PACKET_DELIVERY:  # only a packet seat is handed owner rows, under their section title
-                blocks, notices = gmr.contract_material()
-                pointers.extend([*(_render(gmr.MODULE_ROWS_PATH, block) for block in blocks), *notices])
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
                 *(pointers if layer == BODY_LAYER else ()), *([PACKET_INDEX, PACKET_CHAPTER_DIR.format(folder="⟨folder⟩")] if delivery == PACKET_DELIVERY else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
@@ -589,7 +584,6 @@ def governance_context(
     subject_root: Any = None,
     manifest_facts: Any = None,
     review_words: Any = None,
-    changes: Optional[Sequence[tuple]] = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -604,8 +598,7 @@ def governance_context(
     body) runs the three tiers; ``core`` (any other subject) runs
     :func:`_core_layer_context` over ``subject_root``; ``skill`` (a skill payload)
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
-    manifest's ``declares``). ``changes`` (the subject's ``(status, path, old path)``
-    rows, when the seam has them) labels a body packet's owner rows."""
+    manifest's ``declares``)."""
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
 
     if layer not in GOVERNANCE_LAYERS:
@@ -798,7 +791,7 @@ def governance_context(
         units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section), False)
                   for heading in _top_sections(chapter)]
         for start, title, body, is_code in units:
-            if is_code:  # a code listing gives its lines that name a touched file, not all of itself
+            if is_code:  # a listing (the module directory) gives its lines that name a touched file, not all of itself
                 body = "\n".join(line for line in body.splitlines() if any_name.search(line))
                 title += " (excerpt: its lines naming a touched file)"
             files, mentions = _mentions(body, names)
@@ -810,21 +803,11 @@ def governance_context(
             sections.append(((is_code, -files * 1000 - mentions, chapter.source_path, start),
                              path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
             chapter_text[path] = body
-    # No module tree in the book: one owner row per path of the change, read from the installed manifest, ahead of
-    # the share (it is optional evidence of the fit ladder instead: ``yield_module_rows``).
-    modules = gmr.module_rows(root, touched, changes) if packet and touched else gmr.ModuleRows()
-    if modules.problem:
-        rows.append(_row(gmr.MODULE_ROWS_PATH, 3, "navigation", 0, modules.problem))
-    elif modules.text:
-        selected.append((gmr.MODULE_ROWS_PATH, modules.text))
-        rows.append(_row(gmr.MODULE_ROWS_PATH, 3, "inline", len(modules.text),
-                         f"owner rows of the {modules.count} touched path(s), outside the inline share"))
     for order, path, title, reason in sorted(sections):
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
 
     # --- navigation -------------------------------------------------------
-    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline), invariants_pointer,
-                gmr.UNAVAILABLE if modules.problem else ""]
+    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline), invariants_pointer]
     design_map = ""
     if DESIGN_PATH not in inline_texts:
         delivered = next((row["path"] for row in rows if row["disposition"] == "inline"
@@ -853,25 +836,5 @@ def governance_context(
         stable_inline=stable_inline,
         selected_inline=selected_inline,
         inline_whole_documents=inline_texts,
-        path_owner_rows=modules.count if modules.text else 0,
     )
 
-
-def yield_module_rows(governance: GovernanceContext) -> GovernanceContext:
-    """``governance`` without its owner rows, saying so in counted words: the fit ladder's first optional rung, ahead
-    of any part of the change. The manifest row records the yield; a context without the rows is returned unchanged."""
-    row = next((row for row in governance.manifest if row["path"] == gmr.MODULE_ROWS_PATH
-                and row["disposition"] == "inline"), None)
-    if row is None:
-        return governance
-    kept = [(title, text) for title, text in governance.inline_sections if title != gmr.MODULE_ROWS_PATH]
-    rows_text = next(text for title, text in governance.inline_sections if title == gmr.MODULE_ROWS_PATH)
-    before, after = governance.selected_inline.split(_render(gmr.MODULE_ROWS_PATH, rows_text), 1)
-    selected_inline = _join([before.removesuffix("\n\n"), after.removeprefix("\n\n")])
-    navigation = _join([governance.navigation, gmr.YIELDED.format(count=governance.path_owner_rows)])
-    manifest = [dict(entry, disposition="navigation", reason=gmr.YIELD_REASON) if entry is row else entry
-                for entry in governance.manifest]
-    return replace(
-        governance, inline_sections=kept, navigation=navigation, manifest=manifest, selected_inline=selected_inline,
-        path_owner_rows=0,
-        tokens_estimate=estimate_tokens(_join([governance.stable_inline, selected_inline, navigation])))
