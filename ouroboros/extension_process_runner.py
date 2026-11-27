@@ -330,7 +330,8 @@ def _child_env(
     granted_keys: List[str],
     host_access: bool = True,
 ) -> Dict[str, str]:
-    env = _scrub_env(env_allowlist, skill_state_dir(drive_root, skill_name), skill_name, granted_keys=granted_keys)
+    env = _scrub_env(env_allowlist, skill_state_dir(drive_root, skill_name), skill_name, granted_keys=granted_keys,
+                     drive_root=drive_root)
     from ouroboros.config import resolve_app_root
     from ouroboros.launch_roots import BASIS_ENV
     from ouroboros.node_runtime import forward_playwright_node
@@ -762,14 +763,16 @@ def _base_env_for_skill(skill: Any, drive_root: pathlib.Path, repo_dir: pathlib.
                       env_allowlist=[], granted_keys=[], host_access=host_access)
 
 
-def _readable_settings(skill: Any, drive_root: pathlib.Path, settings: Dict[str, Any], grants: Dict[str, Any]) -> dict:
-    """What the skill's PluginAPI lets it read of ``settings``: its allowlist, under its grants and ``read_settings``."""
+def _readable_settings(skill: Any, drive_root: pathlib.Path, settings: Dict[str, Any], grants: Dict[str, Any],
+                       *, claim: bool = True) -> dict:
+    """What the skill's PluginAPI lets it read of ``settings``: its allowlist, under its grants and ``read_settings``.
+    ``drive_root`` reaches the one-reader arbitration; ``claim`` false for a passive discovery read."""
     from ouroboros.extension_plugin_api import PluginAPIImpl, _PluginAPIConfig
 
     api = PluginAPIImpl(_PluginAPIConfig(
         skill_name=skill.name, permissions=skill.manifest.permissions, env_allowlist=skill.manifest.env_from_settings,
         state_dir=skill_state_dir(drive_root, skill.name), settings_reader=lambda: settings,
-        granted_keys=grants.get("granted_keys") or [],
+        granted_keys=grants.get("granted_keys") or [], drive_root=drive_root, claim_bot_on_read=claim,
     ))
     return api.get_settings(skill.manifest.env_from_settings)
 
@@ -821,7 +824,7 @@ def _catalog_context(skill, drive_root, repo_dir, settings_reader=None):
     declaration, current = declared_catalog_inputs(skill), skill_settings(settings_reader)
     grants = grant_status_for_skill(drive_root, skill)
     settings = (declared_catalog_settings(declaration["settings"], current, grants) if declaration is not None
-                else registration_view(_readable_settings(skill, pathlib.Path(drive_root), current, grants)))
+                else registration_view(_readable_settings(skill, pathlib.Path(drive_root), current, grants, claim=False)))
     return catalog_identity(skill, settings, env, grants), env, settings
 
 

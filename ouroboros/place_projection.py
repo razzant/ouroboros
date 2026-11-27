@@ -25,6 +25,8 @@ def place_declarations(root) -> list[dict]:
         # ``published``: the declarations a wake save reads (``places.declared_fact_labels``). The rows added below are
         # only installed: a save refuses a new signal of theirs until their connector is on (``unpublished_signals``).
         row.update(readiness={"text": "Connector on", "tone": "ok"}, published=True)
+    from ouroboros.telegram_owner_bot import with_owner_bot
+    rows = with_owner_bot(rows, root)  # the owner's own Telegram bot, only while the live connector offers it
     published = {row["skill"] for row in rows}
     for skill in discover_skills(root):
         if skill.name in published or skill.load_error or skill.identity_collision:
@@ -61,14 +63,39 @@ def unpublished_signals(declarations, offered) -> list[str]:
 
 
 def connect_declared_place(root, connector: str, *, account_id: str = "", conversation_id: str = "", label: str = "",
-                           first=None, author: str = AUTHOR_OWNER):
-    """Connect from the installed declaration; ``first`` is what an Add says about the new place (``places.connect_place``)."""
+                           first=None, author: str = AUTHOR_OWNER, contribution_id: str = ""):
+    """Connect from the installed declaration; ``first`` is what an Add says about the new place (``places.connect_place``).
+    ``contribution_id`` names one of several declarations of the connector; without it there must be exactly one other
+    than a projected one (``telegram_owner_bot``), as before. An exact declaration takes only one account's conversation."""
     if not isinstance(label, str):
         raise PlaceError("place_invalid_string", "label")
-    declarations = [row for row in place_declarations(root) if row["skill"] == connector]
+    if not isinstance(contribution_id, str):
+        raise PlaceError("place_invalid_string", "contribution_id")
+    declarations = [row for row in place_declarations(root) if row["skill"] == connector
+                    and (row["id"] == contribution_id if contribution_id else not row.get("projected_from"))]
     if len(declarations) != 1:
         raise PlaceError("place_declaration_unavailable", "connector", "Enable a reviewed connector with one place declaration.")
     row = declarations[0]
+    from ouroboros.telegram_owner_bot import FEED_CONNECTOR, OWNER_BOT_CONTRIBUTION, owner_bridge_bot_id
+    own_bot = owner_bridge_bot_id(root) if connector == FEED_CONNECTOR else ""
+    if own_bot and account_id == own_bot and row["id"] != OWNER_BOT_CONTRIBUTION:
+        # The owner's own bot connects only through its exact owner_bot declaration, never the connector's ordinary
+        # whole-account row (which would write a place every owner_bot admission then refuses).
+        raise PlaceError("place_connect_invalid", "contribution_id", "Your own bot connects through its exact group place.")
+    if row.get("connect_mode") == "exact":
+        if row["skill"] == FEED_CONNECTOR and row["id"] == OWNER_BOT_CONTRIBUTION:
+            # Your own bot's group: the running bridge must confirm this bot, its consent and a group it is in now.
+            # The bridge registers its feed only where its poller runs (the server process): elsewhere, or while it is
+            # stopped, this writer cannot see it and names the place that can.
+            from ouroboros.telegram_owner_bot import current_bridge
+            bridge = current_bridge()
+            if bridge is None:
+                raise PlaceError("place_connect_invalid", "connector",
+                                 "Choose your own bot's group in Circles while its Telegram bridge runs.")
+            if not bridge.connect_allowed(account_id, conversation_id):
+                raise PlaceError("place_connect_invalid", "conversation_id", "Choose a group your own bot is in now.")
+        elif not account_id or not conversation_id:
+            raise PlaceError("place_connect_invalid", "conversation_id", "An exact place names its account and conversation.")
     provider = str(row["destination"]).removeprefix("vendor:").lower()
     # A label that already starts with the connector's word is not prefixed again ("Telegram · Telegram · …").
     given, word = label.strip(), str(row["label"])
@@ -172,16 +199,27 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
                   activity_coverage="captured_place_events", spent_24h_usd=spend)
     rows = place_declarations(root) if declarations is None else declarations
     builtin = place.connector == "ouroboros"  # built in: letters arrive at /api/letters, no connector skill runs
+    from ouroboros.telegram_owner_bot import declaring_place, is_owner_bot_place
     matches = [] if builtin else matching_declarations(place, rows)
+    owner_fallback = False
+    if not matches and not builtin and is_owner_bot_place(place):
+        # The connector is Off (or its owner_bot projection is gone): an already connected owner_bot place keeps its
+        # connector's icon, labels and wakes through the declaration it was projected from, without borrowing the
+        # separate bot's green readiness or probing its status URL.
+        matches = matching_declarations(declaring_place(place), rows)
+        owner_fallback = True
     row = ({"readiness": {"text": "Built in", "tone": "ok"}, "destination": "vendor:ouroboros",
             "wakes": ["direct_message", "from_bot"]} if builtin
            else matches[0] if matches else {})
     suggestions = declared_wake_facts(matches) if place.legacy_binding_ids else list(row.get("wakes") or [])
+    readiness = row.get("readiness") or {"text": "Connector unavailable", "tone": "warn"}
+    if owner_fallback and readiness.get("tone") == "ok":
+        readiness = {"text": "Connector unavailable", "tone": "warn"}
     result.update(label=said_once(place.label or row.get("label") or place.provider),
                   reply_destination=place.destination,
                   destination=row.get("destination") or "vendor:" + place.provider,
                   icon=row.get("icon_spec") or {}, wake_suggestions=suggestions,
-                  readiness=row.get("readiness") or {"text": "Connector unavailable", "tone": "warn"})
+                  readiness=readiness)
     review = wake_review(records, place, result["wake_suggestions"])
     if review:
         result["wake_review"] = review
@@ -195,7 +233,8 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     offered = [item.get("id") if isinstance(item, dict) else item for item in facts or ()]
     if waiting := unpublished_signals(matches, [*offered, *suggestions]):
         result["unpublished_signals"] = waiting
-    result.update({key: row[key] for key in ("source", "settings") if key in row})
+    result.update({key: row[key] for key in ("source", "settings")
+                   if key in row and not (owner_fallback and key == "source")})
     result["account_candidates"] = own["account_candidates"]
     # Accounts another place of this bot or app confirms count here too (``places.counted_owner_accounts``): named
     # with where they were confirmed, removed there.
@@ -236,7 +275,8 @@ def places_view(root, *, owner_reading: bool = False) -> dict:
                                      if owner_reading and p.connector == "ouroboros" else {}))
                        for p in records.places.values()],
             "circles": [circle_summary(circle) for circle in records.circles],
-            "connectors": [{"connector": r["skill"],
+            "connectors": [{"connector": r["skill"], "contribution_id": r["id"],
+                            "connect_mode": r.get("connect_mode") or "any",
                             "label": r["label"], "icon": r.get("icon_spec") or {}, "destination": r["destination"],
                             "readiness": r.get("readiness") or {"text": "Connector unavailable", "tone": "warn"},
                             **{key: r[key] for key in ("facts", "source", "settings", "labels") if key in r},

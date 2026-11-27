@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.25
+version: 1.5.0
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -118,6 +118,28 @@ exactly the ids its own field lists (names are never read back); one kept later 
 deleted copy's outcome stays listed. After a deletion that field is empty until the page is
 opened again. Completion notices keep their own retry; the bot's replies to commands, typing
 and `/panic` are sent once, as before.
+
+Your bot can also take part in groups through the Official `telegram-bot` connector, which then
+handles those groups (files, topics, replies) as it does for its own bot; this bridge stays the bot's
+only reader and keeps its token. Off by default: until the owner chooses this bot in Add a place
+(`POST group_feed` with the bot shown, refused for another bot or before the bot is bound to the
+owner), and whenever no owner is bound, group updates are dropped as before. Off (`enabled: false`
+with the `consent_account_id` shown) withdraws only that bot's consent, also while Telegram is away;
+a successful poll marks the new consent ready. Each consent gathers membership afresh; an existing quiet
+place can refresh only its own group's membership. getUpdates asks for membership and reactions
+(`callback_query` kept). Only a group connected as an exact `owner_bot` place is passed whole; any
+other group the bot is in leaves only its newest id, type, title and membership for the chooser,
+never words, senders or files. Private chats, callbacks and channels never leave this bridge, a
+group `/panic` is no Panic, and the owner's private Panic never waits behind group work. Kept items
+wait in `group_feed.sqlite3` until the connector confirms them; one that cannot be written at once
+is counted (`write_gaps`) and the owner's updates never wait. The connector, an unchanged Official
+release, sends only through the Host relay: listed methods and arguments, the exact place at its
+connection, Active, in its topic (an edit, deletion or reaction in its message's topic, the bot's
+replies included; a restriction or ban only from a chat-wide place). One bot has one reader here:
+before its first request with a token this bridge takes the bot unless that connector already reads
+it with its own token, then waits (Connection: the Telegram Bot connector is already reading this
+bot) and asks Telegram nothing until another bot is saved or Ouroboros restarts. Wire and rules:
+`lib/telegram_group_feed.py` and `ouroboros/telegram_owner_bot.py`.
 
 Before a body rollback or skill downgrade to native Telegram 1.4.14 or older,
 export needed kept copies with the recipe below and verify the saved artifacts.

@@ -284,13 +284,20 @@ export function popularityText(item = {}) {
     return signals.votes > 0 ? `▲ ${plural(signals.votes, 'vote')}` : 'No votes yet';
 }
 
-/** The facts line: only exceptions and the one popularity number (UX §2.1 ⑤). */
+/** The catalog's own words for what a skill needs; "" when it says none (`needs: ""`) or says nothing (absent, null). */
+export const catalogNeedsText = (item = {}) => (typeof item.needs === 'string' ? item.needs.trim() : '');
+
+/**
+ * The facts line: only exceptions and the one popularity number (UX §2.1 ⑤). `needs_keys` names what a skill reads,
+ * required or not (CLIENT_CONTRACT), so it is counted as fields, and only where the catalog says nothing of what the
+ * skill needs; where it speaks, its own words (`catalogNeedsText`) follow this line's.
+ */
 export function factsText(item = {}) {
     const parts = [];
     const popularity = popularityText(item);
     if (popularity) parts.push(popularity);
-    const keys = Array.isArray(item.needs_keys) ? item.needs_keys.length : 0;
-    if (keys) parts.push(keys === 1 ? 'needs a key' : `needs ${keys} keys`);
+    const keys = typeof item.needs !== 'string' && Array.isArray(item.needs_keys) ? item.needs_keys.length : 0;
+    if (keys) parts.push(plural(keys, 'key field'));
     return parts.join(' · ');
 }
 

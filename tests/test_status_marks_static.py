@@ -105,6 +105,7 @@ warning | web/onboarding.css | .wizard-test-result[data-tone="warn"] | border-co
 # The System voice: its bubble, sender and text (chat and the Place reader), quotes of a System message, the skill review it shows.
 system | web/style.css | .chat-bubble.system | background
 system | web/style.css | .chat-bubble.system .message | color
+system | web/style.css | .chat-bubble.system .owner-action-reason:not([data-panic-summary]) | color
 system | web/style.css | .chat-bubble.system .sender | color
 system | web/style.css | .chat-field > .chat-quote--composer | background
 system | web/style.css | .chat-quote | background
