@@ -3373,6 +3373,7 @@ export function createChatInstance({
     // Main's bar: Restart, Panic, the budget and the consciousness chip; a Project's bar is app.js's.
     header = asPanel ? null : createRoomHeader({ bar: pageHeader, ws, shade: roomWork, openDashboardTab,
         refreshState: refreshHeaderControlState });
+    header?.followState(stateSnapshots);  // a retired body withdraws the chip's controls too, not only a failed read
 
     return self = {
         page,

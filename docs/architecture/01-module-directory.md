@@ -227,7 +227,7 @@ ouroboros/ — agent core and shared runtime (§6)
   safety_config.py — work/consciousness coverage, checker, migration (§7)
   safety_records.py, safety_evidence.py — verdict accounting, `tell_owner_over_flag`; evidence diet, row authorship
   ouroboros/gateway/safety_settings.py — owner Safety level/rules/checker endpoints (§4; §7)
-  consciousness.py, consciousness_wake.py, consciousness_standing.py, consciousness_transitions.py, consciousness_view.py, consciousness_clock.py, own_time_seed.py — background alarm, wake input, what stands in it, accepted transition chain, `wake_task_metadata`, read-only view, named times and zones, `wake`-claiming seed (§6 Background consciousness)
+  consciousness.py, consciousness_wake.py, consciousness_standing.py, consciousness_transitions.py, consciousness_view.py, consciousness_hold.py, consciousness_clock.py, own_time_seed.py — background alarm, wake input, what stands in it, accepted transition chain, `wake_task_metadata`, read-only view, held wake, named times and zones, `wake`-claiming seed (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — autonomy ceilings (`observe`/`act`/`full`), rolling 24h allowance (§6 Background consciousness and Evolution)
   chat_chain.py, chat_references.py, chronicle_store.py, chronicle_quotes.py — addressed reads (legacy `(gen, line)`, Reply facts, `retain_memory_source`); append-only chronicle (§6)
   mark_anchors.py — tool/path-anchored marks (once per task) + live room/global updates (§6)

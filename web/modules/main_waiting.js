@@ -20,7 +20,7 @@ import { createSystemMessageActions } from './ui_helpers.js';
 import { showToast } from './toast.js';
 import { fmt, tx } from './i18n.js';
 import { normalizeConsciousness } from './consciousness_api.js';
-import { allowanceHold, wakeResumeRoomWords } from './consciousness_words.js';
+import { allowanceHold, heldWake, totalBudgetNow, wakeResumeRoomWords } from './consciousness_words.js';
 
 const GLYPH = '<svg class="chat-question-nav-glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>';
 const ARROW = '<svg class="chat-question-nav-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
@@ -35,15 +35,21 @@ let nameSeq = 0;
 const REASONS = { budget: 'Paused at the spending limit. Change the limit if needed, then Resume.',
     restart: 'Needs Resume after the restart.', resume: 'Needs an explicit Resume.',
     model_access: 'Needs you to restore model access.' };
+// The spending limit named, where the same body proves which one held its own wake: the past stop, then what the same
+// body's budget says now (raising it is the step only while nothing is left).
+const TOTAL_BUDGET_REASON = 'Paused when the total budget was spent.';
 
-// The wake the same body names as held at its daily share, and what its Resume may add (in Costs' words), said beside
-// that Resume on its card. Any other task, a wake held for another cause and a host that does not say add nothing.
+// The wake the same body names as held: at its daily share, what its Resume may add (in Costs' words), said beside
+// that Resume on its card; by the total budget, that budget as its reason. Any other task, a wake held for another cause
+// and a host that does not say add nothing.
 function heldWakeRoom(data) {
     const bg = data?.bg_consciousness_state;
     if (!bg || typeof bg !== 'object') return null;
     const wake = normalizeConsciousness(bg, { enabled: data.bg_consciousness_enabled });
     const words = allowanceHold(wake) ? wakeResumeRoomWords(wake) : '';
-    return words && wake.liveWakeTaskId ? { taskId: wake.liveWakeTaskId, words } : null;
+    const reason = heldWake(wake) && wake.holdCause === 'total_budget'
+        ? [TOTAL_BUDGET_REASON, totalBudgetNow(data.accounting).words].filter(Boolean).join(' ') : '';
+    return (words || reason) && wake.liveWakeTaskId ? { taskId: wake.liveWakeTaskId, words, reason } : null;
 }
 
 // `reading` returns the chat's reading position (chat_reading_position.js), read when used like the
@@ -164,7 +170,8 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         // Past its deadline the pause keeps its dated author (the work line's own words), never a wait for Resume.
         const needs = expired && row.attention_reason !== 'model_access' ? row.expiredLine || ''
             : row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? reasonText(row.resumeReason)
-                : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
+                : row.attention_reason === 'budget' && row.wakeReason ? tx(row.wakeReason)
+                    : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
         const head = needs && attempt && !/[.!?…]$/.test(needs) ? `${needs}.` : needs;
         // Only a wake that can still Resume has a prospective allowance.
         const room = !expired && row.wakeRoom ? `${row.wakeRoom}.` : '';
@@ -372,7 +379,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
                         ...(late && source ? { expiredLine: workLine({ ...source, last_resume: undefined }) } : {}),
                         last_resume: member?.last_resume || work?.last_resume || action.last_resume,
                         resumeReason: !action.project_id ? member?.because?.[0] : null,
-                        wakeRoom: wake?.taskId === id ? wake.words : '' };
+                        wakeRoom: wake?.taskId === id ? wake.words : '', wakeReason: wake?.taskId === id ? wake.reason : '' };
                     const record = recordFor(row);
                     record.available = true;
                     paint(record, row);
