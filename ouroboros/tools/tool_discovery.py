@@ -95,7 +95,7 @@ def owed_guides(ctx: Any, names: Any) -> List[str]:
     return sorted(servers & set(getattr(nano, "guides", ())) - set(getattr(ctx, "_mcp_guides_handed", None) or ()))
 
 
-def handed_guides(registry: "ToolRegistry", ctx: Any, names: Any) -> str:
+def handed_guides(ctx: Any, names: Any) -> str:
     """The instructions of each MCP server among ``names`` that this actor's current Nano map leaves to the reader
     (``tool_connections.nano_connections_type``: ``guides``) and this session has not handed over yet, raw, each once; ``""``
     when none is owed (Low/Max and an actor whose map keeps them read them there). A body longer than the frame holds
@@ -380,7 +380,7 @@ def enable_tools(
                          f"leaves out: {', '.join(left_out)}. They stay callable; "
                          "enable_tools can show or load a selected schema.")
     brought = [*shown, *(loaded if resident is not None else wanted)]
-    if guides := handed_guides(registry, ctx, brought):  # before this load's first call: once per server
+    if guides := handed_guides(ctx, brought):  # before this load's first call: once per server
         parts.append(guides)
     if partial:
         parts.append("⚠️ Not loaded with the skill: " + "; ".join(partial))
@@ -493,7 +493,7 @@ def call_mcp_tool(registry: "ToolRegistry", ctx: Any, name: str = "", arguments:
                 f"TOOL_ARG_ERROR: nothing was sent to {name}: received {received}; call_mcp_tool's arguments must be one JSON object of "
                 "that tool's arguments, or be omitted when it takes none. Text that is not JSON, an array, a "
                 "number, a boolean or doubly encoded JSON is refused, never guessed at."))))
-    if guide := handed_guides(registry, ctx, [name]):  # its server's instructions first: nothing is sent this time
+    if guide := handed_guides(ctx, [name]):  # its server's instructions first: nothing is sent this time
         wanted = _load_set(registry, [name])[0]
         schema = f"\n\n{_gateway_schemas({name: wanted[name]}, {})}" if name in wanted else ""
         return publish_no_effect(ctx, ToolResult(status="ok", code="OK", text=(

@@ -21,7 +21,8 @@ Nano (text and voice, Main and helpers) reads every tool name by namespace under
 ``HostSection`` (``nano_connections_type``). A server's own instructions stay behind their exact reader,
 ``list_available_tools(namespace="mcp_<server>")``, where this actor can call it and ``enable_tools`` too, and
 reach the mind raw before the server's first use (``tools.tool_discovery.handed_guides``: with the load that
-first brings its schemas, or before its first gateway call). They stay in the map where the actor lacks either
+first brings its schemas, by ``enable_tools`` or ``compact_context(schema_names=...)``, or before its first gateway
+call). They stay in the map where the actor lacks either
 selector, and for a server whose schemas the start's own tool list carries (``start_tools``), which no load
 precedes. The form is a pure function of the start, so it is chosen once and kept for the run.
 """

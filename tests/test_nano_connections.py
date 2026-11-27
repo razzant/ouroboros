@@ -204,6 +204,29 @@ def test_a_gateway_call_in_a_real_batch_waits_for_its_servers_guide_only_in_nano
         assert guides["srv03"] not in str(first["result"])
 
 
+
+@pytest.mark.parametrize("mode", ["nano", "low", "max"])
+def test_schemas_the_mind_makes_resident_bring_their_servers_guide_once_and_only_in_nano(tmp_path, monkeypatch, mode):
+    """``compact_context(schema_names=...)`` makes a server's tools resident without ``enable_tools``: in a Nano view the
+    result that queues it carries that server's guide (before the next request, which is the first that can call the
+    tool directly), once per server; a server already handed over and Low/Max (whose maps keep it) get none."""
+    from ouroboros.tools.compact_context import _compact_context, record_context_view
+
+    registry, guides = scale.mcp_registry(tmp_path, monkeypatch)
+    ctx, resident = _nano_actor(registry, mode=mode)
+    record_context_view(ctx, [{"role": "user", "content": "hi"}], resident)
+    first = _compact_context(ctx, working_note="", schema_names=["mcp_srv03__tool_00", "mcp_srv05__tool_01"])
+    assert first.startswith("Working view requested.") and ctx._pending_compaction["schema_names"]
+    assert all(guides[other] not in first for other in guides if other not in ("srv03", "srv05"))
+    if mode != "nano":
+        assert guides["srv03"] not in first and guides["srv05"] not in first
+        return
+    assert guides["srv03"] in first and guides["srv05"] in first
+    again = _compact_context(ctx, working_note="", schema_names=["mcp_srv03__tool_00", "mcp_srv05__tool_01"])
+    assert guides["srv03"] not in again and guides["srv05"] not in again
+    assert guides["srv03"] not in registry.execute("enable_tools", {"tools": "mcp_srv03"})  # handed: not again
+
+
 def test_the_ordinary_build_carries_the_nano_form_and_max_keeps_the_guides(tmp_path, monkeypatch):
     """One start's view before and after: through the real build the captured Nano map is the guide-less form and the
     Max view of the same capture holds every guide, so a plan that rebinds to Max mid-run shows them there."""
