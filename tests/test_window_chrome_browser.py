@@ -287,6 +287,25 @@ def test_a_narrow_window_stands_its_header_on_the_lights_line(subscription_ui):
     assert page.evaluate(mid) == pytest.approx({"panic": 28, "header": 56}, abs=0.6)
 
 
+ROW = """() => { const b = (s) => document.querySelector(s).getBoundingClientRect();
+    const f = b('#primary-sidebar .nav-projects-find'), a = b('#nav-projects-add'), m = b('.sidebar-head [data-nav-page="chat"]');
+    return { findTop: f.top, findLeft: f.left, findWidth: f.width, addTop: a.top, cardLeft: m.left, cardTop: m.top }; }"""
+
+
+def test_the_search_wraps_under_the_lights_when_its_row_cannot_hold_a_usable_field(subscription_ui):
+    """At a small Interface size a minimum-width column cannot hold a usable field beside the lights: the field and +
+    wrap together under the lights' row at the column's full width; a roomy row keeps them on the lights' line."""
+    page = shell_page(subscription_ui, 1100)
+    page.evaluate("document.getElementById('primary-sidebar').style.setProperty('--drag-width', '270px')")
+    apply(page, top=104, start=126, mid=40)  # 50 %: the native numbers in CSS px are large
+    row = page.evaluate(ROW)
+    assert row["findTop"] >= 80 and row["addTop"] == pytest.approx(row["findTop"], abs=0.5), row  # under the 80 px row
+    assert row["findLeft"] == pytest.approx(row["cardLeft"], abs=0.5) and row["cardTop"] > row["findTop"], row
+    apply(page, mid=MID)  # 100 %: room beside the lights
+    row = page.evaluate(ROW)
+    assert row["findTop"] < 2 * MID and row["findLeft"] >= START and row["findWidth"] >= 160, row
+
+
 def test_the_search_capsule_is_a_text_target_and_the_band_beside_it_drags(subscription_ui):
     """Find a project stands in the title band: its glyph, its padding and its words are the field's (a press focuses
     the words, a double press never zooms the window); the empty band beside the lights stays the window's handle."""
