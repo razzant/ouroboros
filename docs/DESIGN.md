@@ -3729,7 +3729,7 @@ edge inside its top. It keeps scrolling card actions distinct from the floating 
 landing clear the header's reach; a row under it is not read yet. The top edge is separate from the desktop
 title-band strip. A note or the search sheet floats above it as the capsules do (a Project's status note, in its flow,
 stands below it). The blur belongs to the edge, not to a chip, so it applies in both themes; without backdrop blur,
-or with reduced transparency, a stronger darkening alone fades the edge. While typing in Telegram the feed still passes
+or with reduced transparency, a stronger room-colour tint alone fades the edge. While typing in Telegram the feed still passes
 under both. The newest line and time rest just above the measured composer. In a tight room the top extension yields
 to the feed. Reading history holds the passage in place, as it does in a shorter window, and the feed still scrolls.
 Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
