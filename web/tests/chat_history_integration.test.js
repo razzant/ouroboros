@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, ElementStub, PREVIEW_SCOPE, walkCard } from './chat_dom_fixture.js';
+import { installDom, restoreDom, ElementStub, PREVIEW_SCOPE, toastMessages, walkCard } from './chat_dom_fixture.js';
 import { previewEntryKey, PREVIEW_FAMILY, PREVIEW_KEY } from '../modules/chat_preview.js';
 import { roomSocket } from '../modules/room_retire.js';
 
@@ -681,7 +681,7 @@ for (const hydrated of [false, true]) test(`an unavailable archive keeps recent 
     const controls = f.messages.querySelector('.chat-load-older');
     const button = controls.querySelector('.chat-load-older-btn');
     assert.equal(button.textContent, 'Retry loading messages');
-    assert.notEqual((f.messages.parentNode.querySelector('.chat-panel-statusbar').querySelector('.chat-load-older-note') || f.messages.querySelector('.chat-load-older').querySelector('.chat-load-older-note')).textContent, 'Some saved history is not loaded. Shown messages may have gaps.');
+    assert.deepEqual(toastMessages(document.body), ['Some saved history could not be loaded.'], 'the failure is told as one');
     f.respond(page([row('chat:10', 'Readable recent answer')], 'real-page', 'real-older'));
     await f.clickOlder();
     assert.equal(button.textContent, 'Load more history');
@@ -1381,9 +1381,7 @@ test('a newest read refused while the Project registry cannot be read keeps the 
     await f.instance.refreshHistory({ revision: 91 });
     await settle();
     assert.deepEqual(f.bubbles(), shown, 'the refused read removes nothing it shows');
-    const notes = [...(f.messages.parentNode.querySelector('.chat-panel-statusbar')?.children || []),
-        ...(f.messages.querySelector('.chat-load-older')?.children || [])].map(node => node.textContent).join(' ');
-    assert.match(notes, /Some saved history could not be loaded/, 'the feed says its source is unavailable');
+    assert.match(toastMessages(document.body).join(' '), /Some saved history could not be loaded/, 'the room says its source is unavailable');
 });
 
 for (const failed of [false, true]) test(`a room return and its paint receipt share one ${failed ? 'failed' : 'successful'} recent read`, async (t) => {
@@ -2207,7 +2205,7 @@ test('partial fresh data without a disconnect keeps retained rows, names failure
     assert.equal(busy(), false);
     assert.equal(latestButton().classList.contains('visible'), true);
     assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
-    assert.equal(f.messages.parentNode.querySelector('.chat-panel-statusbar').querySelector('.chat-history-status').hidden, false);
+    assert.match(toastMessages(document.body).join(' '), /could not be loaded/, 'the failed read is told');
     assert.ok(retained.every(id => f.bubbles().some(node => node.dataset.historyId === id)), 'partial rechain must not erase the retained messages');
     const receipt = await f.instance.refreshHistory({ revision: 90 });
     assert.equal(receipt.painted, false, 'neither the retained bottom nor a partial 200 proves the current read');
@@ -2386,9 +2384,9 @@ function archiveRoom(t, initial, { asPanel = false, older = null, archive = null
         respond: next => { response = next; },
         door: () => edge()?.querySelector('.chat-archive-door'),
         reader: () => doc.body.children.find(node => node.classList.contains('room-archive')),
-        note: () => [instance.page, edge()].flatMap(node => node?.querySelectorAll('.chat-load-older-note') || [])
-            .map(node => node.textContent).join(' '),
-        restored: () => instance.page.querySelector('.chat-page-note')?.querySelector('.chat-registry-restored')?.textContent,
+        note: () => [...[instance.page, edge()].flatMap(node => node?.querySelectorAll('.chat-load-older-note') || [])
+            .map(node => node.textContent), ...toastMessages(doc.body)].join(' '),
+        restored: () => toastMessages(doc.body).find(text => text.startsWith('Project list')),
         reconnect: () => handlers.get('open')({ previouslyConnected: true }),
         disconnect: () => handlers.get('close')(),
     };

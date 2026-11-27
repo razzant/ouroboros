@@ -98,6 +98,8 @@ class FakeCore:
         self.stops: list[tuple[str, dict]] = []   # Stop requests: (task id, body)
         self.writes: list[tuple[str, dict]] = []  # any other write the page made (preferences, read receipts)
         self.answers: dict[str, object] = {}
+        self.state_reads = 0                      # /api/state bodies served
+        self.since = "run-1"                      # the host run (`boot.since`): a restart is a new one
         self.held: dict[str, object] = {}         # Resume requests left unanswered until release()
 
     def attention(self):
@@ -115,7 +117,9 @@ class FakeCore:
         return rows
 
     def state(self):
-        return {"sha": "fixture", "supervisor_ready": True, "projects": PROJECTS, "project_chat_ids": [21, 22],
+        self.state_reads += 1
+        return {"sha": "fixture", "supervisor_ready": True, "boot": {"tasks_ready": True, "since": self.since},
+                "projects": PROJECTS, "project_chat_ids": [21, 22],
                 "active_chat_activities": [], "active_chat_activities_complete": True,
                 "current_questions": [], "current_questions_complete": True,
                 "main_attention": self.attention(), "main_attention_complete": True,
@@ -174,7 +178,7 @@ def spa():
         with playwright.sync_playwright() as pw:
             engines = {}
 
-            def open_page(core, *, engine="chromium", viewport=DESKTOP, theme="dark", touch=False):
+            def open_page(core, *, engine="chromium", viewport=DESKTOP, theme="dark", touch=False, ready=MESSAGE):
                 if engine not in engines:
                     engines[engine] = getattr(pw, engine).launch(
                         headless=True, executable_path=os.environ.get("OUROBOROS_UI_BROWSER_EXECUTABLE") or None)
@@ -211,7 +215,7 @@ def spa():
                 page.route_web_socket("**/ws", lambda ws: ws.send(json.dumps({"type": "heartbeat"})))
                 page.route("**/api/**", api)
                 page.goto(f"http://127.0.0.1:{server.server_port}/", wait_until="domcontentloaded")
-                page.locator(MESSAGE).wait_for(state="visible", timeout=30_000)
+                page.locator(ready).wait_for(state="visible", timeout=30_000)
                 return page, errors
 
             yield open_page
@@ -229,7 +233,8 @@ def capture(page, name, *, crop=True):
         return
     target = Path(root)
     target.mkdir(parents=True, exist_ok=True)
-    page.locator(MESSAGE).scroll_into_view_if_needed()
+    if page.locator(MESSAGE).count():
+        page.locator(MESSAGE).scroll_into_view_if_needed()
     page.screenshot(path=str(target / f"{name}.png"), animations="disabled")
     if crop:
         page.locator(MESSAGE).screenshot(path=str(target / f"{name}-message.png"), animations="disabled")
@@ -518,26 +523,58 @@ def test_the_final_state_after_a_press_on_an_incomplete_list(spa, viewport, them
     assert errors == []
 
 
-def test_an_empty_first_list_that_is_not_whole_says_only_that(spa):
-    """The host's first answer names no work and says its list is not whole (as a core still starting does): one
-    neutral line, no title claiming a stop, no box, action or count, and the spending-limit card stays its own."""
+def test_an_empty_first_list_that_is_not_whole_is_one_notice(spa):
+    """A ready host's first answer names no work and says its list is not whole: Main holds no System message for it;
+    the page's one notice at the top right says so once, claiming no Panic, stop or work, with a Retry that only reads
+    again and, when that read still is not whole, says so again; the spending-limit card stays its own."""
     core = FakeCore(works=[], complete=False)
-    page, errors = spa(core, viewport=PHONE, theme="light", touch=True)
+    page, errors = spa(core, viewport=PHONE, theme="light", touch=True, ready="#toast-stack .toast")
+    seen = core.state_reads
+    deadline = 30_000
+    while core.state_reads < seen + 2 and deadline > 0:  # at least two more state reads: the notice is not repeated
+        page.wait_for_timeout(250)
+        deadline -= 250
+    assert core.state_reads >= seen + 2, core.state_reads
     capture(page, "panic-final-phone-light-empty-incomplete", crop=False)
-    message = page.locator(MESSAGE)
-    assert [line for line in message.inner_text().split("\n") if line.strip()] == [
-        "System", "Couldn’t check whether any tasks are waiting to resume after Panic."]
-    assert message.locator("[data-panic-gap]").get_attribute("data-tone") is None, "never amber"
-    assert message.get_by_role("group").get_attribute("aria-label") == (
-        "Couldn’t check whether any tasks are waiting to resume after Panic.")
-    assert message.locator("button:visible, input:visible").count() == 0
-    # Nothing read is nothing laid out: the line ends the bubble but for its own padding.
-    room = page.evaluate("""selector => {
-        const bubble = document.querySelector(selector).getBoundingClientRect();
-        return bubble.bottom - document.querySelector(`${selector} [data-panic-gap]`).getBoundingClientRect().bottom;
-    }""", MESSAGE)
-    assert room <= 20, room
+    assert page.locator(MESSAGE).count() == 0
+    toast = page.locator("#toast-stack .toast")
+    assert toast.count() == 1
+    assert toast.locator(".toast-words").inner_text() == "Saved work could not be checked for anything waiting to resume."
+    box, view = toast.bounding_box(), page.viewport_size
+    assert box["x"] >= 0 and box["x"] + box["width"] <= view["width"] and box["y"] >= 0, (box, view)
     assert page.locator(".chat-bubble.owner-action[data-owner-action='task-budget']").count() == 1
-    assert page.evaluate(_CONTAINED, MESSAGE) == {"over": [], "page": True}
-    assert core.posts == [] and core.stops == []
+    reads = core.state_reads
+    toast.get_by_role("button", name="Retry").click()
+    page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast:not(.is-hiding)').length === 1")
+    assert core.state_reads > reads, "Retry read the state again"
+    assert page.locator(MESSAGE).count() == 0, "a list still not whole is answered by the notice, never a card"
+    # A successful Retry: its read is whole, and the notice leaves with nothing said in its place.
+    core.complete = True
+    reads = core.state_reads
+    page.locator("#toast-stack .toast:not(.is-hiding)").get_by_role("button", name="Retry").click()
+    page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast').length === 0")
+    assert core.state_reads > reads, "Retry read the state again"
+    page.wait_for_timeout(400)  # past the Retry's own answer to that read
+    assert page.locator("#toast-stack .toast").count() == 0 and page.locator(MESSAGE).count() == 0, (
+        "a whole empty list: nothing waits, nothing to say")
+    # The host's word again is a new episode. It stands across a reload of the tab; the person's × closes it for this
+    # host run, a reload included; a host that restarted tells it again.
+    core.complete = False
+    page.locator("#toast-stack .toast").wait_for()
+    page.reload()
+    page.locator("#toast-stack .toast").wait_for()
+    page.locator("#toast-stack .toast:not(.is-hiding)").get_by_role("button", name="Dismiss notice").click()
+    page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast').length === 0")
+    page.reload()
+    page.wait_for_selector("#chat-input", state="attached")
+    seen = core.state_reads
+    deadline = 30_000
+    while core.state_reads < seen + 2 and deadline > 0:
+        page.wait_for_timeout(250)
+        deadline -= 250
+    assert core.state_reads >= seen + 2, ("two more reads, still not whole", core.state_reads)
+    assert page.locator("#toast-stack .toast").count() == 0, "closed by the person in this run: none after a reload"
+    core.since = "run-2"
+    page.locator("#toast-stack .toast").wait_for()
+    assert core.posts == [] and core.stops == [], "the notice and its × run nothing"
     assert errors == []

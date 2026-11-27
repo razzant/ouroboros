@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, toastMessages } from './chat_dom_fixture.js';
 
 const TS = '2026-09-12T12:00:00.000Z';
 const row = (id, text) => ({
@@ -213,6 +213,8 @@ for (const [name, fail] of [['a dropped connection', read => read.drop()], ['an 
         assert.equal(f.button().textContent, 'Retry loading messages');
         assert.equal(f.button().hidden, false);
         assert.equal(f.button().disabled, false);
+        // The failure is news, told once by the page's notice; the fact stays at the edge beside Retry while true.
+        assert.deepEqual(toastMessages(document.body), ['Some saved history could not be loaded.']);
         assert.equal(f.note().hidden, false);
         assert.match(f.note().textContent, /^Some saved history could not be loaded/);
         assert.equal(f.instance.hasPaintedHistory(), false);
