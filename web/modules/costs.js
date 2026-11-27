@@ -216,7 +216,7 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
 export function totalBudgetHoldLine(snapshot) {
     const wake = snapshot ? heldWake(snapshot) : '';
     return wake && snapshot.holdCause === 'total_budget' ? { wake, tone: 'warn',
-        text: 'The consciousness wake-up is paused: the total budget was spent.',
+        text: 'The consciousness wake-up stopped when the total budget was spent.',
         note: 'Raising Total budget alone does not resume it; Resume or Stop now on its card.' } : null;
 }
 

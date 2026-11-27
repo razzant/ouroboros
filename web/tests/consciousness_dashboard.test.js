@@ -155,8 +155,10 @@ test('a state that cannot wake wears its failure mark and offers Restart; starti
         detail: 'Its own wake-up stopped at its allowance ($2.99).', live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } });
     for (const [causes, mark] of [
         [['allowance', 'allowance_and_cap', 'per_task_cap', 'launch_ceiling', 'per_task_fence', 'total_budget'], { shape: 'dot', hue: 'owner' }],
+        // A stop of the app or Panic waits for the owner's Resume (DESIGN §4): amber too.
+        [['restart', 'panic'], { shape: 'dot', hue: 'owner' }],
         [['owner'], { shape: 'pause', hue: 'ink' }], [['sleep', 'queued'], { shape: 'still', hue: 'ink' }],
-        [['technical', '', 'a cause of a newer host'], { shape: 'ring', hue: 'ink' }]]) {
+        [['technical', 'technical_resume', '', 'a cause of a newer host'], { shape: 'ring', hue: 'ink' }]]) {
         for (const cause of causes) assert.deepEqual(consciousnessMark({ ...held, holdCause: cause }), mark, cause);
     }
     assert.deepEqual(consciousnessMark({ ...held, enabled: false }), { shape: 'none', hue: 'ink' }, 'Off wins');
@@ -755,4 +757,56 @@ test('a held own wake is its own block under the headline, its controls those of
     }
     assert.equal(watchers.size, 0, 'its watch ends with the tab');
     assert.equal(holder.children.length, 0);
+});
+
+test('the Dashboard block keeps the last confirmed controls, disabled, across a retired read, and follows a newer state', async () => {
+    const env = installDom();
+    const mount = fakeMount();
+    const holder = document.createElement('div');
+    mount.regions.set('[data-cx-held]', holder);
+    const WAKE = 'e629aa8e';
+    const work = (controls) => ({ work_id: WAKE, room: 1, episode: { task_id: WAKE, live: true }, confirmed: true, controls });
+    const RESUME = { action: 'resume', target: WAKE };
+    const STOP = { action: 'stop', target: WAKE, scope: 'cascade' };
+    const held = { enabled: true, status: 'wake_paused', position: 'Also on its own and in places', live_wake_task_id: WAKE,
+        live_wake_held: true, detail: 'Its own wake-up stopped at its allowance ($2.99).',
+        live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } };
+    const body = (bg, controls) => ({ bg_consciousness_enabled: true, bg_consciousness_state: bg, works: [work(controls)] });
+    let latest = body(held, [RESUME, STOP]);
+    let gates = 0;
+    const watchers = new Set();
+    const stateSnapshots = { latest: () => latest, gate: async () => { gates += 1; return null; },
+        watch: (watcher) => { watchers.add(watcher); return () => watchers.delete(watcher); } };
+    const tell = () => watchers.forEach((watcher) => watcher());
+    let reads = 0;
+    const controller = initConsciousnessDashboard({ mount, ws: { send() {}, isConnected: () => true },
+        state: { activePage: 'chat' }, stateSnapshots, read: async () => { reads += 1; return normalizeConsciousness(held); } });
+    try {
+        await controller.refresh();
+        const block = holder.querySelector('.cx-held');
+        const controls = () => block.querySelector('.cx-held-actions').children
+            .filter((node) => !node.classList.contains('cx-held-door')).map((node) => `${node.textContent}${node.disabled ? ' (disabled)' : ''}`);
+        assert.deepEqual(controls(), ['Resume', 'Stop now', 'Costs ›']);
+        assert.equal(gates, 1, 'a block for a new task first asks the page for one fresh state read');
+        // A retired or failed read empties the page's snapshot: the last controls stay, disabled, never vanish.
+        latest = null;
+        tell();
+        assert.deepEqual(controls(), ['Resume (disabled)', 'Stop now (disabled)', 'Costs ›']);
+        // A newer body that no longer offers Resume removes it.
+        latest = body(held, [STOP]);
+        tell();
+        assert.deepEqual(controls(), ['Stop now', 'Costs ›']);
+        assert.equal(gates, 1, 'the same task asks for no second read');
+        // The same wake resumed elsewhere: the newest state says it runs, its Stop still offered. The block's old reason
+        // never stands beside the running work's Stop; the tab reads its own facts again.
+        const before = reads;
+        latest = body({ ...held, status: 'thinking', live_wake_held: false, detail: 'Wake-up runs.' }, [STOP]);
+        tell();
+        assert.equal(block.hidden, true);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(reads, before + 1, 'the tab re-reads consciousness');
+    } finally {
+        controller.destroy();
+        restoreDom(env.prior);
+    }
 });

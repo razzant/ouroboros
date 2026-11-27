@@ -3,20 +3,23 @@
  * one tray under the switch's header, in the chip's Shade and on Dashboard › Consciousness alike, about the one own wake
  * the clock waits for. The header keeps the switch (owner 15.11, 5A); this block keeps the wake: its head names it (Own
  * time, its start in the viewer's clock, its status mark and word), the host's sentence says what holds it and what
- * follows, and its controls are exactly what the server's controls for that work allow, on the shared task controls:
- * Resume (`createTaskResumeButton`), Stop now (the shared stop request after its shared confirmation) and Close for a
- * passed deadline (`createTaskCloseButton`). `Costs ›` stands while the next step is a limit edited in Costs and leads
- * when the total budget holds the wake (Resume then stays pressable, no longer the primary: the server refuses honestly
- * while nothing is left); the door to its card in Main is the task door (task_reference.js). Nothing here polls: each
- * surface paints it from the facts it already reads, and every press re-checks those facts as they are then.
+ * follows, a client line adds what the same state says now (Resume's estimated room at an allowance; whether the total
+ * budget has room), and its controls are exactly what the server's controls for that work allow, on the shared task
+ * controls: Resume (`createTaskResumeButton`), Stop now (the shared stop request after its shared confirmation) and
+ * Close for a passed deadline (`createTaskCloseButton`). `Costs ›` stands while the next step is a limit edited in
+ * Costs and leads while the total budget holds the wake with nothing left (Resume then stays pressable, no longer the
+ * primary: the server refuses honestly); a passed deadline says so in the shared word, with no continuation advice.
+ * The door to its card in Main is the task door (task_reference.js). Nothing here polls: each surface paints it from the
+ * facts it already reads; the last confirmed controls stay, disabled, while the newest state read failed or the socket
+ * is down, and every press re-checks those facts as they are then.
  */
 import { tr } from './i18n.js';
-import { clockText, costsMove, heldWake, heldWakeState } from './consciousness_words.js';
+import { allowanceHold, clockText, costsMove, heldWake, heldWakeState, totalBudgetNow, wakeResumeRoomWords } from './consciousness_words.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
-import { ACTION_STOP_NOW, createTaskCloseButton, createTaskResumeButton, openTaskControlMenu, requestStopAll, resumeEligible,
-    taskControlBusy, taskControlTriggerLabel } from './task_control_menu.js';
-import { workCloseOffer, workControls, workOfEpisode } from './work_status.js';
+import { ACTION_STOP_NOW, createTaskCloseButton, createTaskResumeButton, deadlineExpiredWord, openTaskControlMenu,
+    requestStopAll, resumeEligible, taskControlBusy, taskControlTriggerLabel } from './task_control_menu.js';
+import { deadlineExpiredIn, workCloseOffer, workControls, workOfEpisode } from './work_status.js';
 
 // The Costs row each limit's door opens; the limit a wake started with is not one row, so its door opens the tab.
 const COSTS_ROWS = Object.freeze({ allowance: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD',
@@ -27,32 +30,43 @@ let sequence = 0;
 /**
  * The block's view: null unless its own wake is held while consciousness is on. `snapshot` is a normalized
  * consciousness state (consciousness_api.js); `data` an `/api/state` body whose work projection carries that wake's
- * controls (`workOfEpisode`): without it the block offers only its doors.
+ * controls (`workOfEpisode`) and whose accounting says the total budget now: without it the block offers only its
+ * doors. A work past its hard deadline (its Close offer, or the server's own expired fact) says the shared expired word
+ * and drops the continuation advice and the Costs door.
  */
 export function heldWakeView(snapshot, data = null) {
     const taskId = heldWake(snapshot);
     if (!taskId) return null;
     const work = workOfEpisode(data, taskId);
     const controls = work ? workControls(work) : null;
+    const close = work ? workCloseOffer(work, taskId) : '';
+    const expired = Boolean(close) || deadlineExpiredIn(data, taskId);
     const cause = snapshot.holdCause;
+    const budget = !expired && cause === 'total_budget' ? totalBudgetNow(data?.accounting) : { room: null, words: '' };
+    const room = !expired && allowanceHold(snapshot) ? wakeResumeRoomWords(snapshot) : '';
+    const costs = !expired && costsMove(snapshot);
     return {
-        taskId, ...heldWakeState(snapshot), time: clockText(snapshot.liveWakeStartedAt),
+        taskId, ...(expired ? { mark: { shape: work?.mark || 'pause', hue: 'ink' }, word: deadlineExpiredWord() } : heldWakeState(snapshot)),
+        time: clockText(snapshot.liveWakeStartedAt), expired,
         text: snapshot.detail ? tr(snapshot.detail, snapshot.detail) : '',
-        note: snapshot.detailNote ? tr(snapshot.detailNote, snapshot.detailNote) : '',
-        costs: costsMove(snapshot), costsRow: COSTS_ROWS[cause] || '', costsLeads: cause === 'total_budget',
-        resume: controls?.resume || '', stop: controls?.stop || [], close: work ? workCloseOffer(work, taskId) : '',
-        unboundStart: work?.unbound_start === true,
+        note: !expired && snapshot.detailNote ? tr(snapshot.detailNote, snapshot.detailNote) : '',
+        advice: room || budget.words,
+        costs, costsRow: COSTS_ROWS[cause] || '', costsLeads: costs && cause === 'total_budget' && budget.room !== true,
+        resume: controls?.resume || '', stop: controls?.stop || [], close, unboundStart: work?.unbound_start === true,
     };
 }
 
 /**
  * Build the block in `doc`. `current()` is the view as the surface's latest facts say it now (what every press
- * re-checks), `connected()` whether the socket is up, `refresh()` the reads that reconcile a press (its promise keeps a
- * Resume pending until they settle), `openCosts(row)` opens Costs at that limit's row, `leave()` runs before the task
- * door opens its card (the Shade closes). `paint(view)` draws `heldWakeView`'s answer; null hides the block.
+ * re-checks), `connected()` whether the socket is up, `confirmed()` whether the newest state read stands (a failed or
+ * retired read leaves the last controls in place, disabled), `refresh()` the reads that reconcile a press (its promise
+ * keeps a Resume pending until they settle), `openCosts(row)` opens Costs at that limit's row, `leave()` runs before the
+ * task door opens its card (the Shade closes), `confirmStop` is Stop now's confirmation (the shared dialog unless given). `paint(view)` draws `heldWakeView`'s answer; null hides the block. A press
+ * of one control disables its siblings until it settles; a press started on another surface is seen at the next state
+ * read only (no event says it), so every press re-checks.
  */
-export function createHeldWake(doc, { current = () => null, connected = () => true, refresh = () => {},
-    openCosts = () => {}, leave = () => {} } = {}) {
+export function createHeldWake(doc, { current = () => null, connected = () => true, confirmed = () => true,
+    refresh = () => {}, openCosts = () => {}, leave = () => {}, confirmStop = undefined } = {}) {
     const element = (tag, className = '', text = '') => {
         const node = doc.createElement(tag);
         if (className) node.className = className;
@@ -71,6 +85,7 @@ export function createHeldWake(doc, { current = () => null, connected = () => tr
     head.append(name, status);
     const text = element('p', 'cx-held-text');
     const note = element('p', 'cx-held-note');
+    const advice = element('p', 'cx-held-note cx-held-advice');
     const actions = element('div', 'cx-held-actions');
     const costs = element('button', 'btn btn-sm btn-default ui-hit-area cx-held-costs', 'Costs ›');
     costs.type = 'button';
@@ -78,13 +93,20 @@ export function createHeldWake(doc, { current = () => null, connected = () => tr
     stop.type = 'button';
     stop.dataset.taskControlDirect = '1';  // its one action, after the shared confirmation (openTaskControlMenu)
     const door = element('span', 'cx-held-door');
-    root.append(head, text, note, actions);
+    root.append(head, text, note, advice, actions);
     root.setAttribute('aria-labelledby', name.id);
 
     let shown = null;
     let resume = null;
     let close = null;
+    let pending = 0;  // presses of this block still settling: their siblings wait
     const stopKey = (view) => (view?.stop || []).join('\u0000');
+    // A press may act only on standing authority: the socket up, the newest state read confirmed, no press of this
+    // block settling, and the control still offered by the facts as they are now.
+    const live = () => connected() && confirmed() && pending === 0;
+    const repaint = () => { if (shown) paint(shown); };
+    const begin = () => { pending += 1; repaint(); };
+    const settled = async () => { try { await refresh(); } finally { pending = Math.max(0, pending - 1); repaint(); } };
 
     costs.addEventListener('click', (event) => {
         event.stopPropagation?.();
@@ -93,11 +115,11 @@ export function createHeldWake(doc, { current = () => null, connected = () => tr
     stop.addEventListener('click', (event) => {
         event.stopPropagation?.();
         const targets = shown?.stop || [];
-        if (!targets.length || !connected()) return;
+        if (!targets.length || !live()) return;
         const key = stopKey(shown);
-        openTaskControlMenu(stop, { actions: [ACTION_STOP_NOW], busy: targets.some(taskControlBusy),
-            canAct: () => connected() && stopKey(current()) === key && !targets.some(taskControlBusy),
-            onAction: () => requestStopAll(targets, ACTION_STOP_NOW), afterAction: () => refresh() });
+        openTaskControlMenu(stop, { actions: [ACTION_STOP_NOW], busy: targets.some(taskControlBusy), askConfirm: confirmStop,
+            canAct: () => live() && stopKey(current()) === key && !targets.some(taskControlBusy),
+            onAction: () => { begin(); return requestStopAll(targets, ACTION_STOP_NOW); }, afterAction: settled });
     });
     // The task door: a press opens its card in Main (task_reference.js raises it once; a surface's own door handler
     // above this block does not raise it again).
@@ -108,7 +130,7 @@ export function createHeldWake(doc, { current = () => null, connected = () => tr
     });
 
     function placeActions(view) {
-        const wanted = [view.costs && view.costsLeads && costs, resume, close, view.stop.length && stop,
+        const wanted = [view.costsLeads && costs, resume, close, view.stop.length && stop,
             view.costs && !view.costsLeads && costs, door].filter(Boolean);
         // Only a changed order moves a node: a control that keeps its place keeps the reader's focus.
         if (wanted.length !== actions.children.length || wanted.some((node, index) => actions.children[index] !== node)) {
@@ -124,34 +146,40 @@ export function createHeldWake(doc, { current = () => null, connected = () => tr
         if (name.textContent !== named) name.textContent = named;
         if (word.textContent !== view.word) word.textContent = view.word;
         paintStatusMark(mark, view.mark);
-        if (text.textContent !== view.text) text.textContent = view.text;
-        if (note.textContent !== view.note) note.textContent = view.note;
-        text.hidden = !view.text;
-        note.hidden = !view.note;
-        const online = connected();
+        for (const [node, words] of [[text, view.text], [note, view.note], [advice, view.advice]]) {
+            if (node.textContent !== words) node.textContent = words;
+            node.hidden = !words;
+        }
+        const usable = live();
         if (resume && resume.target !== view.resume) { resume.remove(); resume = null; }
         if (view.resume && !resume) {
             const target = view.resume;
             // The shared button re-checks the work's control at press time; its target never changes.
-            resume = createTaskResumeButton(target, { canResume: () => connected() && current()?.resume === target,
-                onSettled: () => refresh() });
-            resume.target = target;
+            const button = createTaskResumeButton(target, { canResume: () => live() && current()?.resume === target,
+                onSettled: settled });
+            // Its own handler runs first and, when it sends, disables itself before waiting: then this press settles.
+            button.addEventListener('click', () => { if (button.disabled) begin(); });
+            button.target = target;
+            resume = button;
         }
         if (resume) {
-            // While the total budget holds it, raising that budget leads; Resume stays a neutral, pressable capsule.
+            // While the total budget holds it with nothing left, raising that budget leads; Resume stays a neutral,
+            // pressable capsule.
             resume.classList.toggle('btn-primary', !view.costsLeads);
             resume.classList.toggle('btn-default', view.costsLeads);
-            resume.disabled = !resumeEligible(resume.target, () => connected() && current()?.resume === resume.target);
+            resume.disabled = !usable || !resumeEligible(resume.target, () => current()?.resume === resume.target);
         }
         if (close && close.offer !== view.close) { close.remove(); close = null; }
         if (view.close && !close) {
             const offer = view.close;
-            close = createTaskCloseButton(view.taskId, { nameId: name.id, onSettled: () => refresh(),
-                tokenNow: () => (connected() && current()?.close === offer ? offer : '') });
-            close.offer = offer;
+            const button = createTaskCloseButton(view.taskId, { nameId: name.id, onSettled: settled,
+                tokenNow: () => (live() && current()?.close === offer ? offer : '') });
+            button.addEventListener('click', () => { if (button.disabled) begin(); });
+            button.offer = offer;
+            close = button;
         }
-        if (close) close.disabled = !online || taskControlBusy(view.taskId);
-        stop.disabled = !online || view.stop.some(taskControlBusy);
+        if (close) close.disabled = !usable || taskControlBusy(view.taskId);
+        stop.disabled = !usable || view.stop.some(taskControlBusy);
         if (view.unboundStart) stop.dataset.unboundStart = '1'; else delete stop.dataset.unboundStart;
         costs.classList.toggle('btn-primary', view.costsLeads);
         costs.classList.toggle('btn-default', !view.costsLeads);
@@ -162,5 +190,10 @@ export function createHeldWake(doc, { current = () => null, connected = () => tr
         placeActions(view);
     }
 
-    return { element: root, paint, destroy() { shown = null; root.remove(); } };
+    /** The enabled controls in their order: where a keyboard open of the Shade lands first. */
+    const focusable = () => (root.hidden ? [] : [...actions.children]
+        .map((node) => (node === door ? node.querySelector('button') : node))
+        .filter((node) => node && !node.hidden && !node.disabled));
+
+    return { element: root, paint, focusable, destroy() { shown = null; root.remove(); } };
 }

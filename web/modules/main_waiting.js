@@ -20,7 +20,7 @@ import { createSystemMessageActions } from './ui_helpers.js';
 import { showToast } from './toast.js';
 import { fmt, tx } from './i18n.js';
 import { normalizeConsciousness } from './consciousness_api.js';
-import { allowanceHold, heldWake, wakeResumeRoomWords } from './consciousness_words.js';
+import { allowanceHold, heldWake, totalBudgetNow, wakeResumeRoomWords } from './consciousness_words.js';
 
 const GLYPH = '<svg class="chat-question-nav-glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>';
 const ARROW = '<svg class="chat-question-nav-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
@@ -35,8 +35,9 @@ let nameSeq = 0;
 const REASONS = { budget: 'Paused at the spending limit. Change the limit if needed, then Resume.',
     restart: 'Needs Resume after the restart.', resume: 'Needs an explicit Resume.',
     model_access: 'Needs you to restore model access.' };
-// The spending limit named, where the same body proves which one held its own wake.
-const TOTAL_BUDGET_REASON = 'Paused: the total budget was spent. Raise Total budget in Costs, then Resume.';
+// The spending limit named, where the same body proves which one held its own wake: the past stop, then what the same
+// body's budget says now (raising it is the step only while nothing is left).
+const TOTAL_BUDGET_REASON = 'Paused when the total budget was spent.';
 
 // The wake the same body names as held: at its daily share, what its Resume may add (in Costs' words), said beside
 // that Resume on its card; by the total budget, that budget as its reason. Any other task, a wake held for another cause
@@ -46,7 +47,8 @@ function heldWakeRoom(data) {
     if (!bg || typeof bg !== 'object') return null;
     const wake = normalizeConsciousness(bg, { enabled: data.bg_consciousness_enabled });
     const words = allowanceHold(wake) ? wakeResumeRoomWords(wake) : '';
-    const reason = heldWake(wake) && wake.holdCause === 'total_budget' ? TOTAL_BUDGET_REASON : '';
+    const reason = heldWake(wake) && wake.holdCause === 'total_budget'
+        ? [TOTAL_BUDGET_REASON, totalBudgetNow(data.accounting).words].filter(Boolean).join(' ') : '';
     return (words || reason) && wake.liveWakeTaskId ? { taskId: wake.liveWakeTaskId, words, reason } : null;
 }
 

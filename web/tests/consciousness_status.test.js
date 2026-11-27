@@ -560,3 +560,182 @@ test('keyboard opening skips a disabled or hidden toggle and lands on Dashboard'
         restoreDom(env.prior);
     }
 });
+
+// ---- fix round 1: authority, expiry, the client's lines, presses and focus
+
+const openHeld = async (bg, { ws, fetchImpl, refreshState, read, confirmStop } = {}) => {
+    const env = installDom(fetchImpl);
+    const bar = document.createElement('div');
+    env.mount.appendChild(bar);
+    const status = createConsciousnessStatus({ bar, ws: ws || { send() {}, isConnected: () => true }, confirmStop,
+        refreshState: refreshState || (() => {}), read: read || (async () => normalizeConsciousness({ recent_wakes: [] })) });
+    status.update(bg);
+    status.chip.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const block = status.shade.querySelector('.cx-held');
+    const button = (label) => status.shade.querySelector('.cx-held-actions').children.find((node) => node.textContent === label);
+    return { env, status, block, button };
+};
+// A press as a browser makes it: a disabled button dispatches no click; every listener of an enabled one runs in order.
+const press = async (node) => {
+    if (node.disabled) return;
+    const evt = { target: node, stopPropagation() {}, preventDefault() {} };
+    await Promise.all((node.listeners.get('click') || []).map((fn) => fn(evt)));
+};
+
+test('a failed or works-less state read leaves the last controls in place, disabled, and a press sends nothing', async () => {
+    const posts = [];
+    const { env, status, button } = await openHeld(heldBy('allowance'), { fetchImpl: async (url, init = {}) => {
+        if (init.method === 'POST') posts.push(String(url));
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    } });
+    try {
+        assert.deepEqual([button('Resume').disabled, button('Stop now').disabled], [false, false]);
+        // The room's failed read reaches the chip as a body without facts or works (chat.js): authority is withdrawn.
+        status.update({ accounting: { available: false } });
+        assert.deepEqual([Boolean(button('Resume')), button('Resume').disabled, button('Stop now').disabled], [true, true, true]);
+        // Even a press the paint did not reach re-checks: the shared door asks the block's authority at the press.
+        await button('Resume').listeners.get('click')[0]({ target: button('Resume'), stopPropagation() {} });
+        assert.deepEqual(posts, [], 'no Resume on facts the newest read did not confirm');
+        // A body with works alone renews them; one that no longer offers Resume removes it.
+        status.update({ works: [wakeWork([OFFERED[1]])] });
+        assert.deepEqual([Boolean(button('Resume')), button('Stop now').disabled], [false, false]);
+        status.update(heldBy('allowance'));
+        assert.equal(button('Resume').disabled, false);
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('a Stop now confirmed after the state read failed sends no stop; the confirmation keeps the Shade open', async () => {
+    const posts = [];
+    let answer = () => {};
+    const asked = [];
+    const { env, status, button } = await openHeld(heldBy('owner'), {
+        confirmStop: (dialog) => { asked.push(dialog.title); return new Promise((resolve) => { answer = resolve; }); },
+        fetchImpl: async (url, init = {}) => {
+            if (init.method === 'POST') posts.push(String(url));
+            return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        } });
+    try {
+        await press(button('Stop now'));
+        assert.deepEqual(asked, ['Stop this work now?'], 'the shared confirmation asks first');
+        // Focus moving into the modal and a press inside it are part of the Shade meanwhile (Cancel returns to Stop now).
+        const inModal = { closest: (selector) => (selector.includes('aria-modal') ? {} : null) };
+        for (const fn of status.shade.listeners.get('focusout') || []) fn({ relatedTarget: inModal });
+        assert.equal(status.isOpen(), true, 'focus in its own confirmation does not close the Shade');
+        status.update({ accounting: { available: false } });
+        answer(true);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(posts, [], 'the press re-checks authority after the confirmation');
+        // With the read standing again, a confirmed Stop now reaches the work's own stop.
+        status.update(heldBy('owner'));
+        await press(button('Stop now'));
+        answer(true);
+        for (let turn = 0; turn < 4; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(posts, [`/api/tasks/${WAKE}/cancel`]);
+        // Elsewhere, focus leaving still closes it.
+        for (const fn of status.shade.listeners.get('focusout') || []) fn({ relatedTarget: { closest: () => null } });
+        assert.equal(status.isOpen(), false);
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('a passed deadline says the shared expired word and offers Close, without the continuation advice or Costs', async () => {
+    const token = 'b'.repeat(64);
+    const budget = { accounting: { available: true, limit_usd: 62700, remaining_known_usd: 0 } };
+    const current = { ...heldBy('total_budget'), ...budget };
+    const { env, status, block, button } = await openHeld(current);
+    try {
+        const said = () => [block.querySelector('.cx-held-word').textContent, block.querySelector('.cx-held-note').hidden,
+            block.querySelector('.cx-held-advice').hidden, Boolean(button('Costs ›'))];
+        assert.deepEqual(said(), ['Paused', false, false, true], 'a current pause keeps its advice and the Costs lead');
+        status.update({ ...heldBy('total_budget', [{ action: 'close', target: WAKE, close_expired: token }, OFFERED[1]]), ...budget });
+        assert.deepEqual(said(), ['Deadline expired', true, true, false]);
+        assert.equal(block.querySelector('.cx-held-mark').dataset.hue, 'ink', 'nothing waits on the owner');
+        assert.ok(button('Close') && !button('Resume'));
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('the block says Resume\'s estimated room at an allowance and whether the total budget has room now', async () => {
+    const { env, status, block, button } = await openHeld(heldBy('allowance'));
+    try {
+        const advice = () => (block.querySelector('.cx-held-advice').hidden ? '' : block.querySelector('.cx-held-advice').textContent);
+        for (const [hold, words] of [[{ resume_additional_usd: 7.6 }, 'Estimated room on Resume: $7.60'],
+            [{ resume_additional_usd: 0 }, 'Estimated room on Resume: none'], [{}, '']]) {
+            status.update(heldBy('allowance', OFFERED, { live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99, ...hold } }));
+            assert.equal(advice(), words, JSON.stringify(hold));
+        }
+        // The total budget keeps its pause after a raise: the same body's budget decides the step and the lead.
+        const byBudget = (accounting) => ({ ...heldBy('total_budget'), ...(accounting ? { accounting } : {}) });
+        status.update(byBudget({ available: true, limit_usd: 62700, remaining_known_usd: 0 }));
+        assert.equal(advice(), 'The total budget has nothing left now: raise it in Costs, then Resume.');
+        assert.deepEqual([button('Costs ›').classList.contains('btn-primary'), button('Resume').classList.contains('btn-primary')], [true, false]);
+        status.update(byBudget({ available: true, limit_usd: 62700, remaining_known_usd: 2379.5 }));
+        assert.equal(advice(), 'The total budget has $2,379 left now: Resume continues it.');
+        assert.deepEqual([button('Resume').classList.contains('btn-primary'), button('Costs ›').classList.contains('btn-primary')], [true, false]);
+        assert.equal(status.shade.querySelector('.cx-held-actions').children[0], button('Resume'), 'Resume leads');
+        status.update(byBudget(null));
+        assert.equal(advice(), '', 'a body that does not say the budget claims neither');
+        assert.equal(button('Costs ›').classList.contains('btn-primary'), true, 'the decided default: Costs leads');
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('a press of one control disables its siblings until it settles; a press elsewhere is re-checked, not seen', async () => {
+    let release = () => {};
+    const { env, status, button } = await openHeld(heldBy('allowance'), { fetchImpl: async (url, init = {}) => {
+        if (init.method === 'POST') await new Promise((resolve) => { release = resolve; });
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    } });
+    try {
+        const pressed = press(button('Resume'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual([button('Resume').disabled, button('Stop now').disabled], [true, true], 'while the Resume is out');
+        release();
+        await pressed;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(button('Stop now').disabled, false, 'its settling read let the siblings go');
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('a keyboard open of the Shade lands on the held wake\'s first enabled control, before Turn off', async () => {
+    const env = installDom();
+    try {
+        const bar = document.createElement('div');
+        env.mount.appendChild(bar);
+        const status = createConsciousnessStatus({ bar, ws: { send() {}, isConnected: () => true },
+            read: async () => normalizeConsciousness({ recent_wakes: [] }) });
+        status.update(heldBy('allowance'));
+        for (const fn of status.chip.listeners.get('keydown') || []) fn({ target: status.chip, key: 'ArrowDown', preventDefault() {} });
+        assert.equal(document.activeElement?.textContent, 'Resume');
+        status.close();
+        status.update(answer());
+        for (const fn of status.chip.listeners.get('keydown') || []) fn({ target: status.chip, key: 'ArrowDown', preventDefault() {} });
+        assert.equal(document.activeElement, status.shade.querySelector('.cx-toggle'), 'no block: the switch, as before');
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('an own wake written in an owner chat no Project holds is a door too: Main shows its card', () => {
+    const rows = (chat, projects) => wakeRows(normalizeConsciousness({ recent_wakes: [
+        { task_id: 'own-7', chat_id: chat, summary: 'Read notes', started_at: at(13, 5), phase: 'done', ended_at: at(13, 6) },
+    ] }).recentWakes, projects)[0];
+    assert.equal(rows(1, null).taskId, 'own-7');
+    assert.equal(rows(7, [3, 4]).taskId, 'own-7', 'a bound owner chat, not a Project room');
+    assert.equal(rows(7, [7]).taskId, undefined, 'a Project room keeps its own card');
+    assert.equal(rows(7, null).taskId, undefined, 'unknown Projects: no door claimed');
+});

@@ -852,7 +852,7 @@ test('a wake held at the allowance it started with is said apart from room retur
 });
 
 test('a wake held by the total budget is said under that card: raising it alone resumes nothing, its card has Resume', () => {
-    const line = { wake: 'wake-1', tone: 'warn', text: 'The consciousness wake-up is paused: the total budget was spent.',
+    const line = { wake: 'wake-1', tone: 'warn', text: 'The consciousness wake-up stopped when the total budget was spent.',
         note: 'Raising Total budget alone does not resume it; Resume or Stop now on its card.' };
     assert.deepEqual(totalBudgetHoldLine(state({ ...HELD, live_wake_hold: { cause: 'total_budget', ceiling_usd: null } })), line);
     // Only that proven cause, only while consciousness is on and the wake is held; an unread snapshot says nothing.
@@ -957,7 +957,7 @@ test('the Total budget card says its own wake held by that budget, read again wh
     await settle();
     const said = () => mount.querySelector('#cost-total-state').textContent.replace(/\s+/g, ' ').trim();
     // The stub writes a node's own words before its children's: the sentence, its note, then its card's door.
-    assert.equal(said(), 'The consciousness wake-up is paused: the total budget was spent. Raising Total budget alone does '
+    assert.equal(said(), 'The consciousness wake-up stopped when the total budget was spent. Raising Total budget alone does '
         + 'not resume it; Resume or Stop now on its card.Open in Main ↗', 'read-only: its card holds Resume and Stop now');
     assert.equal(mount.querySelector('#cost-total-state').querySelector('[data-open-task]')?.getAttribute('data-open-task'),
         HELD.live_wake_task_id);

@@ -222,11 +222,15 @@ const SPENDING_HOLDS = new Set([...ALLOWANCE_HOLDS, 'per_task_cap', 'launch_ceil
 // The limits edited in Costs. A running work's own cap (per_task_cap) is raised in chat, and a fence of its own work
 // is that work's, so neither is a Costs step.
 const COSTS_HOLDS = new Set([...ALLOWANCE_HOLDS, 'launch_ceiling', 'total_budget']);
-// A held wake by its cause: a spending limit is the owner's amber dot; the owner's or Ouroboros's Pause two bars; a
-// sleep that ends by itself and a wake only queued for a worker the still mark; an unreadable or unproven hold a ring.
+// A held wake by its cause: a spending limit, or a stop of the app or Panic that only the owner's Resume releases, is
+// the owner's amber dot (DESIGN §4: Resume after a restart or Panic); the owner's or Ouroboros's Pause two bars; a
+// sleep that ends by itself and a wake only queued for a worker the still mark; a technical, unreadable or unproven
+// hold a ring.
+const OWNER_HOLDS = new Set([...SPENDING_HOLDS, 'restart', 'panic']);
 const HELD_MARKS = Object.freeze({ owner: 'pause', sleep: 'still', queued: 'still' });
-const HELD_WORDS = Object.freeze({ owner: ['task.phase.paused', 'Paused'], sleep: ['task.phase.waiting', 'Waiting'],
-    queued: ['task.phase.queued', 'Queued'], technical: ['task.phase.paused', 'Paused'] });
+const PAUSED = ['task.phase.paused', 'Paused'];
+const HELD_WORDS = Object.freeze({ owner: PAUSED, sleep: ['task.phase.waiting', 'Waiting'],
+    queued: ['task.phase.queued', 'Queued'], technical: PAUSED, technical_resume: PAUSED });
 
 /** The task id of its own wake while it is held and consciousness is on, else '': the one wake the clock waits for,
  *  whatever holds it (consciousness_view.held_sentence says what). */
@@ -240,9 +244,21 @@ export const allowanceHold = (snapshot) => Boolean(heldWake(snapshot)) && ALLOWA
 /** The held wake's one mark (DESIGN "Status marks") and its status word, from the cause its records prove. */
 export function heldWakeState(snapshot) {
     const cause = snapshot.holdCause;
-    if (SPENDING_HOLDS.has(cause)) return { mark: { shape: 'dot', hue: 'owner' }, word: tr('task.phase.paused', 'Paused') };
+    if (OWNER_HOLDS.has(cause)) return { mark: { shape: 'dot', hue: 'owner' }, word: tr(...PAUSED) };
     const [key, fallback] = HELD_WORDS[cause] || ['task.phase.unknown', 'State unknown'];
     return { mark: { shape: HELD_MARKS[cause] || 'ring', hue: 'ink' }, word: tr(key, fallback) };
+}
+
+/** Whether the total budget has room now, from the accounting one `/api/state` body carries (`remaining_known_usd`;
+ *  the Resume door refuses only when nothing is left): `room` true or false with the line that says the next step, or
+ *  null with no line when the body does not say. A wake held by the total budget keeps its pause after a raise, so
+ *  this, not the pause's rail, decides whether raising it is still the step. */
+export function totalBudgetNow(accounting) {
+    const left = accounting && accounting.available !== false ? accounting.remaining_known_usd : null;
+    if (typeof left !== 'number' || !Number.isFinite(left)) return { room: null, words: '' };
+    return left > 0
+        ? { room: true, words: `The total budget has ${formatLimitUsd(left, accounting.limit_usd, 'left')} left now: Resume continues it.` }
+        : { room: false, words: 'The total budget has nothing left now: raise it in Costs, then Resume.' };
 }
 
 /** What Resume of a wake held at its daily share may add, as the host estimates it now

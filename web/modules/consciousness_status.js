@@ -61,25 +61,29 @@ export function chipView(data = {}) {
 }
 
 /** The three last wakes, newest first: time, its one short line, and its phase in the Dashboard's words; a wake in a
- *  place also names that place (`placeId`, `place`), whose sheet its row opens, and an own wake of Main its task
- *  (`taskId`), whose card in Main its row opens. */
-export function wakeRows(wakes) {
+ *  place also names that place (`placeId`, `place`), whose sheet its row opens, and an own wake whose card Main shows its
+ *  task (`taskId`), whose card in Main its row opens: one written in Main, or in an owner chat no Project holds
+ *  (`projectChatIds`, the same state's list; room_membership shows such a task's rows in Main too). */
+export function wakeRows(wakes, projectChatIds = null) {
+    const inMain = (chat) => chat === 1
+        || (Number.isSafeInteger(chat) && chat > 1 && Array.isArray(projectChatIds) && !projectChatIds.includes(chat));
     return (Array.isArray(wakes) ? wakes : []).slice(0, WAKES_SHOWN).map((wake) => ({
         time: clockText(wake.startedAt) || '—',
         text: wake.summary || (wake.cause === 'focus' ? wake.placeLabel || 'A place' : 'Own time'),
         outcome: wakePhaseText(wake),
         ...(wake.cause === 'focus' && wake.placeId ? { placeId: wake.placeId, place: wake.placeLabel || 'A place' } : {}),
-        ...(wake.cause !== 'focus' && wake.taskId && wake.chatId === 1 ? { taskId: wake.taskId } : {}),
+        ...(wake.cause !== 'focus' && wake.taskId && inMain(wake.chatId) ? { taskId: wake.taskId } : {}),
     }));
 }
 
 /**
  * Mount the chip after `bar`'s title block and its Shade under `bar`. `ws` sends Start/Stop, `openDashboardTab` opens
  * the doors, `refreshState()` asks the room's state clock for a fresh answer after a command. `update(data)` takes
- * every `/api/state` answer the room reads.
+ * every `/api/state` answer the room reads. `confirmStop` is the held wake's Stop now confirmation (the shared dialog).
  */
 export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = null, refreshState = () => {},
-    read = readConsciousness, readPlacesFn = readPlaces, openSheet = openPlaceSheet, turn = turnConsciousness } = {}) {
+    read = readConsciousness, readPlacesFn = readPlaces, openSheet = openPlaceSheet, turn = turnConsciousness,
+    confirmStop = undefined } = {}) {
     const doc = bar?.ownerDocument;
     if (!doc) return null;
     const element = (tag, className = '', text = '') => {
@@ -152,8 +156,8 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     });
     // The held own wake's block, right under the switch's header (owner 27.11, «Блок с кнопками»).
     const held = createHeldWake(doc, {
-        current: () => (view ? heldWakeView(view.snapshot, lastData) : null), connected: () => connected(),
-        refresh: () => refreshState(true),
+        current: () => (view && standing ? heldWakeView(view.snapshot, lastData) : null), connected: () => connected(),
+        confirmed: () => standing, refresh: () => refreshState(true), confirmStop,
         openCosts: (row) => { close({ restoreFocus: false }); openDashboardTab?.('costs', row ? { row } : undefined); },
         leave: () => close({ restoreFocus: false }),
     });
@@ -176,7 +180,8 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     const disposeShadeFade = bindScrollFade(scroll);
 
     let view = null;
-    let lastData = null;  // the `/api/state` answer `view` was made from: its work projection holds the held wake's controls
+    let lastData = null;  // the newest `/api/state` answer: its work projection holds the held wake's controls
+    let standing = true;  // whether the newest state read stands; a failed one leaves the last controls, disabled
     let open = false;
     let destroyed = false;
     let readSeq = 0;
@@ -235,7 +240,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         coverageNote.hidden = !coverageNote.textContent;
         const split = splitWakes(list);
         for (const group of groups) {
-            const rows = wakeRows(split[group.key]);
+            const rows = wakeRows(split[group.key], lastData?.project_chat_ids);
             group.wakes.replaceChildren(...rows.map((row) => {
                 const item = element('li', row.placeId || row.taskId ? 'cx-wake-item' : 'cx-wake');
                 const time = element('span', 'cx-wake-time', row.time);
@@ -333,7 +338,9 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         void readWakes();
         // A pointer open lands on the (ring-less) inner scrollport so PageDown scrolls it at once;
         // a keyboard open enters its first enabled control.
-        const first = viaKeyboard ? [panicChoice, toggle, dashboardDoor].find((node) => !node.hidden && !node.disabled) : null;
+        // The held wake's own controls come first: they are what the owner came for (Turn off is the switch's).
+        const first = viaKeyboard ? [...held.focusable(), panicChoice, toggle, dashboardDoor]
+            .find((node) => !node.hidden && !node.disabled) : null;
         (first || scroll).focus({ preventScroll: true });
     }
 
@@ -399,9 +406,11 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         close({ restoreFocus: false });
         openDashboardTab?.(target.dataset.tab);
     });
-    // The room Shade's dismissal: an outside press, Escape, focus leaving the chip and the Shade.
+    // The room Shade's dismissal: an outside press, Escape, focus leaving the chip and the Shade. A modal confirmation
+    // opened from inside it (the block's Stop now) is part of it meanwhile: its Cancel returns to the open Shade.
+    const modal = (node) => Boolean(node?.closest?.('.ui-modal-backdrop, [aria-modal="true"]'));
     listen(doc, 'pointerdown', (event) => {
-        if (open && !shade.contains(event.target) && !chip.contains(event.target)) close({ restoreFocus: false });
+        if (open && !shade.contains(event.target) && !chip.contains(event.target) && !modal(event.target)) close({ restoreFocus: false });
     }, true);
     listen(doc, 'keydown', (event) => {
         if (event.key !== 'Escape' || !open || event.defaultPrevented) return;
@@ -414,17 +423,22 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     if (doc.defaultView) listen(doc.defaultView, 'resize', () => { if (open) hangUnderCapsules(bar, anchor); });
     listen(shade, 'focusout', (event) => {
         const next = event.relatedTarget;
-        if (open && next && !shade.contains(next) && next !== chip) close({ restoreFocus: false });
+        if (open && next && !shade.contains(next) && next !== chip && !modal(next)) close({ restoreFocus: false });
     });
 
     return {
         chip,
         shade,
-        /** One `/api/state` answer; a failed read (no consciousness facts) keeps the last chip. */
+        /** One `/api/state` answer. A failed read (neither consciousness facts nor a work projection) keeps the last chip
+         *  and leaves the held wake's last controls in place, disabled; a body with works alone still renews them. */
         update(data) {
-            if (destroyed || !carriesFacts(data)) return;
-            view = chipView(data);
+            if (destroyed) return;
+            const facts = carriesFacts(data);
+            standing = facts || Array.isArray(data?.works);
+            if (!standing) { if (open && view) paintShade(); return; }
+            if (facts) view = chipView(data);
             lastData = data;
+            if (!view) return;
             if (pending && Date.now() - pendingAt >= COMMAND_SETTLE_MS) pending = '';
             paintChip();
             if (open) paintShade();

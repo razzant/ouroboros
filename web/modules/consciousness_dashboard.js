@@ -11,7 +11,7 @@ import { statusMarkHtml } from './status_mark.js';
 import { controlIcon } from './page_icons.js';
 import { chipHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
-import { failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
+import { failureText, normalizeConsciousness, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
 import { autonomyOf } from './consciousness_autonomy.js';
 import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, heldWake, modelRouteWords, safetyLevelOf, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { createHeldWake, heldWakeView } from './consciousness_held_wake.js';
@@ -336,26 +336,52 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
     let toggling = '';
     let toggledAt = 0;
     let detailsOpen = false;  // the headline card's Details stays as its reader left it across repaints
-    // The held own wake's block, made at the first held wake: its words are this read's, its controls the work the
-    // page's latest `/api/state` snapshot projects; a press re-checks them and reads both again once it settles.
+    // The held own wake's block, made at the first held wake: its words are this read's, its controls and the budget it
+    // reads the work and accounting of the page's newest `/api/state` body. A failed or retired state read keeps the last
+    // body's controls, disabled; a newer body that no longer names this wake held (or names another) reads this tab
+    // again and shows no block meanwhile; a block for a new task first asks the page for one fresh state read. A press
+    // re-checks its facts and reads both again once it settles.
     let held = null;
-    const heldNow = () => (snapshot ? heldWakeView(snapshot, stateSnapshots?.latest?.() || null) : null);
+    let stateBody = stateSnapshots?.latest?.() || null;  // the newest body that stood
+    let standing = Boolean(stateBody);
+    let heldTask = '';
+    let rereading = false;
+    const agrees = () => {
+        if (!stateBody || !('bg_consciousness_state' in stateBody || 'bg_consciousness_enabled' in stateBody)) return true;
+        const newest = normalizeConsciousness(stateBody.bg_consciousness_state || {}, { enabled: stateBody.bg_consciousness_enabled });
+        return heldWake(newest) === heldWake(snapshot);
+    };
+    const heldNow = () => (snapshot && standing && agrees() ? heldWakeView(snapshot, stateBody) : null);
     async function readState() {
         const request = await stateSnapshots?.gate?.(true);
         if (request) await readStateSnapshot(stateSnapshots, request);
     }
     function paintHeld() {
-        const view = heldNow();
+        let view = snapshot ? heldWakeView(snapshot, stateBody) : null;
+        if (view && !agrees()) {
+            view = null;  // the newest state says otherwise: its words would describe a wake no longer held
+            if (!rereading) { rereading = true; void refresh().finally(() => { rereading = false; }); }
+        }
+        if (view && view.taskId !== heldTask) void readState();
+        heldTask = view?.taskId || '';
         if (!view && !held) return;
         if (!held) {
             held = createHeldWake(regions.held.ownerDocument || document, { current: heldNow,
-                connected: () => ws?.isConnected?.() !== false, refresh: () => Promise.all([readState(), refresh()]),
+                connected: () => ws?.isConnected?.() !== false, confirmed: () => standing,
+                refresh: () => Promise.all([readState(), refresh()]),
                 openCosts: (row) => openDashboardTab?.('costs', row ? { row } : undefined) });
             regions.held.append(held.element);
         }
         held.paint(view);
     }
-    const unwatchState = stateSnapshots?.watch?.(() => { if (!destroyed) paintHeld(); }) || (() => {});
+    const onState = () => {
+        if (destroyed) return;
+        const latest = stateSnapshots.latest?.() || null;
+        standing = Boolean(latest);
+        if (latest) stateBody = latest;
+        paintHeld();
+    };
+    const unwatchState = stateSnapshots?.watch?.(onState) || (() => {});
     function paint() {
         cards.paint();  // the Model door says the route this read published
         if (snapshot) {
