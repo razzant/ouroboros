@@ -5,6 +5,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatRowMenu } from '../modules/chat_row_menu.js';
 import { buildTimelineItemHtml } from '../modules/chat_activity.js';
+import { createChatMedia } from '../modules/chat_media.js';
+import { createChatReplies } from '../modules/chat_reply.js';
+import { createTextBubbles } from '../modules/chat_text_bubble.js';
 import { createMessageActions } from '../modules/message_actions.js';
 import { cardControls, emptyWorkState } from '../modules/work_status.js';
 import { installDomDouble } from './dom_double.js';
@@ -109,6 +112,73 @@ test('a right-click on a bubble opens its menu at the pointer: Reply, Copy, Open
         menuRows(f.openMenu())[2].click();
         assert.deepEqual(f.opened, ['project'], 'Open project presses the row\'s Project reference');
     } finally { f.close(); }
+});
+
+// Spoken lines as a room draws and revises them: the real text bubble, its Copy binding and the real reply path.
+function spokenRoom(t) {
+    const env = installDomDouble();
+    const { doc, el } = env;
+    doc.parseHtml = true;
+    const prior = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const written = [];
+    Object.defineProperty(globalThis, 'navigator', { configurable: true,
+        value: { clipboard: { writeText: async (text) => { written.push(text); } } } });
+    const feed = el('div', { className: 'chat-messages' });
+    const input = el('textarea', { attrs: { id: 'chat-input' } });
+    doc.body.append(feed, el('div', {}, el('div', { className: 'chat-text-row' }, input)));
+    const replies = createChatReplies({ chatId: 1, feed, input, actions: createMessageActions(),
+        reading: () => ({ cancel() {}, scroll() {}, remember() {}, stick: true }) });
+    const media = createChatMedia({ replies });
+    const draw = createTextBubbles({ chatMedia: media, replies, feed });
+    const menu = createChatRowMenu({ feed, replies, cardOf: () => null, readControls: () => ({}),
+        actions: createMessageActions() });
+    const frame = (item, version) => ({
+        meta: { source: 'live_call', projectId: '' },
+        opts: { reply: { role: 'assistant', source: 'live_call', spoken: { call_id: 'call-1', item_id: item },
+            row_address: `row:1@2026-11-27T10:00:00Z#${item}-v${version}` } },
+    });
+    const say = (item, words) => {
+        const { bubble } = draw(words, 'assistant', frame(item, 1));
+        feed.append(bubble);
+        return bubble;
+    };
+    const revise = (bubble, item, words) => assert.equal(draw.revise(bubble, words, 'assistant', frame(item, 2)), true);
+    const openOn = (bubble) => {
+        bubble.querySelector('.message').emit('contextmenu', { clientX: 1, clientY: 1 });
+        const open = doc.body.children.find((node) => node.classList.contains('chat-row-menu'));
+        return (kind) => menuRows(open).find((node) => node.dataset.rowAction === kind);
+    };
+    t.after(async () => {
+        await new Promise((resolve) => setImmediate(resolve));  // Copy's own mark is timed after the write settles
+        menu.destroy(); replies.destroy(); media.destroy();
+        if (prior) Object.defineProperty(globalThis, 'navigator', prior); else delete globalThis.navigator;
+        env.restore();
+    });
+    return { replies, written, say, revise, openOn };
+}
+
+test('Copy in a menu opened before a spoken line was revised copies the words the same row shows at the press', (t) => {
+    const room = spokenRoom(t);
+    room.say('other', 'A neighbouring line.');
+    const line = room.say('mine', 'We meet at ten.');
+    const item = room.openOn(line);
+    const opened = line.querySelector('.chat-message-copy');
+    room.revise(line, 'mine', 'We meet on Friday at ten.');
+    assert.notEqual(line.querySelector('.chat-message-copy'), opened, 'the revision gave the row a new Copy');
+    item('copy').click();
+    assert.deepEqual(room.written, ['We meet on Friday at ten.'], 'one write: this row\'s present words');
+});
+
+test('Reply in a menu opened before a spoken line was revised quotes the same row\'s present words and address', (t) => {
+    const room = spokenRoom(t);
+    room.say('other', 'A neighbouring line.');
+    const line = room.say('mine', 'We meet at ten.');
+    const item = room.openOn(line);
+    room.revise(line, 'mine', 'We meet on Friday at ten.');
+    item('reply').click();
+    const staged = room.replies.echoRow()?.reply_to;
+    assert.deepEqual([staged?.address, staged?.snippet],
+        ['row:1@2026-11-27T10:00:00Z#mine-v2', 'We meet on Friday at ten.']);
 });
 
 test('a link, a field or selected words keep the browser menu; a row with nothing to offer opens none', () => {

@@ -73,8 +73,10 @@ export function createChatRowMenu({ feed, replies, cardOf, readControls, afterAc
 
     function bubbleItems(row, point, touch) {
         const items = [];
-        const copy = row.querySelector(':scope > .chat-message-copy, :scope > .chat-message-actions > .chat-message-copy');
-        if (copy) items.push(['copy', tr('code.copy', 'Copy'), () => copy.click(), true]);
+        // A revision under the open menu (a spoken line's words, chat_text_bubble.js) replaces the row's Copy, so the
+        // item presses the one this row holds at the press.
+        const copy = () => row.querySelector(':scope > .chat-message-copy, :scope > .chat-message-actions > .chat-message-copy');
+        if (copy()) items.push(['copy', tr('code.copy', 'Copy'), () => copy()?.click(), true]);
         if (touch && replies.canSelect?.(row, point)) items.push(['select-text', tr('chat.reply.select_text', 'Select text'),
             () => { tail.disarm(); replies.selectText(row, point); }]);
         const view = row.matches('.chat-bubble') ? messageRow(row) : null;
@@ -109,7 +111,10 @@ export function createChatRowMenu({ feed, replies, cardOf, readControls, afterAc
         const record = recordOf(row);
         const items = record ? cardItems(record) : bubbleItems(row, point, touch);
         const ref = row === target ? replyRef(row, record) : null;
-        if (ref) items.unshift(['reply', tr('chat.reply.reply', 'Reply'), () => replies.start(ref)]);
+        // A bubble's words and address can be revised under the open menu: like its own Reply, the item reads them at
+        // the press.
+        if (ref) items.unshift(['reply', tr('chat.reply.reply', 'Reply'),
+            () => replies.start(row.matches('.chat-bubble') ? replyRef(row) : ref)]);
         // The row's own Project reference (a portal's footer, the reference under an answer or a receipt), where Reply
         // and Copy end: a card pressed through a line has no Reply, so it follows Copy.
         const reference = [...row.querySelectorAll('[data-intent="open-project"]')]
