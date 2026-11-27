@@ -126,10 +126,12 @@ def _enable(page, identity):
 
 
 def _facts(card):
-    """The exact stamps and the engine's words on a server's page: {name: value}."""
+    """The exact stamps and the engine's words on a server's page: {name: value}. The engine's raw words ride behind
+    a Details disclosure kept out of translation (mcp_settings.js): such a value is read as ``Details: <words>``."""
     return card.locator('[data-mcp-facts]').evaluate(
-        "dl => Object.fromEntries([...dl.children].map((fact) => [fact.querySelector('dt').textContent,"
-        " fact.querySelector('dd').textContent]))")
+        "dl => Object.fromEntries([...dl.children].map((fact) => { const raw = fact.querySelector('dd .ui-result-details');"
+        " return [fact.querySelector('dt').textContent,"
+        " raw ? `Details: ${raw.textContent}` : fact.querySelector('dd').textContent]; }))")
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
@@ -498,7 +500,7 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
             assert not re.search(r'2026-10-21|offline', badge.inner_text()), badge.inner_text()
             facts = _facts(card)
             assert facts['Listed'] and (facts['Last attempt'], facts['Error']) == (
-                f"{stamp('2026-10-21T10:00:00+00:00')} · failed", 'offline'), facts
+                f"{stamp('2026-10-21T10:00:00+00:00')} · failed", 'Details: offline'), facts
             badge.scroll_into_view_if_needed()
             _capture(page, 'mcp-catalog-failed-with-tools')
             answer(lambda entry: entry.update(tools=[], tool_count=0, listed_at=None, latest_attempt=None,
@@ -508,7 +510,7 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
                 latest_attempt={'at': '2026-10-21T10:00:00+00:00', 'ok': False, 'error': 'offline', 'partial': False}))
             expect(badge).to_have_text(re.compile(r'^Listing failed [^·]+$'))
             assert _facts(card) == {'Last attempt': f"{stamp('2026-10-21T10:00:00+00:00')} · failed",
-                                    'Error': 'offline'}, _facts(card)  # never listed: no Listed stamp
+                                    'Error': 'Details: offline'}, _facts(card)  # never listed: no Listed stamp
             badge.scroll_into_view_if_needed()
             _capture(page, 'mcp-catalog-never-listed')
             page.set_viewport_size({'width': 390, 'height': 844})
@@ -519,18 +521,20 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
             _capture(page, 'mcp-catalog-never-listed-narrow')
             page.route('**/api/mcp/refresh', lambda route: route.fulfill(json={
                 'ok': True, 'published': False, 'tool_count': 1, 'publication_error': 'disk full'}))
-            answer(lambda entry: entry.update(publication_error='disk full'), expected='Refresh failed: disk full')
+            answer(lambda entry: entry.update(publication_error='disk full'), expected='Refresh failed.')
+            assert message.locator('.ui-result-details').text_content() == 'disk full'  # the raw words, behind Details
             expect(badge).to_have_text(re.compile(r'^1 tool · listed [^·]+ · catalog not published$'))
-            assert _facts(card)['Catalog publication'] == 'disk full', _facts(card)
+            assert _facts(card)['Catalog publication'] == 'Details: disk full', _facts(card)
             assert 'Listed again.' not in message.inner_text()
             page.unroute('**/api/mcp/refresh')
             page.route('**/api/mcp/refresh', lambda route: route.fulfill(json={'ok': False, 'error': 'offline'}))
             answer(lambda entry: entry.update(latest_attempt={'at': '2026-10-21T11:00:00+00:00',
-                'ok': False, 'error': 'offline', 'partial': False}), expected='Refresh failed: offline')
+                'ok': False, 'error': 'offline', 'partial': False}), expected='Refresh failed.')
+            assert message.locator('.ui-result-details').text_content() == 'offline'
             expect(badge).to_have_text(re.compile(r'^1 tool · listed [^·]+ · listing failed [^·]+$'))
             facts = _facts(card)
             assert (facts['Last attempt'], facts['Error']) == (f"{stamp('2026-10-21T11:00:00+00:00')} · failed",
-                                                               'offline'), facts
+                                                               'Details: offline'), facts
             page.unroute('**/api/mcp/refresh')
             page.unroute('**/api/mcp/status')
         finally:

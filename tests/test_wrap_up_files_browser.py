@@ -39,7 +39,7 @@ def test_saved_work_download_and_receipt_survive_real_chat_reload(subscription_u
     monkeypatch.setattr(events_chat_delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
     client = _client(tmp_path)
     ui["backend"]["task_gateway"] = client  # downloads use the fixture's HTTP server and real handler
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
 
     def task_response(route):
         url = urlsplit(route.request.url)

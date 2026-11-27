@@ -2673,8 +2673,8 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert abs(deep["mainTop"] - deep["sideTop"]) <= 1, wide_facts
 
                 # The 620-700px column (laptop with the project panel open): the root
-                # card takes up to 620px there.
-                wide.set_viewport_size({"width": 1004, "height": 750})
+                # card takes up to 620px there. The window is that column plus the sidebar with its outside rail.
+                wide.set_viewport_size({"width": 1040, "height": 750})
                 wide.wait_for_timeout(250)
                 owner_facts = wide.evaluate(
                     """() => {

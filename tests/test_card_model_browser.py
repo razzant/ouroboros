@@ -152,7 +152,10 @@ def _serve(page, stand: Stand) -> None:
 
     def history(route):
         main = "chat_id=1" in route.request.url or "chat_id" not in route.request.url
-        route.fulfill(json={"messages": stand.history if main else [], "window": {"complete": True}, "page_cursor": "fixture",
+        # The stand's rows, for the data profile the serving host proves (its own answer names it, api_client.js).
+        scope = route.fetch().json().get("profile_scope", "")
+        route.fulfill(json={"profile_scope": scope,
+                            "messages": stand.history if main else [], "window": {"complete": True}, "page_cursor": "fixture",
                             "next_cursor": None, "has_more": False, "coverage": {"v": 1, "view": "fixture", "upper": {"chat": 1}, "spans": {
                                 "chat": {"chain": "fixture", "from": 0, "to": 1, "gaps": []}, "progress": None}}})
 

@@ -77,6 +77,13 @@ def seed_reply_history(root, *, outside_sidebar=False):
     return {"a": a, "b": b, "x": x, "sources": saved}
 
 
+# Main's staged reply, from its slot under the page's profile scope when the document proves one (chat_preview.js
+# `roomStoreKey`), or null.
+_MAIN_REPLY_SLOT = """() => {
+    const key = Object.keys(sessionStorage).find(k => /^ouro_chat_reply(:|$)/.test(k));
+    return key ? JSON.parse(sessionStorage.getItem(key)) : null;
+}"""
+
 _OBSERVE_QUOTES = """() => {
     const fetch = window.fetch.bind(window);
     window.__quoteReads = []; window.__quoteSends = []; window.__quoteAcks = [];
@@ -2295,11 +2302,11 @@ def test_selected_reply_keeps_second_rendered_passage_through_reload(direct_serv
                 getSelection().addRange(saved);
                 return offered && refused && stale;
             }""")
-            assert page.evaluate("() => sessionStorage.getItem('ouro_chat_reply')") is None
+            assert page.evaluate(_MAIN_REPLY_SLOT) is None
             action.click()
             strip = page.locator(".chat-quote--composer[data-excerpt]")
             expect(strip.locator(".chat-quote-text")).to_have_text(phrase, use_inner_text=True)
-            kept = page.evaluate("() => JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
+            kept = page.evaluate(_MAIN_REPLY_SLOT)
             assert kept["address"] == format_address(row_address(row))
             assert kept["excerpt"] == {"text": phrase, "start_utf16": len("🌙 Silver gate then ".encode("utf-16-le")) // 2}
             page.reload(wait_until="domcontentloaded")
@@ -2375,7 +2382,8 @@ def test_selected_passage_round_trip(direct_server_with_data, room, direction):
             accepted = ds.accepted_row(root, chat, cmid)
             assert accepted and accepted.row["text"] == new_words
             excerpt = {"text": passage, "start_utf16": len(opening.encode("utf-16-le")) // 2}
-            ref = {**reference_from_row(row), "excerpt": excerpt}
+            # The host stamps its own verdict at acceptance: the quoted row is no work (chat_references `_with_reply_work`).
+            ref = {**reference_from_row(row), "excerpt": excerpt, "ordinary": True}
             assert accepted.row["reply_to"] == ref
             page.reload(wait_until="domcontentloaded")
             if project and not feed.is_visible():
