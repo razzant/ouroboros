@@ -7,7 +7,6 @@ import re
 import threading
 
 from ouroboros import dialogue_store
-from tests import fixtures_mock_llm
 
 SOURCE = "openai-compatible"
 MAIN, PICKED, OTHER, QUEUED = (f"{SOURCE}::mock-{name}" for name in ("main", "picked", "other", "queued"))
