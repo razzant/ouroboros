@@ -219,6 +219,12 @@ def settle_frames(page):
     page.evaluate('() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))')
 
 
+def scrolled_up(page, pid, before):
+    """A scroll key's effect lands within a few frames: wait for the transcript to move up from where it was."""
+    page.wait_for_function('([pid, top]) => document.getElementById(`pchat-${pid}-messages`).scrollTop < top',
+                           arg=[pid, before])
+
+
 def corners(facts):
     assert facts['activeIsFeed'] and facts['focusVisible'] and not facts['quiet'], facts
     assert all(facts['arms'].values()) and facts['plain_between'], ('two corners, nothing between them', facts)
@@ -237,6 +243,7 @@ def test_a_pointer_keeps_the_transcript_quiet_and_its_keys_show_the_corners(cue_
     opened = look(ui, page, 'nova', '01-open-by-mouse', full=True)
     quiet(opened)
     page.keyboard.press('ArrowUp')  # the room lands at its newest message: up scrolls
+    scrolled_up(page, 'nova', opened['feed']['scrollTop'])
     shown = look(ui, page, 'nova', '02-arrow-up', full=True)
     assert shown['feed']['scrollTop'] < opened['feed']['scrollTop'], 'the key scrolls the transcript'
     corners(shown)
@@ -252,6 +259,7 @@ def test_a_pointer_keeps_the_transcript_quiet_and_its_keys_show_the_corners(cue_
     page.keyboard.up('Meta')
     quiet(look(ui, page, 'nova', '04-modifiers-and-shortcuts'))
     page.keyboard.press('PageUp')
+    scrolled_up(page, 'nova', pressed['feed']['scrollTop'])
     again = look(ui, page, 'nova', '05-page-up-after-press')
     assert again['feed']['scrollTop'] < pressed['feed']['scrollTop']
     corners(again)
