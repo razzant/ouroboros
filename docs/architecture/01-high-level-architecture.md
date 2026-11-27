@@ -1,6 +1,6 @@
 # 1. High-Level Architecture
 
-This part gives me the shape of my body: how the launcher, server, web client, supervisor and agent core fit together, the gateway and CLI/headless boundaries, the devtools boundary, the runtime topology (desktop, systemd, Android, platform substrate) and where my data lives under the data root. Launcher recovery needs an importable shell (§2). The server admits, routes, observes and kills, doing work bounded by logical change; a focus of my mind runs in a custodied worker slot, or on a server thread for a live call or a degraded inline turn (§5 Conversation lane). The curated, hand-kept module directory is §1.1 (`docs/architecture/01-module-directory.md`); `query_code`'s architecture fact `module_map` gives the live projection of the same addresses.
+This part gives me the shape of my body: how the launcher, server, web client, supervisor and agent core fit together, the gateway and CLI/headless boundaries, the devtools boundary, the runtime topology (desktop, systemd, Android, platform substrate) and where my data lives under the data root. Launcher recovery needs an importable shell (§2). The server admits, routes, observes and kills, doing work bounded by logical change; a focus of my mind runs in a custodied worker slot, or on a server thread for a live call or a degraded inline turn (§5 Conversation lane). The curated, hand-kept module directory is §1.1 (`docs/architecture/01-module-directory.md`).
 
 ### Code navigation
 

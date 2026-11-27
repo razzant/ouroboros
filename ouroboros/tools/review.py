@@ -732,6 +732,11 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     if task_evidence or words_section:
         _assemble_prompt.compact_optional_evidence = _compact_task_evidence
 
+    def _fallback():
+        nonlocal governance
+        governance = governance.fallback
+    _assemble_prompt.fallback = _fallback if getattr(governance, "fallback", None) else None
+
     # P3 stays one-pass. The api pack, its fit ladder and the fixed_overflow
     # gate exist ONLY for the api rows (5.2/5.7): a retrieving row reads with
     # its own tools, so it neither constrains the fit limit nor is blocked by

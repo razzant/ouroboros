@@ -198,6 +198,10 @@ class GovernanceContext:
     stable_inline: str = ""
     selected_inline: str = ""
     inline_whole_documents: dict = field(default_factory=dict)
+    # A packet whose selection skipped chapter openings already resident in its navigation keeps, as ``fallback``,
+    # the selection that re-sends them instead (smaller where that skip admitted larger sections): the fit ladder's
+    # last step before refusing, so a packet sendable before the skip stays sendable.
+    fallback: Any = None
     layer: str = BODY_LAYER
 
 
@@ -584,6 +588,7 @@ def governance_context(
     subject_root: Any = None,
     manifest_facts: Any = None,
     review_words: Any = None,
+    resident_openings_selectable: bool = False,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -599,6 +604,7 @@ def governance_context(
     :func:`_core_layer_context` over ``subject_root``; ``skill`` (a skill payload)
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
     manifest's ``declares``)."""
+    call = {key: value for key, value in locals().items() if key != "resident_openings_selectable"}
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
 
     if layer not in GOVERNANCE_LAYERS:
@@ -778,6 +784,7 @@ def governance_context(
     rows.append(_row("docs/ARCHITECTURE.md", 3, "navigation", 0, arch_reason if arch_chapters
                      else arch_problem or "no chaptered membership: navigation only"))
     sections: list[tuple[tuple, str, str, str]] = []
+    skipped_resident = False
     any_name = re.compile("|".join(pattern.pattern for group in names for pattern in group)) if names else None
     for chapter in arch_chapters:
         if chapter.source_path == BODY_INVARIANTS_CHAPTER:  # tier 1 above, whole
@@ -790,7 +797,13 @@ def governance_context(
                  for number, (start, text, is_code) in enumerate(_opening_units(chapter), 1)]
         units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section), False)
                   for heading in _top_sections(chapter)]
+        from ouroboros.reference_books import _preamble
+
+        resident = chapter.text_at(_preamble(chapter)).strip()  # the packet navigation carries it either way
         for start, title, body, is_code in units:
+            if not is_code and body.strip() == resident and not resident_openings_selectable:
+                skipped_resident = skipped_resident or bool(_mentions(body, names)[0])
+                continue
             if is_code:  # a listing (the module directory) gives its lines that name a touched file, not all of itself
                 body = "\n".join(line for line in body.splitlines() if any_name.search(line))
                 title += " (excerpt: its lines naming a touched file)"
@@ -836,5 +849,5 @@ def governance_context(
         stable_inline=stable_inline,
         selected_inline=selected_inline,
         inline_whole_documents=inline_texts,
+        fallback=governance_context(**call, resident_openings_selectable=True) if skipped_resident else None,
     )
-

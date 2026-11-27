@@ -397,11 +397,8 @@ def _query_code_read(
             scope=scope, path_allowed=admitted, parse=parse, name=name,
         )
         visible = [file for file in inventory.files if _visible_file(ctx, repo_root, file.path, binding, runtime_check)]
-        # One scope-level fact, never which entries: this view omits some (a protected artifact under the scope, or a
-        # file the view's runtime admission hides). A reader then knows its listing is not the whole scope.
-        under = repo_root / scope if scope else repo_root
-        inventory.admission_omitted = len(visible) < len(inventory.files) or any(
-            pathlib.Path(path).resolve().is_relative_to(under.resolve()) for path in exclude_paths)
+        if len(visible) < len(inventory.files):  # the runtime admission skipped a listed entry: one anonymous fact
+            inventory.enumeration_limits = [*inventory.enumeration_limits, "enumeration_entries_not_admitted"]
         inventory.files = visible
         return inventory
 
@@ -439,8 +436,6 @@ def _query_code_read(
                 scope = repo_root / prefix
                 if not listed.files and work_domain.kind(scope) != "missing" and not admitted(scope):
                     limits.append("module_map_scope_not_admitted: this resource view cannot list that prefix")
-                elif getattr(listed, "admission_omitted", False):
-                    limits.append("module_map_entries_not_admitted: this resource view omits entries of that prefix")
                 return [file.path for file in listed.files], limits
 
             try:

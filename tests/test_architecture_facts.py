@@ -534,11 +534,16 @@ def test_a_wrong_shaped_manifest_is_a_named_error_and_a_refused_prefix_is_incomp
     assert "enumeration complete" in missing and "module_map_scope_not_admitted" not in missing
 
 
-@pytest.mark.parametrize("protected, omits", [((), False), (("pkg/restricted.py",), True),
-                                              (("pkg/restricted.py", "pkg/visible.py"), True)])
-def test_module_map_says_when_its_view_omits_entries_of_the_prefix(tmp_path, protected, omits):
-    """A view that hides some or all files of a prefix (here a black-box reference artifact) reports the listing as
-    incomplete, never as the whole folder or an empty one; which entries are hidden is not said."""
+@pytest.mark.parametrize("files, protected, omits", [
+    (("visible.py", "restricted.py"), (), False),                                  # wholly admitted: complete
+    (("visible.py", "restricted.py"), ("pkg/restricted.py",), True),             # one sibling skipped
+    (("restricted.py",), ("pkg/restricted.py",), True),                          # the only child skipped
+    ((), ("pkg/never_created.py",), False),                                       # empty: nothing was skipped
+])
+def test_module_map_says_when_its_view_skipped_entries_of_the_prefix(tmp_path, files, protected, omits):
+    """The enumeration reports one anonymous fact when it actually skips a visited entry (here a black-box reference
+    artifact), and the lookup then calls its listing incomplete; a path a policy merely names (never created) is not
+    an omission. Which entries were skipped is never said."""
     import subprocess
 
     from ouroboros.tools.query_code import _query_code
@@ -546,11 +551,10 @@ def test_module_map_says_when_its_view_omits_entries_of_the_prefix(tmp_path, pro
 
     repo = tmp_path / "work"
     (repo / "pkg").mkdir(parents=True)
-    for name in ("visible.py", "restricted.py"):
+    for name in files:
         (repo / "pkg" / name).write_text(f'"""Lead for {name}."""\n', encoding="utf-8")
     (repo / "ouroboros").mkdir()
-    (repo / "ouroboros" / "domains.toml").write_text('[domains]\nD01 = "Example"\n[modules]\n"pkg/visible.py" = "D01"\n',
-                                                    encoding="utf-8")
+    (repo / "ouroboros" / "domains.toml").write_text('[domains]\nD01 = "Example"\n[modules]\n', encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data")
@@ -559,6 +563,21 @@ def test_module_map_says_when_its_view_omits_entries_of_the_prefix(tmp_path, pro
             "id": "reference", "role": "black_box_reference", "paths": list(protected)}]}}
     out = _query_code(ctx, op="architecture", root="system_repo", query="module_map pkg/")
     assert ("QUERY_CODE_TRUNCATED" in out) == omits, out
-    assert ("pkg/restricted.py" in out) == (not protected), out
-    if not protected:
-        assert "pkg/visible.py (D01)" in out
+    assert "restricted.py" not in out or not protected, out
+
+
+def test_module_map_of_a_shipped_folder_with_an_inventory_excluded_file_is_incomplete(tmp_path):
+    """On the shipped tree `skills/ui_design/` holds a file the code inventory excludes (`assets/`); the lookup through
+    the real registry must not call its shorter list complete."""
+    import subprocess
+
+    from ouroboros.tools.query_code import _query_code
+    from ouroboros.tools.registry import ToolContext
+
+    tracked = subprocess.run(["git", "-C", str(REPO), "ls-files", "skills/ui_design/"], capture_output=True, text=True,
+                             check=True).stdout.split()
+    out = _query_code(ToolContext(repo_dir=REPO, drive_root=tmp_path / "data"), op="architecture", root="system_repo",
+                      query="module_map skills/ui_design/")
+    listed = [path for path in tracked if f"{path}" in out]
+    assert len(listed) < len(tracked), (tracked, out)
+    assert "QUERY_CODE_TRUNCATED" in out, out

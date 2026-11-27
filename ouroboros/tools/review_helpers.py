@@ -834,3 +834,28 @@ from ouroboros.tools.review_file_pack import (  # noqa: E402, F401 -- intentiona
     span_only_release_carriers,
     triad_pack_exclusions,
 )
+
+
+def triad_fit_note() -> str:
+    """What a packet says in place of the full snapshots it dropped to fit the strictest reviewer; the touched paths
+    are the packet's own "Changed files" list, not repeated here."""
+    return ("TRIAD FIT NOTE: Full post-change snapshots were omitted because they duplicate the complete staged diff "
+            "and would exceed the strictest configured reviewer's input limit. Every touched path is listed under "
+            "\"Changed files\"; all added/deleted lines remain in the staged diff.")
+
+
+def seat_vectors(row_plan: dict) -> dict:
+    """The plan with its ``parts`` vector complete: a row without one is asked by
+    ``review_ledger.seat_parts`` (retrieving → both parts, packet → ``change``)."""
+    from ouroboros.review_ledger import seat_parts
+    from ouroboros.reviewer_slot_config import row_plan_retrieves
+
+    plan = dict(row_plan)
+    parts = list(plan.get("parts") or [])
+    for index in range(len(plan.get("models") or [])):
+        if index >= len(parts) or not parts[index]:
+            while len(parts) <= index:
+                parts.append(())
+            parts[index] = seat_parts({"retrieves": row_plan_retrieves(plan, index)})
+    plan["parts"] = [tuple(p) for p in parts]
+    return plan

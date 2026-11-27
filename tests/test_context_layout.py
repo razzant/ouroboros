@@ -209,3 +209,30 @@ def test_reference_doc_sections_preserve_max_and_orient_both_books_in_low():
     low_no_dev = _render("low", False)
     assert "DEVBODY" not in low_no_dev
     assert "docs/DEVELOPMENT.md" in low_no_dev
+
+
+def test_a_packet_index_states_its_notation_once_and_keeps_an_annotated_chapter_list():
+    """A tool-less packet's index of the real books states PACKET_INDEX once (the governance navigation adds it) and
+    no per-heading "lines" wording; a book whose Chapters list carries prose beside a link keeps the overview form,
+    which keeps that prose."""
+    import dataclasses
+    import pathlib
+
+    from ouroboros.context_layout import PACKET_INDEX, book_navigation
+    from ouroboros.markdown_source import parse_markdown_source
+    from ouroboros.reference_books import load_reference_book
+    from ouroboros.tools.governance_context import governance_context
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    packet = governance_context(root, surface="triad", touched_paths=["web/modules/chat.js"],
+                                usable_window_tokens=200_000, delivery="packet", checklist_section_text="x")
+    assert packet.navigation.count(PACKET_INDEX) == 1 and " — lines " not in packet.navigation.split(PACKET_INDEX)[1]
+    retrieving = governance_context(root, surface="triad", touched_paths=["web/modules/chat.js"],
+                                    usable_window_tokens=200_000, delivery="retrieving", checklist_section_text="x")
+    assert PACKET_INDEX not in retrieving.navigation and " — lines " in retrieving.navigation
+    book = load_reference_book(root, "architecture")
+    entry = book.entrypoint
+    annotated = entry.raw.replace(b"(architecture/02-startup-onboarding-flow.md)",
+                                  b"(architecture/02-startup-onboarding-flow.md) Read this before changing startup.")
+    book = dataclasses.replace(book, entrypoint=parse_markdown_source(annotated, entry.source_path))
+    assert "Read this before changing startup." in book_navigation(book, instructions=False)

@@ -279,6 +279,10 @@ def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(t
                    if line[:1] in "+-" and not line.startswith(("+++", "---"))]
         assert frozen.diff_text in text or all(line in text for line in changed), where  # every changed line
         assert (FIXTURE_SENTINEL in text) == (not omitted), where  # the whole source is really there, or not
+        if not omitted:  # a full-source rung carries every promised file body whole
+            bodies = [(subject / "web" / "modules" / "fixture.js").read_text(encoding="utf-8")]
+            bodies += [(subject / "web" / "tests" / "fixture.test.js").read_text(encoding="utf-8")] if added else []
+            assert all(body.rstrip("\n") in text for body in bodies), where
 
 
 def test_every_gate_variant_reads_one_structured_path_set_for_file_bodies(tmp_path, monkeypatch):
@@ -433,3 +437,78 @@ def test_a_chapter_opening_naming_a_touched_file_is_sent_once(tmp_path, monkeypa
     monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 1_000_000)
     built = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
     assert built.count(opening) == 1
+
+
+# Real history replayed by a reviewer (rev-pr2j), frozen as synthetic files of the same names and sizes and the same
+# numbers of changed lines: (paths with (added, deleted, bytes before), window, the target's rung, sections it selected).
+HISTORY = [
+    ({"docs/DESIGN.md": (1, 1, 321_047), "web/ui.css": (0, 2, 120_198)}, 100_000, "diff",
+     ("Navigation and shared UI contracts", "opening block 2 (excerpt: its lines naming a touched file)")),
+    ({"docs/DESIGN.md": (1, 1, 317_362), "tests/test_phone_keyboard_recovery_browser.py": (5, 5, 81_942),
+      "tests/test_ui_coherence_browser.py": (1, 1, 89_734), "web/ui.css": (1, 1, 113_592)}, 100_000, "diff",
+     ("Navigation and shared UI contracts", "opening block 2 (excerpt: its lines naming a touched file)")),
+]
+
+
+@pytest.mark.parametrize("files, window, rung, sections", HISTORY)
+def test_replayed_history_keeps_the_target_sections_and_directory_rows(tmp_path, monkeypatch, files, window, rung,
+                                                                      sections):
+    """A chapter opening already carried by the packet navigation is not selected again, so the change-specific share
+    goes to the sections and directory rows the pre-PR target selected for the same paths (measured 27 Nov 2026 at
+    7981018bb40e with the target's governance code and documents)."""
+    from ouroboros.tools import review as review_tool
+    from ouroboros.tools.registry import ToolContext
+
+    def lines(count, word):
+        return "".join(f"/* {word} line {index:05d}: " + "x" * 60 + " */\n" for index in range(count))
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    repo = tmp_path / "subject"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    for key, value in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(repo, "config", key, value)
+    for path, (added, deleted, size) in files.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(lines(max(size // 80, deleted + 1), "base"), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    for path, (added, deleted, _size) in files.items():
+        body = (repo / path).read_text(encoding="utf-8").split("\n")
+        body = body[:len(body) - 1 - deleted] + [line for line in lines(added, "new").split("\n") if line] + [""]
+        (repo / path).write_text("\n".join(body), encoding="utf-8")
+    _git(repo, "add", "-A")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "drive")
+    ctx._review_iteration_count = 0
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
+                                                   governance_root=str(root), layer="body"))
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: window)
+    text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review")["system"]
+    got = "diff" if "Full post-change snapshots were omitted" in text else "full"
+    assert RANK[got] >= RANK[rung]
+    for section in sections:
+        assert f"#{section}\n" in text, section
+
+
+def test_a_packet_sendable_with_the_resident_opening_selected_stays_sendable(monkeypatch):
+    """The fit ladder's last step before refusing switches to the governance fallback (the selection that re-sends a
+    resident opening, smaller where skipping it admitted larger sections); without one it refuses."""
+    from ouroboros.tools import review as review_tool, review_admission
+
+    monkeypatch.setattr(review_tool, "_quorum_input_token_limit", lambda *a, **k: 1_000)
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 1_000_000)
+    state = {"governance": "x" * 8_000}
+
+    def assemble(files, diff):
+        return state["governance"] + files + diff, 0
+
+    def fallback():
+        state["governance"] = "small"
+    assemble.fallback = fallback
+    prompt, _stable, error = review_admission.fit_triad_prompt(["openai/gpt-y"], assemble, "", "+one line", "a.py",
+                                                               ".", compact_diff=lambda: "+one line")
+    assert not error and prompt.startswith("small")
+    state["governance"] = "x" * 8_000
+    _prompt, _stable, error = review_admission.fit_triad_prompt(["openai/gpt-y"], assemble, "", "+one line", "a.py",
+                                                                ".", compact_diff=lambda: "+one line")
+    assert "REVIEW_BLOCKED" in error
