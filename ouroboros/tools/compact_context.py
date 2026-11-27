@@ -606,11 +606,11 @@ def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     whole = render(page, following)
     if len(whole) <= limit:
         return whole
-    # Page one runs over by the fields it shares; a later page only when its first unit alone is that long.
-    why = "the fields page one shares took the room" if not start else "its first unit alone is longer than a page"
-    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): {why}."
-                  + (" Later pages carry only units; continue at next_offset." if following is not None else
-                     " It holds every remaining unit; there is no next page."))
+    # A page over the limit holds one unit (none past the end): the fields every page carries and that unit.
+    why = "the fields every page carries and its one unit" if page else "the fields every page carries"
+    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): {why} "
+                  "are longer than a page." + (" Continue at next_offset." if following is not None else
+                                               " It holds every remaining unit; there is no next page."))
 
 
 def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = False, offset: int = 0,

@@ -1070,6 +1070,17 @@ def test_an_overlong_page_names_a_next_page_only_when_there_is_one(tmp_path, mon
     later_text = _compact_context(ctx, inspect=True, offset=1)
     later = json.loads(later_text)
     assert len(later_text) > 200 and later["limitation"] and ("next_offset" in later) is ("next_offset" in later["limitation"])
+    # Its reason is true of the page it describes (Astra REV2 4.4): at 300 characters the later page's one unit is
+    # shorter than a page and the page repeats other fields; past the end there is no unit to blame.
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 300)
+    later = json.loads(_compact_context(ctx, inspect=True, offset=1))
+    assert len(later["units"]) == 1 and len(json.dumps(later["units"][0], ensure_ascii=False)) < 300
+    assert {"view_revision", "units", "offset"} <= set(later) and "next_offset" in later
+    past = json.loads(_compact_context(ctx, inspect=True, offset=10_000))
+    assert past["units"] == [] and "next_offset" not in past
+    for page in (first, later, past):
+        assert "first unit alone" not in page["limitation"] and "only units" not in page["limitation"], page["limitation"]
+        assert ("one unit" in page["limitation"]) is bool(page["units"]), page["limitation"]
 
 
 def test_an_inspection_page_stays_within_its_result_limit_or_says_what_it_could_not_show(tmp_path, monkeypatch):
