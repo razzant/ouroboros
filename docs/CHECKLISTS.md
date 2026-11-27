@@ -468,9 +468,9 @@ The four core categories, with the concrete surfaces of the Ouroboros body:
 3. **Module map** (behavioural documentation) — `docs/ARCHITECTURE.md` naming a
    module / endpoint / data file / UI page that does not exist (or the reverse:
    a new one was added and the map was not updated). This is a hard P6
-   (Architecture mirror) contract. A Python module's map row is its
-   `ouroboros/domains.toml` `[modules]` entry with its docstring lead, which
-   `module_map` reads: a new module absent from the manifest is this mismatch. Behavioural documentation elsewhere
+   (Architecture mirror) contract. A new Python module also owes its
+   `ouroboros/domains.toml` `[modules]` entry and a docstring lead, which
+   `module_map` reads: one absent from the manifest is this mismatch too. Behavioural documentation elsewhere
    (docstrings, README, ARCHITECTURE sections) is critical on the core terms.
 4. **Safety guarding** (safety contracts) — a documented Emergency Stop, secret
    or owner-granted permission contract vs. the actual guard in code (e.g.

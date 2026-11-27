@@ -187,9 +187,9 @@ def _preflight_check(commit_message: str, staged_files: str,
     # comment-only .py diff refused for missing tests). See docstring —
     # CHECKLISTS.md items 4/12 own these duties semantically.
 
-    # A new runtime module owes what makes it a row of the map: its `[modules]` entry in the manifest of this same
-    # subject, and a docstring lead (`module_map` reads both; ARCHITECTURE §1). Whether its owning manual says
-    # enough is the reviewer's judgment: the diff pulse names that manual and whether the change touches it, and
+    # A new runtime module owes what makes it a row of the live map: its `[modules]` entry in the manifest of this
+    # same subject, and a docstring lead (`module_map` reads both). Whether the hand-kept directory (§1.1) and its
+    # owning manual say enough is the reviewer's judgment: the diff pulse names the manuals and whether the change touches them, and
     # no manual edit is demanded here, since a mandatory touch buys an edit that documents nothing (BIBLE P3:
     # review coverage is diagnostic, never a veto). ``repo_dir``'s index is the subject, a frozen base..head
     # review's isolated checkout included; an index that cannot be read is unavailable evidence, never a pass.
@@ -222,9 +222,9 @@ def _preflight_check(commit_message: str, staged_files: str,
             problems.append(f"no module docstring (the map's lead for the module) in: {bare[:5]}")
         if problems or unread:
             head = ("PREFLIGHT_UNAVAILABLE: the subject's index could not be read to check that a new module in "
-                    "ouroboros/ or supervisor/ is a row of the body's map (Bible P6):" if unread else
+                    "ouroboros/ or supervisor/ is a row of the body's live map (Bible P6):" if unread else
                     "PREFLIGHT_BLOCKED: a new module in ouroboros/ or supervisor/ is not yet a row of the body's "
-                    "map (Bible P6):")
+                    "live map (Bible P6):")
             return (f"⚠️ {head}\n" + "\n".join(f"  - {line}" for line in (*problems, *(f"Unavailable: {u}" for u in unread)))
                     + f"\n  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}")
 
