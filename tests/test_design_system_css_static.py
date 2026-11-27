@@ -48,9 +48,7 @@ def test_header_presence_comes_from_writers_and_telegram_owns_its_back():
     slot = re.search(r'(?m)^\.app-page-return \{([^}]+)\}', css)[1]
     assert 'flex: none;' in slot, 'the round Back never yields to the page controls'
     assert 'width' not in slot and '.shell-back-name' not in css, 'the slot itself has no width of its own'
-    # Only a return that names another place yields, inside the header row's own query (owner 27.11.2026).
-    named = re.findall(r'\.app-page-header\[data-return-named\] \.app-page-return \{([^}]+)\}', css)
-    assert named and all('flex: 0 1000 auto;' in body for body in named), named
+    # Only a return that names another place yields (rendered in test_header_question_a_browser.py).
 
 
 # No exception: status/provenance/stat labels keep the renderer's sentence case.

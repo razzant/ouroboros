@@ -74,27 +74,12 @@ test('header actions use the floating control tokens while Back keeps the round 
     assert.doesNotMatch(css, /\.app-page-header \.shell-back[^}]*--control-h:/);
 });
 
-test('Back is the shell\'s round control; its words are drawn only inside the header-row container', () => {
+test('Back is the shell\'s round control; its words are written only for a return to another place', () => {
+    // Where the words paint, on each side of the header row's width, is pinned in the browser:
+    // tests/test_header_question_a_browser.py::test_a_named_return_yields_to_the_pages_own_name_and_controls.
     const html = renderBackControl({ to: 'Tools', title: 'Settings › Tools', attrs: 'data-shell-back' });
     assert.match(html, /aria-label="Back to Settings › Tools"/);
-    assert.doesNotMatch(html, /shell-back-label/, 'its words are written by bindPageBack only for a return to another place');
-    // Which at-rules wrap each declaration that lends the capsule its words (a small brace walk over the sheet).
-    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-    const lenders = [];
-    const stack = [];
-    let head = '';
-    for (const ch of css) {
-        if (ch === '{') { stack.push(head.trim()); head = ''; } else if (ch === '}') { stack.pop(); head = ''; } else {
-            head += ch;
-            if (/--return-words:\s*block/.test(head)) { lenders.push(stack.join(' / ')); head = ''; }
-        }
-    }
-    assert.equal(lenders.length, 2, 'one for a page row, one for a room bar');
-    for (const where of lenders) {
-        assert.match(where, /^@container (pagereturn|roomreturn) \(min-width: [\d.]+rem\) \/ html\[data-layout="docked"\]/, where);
-    }
-    assert.match(css, /\.shell-back\[data-named\] > \.shell-back-label \{[^}]*display: var\(--return-words, none\)/,
-        'outside those rows the words are not drawn');
+    assert.doesNotMatch(html, /shell-back-label/);
 });
 
 test('Telegram sections keep a visible drawer control and one title baseline inside both host buttons', () => {
@@ -468,20 +453,9 @@ test('a named return occupies one shell slot in both layouts, and clearing relea
     assert.equal(header.hasAttribute('data-return'), false);
 });
 
-test('a place the sidebar names by its glyph alone says its name; Files and Settings keep their own words', () => {
-    // Each module's own header call, whatever the order of its fields (the rendered titles are pinned in the browser:
-    // tests/test_header_question_a_browser.py::test_a_named_return_yields_to_the_pages_own_name_and_controls).
-    const call = (name, page) => {
-        const source = readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
-        const found = [...source.matchAll(/renderPageHeader\(\{([^}]*)\}\)/g)].map(([, body]) => body)
-            .find((body) => new RegExp(`page:\\s*'${page}'`).test(body));
-        assert.ok(found !== undefined, `${name} draws the shared header of ${page}`);
-        return /\bnamed:\s*false\b/.test(found);
-    };
-    assert.deepEqual(['circles', 'widgets', 'dashboard'].map((page) => call(`${page}.js`, page)), [true, true, true],
-        'Circles and Widgets at the band\'s start, the Dashboard over its list');
-    assert.deepEqual([['files.js', 'files'], ['settings.js', 'settings'], ['extensions.js', 'skills']].map(([n, p]) => call(n, p)),
-        [false, false, false], 'Files\' location, Settings\' search; Extensions keeps Settings chosen in the sidebar');
+test('a header that names its place shows its one heading; one the band names by other words hides it', () => {
+    // Which places do which is pinned through the real pages in the browser (test_header_question_a_browser.py:
+    // the Dashboard on all seven pages, Circles and Widgets after a return and in a browser row).
     const shown = renderPageHeader({ page: 'widgets', named: false });
     assert.doesNotMatch(shown, /data-sidebar-names|data-empty/, 'a visible name: never the hidden title, never an empty band');
     assert.equal((shown.match(/<h2/g) || []).length, 1, 'one heading for readers, the one shown');
@@ -572,13 +546,13 @@ test('outside a section column a file or room level above a jump keeps its own B
 });
 
 test('the capsule\'s words, its accessible name and its tooltip come from one localized destination', (t) => {
-    const { mount } = setup(t), page = new NodeStub();
+    const { mount, window } = setup(t), page = new NodeStub();
     page.innerHTML = renderPageHeader({ page: 'circles', named: false });
     mount.append(page);
     const header = page.querySelector('.app-page-header');
-    let top = { id: 'jump', page: true, destination: 'circles', returnTo: { key: 'settings:' }, back: { label: 'Settings', title: 'Settings' } }, notify;
-    t.after(bindPageBack({ layers: { page: () => top, onChange: fn => { notify = fn; return () => {}; }, back: () => {} }, currentHeader: () => header }));
-    // The dictionary alone (the stub DOM has no overlay walker): the shell's overlay is not what this control relies on.
+    let top = { id: 'jump', page: true, destination: 'circles', returnTo: { key: 'settings:' }, back: { label: 'Settings', title: 'Settings' } };
+    t.after(bindPageBack({ layers: { page: () => top, onChange: () => () => {}, back: () => {} }, currentHeader: () => header }));
+    // The dictionary alone (the stub DOM has no overlay walker); the shell's own language event repaints the control.
     const load = (payload) => {
         const doc = globalThis.document;
         if (!doc) return applyPayload(payload);
@@ -588,15 +562,20 @@ test('the capsule\'s words, its accessible name and its tooltip come from one lo
     };
     t.after(() => load({ language: '', english: true, entries: {} }));
     const button = header.querySelector('[data-shell-back]');
-    // The language changes while the jump is still owed: the next paint (the shell's ouro:language-changed) says it all.
-    load({ language: 'fr', english: false, revision: 1, entries: { Settings: { text: 'Réglages' }, 'Back to {place}': { text: 'Retour à {place}' } } });
-    notify();
+    load({ language: 'fr', english: false, revision: 1, entries: { Settings: { text: 'Réglages' }, Files: { text: 'Fichiers' },
+        'Back to {place}': { text: 'Retour à {place}' }, 'Back to Settings': { text: 'Retour à Réglages' } } });
+    window.dispatchEvent({ type: 'ouro:language-changed' });  // while the jump is owed
     assert.equal(button.querySelector('.shell-back-label').textContent, 'Réglages');
     assert.equal(button.getAttribute('aria-label'), 'Retour à Réglages', 'the spoken name agrees with the drawn word');
     assert.equal(button.title, 'Retour à Réglages');
-    assert.ok(button.dataset.i18nFmt, 'the page overlay leaves the control alone: it is already translated');
-    // A Project's name is the owner's, never looked up.
-    top = { ...top, returnTo: { key: 'project:p' }, back: { label: 'Settings', title: 'Settings' } }; notify();
+    assert.ok(button.hasAttribute('data-i18n-authored'), 'the page overlay never rewrites the composed control');
+    // Names a person gave stay as written: a Project's name, a Files path (even one spelled like a product word).
+    top = { ...top, returnTo: { key: 'project:p' }, back: { label: 'Settings', title: 'Settings' } };
+    window.dispatchEvent({ type: 'ouro:language-changed' });
     assert.equal(button.querySelector('.shell-back-label').textContent, 'Settings');
     assert.equal(button.getAttribute('aria-label'), 'Retour à Settings');
+    top = { id: 'file', page: true, back: { label: 'Settings', title: 'Files › Settings', literal: ['Settings'] } };
+    window.dispatchEvent({ type: 'ouro:language-changed' });
+    assert.equal(button.getAttribute('aria-label'), 'Retour à Fichiers › Settings');
+    assert.equal(button.title, 'Retour à Fichiers › Settings');
 });

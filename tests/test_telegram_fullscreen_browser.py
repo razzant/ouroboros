@@ -416,9 +416,16 @@ BAND_WORDS = """() => {
     return {page: page.id, titles: [...header.querySelectorAll('.app-page-title, .app-page-lead-title')].filter(shown)
         .map((el) => el.textContent.trim()), backs: [...header.querySelectorAll('[data-shell-back]')].filter(shown).length,
         telegramBack: document.documentElement.dataset.telegramBack || null,
-        // Under the band the page and the list start where the band ends: no void between them.
-        below: page.id === 'page-dashboard' ? Math.min(...[...page.querySelectorAll('.section-rail, .dashboard-panel:not([hidden])')]
-            .filter((el) => el.getClientRects().length).map((el) => el.getBoundingClientRect().top)) - header.getBoundingClientRect().bottom : null};
+        // Under the band: the first visible row of the list and the first visible content of the page, each measured
+        // from the band's bottom, and whether both columns show side by side.
+        below: page.id === 'page-dashboard' ? (() => {
+            const first = (sel) => [...page.querySelectorAll(sel)].find((el) => el.getClientRects().length && el.getBoundingClientRect().height > 0);
+            const row = first('.section-rail .section-row'), body = first('.dashboard-panel:not([hidden]) > *');
+            const rail = page.querySelector('.section-rail').getBoundingClientRect(), pane = page.querySelector('.dashboard-panel:not([hidden])')?.getBoundingClientRect();
+            const bottom = header.getBoundingClientRect().bottom;
+            return {row: row ? row.getBoundingClientRect().top - bottom : null, content: body ? body.getBoundingClientRect().top - bottom : null,
+                twoColumns: Boolean(pane && rail.width > 0 && pane.width > 0 && rail.right <= pane.left + 1)};
+        })() : null};
 }"""
 
 
@@ -463,4 +470,6 @@ def test_a_telegram_tablet_band_shows_one_title_and_telegrams_back_alone(shell_u
     rest(page)
     wide = page.evaluate(BAND_WORDS)
     facts(f'telegram-wide-tablet-dashboard-{shell_ui["engine"]}', wide)
-    assert len(wide['titles']) == 1 and wide['backs'] == 0 and -0.5 <= wide['below'] <= 24, wide
+    assert len(wide['titles']) == 1 and wide['backs'] == 0 and wide['below']['twoColumns'], wide
+    # Each column's first visible row starts within a step or two of the band, never under it, never after a void.
+    assert -0.5 <= wide['below']['row'] <= 40 and -0.5 <= wide['below']['content'] <= 40, wide

@@ -158,12 +158,14 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
             button.addEventListener('click', event => layers.back(event.detail ? 'pointer' : 'keyboard', button.dataset.pageLayer));
         }
         button.dataset.pageLayer = primary.id;
-        // One localized destination for the words, the accessible name and the tooltip; the overlay leaves the control
-        // alone (data-i18n-fmt), so the three cannot disagree. A Project's name stays as its owner wrote it.
+        // One localized destination for the words, the accessible name and the tooltip, composed here once: the product's
+        // words translated, the names a person gave (a Project's name, a Files path: the layer's `literal`) as written.
+        // The page overlay never enters the control (data-i18n-authored), so nothing rewrites it afterwards.
         const own = String(from).startsWith('project:');
-        const steps = String(back.title || back.label).split(' › ').map((part) => (own ? part : translateString(part)));
+        const literal = new Set(back.literal || []);
+        const steps = String(back.title || back.label).split(' › ').map((part) => (own || literal.has(part) ? part : translateString(part)));
         const name = fmt('Back to {place}', { place: steps.join(' › ') });
-        button.dataset.i18nFmt = 'Back to {place}';
+        button.setAttribute('data-i18n-authored', '');
         button.setAttribute('aria-label', name);
         button.title = name;
         nameBack(button, crossing ? steps : null, own, doc);

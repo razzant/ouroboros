@@ -187,7 +187,7 @@ html[data-layout="docked"]:not([data-telegram-fullscreen="active"]) :is(.chat-pa
         --return-nudge: none;
         --return-cap: min(16rem, 40cqi);
         flex: 0 1000 auto;
-        min-width: 0;
+        min-width: var(--control-h-float);  /* never narrower than the round Back it holds: its centre stays its own */
         margin-inline-end: var(--space-1);
     }
 }
@@ -199,7 +199,7 @@ html[data-layout="docked"]:not([data-telegram-fullscreen="active"]) :is(.chat-pa
         --return-nudge: none;
         --return-cap: min(16rem, 25cqi);
         flex: 0 1000 auto;
-        min-width: 0;
+        min-width: var(--control-h-float);  /* never narrower than the round Back it holds: its centre stays its own */
         margin-inline-end: var(--space-1);
     }
 }

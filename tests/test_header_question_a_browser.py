@@ -899,12 +899,15 @@ RETURN_PAINT = """([root, name, control]) => {
         right: header.getBoundingClientRect().right};
 }"""
 BETA = {**PROJECT, 'id': 'proj-beta', 'name': 'Beta', 'chat_id': 43}
+LONG_TOO = {**PROJECT, 'id': 'proj-long-too', 'name': 'Review the sidebar navigation and keyboard shortcuts for accessibility', 'chat_id': 45}
+NAMED_SETTINGS = {**PROJECT, 'id': 'proj-settings', 'name': 'Settings', 'chat_id': 44}
+ROOMS = [PROJECT, BETA, LONG_TOO, NAMED_SETTINGS]
 
 
 def _two_projects(page):
     _seed(page)
-    page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [PROJECT, BETA]}))
-    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [PROJECT, BETA]))
+    page.route('**/api/projects', lambda r: r.fulfill(json={'projects': ROOMS}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, ROOMS))
 
 
 def _project(page, project):
@@ -948,13 +951,21 @@ def test_a_named_return_yields_to_the_pages_own_name_and_controls(engine_ui):
                               "() => document.querySelector('.project-panel.open #project-panel-title')?.textContent === 'Beta'")
             room = page.evaluate(RETURN_PAINT, ['.project-panel.open .project-panel-bar', '#project-panel-title', '[data-chat-command="panic"]'])
             seen[width] = {'logs': logs, 'circles': circles, 'room': room}
-        # A room's bar wide enough for the capsule (a wide window, a wide panel): the return names the room it leads to,
-        # and the opened room's own name still reads whole.
+        # A room's bar wide enough for the capsule (a 1600 px window, a 670 px panel), both names long: once the panel
+        # has settled, Back's centre is Back's (the opened room's title never covers it) and a click there returns.
         page.set_viewport_size({'width': 1600, 'height': 801})
-        page.evaluate("() => { const s = document.documentElement.style; s.removeProperty('--sidebar-width'); s.setProperty('--project-panel-width', '760px'); }")
-        from_long_project(f"() => window.dispatchEvent(new CustomEvent('ouro:open-project', {{detail: {{project: {json.dumps(BETA)}}}}}))",
-                          "() => document.querySelector('.project-panel.open #project-panel-title')?.textContent === 'Beta'")
+        page.evaluate("() => { const s = document.documentElement.style; s.removeProperty('--sidebar-width'); s.setProperty('--project-panel-width', '670px'); }")
+        from_long_project(f"() => window.dispatchEvent(new CustomEvent('ouro:open-project', {{detail: {{project: {json.dumps(LONG_TOO)}}}}}))",
+                          f"() => document.querySelector('.project-panel.open #project-panel-title')?.textContent === {json.dumps(LONG_TOO['name'])}")
+        page.wait_for_function("() => document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming?.().iterations === Infinity)")
+        page.evaluate(settle)
         seen['room-wide'] = page.evaluate(RETURN_PAINT, ['.project-panel.open .project-panel-bar', '#project-panel-title', '[data-chat-command="panic"]'])
+        centre = page.evaluate("""() => { const b = document.querySelector('.project-panel.open [data-shell-back]').getBoundingClientRect();
+            const x = b.left + b.width / 2, y = b.top + b.height / 2;
+            return {x, y, mine: Boolean(document.elementFromPoint(x, y)?.closest('[data-shell-back]'))}; }""")
+        assert centre['mine'], (centre, seen['room-wide'])
+        page.mouse.click(centre['x'], centre['y'])
+        page.wait_for_function("name => document.querySelector('.project-panel.open #project-panel-title')?.textContent === name", arg=PROJECT['name'])
         print(json.dumps({'named_return_paint': seen, 'engine': engine_ui['engine']}))
         setup_browser.capture(page, f'named-return-yields-{engine_ui["engine"]}')
         wide_room = seen.pop('room-wide')
@@ -971,8 +982,10 @@ def test_a_named_return_yields_to_the_pages_own_name_and_controls(engine_ui):
         assert wide['logs']['back']['w'] > wide['logs']['back']['h'], wide
         for where in ('logs', 'circles', 'room'):
             assert narrow[where]['words'] == '' and abs(narrow[where]['back']['w'] - narrow[where]['back']['h']) < 1, (where, narrow)
-        assert wide_room['words'].startswith('Notifications') and wide_room['titleWhole'], wide_room
-        assert wide_room['back']['w'] <= wide_room['right'] and wide_room['control']['right'] <= wide_room['right'] + 0.5, wide_room
+        assert wide_room['words'].startswith('Notifications'), wide_room
+        assert wide_room['back']['right'] <= wide_room['title']['x'] + 0.5, 'the opened room\'s name starts after Back'
+        assert wide_room['title']['w'] > wide_room['back']['w'], 'the opened room\'s name keeps more room than the return'
+        assert wide_room['control']['right'] <= wide_room['right'] + 0.5, wide_room
     finally:
         page.close()
 
@@ -1031,4 +1044,36 @@ def test_widgets_named_row_in_a_browser_keeps_a_clearance_under_its_name(engine_
         assert row['listTop'] - row['titleBottom'] >= 8 - 0.5, row
         assert row['height'] < 52 and row['overflow'] == 'visible', row
     finally:
+        page.close()
+
+
+def test_names_a_person_gave_stay_as_written_in_backs_name_after_a_language_change(engine_ui):
+    """Back's tooltip and accessible name are composed once from the translated template and the names as written
+    (a Project named `Settings`), and the page's own translation pass, with a saved whole-sentence translation that
+    would match, never rewrites them after the language changes while the return is owed."""
+    page = _open(engine_ui, 1280, 801, seed=_two_projects)
+    try:
+        _project(page, NAMED_SETTINGS)
+        page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-circles'))")
+        back = page.locator('#page-circles.active [data-shell-back]')
+        back.wait_for(state='visible')
+        load = """async (entries) => (await import('/static/modules/i18n.js')).applyPayload({language: 'fr', english: false,
+            revision: Object.keys(entries).length, entries})"""
+        said = "b => ({aria: b.getAttribute('aria-label'), title: b.title, words: b.querySelector('.shell-back-label')?.textContent || ''})"
+        settle = '() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))'
+        # A memory with the whole English sentence saved but no template: the template stays English, the name as
+        # written, and the saved sentence must not replace it ("Retour à Réglages" would name another place).
+        page.evaluate(load, {'Settings': {'text': 'Réglages'}, 'Back to Settings': {'text': 'Retour à Réglages'}})
+        page.evaluate(settle)
+        without = back.evaluate(said)
+        # With the template: the template translated, the name still as written.
+        page.evaluate(load, {'Settings': {'text': 'Réglages'}, 'Back to {place}': {'text': 'Retour à {place}'},
+                             'Back to Settings': {'text': 'Retour à Réglages'}})
+        page.evaluate(settle)
+        with_template = back.evaluate(said)
+        print(json.dumps({'literal_back_name': [without, with_template], 'engine': engine_ui['engine']}))
+        assert without == {'aria': 'Back to Settings', 'title': 'Back to Settings', 'words': 'Settings'}, without
+        assert with_template == {'aria': 'Retour à Settings', 'title': 'Retour à Settings', 'words': 'Settings'}, with_template
+    finally:
+        page.evaluate("async () => (await import('/static/modules/i18n.js')).applyPayload({language: '', english: true, entries: {}})")
         page.close()
