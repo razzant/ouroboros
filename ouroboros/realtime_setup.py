@@ -184,7 +184,8 @@ def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fi
 
 
 def preparation_refusal_notice(turn, unfit):
-    """Path 1: the ordinary build refused (``MinimumViewUnfit``) before any call host existed."""
+    """Path 1: the ordinary build refused (``MinimumViewUnfit``) before any call host existed; the window in effect
+    is the one the refusal carries (``context_view_facts.refusal_route``: the fit's and the early bound's alike)."""
     measured = getattr(unfit, "memory_measured", True)
     book = getattr(unfit, "required_book_tokens", 0)
     model = getattr(turn, "native_model", "") or turn.spec.model
@@ -192,7 +193,8 @@ def preparation_refusal_notice(turn, unfit):
         stage="task_preparation", need=unfit.estimated_input_tokens, measured=measured,
         reserve=unfit.response_reserve_tokens, window=unfit.window_tokens,
         fixed=unfit.fixed_input_tokens if measured else None, parts=tuple(getattr(unfit, "parts", ()) or ()),
-        extra=f"This task directly requires the development handbook: {book:,} tokens of the input." if book else "")
+        extra=f"This task directly requires the development handbook: {book:,} tokens of the input." if book else "",
+        limit=getattr(unfit, "window", None))
 
 
 def session_refusal_notice(host):

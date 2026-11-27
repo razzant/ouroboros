@@ -504,3 +504,27 @@ def test_a_key_less_route_whose_own_read_holds_the_frame_is_not_refused_early(dr
     seen.clear()
     build(drive, _keyless(monkeypatch, resolver(None, calls=calls)))  # no cached window: one cached read, nothing else
     assert seen and calls == [(False, False, False), *unbounded]
+
+
+def test_the_early_refusal_names_the_window_in_effect_with_its_own_source_and_date(drive, monkeypatch):
+    """Both directions on the early bound's raise site (no capture runs): the refusal carries the projection of the
+    window it refused on; a call whose catalogue declares that number credits the catalogue (every shipped engine),
+    one whose catalogue declares none names the window's own source and date, never "not recorded"."""
+    from tests.test_context_minimum_view_unfit import _refused_call_window_line
+    from ouroboros.contracts.realtime import RouteFacts
+
+    def dated(task, *, allow_fetch):
+        route, answer = resolver(25_000)(task, allow_fetch=allow_fetch)
+        answer.source, answer.ts = "refusal", "2026-11-25T10:02:00+00:00"
+        return route, answer
+    capture_spy(monkeypatch, fail=True)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build(drive, dated)
+    unfit = raised.value
+    assert unfit.memory_measured is False and unfit.window["source"] == "refusal" and unfit.window["tokens"] == 25_000
+    custom = _refused_call_window_line(unfit, RouteFacts(None, None, 10_000, "estimator", "No published window", "2026-10-21"))
+    assert "source: refusal" in custom and "2026-11-25 10:02" in custom and "declares no window" in custom
+    assert "not recorded" not in custom and "No published window" not in custom
+    shipped = _refused_call_window_line(unfit, RouteFacts(25_000, None, 10_000, "estimator", "the engine's catalogue",
+                                                          "2026-11-26"))
+    assert "source: the engine's catalogue; observed: 2026-11-26." in shipped and "refusal" not in shipped

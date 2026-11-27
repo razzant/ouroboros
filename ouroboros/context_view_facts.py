@@ -479,6 +479,15 @@ def required_book_fact(usage, slot=None):
     return f"{named}; without it the input is ~{max(0, int(slot['tokens']) - book):,} against {usable:,} usable. {choices}"
 
 
+def refusal_route(unfit, route, record):
+    """Stamp on a start's refusal (``context_fit.MinimumViewUnfit``, raised by the fit or the early bound) what its
+    notices name of the route: the serving program (``agent_dispatch``'s guidance) and the window in effect with its
+    source, basis and date (``window_projection``; ``realtime_setup.capacity_notice`` credits it). Returns ``unfit``."""
+    unfit.server_program = ((route.get("_resolved_target") or {}).get("ollama_record") or {}).get("protocol")
+    unfit.window = window_projection(record)
+    return unfit
+
+
 def window_projection(record, *, under_way: bool = False):
     """Pure sourced projection shared by Main, Settings and terminal failures. ``under_way``: the reader is a Main
     work, whose requests after its start are read at ``admitted``; a single-shot caller sizes by ``usable`` alone.

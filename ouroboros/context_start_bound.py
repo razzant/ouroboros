@@ -52,7 +52,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.context_fit import DENSITY_VIEW_KINDS, MinimumViewUnfit, RouteQuestion, _frame_choices, route_window
 from ouroboros.context_measurement import tool_schema_tokens
-from ouroboros.context_view_facts import _largest_first
+from ouroboros.context_view_facts import _largest_first, refusal_route
 from ouroboros.contracts.task_contract import task_input_sources
 from ouroboros.memory_view import json_chars
 
@@ -107,21 +107,19 @@ def _refusal(task, ctx, spec, frame_texts, resolver, *, tool_schemas, nano_base,
     second = _route_frame(again, task, tool_schemas=tool_schemas, nano_base=nano_base, effort=effort, preferred=preferred)
     if second is None or not _refuses(chars, second):
         return None
-    reserve, window, ratio, schemas = second
+    reserve, window, ratio, schemas, record = second
     frame = chars // 4 + schemas
     parts = [(name, json_chars(text) // 4) for name, text in texts] + [("tool schemas", schemas)]
     refusal = MinimumViewUnfit("Core, resident tools and reserve cannot fit before memory", fixed_tokens=frame,
                                memory_tokens=0, reserve_tokens=reserve, window_tokens=window, ratio=ratio,
                                work_room_tokens=0, memory_measured=False, parts=_largest_first(parts))
-    # The serving program the fit's refusal names (``context_fit``), for its guidance (``agent_dispatch``).
-    refusal.server_program = ((again[0].get("_resolved_target") or {}).get("ollama_record") or {}).get("protocol")
-    return refusal
+    return refusal_route(refusal, again[0], record)  # the serving program and window the fit's refusal names
 
 
 def _route_frame(answer: Any, task: Mapping[str, Any], *, tool_schemas, nano_base, effort: str,
-                 preferred: str) -> Optional[Tuple[int, int, float, int]]:
-    """``(Nano reserve, Nano window, density, Nano tool-schema tokens)`` of one route answer, or None without a
-    known window or a readable density."""
+                 preferred: str) -> Optional[Tuple[int, int, float, int, Any]]:
+    """``(Nano reserve, Nano window, density, Nano tool-schema tokens, the route's window record)`` of one route
+    answer, or None without a known window or a readable density."""
     if answer is None:
         return None
     route, evidence = answer
@@ -138,7 +136,7 @@ def _route_frame(answer: Any, task: Mapping[str, Any], *, tool_schemas, nano_bas
         return None
     schemas = tool_schema_tokens(list(tools_for("nano").schemas), provider=str(route.get("provider") or ""),
                                  reasoning_effort=effort)
-    return reserve, window, ratio, schemas
+    return reserve, window, ratio, schemas, record
 
 
 def _lowest_density(task: Mapping[str, Any], route: Mapping[str, Any], evidence: Any) -> Optional[float]:
@@ -152,6 +150,6 @@ def _lowest_density(task: Mapping[str, Any], route: Mapping[str, Any], evidence:
                                      view_kind=DENSITY_VIEW_KINDS.get(role, role))
 
 
-def _refuses(chars: int, frame: Tuple[int, int, float, int]) -> bool:
-    reserve, window, ratio, schemas = frame
+def _refuses(chars: int, frame: Tuple[int, int, float, int, Any]) -> bool:
+    reserve, window, ratio, schemas, _record = frame
     return math.ceil((chars // 4 + schemas) * ratio) + reserve > window

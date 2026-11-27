@@ -1438,9 +1438,9 @@ def build_context_fit_plan(
                 working_reserve_tokens=state.working_reserve, provider=provider, reasoning_effort=reasoning_effort,
                 sized=(rows, schemas, sized[provider]), nano_base=nano_base, current_messages=current_messages,
                 ratio=state.ratio, work_room_levels=levels, **options)
-        except MinimumViewUnfit as unfit:  # the refusal names the serving program it would have gone to
-            unfit.server_program = ((state.route.get("_resolved_target") or {}).get("ollama_record") or {}).get("protocol")
-            raise
+        except MinimumViewUnfit as unfit:  # the refusal names its serving program and window in effect
+            from ouroboros.context_view_facts import refusal_route
+            raise refusal_route(unfit, state.route, state.window_record)
 
     def walk(state):
         try:
