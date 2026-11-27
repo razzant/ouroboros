@@ -1876,7 +1876,7 @@ def test_the_physical_cut_is_sized_without_the_book(tmp_path, monkeypatch):
     size = estimate_context_prompt_tokens(messages, [])
     seen = {}
 
-    def cut(seed, *, drive_root, task_id, measure, usable):
+    def cut(seed, *, drive_root, task_id, measure, usable, density=1.0):
         seen.update(measured=measure(seed), raw=estimate_context_prompt_tokens(seed, []), usable=usable)
         return seed, None
 
