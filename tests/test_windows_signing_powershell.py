@@ -40,7 +40,8 @@ def run_ps(tmp_path, body, **overrides):
 
 def test_powershell_scripts_and_workflow_parse(tmp_path):
     scripts = [ROOT / "build_windows.ps1", *[ROOT / "scripts" / name for name in (
-        "pack_windows_archive.ps1", "sign_windows_release.ps1", "verify_windows_signature.ps1")]]
+        "download_inno_setup.ps1", "pack_windows_archive.ps1", "pack_windows_setup.ps1",
+        "sign_windows_release.ps1", "smoke_windows_setup.ps1", "verify_windows_signature.ps1")]]
     jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
     for job_id in ("windows-sign", "windows-proof"):
         for index, step in enumerate(jobs[job_id]["steps"]):
@@ -109,6 +110,8 @@ function Get-Command {
     if ($env:TEST_TOOL_EXIT -ne 'missing') { [pscustomobject]@{Source = 'Invoke-MockSignTool'} }
 }
 function Invoke-MockSignTool {
+    $Leaked = @(Get-ChildItem Env:ESIGNER_* -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    if ($Leaked.Count) { throw "signtool.exe inherited ESIGNER environment variables: $($Leaked -join ', ')" }
     @($args) | ConvertTo-Json | Set-Content -LiteralPath tool-arguments.json
     # Deliberately localized and misleading; only exit status decides.
     Write-Output 'Successfully verified. Проверка. Warnungen.'
@@ -175,6 +178,8 @@ UPSTREAM = {path: f"upstream {path.rsplit('/', 1)[1]}".encode() for path in CATA
 UNSIGNED_PAYLOAD = {
     CATALOG_PATHS[0]: b"unsigned mock PE",
     **UPSTREAM,
+    "Ouroboros/_internal/VERSION": b"7.6.1-rc.1\n",
+    "Ouroboros/bin/ouroboros.cmd": b"@echo off\r\n",
     "Ouroboros/_internal/.local-browsers/hidden": b"browser",
     # Look-alikes outside the catalog: venv launcher templates and a DLL its
     # vendor signed stay byte for byte as built.
@@ -183,6 +188,7 @@ UNSIGNED_PAYLOAD = {
     "Ouroboros/_internal/vcruntime140.dll": b"vendor-signed: runtime DLL",
 }
 ARCHIVE = Path("dist") / "Ouroboros-7.6.1-rc.1-windows-x64.zip"
+INSTALLER = Path("dist") / "Ouroboros-Setup-7.6.1-rc.1-windows-x64.exe"
 MOCK_SERVICE = r"""
 $TestRoot = (Get-Location).Path
 function Invoke-WebRequest {
@@ -190,7 +196,33 @@ function Invoke-WebRequest {
     Add-Content -LiteralPath (Join-Path $TestRoot 'network-calls') -Value $Uri
     Copy-Item -LiteralPath (Join-Path $TestRoot 'vendor.zip') -Destination $OutFile
 }
+function Assert-NoEsignerEnv([string]$Caller) {
+    $Leaked = @(Get-ChildItem Env:ESIGNER_* -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    if ($Leaked.Count) { throw "$Caller inherited ESIGNER environment variables: $($Leaked -join ', ')" }
+}
+function Invoke-MockDownloadInno {
+    param([string]$Destination)
+    Assert-NoEsignerEnv 'download_inno_setup.ps1'
+    Add-Content -LiteralPath (Join-Path $TestRoot 'inno-download-calls') -Value $Destination
+    if ($env:TEST_MODE -eq 'inno-download-failure') { throw 'Pinned Inno Setup digest mismatch' }
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $Iscc = Join-Path $Destination 'ISCC.exe'
+    Set-Content -LiteralPath $Iscc -Value 'mock-iscc' -NoNewline
+    return $Iscc
+}
+function Invoke-MockPackSetup {
+    param([string]$PayloadRoot, [string]$OutputDir, [string]$Compiler)
+    Assert-NoEsignerEnv 'pack_windows_setup.ps1'
+    Add-Content -LiteralPath (Join-Path $TestRoot 'setup-pack-calls') -Value "$PayloadRoot|$Compiler"
+    New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+    $Version = (Get-Content -Raw -LiteralPath (Join-Path $PayloadRoot '_internal/VERSION')).Trim()
+    $Built = Join-Path $OutputDir "Ouroboros-Setup-$Version-windows-x64.exe"
+    $Launcher = [IO.File]::ReadAllText((Join-Path $PayloadRoot 'Ouroboros.exe'))
+    $Prefix = if ($env:TEST_MODE -eq 'setup-presigned') { 'vendor-signed:' } else { 'unsigned-setup:' }
+    [IO.File]::WriteAllText($Built, $Prefix + $Launcher)
+}
 function Invoke-MockJava {
+    Assert-NoEsignerEnv 'java.exe'
     $Source = @($args | Where-Object { $_ -like '-input_file_path=*' })[0].Substring(17)
     Add-Content -LiteralPath (Join-Path $TestRoot 'java-calls') -Value $Source
     $Call = @(Get-Content -LiteralPath (Join-Path $TestRoot 'java-calls')).Count
@@ -206,6 +238,8 @@ function Invoke-MockJava {
     [IO.File]::WriteAllText((Join-Path $Output (Split-Path -Leaf $Source)), $Signature + [IO.File]::ReadAllText($Source))
 }
 Set-Alias -Name (Join-Path $env:JAVA_HOME_11_X64 'bin/java.exe') -Value Invoke-MockJava
+Set-Alias -Name (Join-Path $env:TEST_REPO 'scripts/download_inno_setup.ps1') -Value Invoke-MockDownloadInno
+Set-Alias -Name (Join-Path $env:TEST_REPO 'scripts/pack_windows_setup.ps1') -Value Invoke-MockPackSetup
 & "$env:TEST_REPO/scripts/sign_windows_release.ps1" -UnsignedArchive (Join-Path $TestRoot 'unsigned.zip')
 """
 
@@ -258,31 +292,43 @@ function Invoke-WebRequest { throw 'UNEXPECTED_NETWORK_CALL' }
     assert not (tmp_path / "dist").exists()
 
 
-def test_signer_signs_exactly_the_catalog_and_reports_both_hashes(tmp_path):
+def test_signer_signs_exactly_the_catalog_and_installer_and_reports_both_hashes(tmp_path):
     result = _run_signer(tmp_path)
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "SYNTHETIC_VENDOR_SECRET_MUST_NOT_REACH_LOG" not in output
-    # One billed request per catalogued file, each for that file alone.
-    requested = [line.replace("\\", "/").split("/p/", 1)[1] for line in _lines(tmp_path / "java-calls")]
-    assert requested == CATALOG_PATHS
+    # Four billed requests: the 3 catalogued payload files, then the compiled outer Setup .exe.
+    java_calls = [line.replace("\\", "/") for line in _lines(tmp_path / "java-calls")]
+    assert [line.split("/p/", 1)[1] for line in java_calls[:3]] == CATALOG_PATHS
+    assert java_calls[3].endswith("/setup-unsigned/" + INSTALLER.name)
+    assert len(java_calls) == 4
     with zipfile.ZipFile(tmp_path / ARCHIVE) as packed:
         files = {info.filename: packed.read(info) for info in packed.infolist() if not info.is_dir()}
     assert set(files) == set(UNSIGNED_PAYLOAD)
     for name, content in UNSIGNED_PAYLOAD.items():
         assert files[name] == (b"signed:" + content if name in CATALOG_PATHS else content), name
-    # Preflight, then each returned and each copied file: three reads per file.
-    assert len(_lines(tmp_path / "signature-checks")) == 3 * len(CATALOG_PATHS)
+    # The compiled Setup .exe was built from the already-signed Ouroboros.exe, then outer-signed.
+    expected_unsigned_setup = b"unsigned-setup:signed:" + UNSIGNED_PAYLOAD[CATALOG_PATHS[0]]
+    expected_signed_setup = b"signed:" + expected_unsigned_setup
+    assert (tmp_path / INSTALLER).read_bytes() == expected_signed_setup
+    # Preflight + returned + copied for 3 payload files (9), plus preflight + returned + copied + published for Setup (4) = 13.
+    assert len(_lines(tmp_path / "signature-checks")) == 3 * len(CATALOG_PATHS) + 4
     assert json.loads((tmp_path / "tool-arguments.json").read_text())[:3] == ["verify", "/pa", "/all"]
-    (line,) = [line for line in _lines(tmp_path / "github-output") if line.startswith("signed_files=")]
-    record = line.split("=", 1)[1]
+    outputs = dict(line.split("=", 1) for line in _lines(tmp_path / "github-output"))
+    record = outputs["signed_files"]
+    installer_record = outputs["signed_installer"]
     pins = {entry["path"]: entry.get("upstreamSha256") for entry in CATALOG["files"]}
     assert json.loads(record) == [{
         "path": path,
         "unsignedSha256": pins[path] or hashlib.sha256(UNSIGNED_PAYLOAD[path]).hexdigest(),
         "sha256": hashlib.sha256(b"signed:" + UNSIGNED_PAYLOAD[path]).hexdigest(),
     } for path in CATALOG_PATHS]
-    # The secret-free proof's receipt writer accepts this record for this ZIP.
+    assert json.loads(installer_record) == {
+        "name": INSTALLER.name,
+        "unsignedSha256": hashlib.sha256(expected_unsigned_setup).hexdigest(),
+        "sha256": hashlib.sha256(expected_signed_setup).hexdigest(),
+    }
+    # The secret-free proof's receipt writer accepts both records for their respective final artifacts.
     receipt = tmp_path / "receipt.json"
     smoke = subprocess.run(
         [sys.executable, "-S", str(ROOT / "scripts" / "release_proof.py"), "record-smoke",
@@ -293,6 +339,16 @@ def test_signer_signs_exactly_the_catalog_and_reports_both_hashes(tmp_path):
         capture_output=True, text=True, check=False)
     assert smoke.returncode == 0, smoke.stderr
     assert json.loads(receipt.read_text())["authenticode"]["files"] == json.loads(record)
+    setup_receipt = tmp_path / "setup-receipt.json"
+    setup_smoke = subprocess.run(
+        [sys.executable, "-S", str(ROOT / "scripts" / "release_proof.py"), "record-smoke",
+         "--proof-id", "windows-setup-x64", "--artifact", str(tmp_path / INSTALLER), "--output", str(setup_receipt),
+         "--commit", "a" * 40, "--tag", "v7.6.1-rc.1", "--check", "packaged_cli_help",
+         "--authenticode-thumbprint", SIGNER, "--authenticode-publisher", "Example Publisher",
+         "--authenticode-installer", installer_record],
+        capture_output=True, text=True, check=False)
+    assert setup_smoke.returncode == 0, setup_smoke.stderr
+    assert json.loads(setup_receipt.read_text())["authenticode"]["installer"] == json.loads(installer_record)
     assert not list(tmp_path.glob("es-*"))
 
 
@@ -301,36 +357,186 @@ def test_signer_signs_exactly_the_catalog_and_reports_both_hashes(tmp_path):
     *[({path: b"rebuilt " + UPSTREAM[path]}, "not the catalogued upstream") for path in CATALOG_PATHS[1:]],
     ({CATALOG_PATHS[0]: b"vendor-signed: launcher"}, "already has an Authenticode signature state (Valid)"),
     ({CATALOG_PATHS[2]: b"vendor-signed: pythonw"}, "already has an Authenticode signature state (Valid)"),
-], 0, 3, 6))
+    ({"Ouroboros/_internal/VERSION": b"0.0.0\n"}, "does not match checkout VERSION"),
+    ({"Ouroboros/stray.txt": b"stray"}, "must hold exactly"),
+], 0, 3, 6, 7, 8))
 def test_signer_refuses_wrong_catalog_input_before_any_request(tmp_path, change, error):
     payload = {name: content for name, content in {**UNSIGNED_PAYLOAD, **change}.items() if content is not None}
     result = _run_signer(tmp_path, payload)
     assert result.returncode != 0 and error in result.stderr, result.stdout + result.stderr
     assert not (tmp_path / "network-calls").exists() and not (tmp_path / "java-calls").exists()
-    assert not (tmp_path / ARCHIVE).exists() and not (tmp_path / "github-output").exists()
+    assert not (tmp_path / ARCHIVE).exists() and not (tmp_path / INSTALLER).exists()
+    assert not (tmp_path / "github-output").exists()
 
 
 @pytest.mark.parametrize(("overrides", "error", "requests"), chosen_rows([
     ({"TEST_MODE": "digest"}, "not the pinned", 0),
+    ({"TEST_MODE": "inno-download-failure"}, "Pinned Inno Setup digest mismatch", 0),
     *[({"TEST_MODE": "vendor-failure", "TEST_FAIL_AT": str(n)},
-       f"sign exited 1 at signing request {n} of 3 ({CATALOG_PATHS[n - 1]})", n) for n in (1, 2, 3)],
+       f"sign exited 1 at signing request {n} of 4 ({CATALOG_PATHS[n - 1]})", n) for n in (1, 2, 3)],
+    ({"TEST_MODE": "vendor-failure", "TEST_FAIL_AT": "4"},
+     f"sign exited 1 at signing request 4 of 4 ({INSTALLER.name})", 4),
     ({"TEST_MODE": "start-failure", "TEST_FAIL_AT": "2"},
      "could not be started with the runner Java 11 at signing request 2", 2),
-    ({"TEST_MODE": "no-output", "TEST_FAIL_AT": "3"}, "wrote no signed file at signing request 3", 3),
+    ({"TEST_MODE": "no-output", "TEST_FAIL_AT": "4"}, "wrote no signed file at signing request 4", 4),
+    ({"TEST_MODE": "setup-presigned"}, "already has an Authenticode signature state (Valid)", 3),
     ({"TEST_MODE": "invalid-signature"}, "not valid", 3),
     ({"TEST_ACTUAL": "F" * 40}, "not the configured certificate", 1),
     ({"TEST_TOOL_EXIT": "2"}, "warnings", 1),
     ({"TEST_TOOL_EXIT": "1"}, "rejected the signature", 1),
-], 0, 3, 9))
-def test_signer_failure_stops_requests_and_ships_no_zip(tmp_path, overrides, error, requests):
+], 0, 1, 4, 5, 8, 12))
+def test_signer_failure_stops_requests_and_ships_no_artifacts(tmp_path, overrides, error, requests):
     result = _run_signer(tmp_path, **overrides)
     output = result.stdout + result.stderr
     assert result.returncode != 0 and error in output, output
     assert "SYNTHETIC_VENDOR_SECRET_MUST_NOT_REACH_LOG" not in output
-    # Never retried: a failure stops at the request that failed.
+    # Never retried: a failure stops at the request that failed, leaving neither ZIP nor Setup in dist\.
     assert len(_lines(tmp_path / "java-calls")) == requests
-    assert not (tmp_path / ARCHIVE).exists() and not (tmp_path / "github-output").exists()
+    assert not (tmp_path / ARCHIVE).exists() and not (tmp_path / INSTALLER).exists()
+    assert not (tmp_path / "github-output").exists()
     assert not list(tmp_path.glob("es-*"))  # vendor/signed scratch removed on every outcome
+
+
+def test_pack_windows_setup_validates_payload_and_output_guards(tmp_path):
+    payload = tmp_path / "Ouroboros"
+    (payload / "_internal").mkdir(parents=True)
+    (payload / "bin").mkdir()
+    (payload / "Ouroboros.exe").write_bytes(b"launcher")
+    (payload / "_internal" / "VERSION").write_text("7.6.1-rc.1\n", encoding="utf-8")
+    (payload / "bin" / "ouroboros.cmd").write_bytes(b"@echo off\r\n")
+    out_inside = payload / "out"
+    res = run_ps(tmp_path, r'''
+& "$env:TEST_REPO/scripts/pack_windows_setup.ps1" -PayloadRoot $env:TEST_PAYLOAD -OutputDir $env:TEST_OUT
+''', TEST_PAYLOAD=str(payload), TEST_OUT=str(out_inside))
+    assert res.returncode != 0 and "outside the payload" in res.stderr
+    nonempty = tmp_path / "nonempty"
+    nonempty.mkdir()
+    (nonempty / "existing.txt").write_text("keep", encoding="utf-8")
+    res = run_ps(tmp_path, r'''
+& "$env:TEST_REPO/scripts/pack_windows_setup.ps1" -PayloadRoot $env:TEST_PAYLOAD -OutputDir $env:TEST_OUT
+''', TEST_PAYLOAD=str(payload), TEST_OUT=str(nonempty))
+    assert res.returncode != 0 and "new or empty folder" in res.stderr
+    (payload / "stray.txt").write_text("stray", encoding="utf-8")
+    res = run_ps(tmp_path, r'''
+& "$env:TEST_REPO/scripts/pack_windows_setup.ps1" -PayloadRoot $env:TEST_PAYLOAD -OutputDir $env:TEST_OUT
+''', TEST_PAYLOAD=str(payload), TEST_OUT=str(tmp_path / "fresh"))
+    assert res.returncode != 0 and "not a collected Ouroboros payload" in res.stderr
+
+
+def test_pack_windows_setup_refuses_hidden_entries_its_zip_would_keep(tmp_path):
+    """Inno's wildcard Source skips Hidden entries while the ZIP keeps them, so a direct build from such a tree is
+    refused upfront, naming the extracted-ZIP remedy, before any compiler is looked for or output written."""
+    payload = tmp_path / "dist" / "Ouroboros"
+    browsers = payload / "_internal" / ".local-browsers"
+    browsers.mkdir(parents=True)
+    (payload / "bin").mkdir()
+    (payload / "Ouroboros.exe").write_bytes(b"launcher")
+    (payload / "_internal" / "VERSION").write_text("7.6.1-rc.1\n", encoding="utf-8")
+    (browsers / "browser.dll").write_bytes(b"browser")
+    out = tmp_path / "setup-out"
+    res = run_ps(tmp_path, r'''
+if ($IsWindows) {
+    (Get-Item -Force -LiteralPath (Join-Path $env:TEST_PAYLOAD '_internal/.local-browsers')).Attributes = 'Hidden,Directory'
+}
+& "$env:TEST_REPO/scripts/pack_windows_setup.ps1" -PayloadRoot $env:TEST_PAYLOAD -OutputDir $env:TEST_OUT
+''', TEST_PAYLOAD=str(payload), TEST_OUT=str(out))
+    assert res.returncode != 0 and "leave out Hidden entries" in res.stderr, res.stdout + res.stderr
+    assert ".local-browsers" in res.stderr and "extracted ZIP" in res.stderr
+    assert not out.exists(), "refused before any output folder"
+
+
+def test_smoke_windows_setup_refuses_non_disposable_host(tmp_path):
+    setup = tmp_path / "Ouroboros-Setup-7.6.1-rc.1-windows-x64.exe"
+    archive = tmp_path / "Ouroboros-7.6.1-rc.1-windows-x64.zip"
+    setup.write_bytes(b"mock setup")
+    archive.write_bytes(b"mock zip")
+    for overrides in (
+        {"GITHUB_ACTIONS": "", "RUNNER_ENVIRONMENT": "", "RUNNER_TEMP": ""},
+        {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_TEMP": str(tmp_path)},
+        {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "", "RUNNER_TEMP": str(tmp_path)},
+        {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_TEMP": ""},
+    ):
+        res = run_ps(tmp_path, r'''
+& "$env:TEST_REPO/scripts/smoke_windows_setup.ps1" -Installer $env:TEST_SETUP -Archive $env:TEST_ARCHIVE
+''', TEST_SETUP=str(setup), TEST_ARCHIVE=str(archive), **overrides)
+        assert res.returncode != 0 and "-AllowDisposableProfile" in res.stderr, (overrides, res.stdout + res.stderr)
+
+    # Evaluate the real guard function from smoke_windows_setup.ps1 across hosted/self-hosted/OS combinations.
+    guard = run_ps(tmp_path, r'''
+$Tokens = $null; $Errors = $null
+$Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $env:TEST_REPO 'scripts/smoke_windows_setup.ps1'), [ref]$Tokens, [ref]$Errors)
+if ($Errors.Count) { throw ($Errors | Out-String) }
+$Fn = $Ast.Find({ param($Node)
+    $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $Node.Name -eq 'Test-DisposableWindowsCiRunner'
+}, $true)
+if (-not $Fn) { throw 'Test-DisposableWindowsCiRunner not found' }
+Invoke-Expression $Fn.Extent.Text
+$Cases = @(
+    @{ OnWin = $true;  Act = 'true';  Env = 'github-hosted'; Tmp = '/tmp'; Expect = $true }
+    @{ OnWin = $true;  Act = 'true';  Env = 'self-hosted';   Tmp = '/tmp'; Expect = $false }
+    @{ OnWin = $true;  Act = 'true';  Env = '';              Tmp = '/tmp'; Expect = $false }
+    @{ OnWin = $true;  Act = 'true';  Env = 'github-hosted'; Tmp = '';     Expect = $false }
+    @{ OnWin = $true;  Act = 'false'; Env = 'github-hosted'; Tmp = '/tmp'; Expect = $false }
+    @{ OnWin = $false; Act = 'true';  Env = 'github-hosted'; Tmp = '/tmp'; Expect = $false }
+)
+foreach ($Case in $Cases) {
+    $env:GITHUB_ACTIONS = $Case.Act
+    $env:RUNNER_ENVIRONMENT = $Case.Env
+    $env:RUNNER_TEMP = $Case.Tmp
+    $Actual = Test-DisposableWindowsCiRunner -OnWindows $Case.OnWin
+    if ($Actual -ne $Case.Expect) {
+        throw "Guard returned $Actual (expected $($Case.Expect)) for $($Case | ConvertTo-Json -Compress)"
+    }
+}
+''')
+    assert guard.returncode == 0, guard.stdout + guard.stderr
+
+
+def test_smoke_windows_setup_start_exact_process_preserves_spaces_and_handle(tmp_path):
+    spaced_dir = tmp_path / "dir with spaces"
+    spaced_dir.mkdir()
+    ready = spaced_dir / "pythonw busy.ready"
+    res = run_ps(tmp_path, r'''
+$Tokens = $null; $Errors = $null
+$Path = Join-Path $env:TEST_REPO 'scripts/smoke_windows_setup.ps1'
+$Ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$Errors)
+if ($Errors.Count) { throw ($Errors | Out-String) }
+$Fn = $Ast.Find({ param($Node)
+    $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $Node.Name -eq 'Start-ExactProcess'
+}, $true)
+if (-not $Fn) { throw 'Start-ExactProcess not found' }
+Invoke-Expression $Fn.Extent.Text
+$Text = Get-Content -Raw -LiteralPath $Path
+$Match = [regex]::Match($Text, '"(import pathlib,sys,time;[^"]+)"')
+if (-not $Match.Success) { throw 'Busy-probe -c snippet not found in smoke_windows_setup.ps1' }
+$Code = $Match.Groups[1].Value
+$Proc = Start-ExactProcess $env:TEST_PYTHON @('-I', '-B', '-c', $Code, $env:TEST_READY)
+try {
+    for ($Tick = 0; $Tick -lt 100; $Tick++) {
+        if (Test-Path -LiteralPath $env:TEST_READY -PathType Leaf) { break }
+        if ($Proc.HasExited) { throw "Exact-argv probe exited early ($($Proc.ExitCode))" }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not (Test-Path -LiteralPath $env:TEST_READY -PathType Leaf)) { throw 'Ready marker was not written' }
+    if ((Get-Content -Raw -LiteralPath $env:TEST_READY) -ne 'up') { throw 'Unexpected ready marker content' }
+    if ($Proc.HasExited) { throw 'Probe process exited unexpectedly before Kill' }
+    $Proc.Kill()
+    if (-not $Proc.WaitForExit(10000)) { throw 'Probe process did not exit after Kill' }
+    if (-not $Proc.HasExited) { throw 'Probe handle did not report HasExited after WaitForExit' }
+} finally {
+    if ($Proc) {
+        if (-not $Proc.HasExited) {
+            try { $Proc.Kill(); $Proc.WaitForExit(10000) | Out-Null } catch { }
+        }
+        try { $Proc.Dispose() } catch { }
+    }
+}
+''', TEST_PYTHON=sys.executable, TEST_READY=str(ready))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert ready.read_text(encoding="utf-8") == "up"
 
 
 def test_verifier_checks_every_catalogued_file_of_an_extracted_release(tmp_path):

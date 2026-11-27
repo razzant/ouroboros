@@ -24,5 +24,5 @@ if defined LOCALAPPDATA (
     set "PYTHONPYCACHEPREFIX=%USERPROFILE%\Ouroboros\pycache.noindex"
 )
 if defined PYTHONPYCACHEPREFIX if not exist "%PYTHONPYCACHEPREFIX%" mkdir "%PYTHONPYCACHEPREFIX%" >nul 2>nul
-"%PY%" -m ouroboros.packaged_cli %*
+"%PY%" -P -m ouroboros.packaged_cli %*
 exit /b %ERRORLEVEL%

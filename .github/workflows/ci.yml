@@ -1914,6 +1914,8 @@ jobs:
           python-version: '3.10'
       - name: Validate tag matches VERSION
         id: release_meta
+        env:
+          ESIGNER_CERT_SHA1: ${{ vars.ESIGNER_CERT_SHA1 }}
         run: |
           python - <<'PY'
           import os
@@ -1925,18 +1927,23 @@ jobs:
           tag = os.environ["GITHUB_REF_NAME"].strip()
           expected_tag = f"v{version}"
           output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          def fail(message: str) -> None:
+              with output.open("a", encoding="utf-8") as fh:
+                  fh.write("tag_valid=false\nis_prerelease=false\n")
+              raise SystemExit(message)
+
           if tag != expected_tag:
-              with output.open("a", encoding="utf-8") as fh:
-                  fh.write("tag_valid=false\nis_prerelease=false\n")
-              raise SystemExit(f"Release tag mismatch: {tag} != {expected_tag}")
+              fail(f"Release tag mismatch: {tag} != {expected_tag}")
           if not is_release_version(version):
-              with output.open("a", encoding="utf-8") as fh:
-                  fh.write("tag_valid=false\nis_prerelease=false\n")
-              raise SystemExit(f"VERSION is not a supported release version: {version!r}")
+              fail(f"VERSION is not a supported release version: {version!r}")
           if is_development_marker(version):
-              with output.open("a", encoding="utf-8") as fh:
-                  fh.write("tag_valid=false\nis_prerelease=false\n")
-              raise SystemExit(f"VERSION {version} is a development-cycle marker, never a release: cut a plain X.Y.Z")
+              fail(f"VERSION {version} is a development-cycle marker, never a release: cut a plain X.Y.Z")
+          cert = os.environ.get("ESIGNER_CERT_SHA1", "")
+          repo = os.environ.get("GITHUB_REPOSITORY", "").strip().lower()
+          if cert and not re.fullmatch(r"[0-9A-Fa-f]{40}", cert):
+              fail("ESIGNER_CERT_SHA1 is set but is not a 40-hex SHA-1 thumbprint")
+          if repo == "razzant/ouroboros" and not cert:
+              fail("Official razzant/ouroboros releases require ESIGNER_CERT_SHA1 so the primary Windows Setup installer is signed")
           is_prerelease = bool(re.search(r'(?:rc|alpha|beta|a|b)\.?\d+$', version, re.IGNORECASE))
           with output.open("a", encoding="utf-8") as fh:
               fh.write(f"is_prerelease={'true' if is_prerelease else 'false'}\n")
@@ -2762,25 +2769,29 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # Windows signing is selected by configuration. With ESIGNER_CERT_SHA1 unset
-  # (forks, repositories without a certificate) no job binds the signing
-  # Environment and windows-proof proves the build's ZIP as explicitly
-  # unsigned. Once it is set, signing is required: any failure here, a
-  # malformed thumbprint or a missing secret included, blocks the whole
-  # release. Build and sign never share a runner.
+  # Official razzant/ouroboros releases require ESIGNER_CERT_SHA1 (primary
+  # Windows Setup installer must be signed; release-preflight, windows-proof,
+  # and release_proof.py all fail closed when unset). Forks without a
+  # certificate keep an explicit unsigned Setup + ZIP path with no signing
+  # Environment/secrets bound. Once set, signing is required everywhere:
+  # windows-sign signs the 3 payload executables, builds BOTH ZIP and Setup
+  # from that exact signed tree, signs the outer Setup .exe, and any failure
+  # blocks the whole release. Build and sign never share a runner.
   windows-sign:
     if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && vars.ESIGNER_CERT_SHA1 != '' && needs.build.result == 'success' && needs.release-preflight.result == 'success' && needs.release-preflight.outputs.tag_valid == 'true' }}
     needs: [build, release-preflight]
     runs-on: windows-latest
     environment: windows-release-signing
     # Only this job holds the eSigner secrets: no OIDC token and no attestation
-    # right here; the secret-free windows-proof job attests the signed ZIP.
+    # right here; the secret-free windows-proof job attests the signed ZIP and Setup installer.
     permissions:
       contents: read
       artifact-metadata: write
     outputs:
       archive_sha256: ${{ steps.release_asset.outputs.sha256 }}
+      installer_sha256: ${{ steps.installer_asset.outputs.sha256 }}
       signed_files: ${{ steps.sign.outputs.signed_files }}
+      signed_installer: ${{ steps.sign.outputs.signed_installer }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -2800,6 +2811,12 @@ jobs:
         env:
           EXPECTED_SHA256: ${{ needs.build.outputs.windows_archive_sha256 }}
         run: python scripts/release_proof.py locate --directory unsigned --expect-sha256 "$EXPECTED_SHA256" --github-output "$GITHUB_OUTPUT"
+      - name: Stage pinned Inno Setup compiler
+        id: inno_setup
+        shell: pwsh
+        run: |
+          $Iscc = & .\scripts\download_inno_setup.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'inno-setup')
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "compiler=$Iscc"
       - name: Sign, verify and package Windows executables
         id: sign
         shell: pwsh
@@ -2810,27 +2827,36 @@ jobs:
           ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_TOTP_SECRET }}
           ESIGNER_CERT_SHA1: ${{ vars.ESIGNER_CERT_SHA1 }}
           UNSIGNED_ARCHIVE: ${{ steps.unsigned_asset.outputs.path }}
-        run: .\scripts\sign_windows_release.ps1 -UnsignedArchive $env:UNSIGNED_ARCHIVE
+          INNO_COMPILER: ${{ steps.inno_setup.outputs.compiler }}
+        run: .\scripts\sign_windows_release.ps1 -UnsignedArchive $env:UNSIGNED_ARCHIVE -InnoCompiler $env:INNO_COMPILER
       - name: Locate final release archive
         id: release_asset
         shell: bash
         run: python scripts/release_proof.py locate --directory dist --github-output "$GITHUB_OUTPUT"
+      - name: Locate final Windows installer
+        id: installer_asset
+        shell: bash
+        run: python scripts/release_proof.py locate --directory dist --suffix .exe --github-output "$GITHUB_OUTPUT"
       - name: Transfer signed Windows archive (not yet release proof)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-signed-archive
-          path: ${{ steps.release_asset.outputs.path }}
+          path: |
+            ${{ steps.release_asset.outputs.path }}
+            ${{ steps.installer_asset.outputs.path }}
           overwrite: true
           if-no-files-found: error
           retention-days: 7
 
   # No eSigner secrets on this fresh runner, in either mode: it checks the
-  # final ZIP against its producer's job-output digest before extracting,
-  # verifies every catalogued signature when signing is configured, smokes
-  # the packaged app, then records the proof, SBOM and attestations for the
-  # release asset.
+  # final ZIP (and signed Setup .exe when configured) against its producer's
+  # job-output digest before extracting/executing, verifies every catalogued
+  # and outer-installer signature when signing is configured, builds the
+  # unsigned Setup .exe from the exact ZIP payload on forks without
+  # ESIGNER_CERT_SHA1, smokes both artifacts end-to-end, then records proofs,
+  # SBOMs and attestations for both release assets.
   windows-proof:
-    if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && (vars.ESIGNER_CERT_SHA1 == '' || needs.windows-sign.result == 'success') }}
+    if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && ((vars.ESIGNER_CERT_SHA1 == '' && github.repository != 'razzant/ouroboros') || needs.windows-sign.result == 'success') }}
     needs: [build, windows-sign]
     runs-on: windows-latest
     permissions:
@@ -2858,6 +2884,13 @@ jobs:
           EXPECTED_SHA256="$UNSIGNED_SHA256"
           if [ -n "$WINDOWS_SIGNER_THUMBPRINT" ]; then EXPECTED_SHA256="$SIGNED_SHA256"; fi
           python scripts/release_proof.py locate --directory dist --expect-sha256 "$EXPECTED_SHA256" --github-output "$GITHUB_OUTPUT"
+      - name: Check final installer digest before execution
+        id: signed_installer_asset
+        if: vars.ESIGNER_CERT_SHA1 != ''
+        shell: bash
+        env:
+          SIGNED_INSTALLER_SHA256: ${{ needs.windows-sign.outputs.installer_sha256 }}
+        run: python scripts/release_proof.py locate --directory dist --suffix .exe --expect-sha256 "$SIGNED_INSTALLER_SHA256" --github-output "$GITHUB_OUTPUT"
       - name: Smoke final Windows archive
         id: smoke_windows
         shell: pwsh
@@ -2953,6 +2986,90 @@ jobs:
         run: |
           "${{ steps.syft.outputs.path }}" "dir:${{ steps.smoke_windows.outputs.sbom_path }}" \
             --output cyclonedx-json=dist/sbom-windows-x64.cdx.json
+      - name: Release the archive smoke's expanded copy
+        shell: pwsh
+        env:
+          EXPANDED: ${{ steps.smoke_windows.outputs.sbom_path }}
+        run: |
+          # The SBOM was its last reader; the installer build and smoke expand their own copies of the ZIP.
+          $Expanded = Join-Path $env:RUNNER_TEMP "ouroboros-windows-$env:GITHUB_RUN_ATTEMPT"
+          if ($env:EXPANDED -ne $Expanded) { throw "Unexpected archive smoke folder: $env:EXPANDED" }
+          Remove-Item -LiteralPath $Expanded -Recurse -Force -ErrorAction SilentlyContinue
+          if (Test-Path -LiteralPath $Expanded) { Write-Warning "Part of $Expanded is still in use and stays on the runner" }
+      - name: Stage pinned Inno Setup compiler
+        id: inno_setup
+        shell: pwsh
+        run: |
+          $Iscc = & .\scripts\download_inno_setup.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'inno-setup')
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "compiler=$Iscc"
+      - name: Build unsigned Windows installer
+        id: unsigned_installer_asset
+        if: vars.ESIGNER_CERT_SHA1 == '' && github.repository != 'razzant/ouroboros'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $CleanZipRoot = Join-Path $env:RUNNER_TEMP "ouroboros-setup-src-$env:GITHUB_RUN_ATTEMPT"
+          $StageOut = Join-Path $env:RUNNER_TEMP "ouroboros-setup-out-$env:GITHUB_RUN_ATTEMPT"
+          try {
+              if (Test-Path -LiteralPath $CleanZipRoot) { Remove-Item -LiteralPath $CleanZipRoot -Recurse -Force }
+              if (Test-Path -LiteralPath $StageOut) { Remove-Item -LiteralPath $StageOut -Recurse -Force }
+              [IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path -LiteralPath "${{ steps.release_asset.outputs.path }}").Path, $CleanZipRoot)
+              & .\scripts\pack_windows_setup.ps1 -PayloadRoot (Join-Path $CleanZipRoot 'Ouroboros') -OutputDir $StageOut -Compiler "${{ steps.inno_setup.outputs.compiler }}"
+              $Built = @(Get-ChildItem -LiteralPath $StageOut -Filter 'Ouroboros-Setup-*.exe' -File)
+              if ($Built.Count -ne 1) { throw "Expected one built Windows installer in $StageOut, found $($Built.Count)" }
+              Move-Item -LiteralPath $Built[0].FullName -Destination (Join-Path 'dist' $Built[0].Name)
+          } finally {
+              Remove-Item -LiteralPath $CleanZipRoot, $StageOut -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          python scripts/release_proof.py locate --directory dist --suffix .exe --github-output $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { throw "Failed to locate unsigned Windows installer: $LASTEXITCODE" }
+      - name: Smoke final Windows installer
+        id: smoke_windows_setup
+        shell: pwsh
+        env:
+          INSTALLER_PATH: ${{ steps.signed_installer_asset.outputs.path || steps.unsigned_installer_asset.outputs.path }}
+          ARCHIVE_PATH: ${{ steps.release_asset.outputs.path }}
+          ZIP_SIGNER_THUMBPRINT: ${{ steps.smoke_windows.outputs.signer_thumbprint }}
+          ZIP_SIGNER_PUBLISHER: ${{ steps.smoke_windows.outputs.signer_publisher }}
+          SYFT_PATH: ${{ steps.syft.outputs.path }}
+          INNO_COMPILER: ${{ steps.inno_setup.outputs.compiler }}
+        run: >-
+          .\scripts\smoke_windows_setup.ps1
+          -Installer $env:INSTALLER_PATH
+          -Archive $env:ARCHIVE_PATH
+          -ExpectedThumbprint $env:WINDOWS_SIGNER_THUMBPRINT
+          -ZipSignerThumbprint $env:ZIP_SIGNER_THUMBPRINT
+          -ZipSignerPublisher $env:ZIP_SIGNER_PUBLISHER
+          -SyftPath $env:SYFT_PATH
+          -SbomOutput 'dist/sbom-windows-setup-x64.cdx.json'
+          -GitHubOutput $env:GITHUB_OUTPUT
+          -Compiler $env:INNO_COMPILER
+      - name: Record Windows installer smoke
+        shell: bash
+        env:
+          INSTALLER_PATH: ${{ steps.signed_installer_asset.outputs.path || steps.unsigned_installer_asset.outputs.path }}
+          SIGNER_THUMBPRINT: ${{ steps.smoke_windows_setup.outputs.signer_thumbprint }}
+          SIGNER_PUBLISHER: ${{ steps.smoke_windows_setup.outputs.signer_publisher }}
+          SIGNED_INSTALLER: ${{ needs.windows-sign.outputs.signed_installer }}
+        run: |
+          SIGNED=()
+          if [ -n "$WINDOWS_SIGNER_THUMBPRINT" ]; then
+            SIGNED=(--authenticode-thumbprint "$SIGNER_THUMBPRINT" --authenticode-publisher "$SIGNER_PUBLISHER"
+                    --authenticode-installer "$SIGNED_INSTALLER"
+                    --check authenticode_signer --check timestamp --check signed_installer_match
+                    --check installed_payload_signatures)
+          fi
+          python scripts/release_proof.py record-smoke \
+            --proof-id windows-setup-x64 --artifact "$INSTALLER_PATH" \
+            --output dist/release-smoke-windows-setup-x64.json \
+            --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME" \
+            --check installer_foreign_dir_refused --check installer_busy_upgrade_refused \
+            --check installer_silent_install --check installer_payload_match_zip \
+            --check start_menu_shortcut --check uninstall_registry_entry \
+            --check packaged_cli_help --check embedded_betterleaks_runtime \
+            --check uninstall_preserves_data "${SIGNED[@]}"
       - name: Attest Windows build provenance
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
@@ -2962,6 +3079,15 @@ jobs:
         with:
           subject-path: ${{ steps.release_asset.outputs.path }}
           sbom-path: dist/sbom-windows-x64.cdx.json
+      - name: Attest Windows installer build provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ steps.signed_installer_asset.outputs.path || steps.unsigned_installer_asset.outputs.path }}
+      - name: Attest Windows installer SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ steps.signed_installer_asset.outputs.path || steps.unsigned_installer_asset.outputs.path }}
+          sbom-path: dist/sbom-windows-setup-x64.cdx.json
       - name: Upload Windows release asset and proof
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -2969,8 +3095,11 @@ jobs:
           overwrite: true
           path: |
             ${{ steps.release_asset.outputs.path }}
+            ${{ steps.signed_installer_asset.outputs.path || steps.unsigned_installer_asset.outputs.path }}
             dist/release-smoke-windows-x64.json
+            dist/release-smoke-windows-setup-x64.json
             dist/sbom-windows-x64.cdx.json
+            dist/sbom-windows-setup-x64.cdx.json
           if-no-files-found: error
           retention-days: 30
 
@@ -3159,8 +3288,8 @@ jobs:
           PREVIOUS_TAG: ${{ steps.git_sources.outputs.previous_tag }}
           ANDROID_BUILD_RESULT: ${{ needs.android-build.result }}
           ANDROID_ATTESTATION_RESULT: ${{ steps.verify_artifacts.outputs.android_result }}
-          # Empty selects the explicitly unsigned Windows ZIP; set, the proof
-          # receipt must name exactly this verified signer.
+          # Empty is allowed only on forks (explicitly unsigned Windows Setup + ZIP);
+          # official razzant/ouroboros requires a configured 40-hex certificate thumbprint.
           WINDOWS_SIGNER_THUMBPRINT: ${{ vars.ESIGNER_CERT_SHA1 }}
           # Every consumed job's actual result; the proof refuses a missing one.
           RELEASE_GATE_RESULTS: >-
