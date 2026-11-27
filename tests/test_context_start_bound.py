@@ -371,3 +371,81 @@ def test_a_provider_route_uses_the_lowest_fresh_witness_capped_at_one(drive, mon
     with pytest.raises(fit.MinimumViewUnfit):
         build(drive, resolver(window - 5_000, basis="provider"))
     assert seen, "an unreadable store refuses nothing early"
+
+
+def _imported_room(drive, marks, *, title):
+    """A connected room whose current conversation title is short ("Standup") and whose history import later wrote an
+    older inbound arrival under ``title``, through the production Presence writer; ``marks`` room marks there."""
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.place_arrivals import history_import_rooms
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_history import _carrier
+    from ouroboros.presence_runner import _log_dialogue, _stable_numeric_id
+
+    key = conversation_key("demo", "a", "c", "")
+    room = _stable_numeric_id("presence-conversation", key)
+    admission = SimpleNamespace(binding_id="b", transport_skill="example", behavior_skill="example",
+                                profile_fingerprint="example", place=SimpleNamespace(place_id="place_demo"))
+    for n, name, second in ((2, "Standup", 20), (1, title, 10)):
+        sent = f"2026-11-20T12:00:{second}+00:00"
+        event = SimpleNamespace(source_event_id=f"arrival_{n}", provider="demo", account_id="a", conversation_id="c",
+                                thread_id="", conversation_key=key, text=f"Meeting note {n}.",
+                                actor={"platform_actor_id": "participant", "display_name": "Participant"},
+                                conversation={"title": name, "type": "group"},
+                                message={"source_order": n, "sent_at": sent})
+        imported = {"version": 1, "import_id": "example", "authorship": "participant",
+                    "received_at": "2026-11-21T12:00:00+00:00", "transport_skill": "example"} if n == 1 else None
+        _log_dialogue(drive, direction="in", chat_id=room, user_id=2, text=event.text, event=event,
+                      task=_carrier(admission, event), task_id=f"meeting{n}", ts=sent, historical_import=imported)
+    assert room in history_import_rooms(drive, [room])
+    store = ChronicleStore(drive)
+    page = scale._page(store, "1", 810, 1)
+    assert store.publish([dict(kind="mark", room_id=str(room), target_ref={"kind": "chronicle", "id": page["id"]},
+                               text=f"Notes for meeting {i}.", author=scale.MIND, scope="room", quote=None,
+                               visibility="full") for i in range(marks)]).ok
+    return room
+
+
+def test_a_history_import_under_an_older_long_title_never_raises_the_bound(tmp_path, monkeypatch):
+    """The ordinary render names a room by the facts its capture holds, which after a history import can be a shorter
+    title than the room's latest inbound append; the bound prices the marks without their room's display name, so it
+    stays at most the fitted minimum (Astra's witness: 580 marks under a 125-character older title). The other
+    direction: marks larger than the window alone are still refused before the capture."""
+    from ouroboros import memory_view
+    from ouroboros.chronicle_store import ChronicleStore
+
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
+    drive = scale.install(tmp_path / "drive")
+    title = ("Today's working group on the November release, verification and backlog for review at the next "
+             "iteration " * 2)[:125]
+    room = str(_imported_room(drive, 580, title=title))
+    task = {"id": "start", "type": "task", "chat_id": 1, "text": "Continue in this room.", "_is_direct_chat": True}
+    spec = context._view_spec(task, drive, None)
+    appended = next(m for m in memory_view._capture_marks(ChronicleStore(drive), spec, memory_view.room_labeler(drive))
+                    if m["room"] != "" and m["text"] == "Notes for meeting 0.")
+    rendered = next(m for m in memory_view.capture_memory_view(drive, task, spec).marks if str(m["text"]).endswith(" 0."))
+    assert len(appended["room"]) > len(rendered["room"])  # the two readers name the room differently: the witness holds
+    assert room in appended["room"] + rendered["room"]
+
+    def refusal(window, *, bounded=False):
+        with monkeypatch.context() as patch, pytest.raises(fit.MinimumViewUnfit) as raised:
+            if not bounded:
+                patch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
+            build(drive, route_at("synthetic", None, window))
+        return raised.value
+
+    with monkeypatch.context() as patch:
+        patch.setattr(context, "_capture_memory_view", lambda *_a, **_kw: pytest.fail("the memory capture ran"))
+        unfit_bound = refusal(25_000, bounded=True)
+    marks = dict(unfit_bound.parts)["marks"]
+    core_alone = refusal(20_000)
+    minimum = refusal(core_alone.fixed_input_tokens + core_alone.response_reserve_tokens)
+    assert minimum.memory_measured
+    assert unfit_bound.raw_input_tokens <= minimum.raw_input_tokens
+    assert math.ceil(unfit_bound.raw_input_tokens * unfit_bound.measurement_density) <= minimum.estimated_input_tokens
+    admit = minimum.estimated_input_tokens + minimum.response_reserve_tokens
+    assert build(drive, route_at("synthetic", None, admit)).initial_mode in {"max", "low", "nano"}
+    with monkeypatch.context() as patch:  # the guard still fires: a window the marks alone overflow
+        patch.setattr(context, "_capture_memory_view", lambda *_a, **_kw: pytest.fail("the memory capture ran"))
+        tight = refusal(marks - 1, bounded=True)
+    assert not tight.memory_measured and dict(tight.parts)["marks"] == marks

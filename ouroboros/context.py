@@ -1267,8 +1267,8 @@ def _start_frame_texts(env: Any, memory: Memory, ctx: Any, spec: Any, connection
     """The named texts an undeclared, non-child start's every request holds whole (the start bound's reads).
 
     Each is read by its own producer, as the capture reads it: SYSTEM and BIBLE; the tier-0 sections (identity, the
-    scratchpad and, where the view holds knowledge, the authored overview); the ordinary marks this view keeps, only
-    from a chronicle already active (activating it is the capture's); the connections form of fewer escaped characters.
+    scratchpad and, where the view holds knowledge, the overview); the ordinary marks this view keeps, from an active
+    chronicle only, without the room names a capture reads; the connections form of fewer escaped characters.
     """
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.memory_view import json_chars
@@ -1287,9 +1287,9 @@ def _start_frame_texts(env: Any, memory: Memory, ctx: Any, spec: Any, connection
               if isinstance(part, HostSection) and part.section_id in TIER0_ALWAYS_FULL]
     store = ChronicleStore(root)
     if (store.activation() or {}).get("kind") == "activation":
-        from ouroboros.memory_view import _capture_marks, _marks_text, room_labeler
+        from ouroboros.memory_view import _capture_marks, _marks_text
 
-        ordinary = [mark for mark in _capture_marks(store, spec, room_labeler(root)) if not mark.get("late_review")]
+        ordinary = [mark for mark in _capture_marks(store, spec, lambda *_a, **_kw: "") if not mark.get("late_review")]
         if ordinary:
             texts.append(("marks", _marks_text(ordinary)))
     return [*texts, ("connections", min(connections, key=json_chars))]
