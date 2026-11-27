@@ -3813,9 +3813,10 @@ ends what floats over it stands on one material, top and bottom (owner 15.11 «�
 по нашей библии… и в десктопе», his choice 17.11 1A, 3A): two blur steps, a soft one (4 px) over the
 whole taper and a deep one in its depth (12 px in all over the soft), under the room's colour, 72 % at the window's
 edge. Blur and darkening each follow the shared edge curve to clear, the deep blur dissolving into the soft and the
-soft into sharp text, so the blurred zone ends with no line. It is full behind the
-phone clock and clears through the capsules' band, ending at their lower side on every layout: nothing of it shows
-below the capsules. The composer's area mirrors it, ending at the capsule row's upper side. It keeps scrolling card
+soft into sharp text, so the blurred zone ends with no line. It is full from the
+window's top, behind the phone clock and the window's lights, down to the capsules, and clears through their band,
+ending at their lower side on every layout: nothing of it shows below the capsules. The composer's edge mirrors it from
+the capsule row's upper side, whatever the composer holds above that row (a staged attachment or reply). It keeps scrolling card
 actions distinct from the floating controls. The first row and every landing clear the bar; a row under it is not
 read yet. The top edge is separate from the desktop
 title-band strip. A note or the search sheet floats above it as the capsules do (a Project's status note, in its flow,

@@ -1435,15 +1435,21 @@ def test_the_typing_read_band_keeps_the_bars_edge_where_the_reach_reads_back_unr
                 ? name => (name === '--edge-reach' ? 'clamp(0px, 508px - 47px - 250px, 32px)' : target.getPropertyValue(name))
                 : (typeof target[key] === 'function' ? target[key].bind(target) : target[key]) });
         };
+        // The band follows the edge's painted box, not the property: give the tint an overhang of 20 px below the bar
+        // while the reach still reads back unresolved, and the band starts under it.
+        const tint = bar.querySelector(':scope > .room-edge[data-edge="tint"]');
         try {
+            const atBar = readBand(feed, bar, null).top;
+            tint.style.height = `${bar.clientHeight + 20}px`;
             return { resolved, unresolved: getComputedStyle(bar).getPropertyValue('--edge-reach'),
-                top: readBand(feed, bar, null).top, bar: bar.getBoundingClientRect().bottom };
-        } finally { window.getComputedStyle = real; }
+                top: atBar, overhang: readBand(feed, bar, null).top, bar: bar.getBoundingClientRect().bottom };
+        } finally { window.getComputedStyle = real; tint.style.removeProperty('height'); }
     }""")
     facts(f'typing-read-band-unresolved-{shell_ui["engine"]}', band)
     # The edge ends inside the bar, at its capsules: whatever the reach reads back as, the band starts at the bar.
     assert band['resolved'] == 0 and band['unresolved'].startswith('clamp('), band
     assert abs(band['top'] - band['bar']) <= 0.5, band
+    assert abs(band['overhang'] - (band['bar'] + 20)) <= 0.5, ('the band follows the painted edge', band)
 
 
 @pytest.mark.parametrize('project_room', [False, True], ids=['main', 'project'])

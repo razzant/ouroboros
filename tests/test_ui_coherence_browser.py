@@ -103,13 +103,15 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         return pieces
 
     pieces = two_steps_under_a_tint(paint)
-    # The edge ends at the capsules' lower side, inside the bar, on every layout, the desk included; the deep step
-    # clears halfway down, where the soft one starts to. Nothing hangs under the bar: a failed history read is the
-    # page's notice.
-    capsules = header.evaluate("el => Math.max(...[...el.querySelectorAll('.app-page-actions button')].filter(b => b.getClientRects().length).map(b => b.getBoundingClientRect().bottom))")
+    # The edge ends at the capsules' lower side, inside the bar, on every layout, the desk included; it is full above
+    # them and clears through their band, the deep step over its upper half. Nothing hangs under the bar: a failed
+    # history read is the page's notice.
+    top, capsules = header.evaluate("""el => { const b = [...el.querySelectorAll('.app-page-actions button')]
+        .filter(n => n.getClientRects().length).map(n => n.getBoundingClientRect());
+        return [Math.min(...b.map(r => r.top)), Math.max(...b.map(r => r.bottom))]; }""")
     assert pieces["tint"]["height"] == pytest.approx(capsules, abs=1) and pieces["tint"]["height"] <= paint["bar"], (capsules, paint)
     assert pieces["soft"]["height"] == pytest.approx(capsules, abs=1), paint
-    assert pieces["deep"]["height"] == pytest.approx(capsules / 2, abs=1), paint
+    assert pieces["deep"]["height"] == pytest.approx(capsules - (capsules - top) / 2, abs=1), (top, capsules, paint)
     # The transcript's first row clears the bar (style.css --chat-top-reserve), the edge taking no more of it.
     feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
     assert feed_top >= paint["bar"] - 1, (feed_top, paint)
@@ -117,9 +119,12 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
     # never takes its box, and the strip still takes presses for the title bar.
     page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
+    # The room re-measures where its capsules stand once the bar is laid out again (chat.js, a frame later).
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 50))))")
     chrome = header.evaluate(edge)
+    chrome_capsules = header.evaluate("el => Math.max(...[...el.querySelectorAll('.app-page-actions button')].filter(n => n.getClientRects().length).map(n => n.getBoundingClientRect().bottom))")
     page.evaluate("delete document.documentElement.dataset.windowChrome")
-    assert two_steps_under_a_tint(chrome)["tint"]["height"] <= chrome["bar"], chrome
+    assert two_steps_under_a_tint(chrome)["tint"]["height"] == pytest.approx(chrome_capsules, abs=1), (chrome_capsules, chrome)
     assert chrome["strip"] == "auto", chrome
     # The composer's edge mirrors the bar's inside its area: the same nodes, the same steps, no press taken.
     area = page.locator("#chat-input-area")

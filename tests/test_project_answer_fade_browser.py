@@ -459,25 +459,68 @@ def test_a_rooms_edge_is_two_shared_blur_planes_under_its_tint_clearing_toward_t
             assert ends == ([1, 0] if name == "top" else [0, 1]), (name, 'ramp and solid layers in place', piece)
 
 
-# The owner's criterion for a room's edge (27.11): it does not reach past the capsules. At the top nothing of it lies
-# lower than the bar's capsules' lower side plus the bar's own padding; at the bottom nothing higher than the capsule
-# row's upper side less that padding. The edge that reached one edge length below the bar fails it.
+# The owner's criterion for a room's edge: it does not reach past the capsules. At the top it ends at the bar's
+# capsules' lower side, at the bottom it starts at the composer's capsule row's upper side, in every state of the
+# composer (a staged attachment or reply grows the area above the row), within a sub-pixel. The references are the
+# visible capsules themselves (not the floating jump to latest), and there must be some.
 EDGE_EXTENT = """() => {
     const bar = document.querySelector('#page-chat > .chat-page-header'), area = document.querySelector('#chat-input-area');
     const shown = n => n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden';
-    const capsules = [...bar.querySelectorAll('.app-page-actions button, .cx-chip, .rw-trigger')].filter(shown);
-    const chips = [...area.querySelectorAll('.chat-toolbar-row > *')].filter(shown);
-    const nodes = host => [...host.querySelectorAll(':scope > .room-edge')].map(n => n.getBoundingClientRect());
-    return {pad: parseFloat(getComputedStyle(bar).paddingBottom),
+    const capsules = [...bar.querySelectorAll('.chat-header-btn, .cx-chip, .rw-trigger, .shell-icon-control, .chat-budget-pill')]
+        .filter(n => shown(n) && !n.closest('.rw-surface, .cx-shade'));
+    const chips = [...area.querySelectorAll('.chat-toolbar-row > *')].filter(n => shown(n) && !n.matches('.chat-scroll-bottom-btn'));
+    const nodes = host => [...host.querySelectorAll(':scope > .room-edge')].filter(shown).map(n => n.getBoundingClientRect());
+    return {capsules: capsules.length, chips: chips.length,
         capsulesEnd: Math.max(...capsules.map(n => n.getBoundingClientRect().bottom)),
         chipsStart: Math.min(...chips.map(n => n.getBoundingClientRect().top)),
         topEnd: Math.max(...nodes(bar).map(r => r.bottom)), bottomStart: Math.min(...nodes(area).map(r => r.top))};
 }"""
 
 
+def assert_edge_at_capsules(page, state):
+    found = page.evaluate(EDGE_EXTENT)
+    assert found["capsules"] and found["chips"], (state, found)
+    assert abs(found["topEnd"] - found["capsulesEnd"]) <= 0.5, (state, 'the top edge ends at the capsules', found)
+    assert abs(found["bottomStart"] - found["chipsStart"]) <= 0.5, (state, 'the bottom edge starts at the capsule row', found)
+
+
 @pytest.mark.parametrize("project_chat", [("chromium", "light", 1100), ("webkit", "dark", 390)], indirect=True)
 def test_a_rooms_edge_ends_at_its_capsules_top_and_bottom(project_chat):
-    found = project_chat["page"].evaluate(EDGE_EXTENT)
-    assert found["capsulesEnd"] > 0 and found["chipsStart"] > found["capsulesEnd"], found
-    assert found["topEnd"] <= found["capsulesEnd"] + found["pad"] + 0.5, ('the top edge ends at the capsules', found)
-    assert found["bottomStart"] >= found["chipsStart"] - found["pad"] - 0.5, ('the bottom edge starts at the capsule row', found)
+    page = project_chat["page"]
+    settle = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 120))))"
+    page.evaluate(settle)
+    assert_edge_at_capsules(page, "at rest")
+    # A staged attachment grows the composer's area above the capsule row; the edge stays at the row.
+    page.locator("#chat-file-input").set_input_files({"name": "sample.txt", "mimeType": "text/plain", "buffer": b"example"})
+    page.wait_for_selector(".attach-badge")
+    page.evaluate(settle)
+    assert_edge_at_capsules(page, "a staged attachment")
+    # So does a staged reply.
+    page.locator("#chat-messages .chat-message-reply").last.evaluate("b => b.click()")
+    page.get_by_role("button", name="Cancel reply", exact=True).wait_for()
+    page.evaluate(settle)
+    assert_edge_at_capsules(page, "a staged reply")
+
+
+# In Telegram's fullscreen the room's edge is full behind the phone clock (the top safe area) and clears only through
+# the capsules' band below it: over a white feed the column under the clock is one shade from the screen's top to the
+# capsules' upper side, and white again from their lower side.
+@pytest.mark.parametrize("project_chat", [("chromium", "dark", 390)], indirect=True)
+def test_a_rooms_edge_is_full_behind_the_telegram_clock(project_chat):
+    from io import BytesIO
+    from PIL import Image
+    page = project_chat["page"]
+    page.evaluate("""() => { const h = document.documentElement; h.dataset.telegramFullscreen = 'active';
+        h.style.setProperty('--tg-safe-area-inset-top', '47px'); h.style.setProperty('--tg-content-safe-area-inset-top', '46px'); }""")
+    page.add_style_tag(content="#chat-messages { background: #fff !important; } #chat-messages > * { visibility: hidden !important; }")
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200))))")
+    found = page.evaluate(EDGE_EXTENT) | page.evaluate("""() => { const c = [...document.querySelectorAll('#page-chat > .chat-page-header .rw-trigger')]
+        .filter(n => n.getClientRects().length).map(n => n.getBoundingClientRect()); return {capsulesTop: Math.min(...c.map(r => r.top))}; }""")
+    assert found["capsulesTop"] >= 47, found
+    shot = Image.open(BytesIO(page.screenshot())).convert("L")
+    scale = shot.width / 390
+    shade = lambda y: shot.getpixel((int(10 * scale), int(y * scale)))  # noqa: E731 - the column at the screen's edge
+    under_clock = [shade(y) for y in range(0, 47, 4)]
+    assert max(under_clock) - min(under_clock) <= 2 and under_clock[0] < 200, ('full behind the clock', under_clock)
+    assert shade(found["capsulesTop"] - 2) == under_clock[0], ('still full down to the capsules', found)
+    assert shade(found["capsulesEnd"] + 2) >= 250, ('clear below the capsules', found)
