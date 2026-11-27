@@ -83,7 +83,7 @@ from ouroboros.server_liveness import (  # noqa: F401
     _chat_turn_wedged,
     _start_supervisor_liveness_watchdog,
     _supervisor_loop_stalled,
-    drain_worker_events, flush_budget_projection, publish_supervisor_load,
+    drain_worker_events, publish_supervisor_load,
 )
 from ouroboros.server_liveness import BOOT, start_boot_coordinator, wait_event
 from ouroboros.server_maintenance import (  # noqa: F401
@@ -91,7 +91,7 @@ from ouroboros.server_maintenance import (  # noqa: F401
     _migrate_startup_cancel_latches,
     _startup_worker_pids,
     _installed_skill_names,
-    _periodic_supervisor_maintenance,
+    _periodic_supervisor_maintenance, dispatch_display_projections,
     _prune_delegated_snapshots,
     _prune_worktrees,
     _reconcile_delegated_runs,
@@ -830,7 +830,7 @@ def _run_supervisor(settings: dict) -> None:
             )
 
             if _restart_requested.is_set():
-                flush_budget_projection(_event_ctx)  # this turn's drained llm_usage still reaches state.json
+                dispatch_display_projections(_event_ctx)  # this turn's drained llm_usage still reaches state.json, off the loop
                 break
 
             # WS3: intake new bridge messages EARLY — before the heavy steps
@@ -839,13 +839,11 @@ def _run_supervisor(settings: dict) -> None:
             # where no task_received fired for hours until a full restart). A drain that stopped
             # at its bound only polls: the idle wait would steal its backlog's second.
             offset = _process_bridge_updates(bridge, offset, _event_ctx, timeout=0 if backlog else 1)
-            # The one budget-projection write of this turn (llm_usage events only mark it dirty).
-            flush_budget_projection(_event_ctx)
 
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "maintenance"), time.monotonic()
             enforce_due_task_timeouts(lambda: pending_idle_observations(get_event_q()))
-            _periodic_supervisor_maintenance(  # includes the off-loop schedule duty
-                _last_custody_reap, _last_review_job_reconcile, stop_event=_watchdog_stop,
+            _periodic_supervisor_maintenance(  # starts the off-loop duties, the turn's display projections last
+                _last_custody_reap, _last_review_job_reconcile, stop_event=_watchdog_stop, ctx=_event_ctx,
             )
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "assign"), time.monotonic()
             # The requester's finalization starts the drain; its accepted intent

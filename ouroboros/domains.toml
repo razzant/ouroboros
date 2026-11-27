@@ -1077,6 +1077,7 @@ D20 = "Presence"
 "ouroboros/server_liveness.py" = "D11"
 "ouroboros/server_boot.py" = "D11"
 "ouroboros/server_maintenance.py" = "D11"
+"ouroboros/display_projections.py" = "D11"  # the supervisor's display and diagnostic projections, written off its loop by one host duty
 "ouroboros/maintenance.py" = "D11"
 "ouroboros/maintenance_retirement.py" = "D11"
 "ouroboros/saved_state_retirement.py" = "D11"  # the maintenance child's retirement of saved states for exact return

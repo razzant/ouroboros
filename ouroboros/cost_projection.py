@@ -26,7 +26,7 @@ import math
 import pathlib
 import threading
 import time
-from typing import Any, Dict, Literal, Mapping, Optional, TypedDict
+from typing import Any, Dict, Literal, Mapping, NamedTuple, Optional, Tuple, TypedDict
 
 log = logging.getLogger(__name__)
 
@@ -333,7 +333,7 @@ def live_root_cost_projection(
     """Return a non-final root-subtree projection: two reads (custody, then usage).
 
     ``{}`` means no figure: a non-root task, or a root with no attributable
-    subtree rows (absent, not zero). Consumers: ``LiveRootCosts.refresh`` (the
+    subtree rows (absent, not zero). Consumers: ``LiveRootCosts.read`` (the
     figure root heartbeats carry) and the live cost in ``gateway.history``;
     ``supervisor.events`` re-exports it.
     """
@@ -351,8 +351,8 @@ def live_root_cost_projection(
     try:
         from ouroboros.usage_accounting import usage_breakdown
 
-        # The supervisor's usage flush runs this on its thread (``LiveRootCosts``): a contended
-        # ledger lock serves the last validated snapshot, it never parks the loop behind money.
+        # The display-projection duty runs this off the loop (``LiveRootCosts.read``): a contended
+        # ledger lock serves the last validated snapshot, it never parks the duty behind money.
         usage = usage_breakdown(
             pathlib.Path(task.get("budget_drive_root") or drive_root),
             root_task_id=str(lineage["root_task_id"] or task_id), allow_stale=True, custody_root=drive_root, include_custody=True,
@@ -401,6 +401,15 @@ def live_root_cost_projection(
     return with_cost_aliases(projection)
 
 
+class DueRoot(NamedTuple):
+    """One root whose figure is read again: its memo key, the RUNNING task id carrying it and that task's
+    projection inputs (``_projection_inputs``), all taken on the supervisor loop."""
+
+    key: tuple
+    carrier: str
+    task: Dict[str, Any]
+
+
 class LiveRootCosts:
     """The cost figure a root heartbeat carries, read again only when that root's money moved.
 
@@ -416,9 +425,14 @@ class LiveRootCosts:
       the held figure of a root, ``{}`` for a child, for a root without attributable rows and for a
       root not read yet (absent, never zero). A root it meets for the first time in this server
       generation is marked, so its figure exists from the next beat on;
-    * ``refresh(running, drive_root)``: the supervisor's one usage flush per loop turn, after bridge
-      intake (``server_liveness.flush_budget_projection``), reads only the marked roots that still
-      run and forgets roots that left RUNNING. Nothing marked, nothing read.
+    * ``take(running, drive_root)``, on the supervisor loop: the marked roots of that drive whose read
+      is due, each with the RUNNING task carrying it and a copy of the task fields the projection
+      reads (``DueRoot``), and the roots that left RUNNING forgotten. Nothing marked, nothing taken;
+    * ``read(roots, drive_root)``, off the loop (``display_projections``, the one host duty that
+      reads them): each taken root's projection, published while the root's carrier is still the one
+      it was read for (a carrier that changed meanwhile has the root read again for it). A mark made
+      during the read leaves the root due for the next pass; ``restore(roots)`` puts back the roots
+      of a pass that could not start.
 
     Delegated-run custody is read with the usage in the same projection, so a run that started or
     settled with no model call of the subtree since reaches the figure with the subtree's next usage
@@ -445,7 +459,7 @@ class LiveRootCosts:
         key = self._key(drive_root, root_task_id)
         if key[1]:
             with self._lock:
-                self._due[key] = 0.0  # a change is read at the next flush, whatever retry was pending
+                self._due[key] = 0.0  # a change is read by the next pass, whatever retry was pending
 
     def fields(self, drive_root: Any, task_id: str, task: Mapping[str, Any],
                event: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
@@ -465,11 +479,9 @@ class LiveRootCosts:
                 self._due.setdefault(key, 0.0)
         return dict(figure or {})
 
-    def refresh(self, running: Any, drive_root: Any) -> None:
+    def take(self, running: Any, drive_root: Any) -> Tuple[DueRoot, ...]:
         if drive_root is None or not isinstance(running, Mapping):
-            return
-        from ouroboros.runtime_limits import BUDGET_PROJECTION_RETRY_SEC
-
+            return ()
         now, root = time.monotonic(), str(drive_root)
         with self._lock:
             due = [key for key, at in self._due.items() if key[0] == root and at <= now]
@@ -481,21 +493,53 @@ class LiveRootCosts:
                     self._carriers.pop(key, None)
                     self._figures.pop(key, None)
             carriers = {key: self._carriers.get(key) for key in due}
+        taken = []
         for key, carrier in carriers.items():
             meta = running.get(carrier) if carrier else None
             task = meta.get("task") if isinstance(meta, dict) else None
-            if not isinstance(task, dict):
-                continue  # no heartbeat carries this root here: nothing to read for
-            projection = live_root_cost_projection(carrier, task, {}, drive_root)
+            if isinstance(task, dict):  # else no heartbeat carries this root here: nothing to read for
+                taken.append(DueRoot(key, str(carrier), _projection_inputs(task)))
+        return tuple(taken)
+
+    def read(self, roots: Tuple[DueRoot, ...], drive_root: Any) -> None:
+        from ouroboros.runtime_limits import BUDGET_PROJECTION_RETRY_SEC
+
+        for due in roots:
+            projection = live_root_cost_projection(due.carrier, due.task, {}, drive_root)
             failed = projection.get("cost_accounting_status") == "unavailable"
             with self._lock:
-                if not (failed and key in self._figures):
-                    self._figures[key] = projection
+                carrier = self._carriers.get(due.key)
+                if carrier != due.carrier:
+                    if carrier is not None:  # another task carries the root now: it is read again for that one
+                        self._due.setdefault(due.key, 0.0)
+                    continue
+                if not (failed and due.key in self._figures):
+                    self._figures[due.key] = projection
                 if failed:
-                    self._due.setdefault(key, now + BUDGET_PROJECTION_RETRY_SEC)
+                    self._due.setdefault(due.key, time.monotonic() + BUDGET_PROJECTION_RETRY_SEC)
+
+    def restore(self, roots: Tuple[DueRoot, ...]) -> None:
+        with self._lock:
+            for due in roots:
+                self._due.setdefault(due.key, 0.0)
 
 
-# The server process's one memo (the supervisor thread marks, reads and flushes it).
+# The lineage fields ``live_root_cost_projection`` reads, at the task's top level and in its metadata.
+_LINEAGE_FIELDS = ("root_task_id", "parent_task_id", "delegation_role", "original_task_id", "timeout_retry_from")
+
+
+def _projection_inputs(task: Mapping[str, Any]) -> Dict[str, Any]:
+    """A copy of what the projection reads from a RUNNING task: its lineage (top level and the metadata copy)
+    and its budget drive root, never its text or the rest of its metadata. Taken on the supervisor loop, so
+    the reader off the loop never touches the live RUNNING entry."""
+    meta = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    inputs: Dict[str, Any] = {key: task[key] for key in (*_LINEAGE_FIELDS, "budget_drive_root") if key in task}
+    inputs["metadata"] = {key: meta[key] for key in _LINEAGE_FIELDS if key in meta}
+    return inputs
+
+
+# The server process's one memo: the supervisor thread marks it and takes the due roots, the
+# display-projection duty reads them and publishes the figures.
 LIVE_ROOT_COSTS = LiveRootCosts()
 
 
@@ -652,6 +696,7 @@ __all__ = [
     "COST_SCOPE_OWN",
     "COST_SCOPE_ROOT_TREE",
     "CostPresentation",
+    "DueRoot",
     "LIVE_ROOT_COSTS",
     "LiveRootCosts",
     "build_cost_presentation",

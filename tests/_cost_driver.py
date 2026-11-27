@@ -554,13 +554,14 @@ def _event_ctx(srv: Any) -> Any:
     from ouroboros.utils import append_jsonl
     from supervisor import queue, workers
     from supervisor.message_bus import send_with_budget, try_get_bridge
-    from supervisor.state import load_state, save_state, update_state
+    from supervisor.state import load_state, save_state, update_budget_from_usage, update_state
     from supervisor.worker_chat_lane import handle_chat_direct
 
     return SimpleNamespace(
         DRIVE_ROOT=srv.DATA_DIR, REPO_DIR=srv.REPO_DIR, bridge=try_get_bridge(), WORKERS=workers.WORKERS,
         PENDING=queue.PENDING, RUNNING=queue.RUNNING, send_with_budget=send_with_budget,
         load_state=load_state, save_state=save_state, update_state=update_state,
+        update_budget_from_usage=update_budget_from_usage,
         append_jsonl=append_jsonl, enqueue_task=queue.enqueue_task, persist_queue_snapshot=queue.persist_queue_snapshot,
         sort_pending=queue.sort_pending, consciousness=None, handle_chat_direct=handle_chat_direct,
         request_restart=lambda *_a, **_k: None, kill_workers=lambda *_a, **_k: None,
@@ -839,15 +840,19 @@ def _duty_rows(sm: Any) -> List[Any]:
             for name, latch, runner in legacy]
 
 
-def _one_pass(sm: Any, duty: Any, root: pathlib.Path, stop: threading.Event) -> None:
-    """One pass of a declared duty on this thread, under its latch, with the arguments the tick gives it."""
+def _one_pass(sm: Any, duty: Any, root: pathlib.Path, stop: threading.Event, ctx: Any = None) -> None:
+    """One pass of a declared duty on this thread, under its latch, with the arguments the tick gives it
+    (the display projections: the snapshot the tick takes from the loop's event context ``ctx``)."""
     run, latch = duty.run, duty.latch
     if run is sm._tick_maintenance_child:
         run()
         return
     if not latch.acquire(blocking=False):
         raise RuntimeError(f"{duty.name}: its latch is held")
-    if run is sm._run_terminal_duty:
+    projections = sys.modules.get("ouroboros.display_projections")  # absent from an older measured body
+    if projections is not None and run is projections.project:
+        run(projections.take(ctx), latch)
+    elif run is sm._run_terminal_duty:
         run(root, duty.name, latch, stop)
     elif run is sm._run_periodic_reconcile_sweep:
         run([0.0], stop, latch)
@@ -942,9 +947,9 @@ def _body_pass(runtime: Any, tick: Callable[..., Any]) -> None:
         concurrent.futures.wait(jobs, timeout=300.0)
 
 
-def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str, Callable[[], str]]:
+def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any], ctx: Any = None) -> Dict[str, Callable[[], str]]:
     """One addressed input change per duty, after whose arrival the duty has work again (the live set's own six in
-    tests/_live_set.py). Each returns what it changed."""
+    tests/_live_set.py). Each returns what it changed; ``ctx`` is the event context the duties' passes read."""
     from ouroboros import delegate_custody as custody
     from ouroboros import owner_quiz, store
     from ouroboros.cancel_intents import request_cancel
@@ -1030,9 +1035,17 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
         (root / CENSUS_FILE).write_text("{}", encoding="utf-8")
         return "a torn census file and no engine descriptor"
 
+    def usage_event() -> str:
+        from supervisor.events_budget import _handle_llm_usage
+
+        _handle_llm_usage({"type": "llm_usage", "task_id": "cur-owes-projection", "root_task_id": "cur-owes-projection",
+                           "usage": {"prompt_tokens": 1, "cost": 0.01}}, ctx)
+        return "one llm_usage event handled: the compatibility budget projection is marked"
+
     from tests._live_set import companions as live_set_companions
 
     return {"delegated-body": body, "abandoned_usage_reconciliation": late_body, "custody-maintenance": owed_projection,
+            "display-projections": usage_event,
             "reconcile-maintenance": owed_mark, "maintenance-child": child_job, "question_delivery_replay": question,
             "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel, "subscription-census": census_file,
             "wal_checkpoint_look": wal_backlog, **live_set_companions(root)}
@@ -1086,7 +1099,8 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
 
     stop = threading.Event()
     k = int(facts.get("k") or 1)
-    companions = _companions(srv, root, facts)
+    ctx = _event_ctx(srv)
+    companions = _companions(srv, root, facts, ctx)
     duties = result.setdefault("duties", {})
     runtime, park, clock = body_runtime(root), stubs["park"], stubs["clock"]
     if runtime is None:
@@ -1151,7 +1165,7 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
     for duty in _duty_rows(sm):
         if duty.name == "wal_checkpoint_look":
             settle_logs(root)
-        passes(duty.name, lambda duty=duty: _one_pass(sm, duty, root, stop),
+        passes(duty.name, lambda duty=duty: _one_pass(sm, duty, root, stop, ctx),
                child.request if duty.name == "maintenance-child" else (lambda: None))
 
 

@@ -925,6 +925,21 @@ def _reset_custody_memo_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _reset_display_projection_memory_between_tests(monkeypatch):
+    """The display-projection duty's process memory belongs to the test that made it: the stall rows a
+    watchdog queued and an after-update observation not yet published (an owner turn's first dispatch).
+    Left behind, they make the next test's maintenance tick find that duty due and start a pass that
+    test never set up (``display_projections``). Read from ``sys.modules``: a test that never imported
+    them has nothing to reset, and importing them here would load the server's process facts."""
+    from collections import deque
+
+    if (projections := sys.modules.get("ouroboros.display_projections")) is not None:
+        monkeypatch.setattr(projections, "_ROWS", deque())
+    if (facts := sys.modules.get("ouroboros.update_generation_facts")) is not None:
+        monkeypatch.setattr(facts, "_pending", False)
+
+
+@pytest.fixture(autouse=True)
 def _unlatch_supervisor_event_bus_between_tests(monkeypatch):
     """A TestClient lifespan runs the server shutdown, whose ``workers.shutdown_event_q()``
     latches ``_EVENT_Q_SHUTDOWN`` for the rest of the xdist worker; the next test in that

@@ -255,6 +255,7 @@ def restart_current_process(
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
         if _restart_stop_requested:
             return  # the watcher parks in exit_after_shutdown; Panic keeps its thread and writes
+        _drain_projections()  # the exec ends this image as an exit would
         try:
             os.execvpe(sys.executable, argv, env)
             return  # exec does not return; only a test double of it reaches this line
@@ -351,10 +352,12 @@ def exit_after_shutdown(exit_code: int) -> None:
     interrupted capture stays owed to the next generation. An accepted Panic
     parks the caller until its own flag/control writes and exit finish; Panic
     never waits for this caller. Ordinary imported main()/ASGI shutdown returns.
-    Before the exit the output relay hands its queue to a reading launcher, bounded inside the
-    ordinary stop's own deadline (``finish_output_relay``); Panic and the backstops never do.
+    Before the exit the display projections' last pass and then the output relay's handover to a
+    reading launcher finish, each bounded inside the ordinary stop's own deadline (``_drain_projections``,
+    ``finish_output_relay``); Panic and the backstops never wait for either.
     """
     if not _restart_stop_requested:
+        _drain_projections()
         try:
             from ouroboros.owned_shutdown import stop_deadline
             from ouroboros.process_logging import finish_output_relay
@@ -372,6 +375,18 @@ def exit_after_shutdown(exit_code: int) -> None:
 
 # Compatibility for existing restart callers.
 exit_after_restart = exit_after_shutdown
+
+
+def _drain_projections() -> None:
+    """The display-projection duty's last pass before this process image ends (``display_projections.drain``:
+    at most half of the stop grace left); it never stands between the exit and the process's end."""
+    try:
+        from ouroboros.display_projections import drain
+        from ouroboros.owned_shutdown import stop_deadline
+
+        drain(stop_deadline())
+    except Exception:
+        pass
 
 
 def execute_panic_stop(

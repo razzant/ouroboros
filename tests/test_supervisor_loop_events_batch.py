@@ -1,13 +1,12 @@
-"""The supervisor loop's events phase is BOUNDED and pays one budget-projection write per turn.
+"""The supervisor loop's events phase is BOUNDED.
 
-Two starvation classes of the same live incident: a producer that keeps the worker
-event queue non-empty used to hold the loop inside its drain until the queue was
-empty, so an owner message waited behind every queued event; and every ``llm_usage``
-event paid its own ledger render plus STATE_LOCK write. One events pass now drains at
-most N events or T seconds (``runtime_limits``), FIFO, the remainder next turn; bridge
-intake runs every turn and only polls when the pass stopped at its bound (its 1 s wait
-would idle a turn that has work); and the compatibility projection is written once per
-turn after intake, kept dirty on failure and retried no more often than a bounded interval.
+A starvation class of a live incident: a producer that keeps the worker event queue
+non-empty used to hold the loop inside its drain until the queue was empty, so an owner
+message waited behind every queued event. One events pass now drains at most N events or
+T seconds (``runtime_limits``), FIFO, the remainder next turn; bridge intake runs every
+turn and only polls when the pass stopped at its bound (its 1 s wait would idle a turn
+that has work). The compatibility projection the drained ``llm_usage`` events mark is
+written once per marked pass, off the loop (tests/test_display_projections.py).
 Every guard is pinned in both directions.
 """
 
@@ -139,69 +138,6 @@ def test_a_dequeued_send_is_released_after_its_handler_returned_or_raised(monkey
         assert sl.drain_worker_events(plain, ctx, _liveness(), on_restart=lambda evt, c: None) is False
     assert ctx.dispatched == [1, 2, 4, 5]
     assert sum("Delivery membership release failed" in rec.message for rec in caplog.records) == 1
-
-
-def test_flush_writes_once_when_dirty_and_clears_only_on_success(monkeypatch):
-    writes = []
-    ctx = SimpleNamespace(budget_projection_dirty=True,
-                          update_budget_from_usage=lambda usage: writes.append(usage) or True)
-
-    sl.flush_budget_projection(ctx)
-    assert writes == [{}] and ctx.budget_projection_dirty is False
-    sl.flush_budget_projection(ctx)
-    assert writes == [{}], "a clean context pays nothing"
-
-    monkeypatch.setattr(sl, "BUDGET_PROJECTION_RETRY_SEC", 30.0)
-    clock = [1000.0]
-    monkeypatch.setattr(sl.time, "monotonic", lambda: clock[0])
-    outcomes = [False, RuntimeError("ledger unreadable"), True]
-
-    def writer(usage):
-        writes.append(usage)
-        outcome = outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-    ctx = SimpleNamespace(budget_projection_dirty=True, update_budget_from_usage=writer)
-    sl.flush_budget_projection(ctx)
-    assert len(writes) == 2 and ctx.budget_projection_dirty is True, "a refused write keeps the flag"
-    sl.flush_budget_projection(ctx)
-    assert len(writes) == 2, "no retry inside the bounded interval"
-    clock[0] += 30.0
-    sl.flush_budget_projection(ctx)
-    assert len(writes) == 3 and ctx.budget_projection_dirty is True, "an exception keeps the flag too"
-    clock[0] += 30.0
-    sl.flush_budget_projection(ctx)
-    assert len(writes) == 4 and ctx.budget_projection_dirty is False and not outcomes
-
-
-def test_n_llm_usage_events_in_one_turn_produce_one_write_after_intake(monkeypatch, tmp_path):
-    """N events in one drain -> one writer call, after bridge intake; the event
-    rows carry ``deferred``."""
-    import json
-
-    from supervisor import events as events_mod
-
-    (tmp_path / "logs").mkdir()
-    order = []
-    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, dispatched=[], RUNNING={},
-                          bridge=SimpleNamespace(push_log=lambda payload: None),
-                          update_budget_from_usage=lambda usage: order.append("write") or True)
-    monkeypatch.setattr(events_mod, "dispatch_event",
-                        lambda evt, c: events_mod._handle_llm_usage(evt, c))
-    event_q: "queue.Queue" = queue.Queue()
-    for n in range(8):
-        event_q.put({"type": "llm_usage", "task_id": f"t{n}", "usage": {"prompt_tokens": 1, "cost": 0.01}})
-
-    sl.drain_worker_events(event_q, ctx, _liveness(), on_restart=lambda evt, c: None)
-    order.append("intake")
-    sl.flush_budget_projection(ctx)
-
-    assert order == ["intake", "write"]
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 8 and {row["projection_update_status"] for row in rows} == {"deferred"}
-    assert ctx.budget_projection_dirty is False
 
 
 class _InboxBridge:

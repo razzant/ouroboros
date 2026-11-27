@@ -481,11 +481,11 @@ def test_display_read_held_off_by_a_commit_is_unavailable_never_zero(data_root):
 
 
 def test_loop_handlers_survive_an_unavailable_read_without_publishing_a_zero(data_root, supervisor_state, monkeypatch):
-    from ouroboros import server_liveness
+    from ouroboros import display_projections
     from ouroboros.cost_projection import live_root_cost_projection
     from supervisor import events_budget
 
-    monkeypatch.setattr(server_liveness, "BUDGET_PROJECTION_RETRY_SEC", 0.0)  # retry on the very next turn
+    monkeypatch.setattr(display_projections, "BUDGET_PROJECTION_RETRY_SEC", 0.0)  # retry on the very next pass
     _spend(data_root, 0.40)
     supervisor_state.save_state(dict(supervisor_state.load_state(), spent_usd=7.5))
 
@@ -499,7 +499,7 @@ def test_loop_handlers_survive_an_unavailable_read_without_publishing_a_zero(dat
     with _held_exclusive(data_root):
         heartbeat, heartbeat_sec = _timed(lambda: live_root_cost_projection("root", task, {}, data_root))
         events_budget._handle_llm_usage(dict(event), ctx)
-        _, usage_sec = _timed(lambda: server_liveness.flush_budget_projection(ctx))  # the turn's one write
+        _, usage_sec = _timed(lambda: display_projections.project(display_projections.take(ctx)))  # the one write
     assert heartbeat_sec < _MAX_READ_SEC and usage_sec < _MAX_READ_SEC
     assert heartbeat["cost_accounting_status"] == "unavailable"
     assert heartbeat["accounted_upper_bound_usd_with_children"] is None  # unknown, never zero
@@ -509,7 +509,7 @@ def test_loop_handlers_survive_an_unavailable_read_without_publishing_a_zero(dat
 
     # The working case stays quiet: with the lock free the same handlers publish real money.
     events_budget._handle_llm_usage(dict(event), ctx)
-    server_liveness.flush_budget_projection(ctx)
+    display_projections.project(display_projections.take(ctx))
     assert _llm_usage_rows(data_root)[-1]["projection_update_status"] == "deferred"
     assert ctx.budget_projection_dirty is False
     assert supervisor_state.load_state()["spent_usd"] == pytest.approx(0.40)

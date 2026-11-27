@@ -74,7 +74,7 @@ def test_root_heartbeats_read_no_store_and_the_flush_reads_only_a_changed_root(d
     from ouroboros import delegate_custody as custody
     from ouroboros import usage_store
     from ouroboros.projects_registry import project_chat_for_task_tree
-    from ouroboros.server_liveness import flush_budget_projection
+    from ouroboros.display_projections import project, take
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from supervisor.events_budget import _handle_llm_usage
     from supervisor.events_worker_reports import _handle_task_heartbeat
@@ -110,7 +110,7 @@ def test_root_heartbeats_read_no_store_and_the_flush_reads_only_a_changed_root(d
     # First sight: no figure yet (absent, never zero) and still no read on the drain.
     first = beat("root")
     assert "accounted_upper_bound_usd_with_children" not in first and "cost_accounting_status" not in first
-    flush_budget_projection(ctx)
+    project(take(ctx))
     assert len(reads.breakdowns) == 1 and reads.breakdowns[0]["include_custody"] is True
 
     held = beat("root")
@@ -123,14 +123,14 @@ def test_root_heartbeats_read_no_store_and_the_flush_reads_only_a_changed_root(d
     # Rest law: beats and flushes over unchanged money read nothing.
     for _ in range(3):
         beat("root")
-        flush_budget_projection(ctx)
+        project(take(ctx))
     assert len(reads.breakdowns) == 1
 
     # A real change: the child's usage row marks its root, and exactly one read follows.
     money._settle(data_root, cost=0.75, cost_final=True, task_id="child", root_task_id="root")
     _handle_llm_usage({"type": "llm_usage", "task_id": "child", "usage": {"prompt_tokens": 1, "cost": 0.75}}, ctx)
-    flush_budget_projection(ctx)
-    flush_budget_projection(ctx)
+    project(take(ctx))
+    project(take(ctx))
     assert len(reads.breakdowns) == 2
     assert beat("root")["accounted_upper_bound_usd_with_children"] == pytest.approx(2.0)
 
@@ -138,7 +138,7 @@ def test_root_heartbeats_read_no_store_and_the_flush_reads_only_a_changed_root(d
     del running["root"]
     _handle_llm_usage({"type": "llm_usage", "task_id": "child", "root_task_id": "root",
                        "usage": {"prompt_tokens": 1, "cost": 0.0}}, ctx)
-    flush_budget_projection(ctx)
+    project(take(ctx))
     assert len(reads.breakdowns) == 2
 
 
@@ -185,17 +185,56 @@ def test_a_failed_figure_read_keeps_the_last_figure_and_retries_no_sooner_than_t
     clock = [1000.0]
     monkeypatch.setattr(cost_projection.time, "monotonic", lambda: clock[0])
     assert memo.fields(tmp_path, "root", task) == {}
-    memo.refresh(running, tmp_path)
+    memo.read(memo.take(running, tmp_path), tmp_path)
     assert memo.fields(tmp_path, "root", task)["accounted_upper_bound_usd_with_children"] == 3.0
     memo.mark(tmp_path, "root")
-    memo.refresh(running, tmp_path)  # the failed read
+    memo.read(memo.take(running, tmp_path), tmp_path)  # the failed read
     assert memo.fields(tmp_path, "root", task)["accounted_upper_bound_usd_with_children"] == 3.0
     answers.append(OSError("not read inside the bound"))
-    memo.refresh(running, tmp_path)
-    assert len(answers) == 1, "inside the retry bound nothing is read again"
+    assert memo.take(running, tmp_path) == (), "inside the retry bound nothing is due again"
+    assert len(answers) == 1
     from ouroboros.runtime_limits import BUDGET_PROJECTION_RETRY_SEC
 
     clock[0] += BUDGET_PROJECTION_RETRY_SEC
-    memo.refresh(running, tmp_path)
+    memo.read(memo.take(running, tmp_path), tmp_path)
     assert answers == [], "after the bound the root is read again"
     assert memo.fields(tmp_path, "root", task)["accounted_upper_bound_usd_with_children"] == 3.0
+
+
+def test_a_mark_during_a_read_is_read_again_and_a_figure_goes_only_to_the_carrier_it_was_read_for(tmp_path, monkeypatch):
+    """The loop takes the due roots and the display-projection duty reads them, while the loop keeps marking
+    and heartbeats keep naming carriers. A mark made during a read leaves the root due for the next pass; a
+    root whose carrier changed meanwhile (a hard-timeout retry runs under a fresh physical id) gets nothing
+    from the old carrier's read and is read again for the new one."""
+    from ouroboros import cost_projection, usage_accounting
+
+    memo = cost_projection.LiveRootCosts()
+    first = {"id": "root", "type": "task", "root_task_id": "root"}
+    retry = {"id": "root-retry", "type": "task", "root_task_id": "root", "delegation_role": "root",
+             "original_task_id": "root", "timeout_retry_from": "root"}
+    reads, during = [], []
+
+    def read(_root, **_kwargs):
+        reads.append(_kwargs.get("root_task_id"))
+        while during:
+            during.pop(0)()
+        return {"accounted_usd": float(len(reads)), "attempt_counts": {"settled": 1}, "priced_rows": 1,
+                "tracked_nonfinal_rows": 0, "accounting_open_rows": 0}
+
+    def figure(task_id, task):
+        return memo.fields(tmp_path, task_id, task).get("accounted_upper_bound_usd_with_children")
+
+    monkeypatch.setattr(usage_accounting, "usage_breakdown", read)
+    assert figure("root", first) is None  # first sight: due
+    during.append(lambda: memo.mark(tmp_path, "root"))  # the subtree's usage arrives during the read
+    memo.read(memo.take({"root": {"task": first}}, tmp_path), tmp_path)
+    assert figure("root", first) == 1.0
+    (due,) = memo.take({"root": {"task": first}}, tmp_path)  # the mark made during the read: due again
+    during.append(lambda: memo.fields(tmp_path, "root-retry", retry))  # the retry's heartbeat names its carrier
+    memo.read((due,), tmp_path)
+    assert figure("root-retry", retry) == 1.0, "the old carrier's read published nothing"
+    (due,) = memo.take({"root-retry": {"task": retry}}, tmp_path)
+    assert (due.carrier, due.task["timeout_retry_from"]) == ("root-retry", "root")
+    memo.read((due,), tmp_path)
+    assert figure("root-retry", retry) == 3.0 and reads == ["root"] * 3
+    assert memo.take({"root-retry": {"task": retry}}, tmp_path) == (), "read for its carrier: the root rests"

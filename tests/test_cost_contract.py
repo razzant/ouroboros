@@ -824,6 +824,7 @@ COMPANION_COUNTERS = {
     "post_task_synthesis_recovery": ("writes",),
     "subscription-census": ("open",),  # the engine's descriptor, read once a census file exists
     "wal_checkpoint_look": ("child_spawn",),  # the checkpoint lane's child, once a log holds SQLite's own threshold
+    "display-projections": ("replace",),  # state.json and its last-good copy, written for the marked budget
 }
 
 

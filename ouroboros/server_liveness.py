@@ -22,9 +22,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
-from ouroboros.runtime_limits import (
-    BUDGET_PROJECTION_RETRY_SEC, SUPERVISOR_EVENT_BATCH_MAX_EVENTS, SUPERVISOR_EVENT_BATCH_MAX_SEC,
-)
+from ouroboros.runtime_limits import SUPERVISOR_EVENT_BATCH_MAX_EVENTS, SUPERVISOR_EVENT_BATCH_MAX_SEC
 from ouroboros.server_process import DATA_DIR, log, _restart_requested
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -345,42 +343,6 @@ def _release_delivery(event_q: Any, evt: Any) -> None:
             _RELEASE_FAILURES_SEEN.add(failure_class)
             log.warning("Delivery membership release failed (%s); replay reads it as unknown",
                         failure_class, exc_info=True)
-
-
-def flush_budget_projection(ctx: Any) -> None:
-    """The usage-driven projections of one loop turn, paid once, AFTER bridge intake.
-
-    ``llm_usage`` events only mark: the root they name in ``LIVE_ROOT_COSTS``, whose
-    marked roots are read again here (the cost figure root heartbeats carry, so a
-    heartbeat itself reads no store), and ``ctx.budget_projection_dirty``. This is the
-    one place that pays the compatibility budget-projection ledger render and the
-    STATE_LOCK write. The flag clears only when the writer returns True; a False
-    (unknown or stale ledger marker) or an exception keeps it dirty and the next attempt
-    waits ``BUDGET_PROJECTION_RETRY_SEC``, logged once per attempt, so a frozen-marker
-    install does not render every turn."""
-    from ouroboros.cost_projection import LIVE_ROOT_COSTS
-
-    try:
-        LIVE_ROOT_COSTS.refresh(getattr(ctx, "RUNNING", None), getattr(ctx, "DRIVE_ROOT", None))
-    except Exception:
-        log.warning("Live root cost figures not refreshed this turn", exc_info=True)
-    if not getattr(ctx, "budget_projection_dirty", False):
-        return
-    now = time.monotonic()
-    if now < float(getattr(ctx, "budget_projection_retry_at", 0.0) or 0.0):
-        return
-    try:
-        written = ctx.update_budget_from_usage({}) is not False
-    except Exception:
-        written = False
-        log.error("Compatibility budget projection update failed; retrying in %.0fs",
-                  BUDGET_PROJECTION_RETRY_SEC, exc_info=True)
-    else:
-        if not written:
-            log.warning("Compatibility budget projection not written (ledger marker unknown or stale); "
-                        "retrying in %.0fs", BUDGET_PROJECTION_RETRY_SEC)
-    ctx.budget_projection_dirty = not written
-    ctx.budget_projection_retry_at = 0.0 if written else now + BUDGET_PROJECTION_RETRY_SEC
 
 
 def _published_loop_facts(liveness: list) -> dict:

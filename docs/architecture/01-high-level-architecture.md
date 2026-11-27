@@ -357,7 +357,7 @@ ouroboros/ — agent core and shared runtime (§6)
   server_entrypoint.py — CLI parsing, data-root admission (`admit_data_root`), port binding (§2; §4)
   server_runtime.py, asgi_beat.py — startup wiring, WS liveness (§2; §4)
   server_web.py — `ServedUI` static/SPA mounts (§4)
-  server_process.py, server_liveness.py, server_boot.py, server_maintenance.py, server_restart.py — composition-root leaves: process facts, boot document/wedge detection, boot steps (§2), upkeep, shutdown restart (§9)
+  server_process.py, server_liveness.py, server_boot.py, server_maintenance.py, display_projections.py, server_restart.py — composition-root leaves: process facts, boot document/wedge detection, boot steps (§2), upkeep, display projections, shutdown restart (§9)
   server_owner_routing.py, server_routing_context.py — owner-message routing, bounded per-turn facts (§5)
   terminal_cost_reconciliation.py — late terminal usage recovery (§6 Budget tracking)
   task_continuation.py — durable review continuation state
