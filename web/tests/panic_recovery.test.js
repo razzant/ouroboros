@@ -558,8 +558,9 @@ test('the Panic notice is Main\'s: withdrawn when Main is left or covered, told 
     shown = true;
     r.panic.snapshot(census([], false, READY), 3);
     assert.equal(n.told.length, 3, 'back and still not whole: told again');
-    // Closed by the person, it is not told again in this episode.
-    n.told[2].isConnected = false;
+    // Closed by the person with its × (which only hides it: the notice is leaving, still mounted for its fade), it is not
+    // told again in this episode.
+    n.told[2].classList = { contains: (name) => name === 'is-hiding' };
     r.panic.notice.hide();
     r.panic.snapshot(census([], false, READY), 4);
     assert.equal(n.told.length, 3, 'closed by the person: not again');

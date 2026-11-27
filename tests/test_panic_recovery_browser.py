@@ -546,9 +546,24 @@ def test_an_empty_first_list_that_is_not_whole_is_one_notice(spa):
     page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast:not(.is-hiding)').length === 1")
     assert core.state_reads > reads, "Retry read the state again"
     assert page.locator(MESSAGE).count() == 0, "a list still not whole is answered by the notice, never a card"
-    core.complete = True
-    page.locator("#toast-stack .toast:not(.is-hiding)").get_by_role("button", name="Retry").click()
+    # The person closes it with its ×, which only hides it: later reads still not whole do not tell it again.
+    page.locator("#toast-stack .toast:not(.is-hiding)").get_by_role("button", name="Dismiss notice").click()
     page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast').length === 0")
-    assert page.locator(MESSAGE).count() == 0, "a whole empty list: nothing waits, nothing to say"
+    seen = core.state_reads
+    deadline = 30_000
+    while core.state_reads < seen + 2 and deadline > 0:
+        page.wait_for_timeout(250)
+        deadline -= 250
+    assert core.state_reads >= seen + 2, core.state_reads
+    assert page.locator("#toast-stack .toast").count() == 0, "closed by the person: not told again in this episode"
+    assert core.posts == [] and core.stops == [], "the × runs nothing"
+    core.complete = True
+    seen = core.state_reads
+    deadline = 30_000
+    while core.state_reads < seen + 1 and deadline > 0:
+        page.wait_for_timeout(250)
+        deadline -= 250
+    assert page.locator("#toast-stack .toast").count() == 0 and page.locator(MESSAGE).count() == 0, (
+        "a whole empty list: nothing waits, nothing to say")
     assert core.posts == [] and core.stops == []
     assert errors == []

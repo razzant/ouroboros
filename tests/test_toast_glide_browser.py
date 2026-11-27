@@ -1982,3 +1982,54 @@ def test_the_place_sheet_takes_the_notices_it_hosted_with_it(toast_ui, tmp_path)
     finally:
         save_evidence(tmp_path, name, facts)
         page.close()
+
+
+# The room's notices (room_notice.js: the history event, the Panic line, "Project list restored") use the page's stack,
+# so the page's hold behind a blocking surface and the room's own withdrawal must not fight: a notice the room withdrew
+# while held never comes back when the surface closes, and a notice the hold kept is shown again, its time running.
+HOLD_AND_SEAM = """async (step) => {
+    const { roomNotice } = await import('/static/modules/room_notice.js');
+    const facts = () => ({ notices: [...document.querySelectorAll('#toast-stack .toast:not(.is-hiding)')]
+        .map((el) => el.querySelector('.toast-words').textContent),
+        held: document.querySelector('#toast-stack')?.hasAttribute('data-held') ?? null });
+    const dialog = document.createElement('dialog');
+    dialog.textContent = 'A blocking surface.';
+    document.body.append(dialog);
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 60));
+    const out = {};
+    if (step === 'withdrawn') {
+        dialog.showModal();
+        const notice = roomNotice('Some saved history could not be loaded.', 'failed');
+        await tick();
+        out.during = facts();
+        notice.dispose();  // the room withdraws it (left or covered) while the page is held
+        dialog.close();
+    } else {
+        roomNotice('Project list restored.', 'restored');
+        await tick();
+        dialog.showModal();
+        await tick();
+        out.during = facts();
+        dialog.close();
+    }
+    dialog.remove();
+    await tick();
+    out.after = facts();
+    return out;
+}"""
+
+
+def test_the_pages_hold_and_the_rooms_withdrawal_do_not_fight(toast_ui, tmp_path):
+    page = _open(toast_ui, *WIDE)
+    name = f'toast-hold-and-seam-{toast_ui["engine"]}'
+    facts = {}
+    try:
+        facts['withdrawn'] = page.evaluate(HOLD_AND_SEAM, 'withdrawn')
+        assert facts['withdrawn']['during']['held'] is True, facts
+        assert facts['withdrawn']['after']['notices'] == [], ('withdrawn while held: not resurrected', facts)
+        facts['kept'] = page.evaluate(HOLD_AND_SEAM, 'kept')
+        assert facts['kept']['during'] == {'notices': ['Project list restored.'], 'held': True}, facts
+        assert facts['kept']['after'] == {'notices': ['Project list restored.'], 'held': False}, ('kept by the hold', facts)
+    finally:
+        save_evidence(tmp_path, name, facts)
+        page.close()
