@@ -1,0 +1,214 @@
+name: Track08 scoped tools qualification
+run-name: Track08 scoped tools ${{ github.sha }}
+on:
+  push:
+    branches: ['qa/track08-tools-806b88a7']
+permissions:
+  contents: read
+jobs:
+  verify-admission:
+    if: github.repository == 'razzant/ouroboros'
+    name: Verify admission and live size manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind to the product under test
+        shell: bash
+        env:
+          SUBJECT: '806b88a7141729fb21f5f8d5652b274852888b32'
+          SUBJECT_TREE: '2893de47dff744370e46a6b223f203003f6ab36d'
+          PRODUCT_BASE: '30cf880af1c40745b2bf3e9eaffeae7d60f3fbc7'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$SUBJECT"
+          test "$(git rev-parse "$SUBJECT^{tree}")" = "$SUBJECT_TREE"
+          test "$(git rev-parse "$SUBJECT^")" = "$PRODUCT_BASE"
+          test "$(git diff --name-only "$SUBJECT" HEAD)" = .github/workflows/qualify-track08-two-fixes.yml
+          printf 'subject=%s tree=%s tip=%s\n' "$SUBJECT" "$SUBJECT_TREE" "$GITHUB_SHA"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Check inert refusal and ordinary commands through dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          xml="$RUNNER_TEMP/track08-verify-admission.xml"
+          python -I -S scripts/safe_test.py --timeout 300 -- "$VIRTUAL_ENV/bin/python" -m pytest \
+            -o addopts= -v -ra --tb=short --junitxml="$xml" \
+            tests/test_verification_check_facts.py::test_missing_command_returns_before_target_and_safety \
+            tests/test_verification_check_facts.py::test_command_reaches_shell_guard_then_safety \
+            tests/test_verification_check_facts.py::test_non_run_kinds_still_record_after_safety \
+            tests/test_registry_guard_process.py::test_registry_dispatch_calls_process_owner_once_before_safety_and_handler \
+            tests/test_restored_readonly_zero_run.py::test_restored_readonly_definite_unrun_can_record_only_its_receipt \
+            "tests/test_completion_hold_observation.py::test_the_finish_door_returns_an_unexamined_result_and_a_red_last_check_once_each[green_check_padded]" \
+            tests/test_domain_manifest.py::test_strict_direction_matrix_matches_the_pinned_baseline \
+            tests/test_domain_manifest.py::test_cycle_groups_match_the_pinned_ceiling \
+            tests/test_registry_core.py::test_registry_core_extraction_preserves_only_proven_facades \
+            tests/test_workspace_authority_binding.py::test_registry_tool_resolution_owner_facades_preserve_identity
+          /usr/bin/python3 - "$xml" <<'PY'
+          import collections
+          import sys
+          import xml.etree.ElementTree as ET
+
+          cases = ET.parse(sys.argv[1]).findall('.//testcase')
+          names = [case.get('name', '') for case in cases]
+          observed = collections.Counter(name.split('[', 1)[0] for name in names)
+          expected = {
+              'test_missing_command_returns_before_target_and_safety': 3,
+              'test_command_reaches_shell_guard_then_safety': 3,
+              'test_non_run_kinds_still_record_after_safety': 3,
+              'test_registry_dispatch_calls_process_owner_once_before_safety_and_handler': 1,
+              'test_registry_core_extraction_preserves_only_proven_facades': 1,
+              'test_registry_tool_resolution_owner_facades_preserve_identity': 1,
+              'test_restored_readonly_definite_unrun_can_record_only_its_receipt': 3,
+              'test_the_finish_door_returns_an_unexamined_result_and_a_red_last_check_once_each': 1,
+              'test_strict_direction_matrix_matches_the_pinned_baseline': 1,
+              'test_cycle_groups_match_the_pinned_ceiling': 1,
+          }
+          print('Executed:', names)
+          if observed != expected or len(set(names)) != len(names) or any(
+              node.tag in {'failure', 'error', 'skipped'} for case in cases for node in case
+          ):
+              sys.exit('The intended ordinary cases did not all pass exactly once')
+          PY
+      - name: Check the live module-size manifest and pairwise transition
+        shell: bash
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: '30cf880af1c40745b2bf3e9eaffeae7d60f3fbc7'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          xml="$RUNNER_TEMP/track08-verify-size.xml"
+          python -I -S scripts/safe_test.py --timeout 300 -- "$VIRTUAL_ENV/bin/python" -m pytest \
+            -o addopts= -m size_ratchet -v -ra --tb=short --junitxml="$xml" \
+            tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree \
+            tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base
+          /usr/bin/python3 - "$xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          cases = ET.parse(sys.argv[1]).findall('.//testcase')
+          expected = {'test_size_ratchet_manifest_matches_live_tree',
+                      'test_size_ratchet_transition_against_explicit_base'}
+          if len(cases) != 2 or {case.get('name') for case in cases} != expected or any(
+              node.tag in {'failure', 'error', 'skipped'} for case in cases for node in case
+          ):
+              sys.exit('The manifest and pairwise size checks did not both pass')
+          print('Executed:', sorted(expected))
+          PY
+  gh-run-logs:
+    if: github.repository == 'razzant/ouroboros'
+    name: gh ${{ matrix.gh }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gh: '2.45.0'
+            sha256: '79e89a14af6fc69163aee00e764e86d5809d0c6c77e6f229aebe7a4ed115ee67'
+          - gh: '2.101.0'
+            sha256: '9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind to the product under test
+        shell: bash
+        env:
+          SUBJECT: '806b88a7141729fb21f5f8d5652b274852888b32'
+          SUBJECT_TREE: '2893de47dff744370e46a6b223f203003f6ab36d'
+          PRODUCT_BASE: '30cf880af1c40745b2bf3e9eaffeae7d60f3fbc7'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$SUBJECT"
+          test "$(git rev-parse "$SUBJECT^{tree}")" = "$SUBJECT_TREE"
+          test "$(git rev-parse "$SUBJECT^")" = "$PRODUCT_BASE"
+          test "$(git diff --name-only "$SUBJECT" HEAD)" = .github/workflows/qualify-track08-two-fixes.yml
+          printf 'subject=%s tree=%s tip=%s\n' "$SUBJECT" "$SUBJECT_TREE" "$GITHUB_SHA"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Read full and failed logs in both orders
+        shell: bash
+        env:
+          CLI_VERSION: ${{ matrix.gh }}
+          CLI_SHA256: ${{ matrix.sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          work="$RUNNER_TEMP/gh-$CLI_VERSION"
+          mkdir "$work"
+          file="gh_${CLI_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            "https://github.com/cli/cli/releases/download/v${CLI_VERSION}/${file}" -o "$work/$file"
+          (cd "$work" && printf '%s  %s\n' "$CLI_SHA256" "$file" | sha256sum -c - \
+            && tar xzf "$file" --strip-components=1 "gh_${CLI_VERSION}_linux_amd64/bin/gh")
+          export PATH="$work/bin:$PATH"
+          test "$(command -v gh)" = "$work/bin/gh"
+          test "$(gh --version | awk 'NR == 1 {print $3}')" = "$CLI_VERSION"
+          printf 'gh=%s tip=%s tree=%s\n' "$CLI_VERSION" "$GITHUB_SHA" "$(git rev-parse 'HEAD^{tree}')"
+          sha256sum tests/test_github_enterprise_host.py
+          name=test_installed_gh_reads_completed_run_logs
+          case_id="tests/test_github_enterprise_host.py::$name"
+          rc=0
+          for first in full failed; do
+            if [[ "$first" == full ]]; then second=failed; else second=full; fi
+            tag="$first-then-$second"
+            xml="$work/$tag.xml"
+            echo "::group::gh $CLI_VERSION $tag"
+            python -I -S scripts/safe_test.py --timeout 300 -- "$VIRTUAL_ENV/bin/python" -m pytest \
+              -o addopts= -v -ra --tb=short --junitxml="$xml" \
+              "$case_id[$first]" "$case_id[$second]" || rc=1
+            /usr/bin/python3 - "$xml" "$name[$first]" "$name[$second]" <<'PY' || rc=1
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path, *want = sys.argv[1:]
+          cases = ET.parse(path).findall('.//testcase')
+          got = [case.get('name') for case in cases]
+          print(f'JUnit: {got}')
+          if got != want or any(node.tag in {'failure', 'error', 'skipped'} for case in cases for node in case):
+              sys.exit(f'Expected two passing cases in order: {want}')
+          PY
+            echo '::endgroup::'
+          done
+          xml="$work/active-job.xml"
+          echo "::group::gh $CLI_VERSION completed job in active run"
+          python -I -S scripts/safe_test.py --timeout 300 -- "$VIRTUAL_ENV/bin/python" -m pytest \
+            -o addopts= -v -ra --tb=short --junitxml="$xml" \
+            tests/test_github_workflows.py::test_run_log_reads_a_completed_job_before_the_parent_run_finishes \
+            tests/test_github_workflows.py::test_run_log_refuses_a_cap_truncated_job_log_of_a_run_still_in_progress \
+            tests/test_github_workflows.py::test_run_log_cap_retains_the_first_bytes_and_says_the_log_is_longer \
+            tests/test_github_workflows.py::test_run_log_resolves_identity_retains_exact_bytes_and_shows_the_tail \
+            tests/test_github_workflows.py::test_old_job_requires_its_explicit_attempt \
+            tests/test_github_workflows.py::test_run_log_missing_run_id_refusal_keeps_the_selected_repo_in_its_one_recovery \
+            tests/test_github_workflows.py::test_list_kind_run_refusal_offers_the_same_repo_aware_recovery \
+            tests/test_github_enterprise_host.py::test_installed_gh_takes_a_completed_jobs_own_log_from_the_documented_endpoint || rc=1
+          /usr/bin/python3 - "$xml" <<'PY' || rc=1
+          import sys
+          import xml.etree.ElementTree as ET
+
+          cases = ET.parse(sys.argv[1]).findall('.//testcase')
+          expected = {'test_run_log_reads_a_completed_job_before_the_parent_run_finishes[queued]', 'test_run_log_reads_a_completed_job_before_the_parent_run_finishes[in_progress]', 'test_run_log_refuses_a_cap_truncated_job_log_of_a_run_still_in_progress', 'test_run_log_cap_retains_the_first_bytes_and_says_the_log_is_longer', 'test_installed_gh_takes_a_completed_jobs_own_log_from_the_documented_endpoint', 'test_run_log_resolves_identity_retains_exact_bytes_and_shows_the_tail', 'test_old_job_requires_its_explicit_attempt', 'test_run_log_missing_run_id_refusal_keeps_the_selected_repo_in_its_one_recovery', 'test_list_kind_run_refusal_offers_the_same_repo_aware_recovery'}
+          if len(cases) != 9 or {c.get('name') for c in cases} != expected or any(
+              n.tag in {'failure', 'error', 'skipped'} for c in cases for n in c
+          ):
+              sys.exit('The nine GitHub log checks must all pass')
+          print('Executed:', sorted(expected))
+          PY
+          echo '::endgroup::'
+          exit "$rc"
