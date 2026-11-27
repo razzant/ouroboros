@@ -159,7 +159,8 @@ STATE = {"supervisor_ready": True, "active_chat_activities": [], "projects": [],
                                     "tasks_running": 0, "max_tasks": 2, "unknown_unmetered": 0}}
 
 
-@pytest.mark.parametrize("width,theme", [(390, "light"), (1100, "dark")], ids=["phone-light", "window-dark"])
+@pytest.mark.parametrize("width,theme", [(390, "light"), (1100, "dark"), (1500, "dark")],
+                         ids=["phone-light", "window-dark", "wide-window-dark"])
 def test_activity_rows_keep_each_name_whole_and_say_how_long_in_words(ui, width, theme):
     page = _open(ui, width=width, theme=theme, place="dashboard", tab="activity", routes=[
         ("**/api/tasks*", _json(_queue(LONG_TITLES), path="/api/tasks")),
@@ -228,13 +229,24 @@ def _storage():
         "pool": {"count": 0, "bytes": 0, "bytes_complete": True, "kinds": {}, "excluded": []}}}
 
 
-@pytest.mark.parametrize("width,theme", [(390, "light"), (1100, "dark")], ids=["phone-light", "window-dark"])
+@pytest.mark.parametrize("width,theme", [(390, "light"), (1100, "dark"), (1500, "dark")],
+                         ids=["phone-light", "window-dark", "wide-window-dark"])
 def test_temporary_space_keeps_a_groups_name_its_room_on_a_narrow_card(ui, width, theme):
     page = _open(ui, width=width, theme=theme, place="dashboard", tab="storage",
                  routes=[("**/api/storage", _json(_storage(), path="/api/storage"))])
     # The saved groups are one Cleanup decision row (DESIGN "Storage"); their checklist opens only on purpose.
     page.locator("[data-free-saved]").click()
     page.wait_for_selector("[data-free-group]")
+    # The size drops under the name by the Dashboard's own container width (style.css `@container dashboard`), not the
+    # window's: the sidebar takes part of it (498 px of a 1100 px window).
+    content = page.evaluate("""() => {
+        let node = document.querySelector('.storage-free-group');
+        while (node && getComputedStyle(node).containerName !== 'dashboard') node = node.parentElement;
+        const style = getComputedStyle(node);
+        return node.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    }""")
+    assert content > 0, content
+    assert (content <= 520) == (width < 1200), (width, content)  # the three cases cover both sides of the container rule
     groups = page.evaluate("""() => [...document.querySelectorAll('.storage-free-group')].map((group) => {
         const label = group.querySelector('.storage-free-label'), size = group.querySelector('.storage-free-size');
         const l = label.getBoundingClientRect(), s = size.getBoundingClientRect();
@@ -247,7 +259,7 @@ def test_temporary_space_keeps_a_groups_name_its_room_on_a_narrow_card(ui, width
     evidence = next(group for group in groups if group["qualified"])
     assert evidence["name"] == "Reviewers’ saved files of finished tasks"
     assert evidence["lines"] <= 2, evidence
-    if width < 520:
+    if content <= 520:
         # The name keeps the card's width; the size that carries its qualifier stands under it.
         assert evidence["width"] > 200 and evidence["sizeBelowName"], evidence
         # A plain size stays on the name's line, where sizes are scanned.
@@ -278,7 +290,8 @@ WIDGET_TABS = [
 ]
 
 
-@pytest.mark.parametrize("width,theme", [(390, "light"), (1100, "dark")], ids=["phone-light", "window-dark"])
+@pytest.mark.parametrize("width,theme", [(390, "light"), (1100, "dark"), (1500, "dark")],
+                         ids=["phone-light", "window-dark", "wide-window-dark"])
 def test_widget_heads_keep_the_menu_and_the_move_handle_as_one_visible_quiet_pair(ui, width, theme):
     page = _open(ui, width=width, theme=theme, place="widgets",
                  routes=[("**/api/widgets", _json({"ui_tabs": WIDGET_TABS}, path="/api/widgets"))])

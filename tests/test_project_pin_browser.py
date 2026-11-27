@@ -1000,6 +1000,8 @@ def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger
     page.locator('.nav-find-input').focus()
     page.keyboard.press("Tab")
     assert page.evaluate("document.activeElement.id") == "nav-projects-add"
+    page.keyboard.press("Tab")  # the head's Main row now stands between Add and the project rows (#4339)
+    assert page.evaluate("document.activeElement.classList.contains('nav-row-main')")
     page.keyboard.press("Tab")
     keyed = pin("newer")
     assert keyed["focused"] and keyed["keyboard"] and keyed["drawn"] and keyed["ring"] == "solid" and keyed["kebabDrawn"], keyed

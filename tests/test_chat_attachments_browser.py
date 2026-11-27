@@ -17,6 +17,7 @@ Playwright, not the native PyWebView shell.
 from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
+from tests import _room_browser_shared as room_browser
 
 import base64
 import json
@@ -56,12 +57,8 @@ _VP8_CLIP = base64.b64decode(
 )
 
 
-# Main's slot of a tab-kept value, under the page's profile scope when the document proves one (chat_preview.js
-# `roomStoreKey`), or null.
-_MAIN_SLOT = """(base) => {
-    const key = Object.keys(sessionStorage).find(k => k === base || k.startsWith(`${base}:`));
-    return key ? JSON.parse(sessionStorage.getItem(key)) : null;
-}"""
+# Main's slot of a tab-kept value: its exact key under the document's proven scope (tests/_room_browser_shared.py).
+_MAIN_SLOT = room_browser.MAIN_SLOT_JS
 
 
 def _png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:

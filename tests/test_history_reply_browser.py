@@ -77,12 +77,9 @@ def seed_reply_history(root, *, outside_sidebar=False):
     return {"a": a, "b": b, "x": x, "sources": saved}
 
 
-# Main's staged reply, from its slot under the page's profile scope when the document proves one (chat_preview.js
-# `roomStoreKey`), or null.
-_MAIN_REPLY_SLOT = """() => {
-    const key = Object.keys(sessionStorage).find(k => /^ouro_chat_reply(:|$)/.test(k));
-    return key ? JSON.parse(sessionStorage.getItem(key)) : null;
-}"""
+# Main's staged reply: its exact key under the document's proven scope (tests/_room_browser_shared.py).
+def _main_reply_slot(page):
+    return page.evaluate(room_browser.MAIN_SLOT_JS, "ouro_chat_reply")
 
 _OBSERVE_QUOTES = """() => {
     const fetch = window.fetch.bind(window);
@@ -2302,11 +2299,11 @@ def test_selected_reply_keeps_second_rendered_passage_through_reload(direct_serv
                 getSelection().addRange(saved);
                 return offered && refused && stale;
             }""")
-            assert page.evaluate(_MAIN_REPLY_SLOT) is None
+            assert _main_reply_slot(page) is None
             action.click()
             strip = page.locator(".chat-quote--composer[data-excerpt]")
             expect(strip.locator(".chat-quote-text")).to_have_text(phrase, use_inner_text=True)
-            kept = page.evaluate(_MAIN_REPLY_SLOT)
+            kept = _main_reply_slot(page)
             assert kept["address"] == format_address(row_address(row))
             assert kept["excerpt"] == {"text": phrase, "start_utf16": len("🌙 Silver gate then ".encode("utf-16-le")) // 2}
             page.reload(wait_until="domcontentloaded")
