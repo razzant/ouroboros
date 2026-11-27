@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.context import _build_installed_skills_section
+from ouroboros.context_sections import _MANIFEST_READ
 from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_enabled, save_review_state, summarize_skills
 from tests.test_skill_catalogue import _read, _seed, registry as registry
 
@@ -38,7 +39,9 @@ def test_bounded_suggestions_lead_to_every_full_declaration(registry):
     # The context names the manifest read itself: list_skills is not a readonly child's tool.
     named = json.loads(registry.execute("list_skills", {"name": "review-guide"}))
     reader = named["manifest"]["read"]
-    shown = "read_file(" + ", ".join(f"{key}={value!r}" for key, value in reader["arguments"].items()) + ")"
+    # The address is that read's arguments after root; the call they complete is stated once (consensus v3, K7(d)).
+    assert reader["arguments"]["root"] == "skill_payload" and _MANIFEST_READ in section
+    shown = ", ".join(f"{key}={value!r}" for key, value in reader["arguments"].items() if key != "root")
     assert f"Schedule source: {shown}; 2 more suggestions omitted." in section
     source = _read(registry, reader)
     assert source == (folder / "SKILL.md").read_text(encoding="utf-8")
@@ -62,7 +65,7 @@ def test_context_suggestions_require_current_review_and_enablement(registry, sta
             "Review the project using this skill. Not scheduled unless adopted.")
     assert (line in section) is (state == "ready")
     if state == "ready":  # nothing omitted, so no omission note
-        assert "skill_name='review-guide', path='SKILL.md')." in section and "more suggestions omitted" not in section
+        assert "skill_name='review-guide', path='SKILL.md'." in section and "more suggestions omitted" not in section
     assert not (root / "state" / "scheduled_tasks.json").exists()
 
 

@@ -24,7 +24,7 @@ import pytest
 from ouroboros import context
 from ouroboros import context_fit as fit
 from ouroboros import knowledge as store
-from ouroboros.context_sections import _build_installed_skills_section, _build_registry_section
+from ouroboros.context_sections import _MANIFEST_READ, _build_installed_skills_section, _build_registry_section
 from ouroboros.section_floor import HostSection, retain_section, section_views
 from ouroboros.skill_loader import compute_content_hash, save_enabled
 from ouroboros.tools.registry import ToolContext
@@ -386,13 +386,13 @@ def _rows():
 def test_every_admitted_skill_keeps_purpose_and_trigger_in_each_catalogue_form(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.skill_loader.summarize_skills", lambda *_: {"skills": _rows()})
     part = _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[])
-    reader = "read_file(root='skill_payload', bucket='external', skill_name='atlas', path='SKILL.md')"
+    address = "bucket='external', skill_name='atlas', path='SKILL.md'"  # read_file(root='skill_payload', <address>)
     for text in (part.full_text, part.operative_view):
         for n in range(117):  # every row past the former hundred-line cut, by name, purpose and trigger
             assert f"- bulk-{n:03d} (instruction, v1, pass): PURPOSE_{n:03d}\n  Trigger: TRIGGER_{n:03d}" in text
         assert "ATLAS_HEAD" in text and "ATLAS_TAIL" not in text
         assert "OMISSION NOTE: truncated at 260 chars; original length" in text
-        assert f"Instructions: {reader}" in text
+        assert f"Instructions: {address}" in text and text.count(_MANIFEST_READ) == 1
         assert "- cipher (instruction, v1, pass): No description.\n  Trigger: Not specified." in text
         assert "Live (" not in text  # process liveness is the start-of-work notice's, never block C's (C07)
         # An enabled skill no review admits is one line after the cards, never a card (п.57: once per install).
@@ -424,7 +424,10 @@ def test_each_skill_names_a_manifest_read_every_actor_profile_dispatches(tmp_pat
     (data / "state" / "skills" / "atlas" / "review.json").write_text(
         json.dumps({"status": "pass", "content_hash": compute_content_hash(skill)}), encoding="utf-8")
     compact = _build_installed_skills_section(SimpleNamespace(drive_root=data)).operative_view
-    [reader] = set(re.findall(r"read_file\(root='skill_payload'[^)]*\)", compact))
+    # The call each address completes is stated once; built from them, it is a read every actor profile dispatches.
+    [address] = set(re.findall(r"Instructions: (bucket=[^\n]*)", compact))
+    assert _MANIFEST_READ in compact and "read_file(root='skill_payload', bucket=..." in _MANIFEST_READ
+    reader = f"read_file(root='skill_payload', {address})"
     ctx, _tools = actor(SimpleNamespace(repo_dir=repo, drive_root=data, fork=fork, work=work), profile)
     assert "ATLAS_TAIL" in _run(ctx, reader)
     # The registry's outline names a retained capture in this actor's own drive and task, as the capture does.
