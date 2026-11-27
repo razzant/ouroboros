@@ -118,8 +118,10 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "quiz_answer_unconfirmed": (False, "503 before any answer was recorded; not a task terminal or truncation"),
     "awaiting_recipient_read": (False, "question_answers.py: a recorded answer is in its living recipient's mailbox (paused or held too), read pending; a delivery fact on the question, never a task terminal"),
     "asker_not_reading": (False, "question_answers.py: no living asker or successor holds the answer, so it goes to named ingress in its room (the asker's live late-answer head, else a fresh head); a delivery fact, never a task terminal"),
+    "late_answer_delivery_unknown": (False, "question_answers.py: a late answer whose dispatch witness ended with its process stays owed with its delivery unknown (owner_quiz.py); a delivery fact on the question, never a task terminal"),
     "no_publication_target": (False, "owner_quiz.py: a closure note no room can show retires as no_target; a delivery fact on the closed question, never a task terminal"),
     "promotion_not_started": (False, "promotion_intent.py: boot reconciliation of a start_task intent proven never admitted; that separate work never ran (explicit retry), so nothing was truncated and it is never a trial root's code"),
+    "scheduler_duplicate_rejection": (False, "outcomes.py normalize_outcome_axes: a historical rejected_duplicate record; the scheduler refused a duplicate submission before it ran, so no attempt was cut short"),
     "migrating": (False, "gateway/_helpers.py: a write door (create, Cancel, Pause, Presence) answered 503 inside the boot import window of state/current.sqlite (retry); no task attempt was truncated"),
     "boot_changed": (False, "gateway/control.py: a command whose if_boot names an earlier boot.since reached a restarted server; HTTP 409 with accepted=false before anything was queued, never a task terminal"),
     "reset_interrupted": (False, "gateway/onboarding_host.py and gateway/owner_settings.py: an unfinished Reset refuses this request with HTTP 409; not a task terminal"),
@@ -221,6 +223,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     ),
     "task_exception": (False, "agent.py:777 the attempt ran and crashed; an honest failure"),
     "capability_profile_mismatch": (False, "control_delegation.py:81 rejected delegate call"),
+    "target_not_steerable": (False, "tools/control_relay.py tell_task: the routed note was rejected or needs a manual target; the calling tool's TOOL_REPORTED_FAILURE meta, never a task terminal"),
+    "confirmation_timeout": (False, "tools/control_relay.py tell_task: the routing receipt did not confirm the note in time (it may still land); the calling tool's TOOL_REPORTED_FAILURE meta, never a task terminal"),
     "option_index_required": (False, "gateway/task_decision.py quiz-answer HTTP 400 validation; an owner-UI refusal, never a trial rail"),
     "action_invalid": (False, "gateway/task_decision.py rejects an unknown owner decision action (HTTP 400); no task transition"),
     "close_payload_invalid": (False, "gateway/task_decision.py rejects answer fields or a non-quiz target for closure (HTTP 400); no task transition"),
@@ -290,6 +294,11 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         "gateway/task_decision.py verbatim-comment refusal (400) — refuses instead of truncating",
     ),
     "option_index_invalid": (False, "gateway/task_decision.py ingress refusal (400)"),
+    # #4247 (a question answered with a file, and the bridge's rejoin after an unknown outcome): HTTP replies on the
+    # owner-answer ingress; the asking task keeps waiting or running as it was, so no trial ends with any of them.
+    "attachments_invalid": (False, "gateway/task_decision.py refuses files on anything but a quiz answer (HTTP 400) before anything is recorded; never a task terminal"),
+    "rejoin_invalid": (False, "gateway/task_decision.py refuses a rejoin naming more than its request and question (HTTP 400); a read-only route that writes nothing, never a task terminal"),
+    "request_not_recorded": (False, "gateway/task_decision.py rejoin: this request is not the question's recorded winner (HTTP 404, the record's state attached); read-only, never a task terminal"),
     "quiz_history_write_failed": (
         False,
         "gateway/task_decision.py retryable owner-answer history append refusal (503); never a task terminal or trial truncation",
@@ -377,18 +386,33 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
 _REASON_CODE_LITERAL = re.compile(r"""reason_code(?:=|["']\s*:\s*)\s*["']([a-z0-9_]+)["']""")
 
 
+def _keyword_reason_names(function: ast.AST) -> set[str]:
+    """Names a function passes as the reason_code keyword."""
+    return {node.value.id for node in ast.walk(function)
+            if isinstance(node, ast.keyword) and node.arg == "reason_code" and isinstance(node.value, ast.Name)}
+
+
+def _payload_reason_names(function: ast.AST, *, outcome_only: bool = False) -> set[str]:
+    """Names a function writes as the "reason_code" entry of a payload it builds; ``outcome_only``: only of a task
+    outcome (a payload that also sets execution_status), the reason an auditor reads off a trial."""
+    names = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Dict):
+            entries = {key.value: value for key, value in zip(node.keys, node.values) if isinstance(key, ast.Constant)}
+            if isinstance(entries.get("reason_code"), ast.Name) and (not outcome_only or "execution_status" in entries):
+                names.add(entries["reason_code"].id)
+    return names
+
+
 def _forwarded_reason_arguments(tree: ast.Module) -> dict[str, dict[str, int]]:
-    """Local wrappers may pass a named parameter straight into reason_code."""
+    """Local wrappers may pass a named parameter straight into reason_code, or into a task outcome they build
+    (agent_dispatch._unstarted_terminal)."""
     forwarding = {}
     for function in tree.body:
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         parameters = function.args.posonlyargs + function.args.args
-        forwarded = {
-            node.value.id for node in ast.walk(function)
-            if isinstance(node, ast.keyword) and node.arg == "reason_code"
-            and isinstance(node.value, ast.Name)
-        }
+        forwarded = _keyword_reason_names(function) | _payload_reason_names(function, outcome_only=True)
         arguments = {parameter.arg: index for index, parameter in enumerate(parameters)
                      if parameter.arg in forwarded}
         if arguments:
@@ -439,8 +463,16 @@ def _runtime_reason_code_literals() -> dict[str, str]:
         for function in tree.body:
             if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            forwarded_names = {node.value.id for node in ast.walk(function)
-                               if isinstance(node, ast.keyword) and node.arg == "reason_code" and isinstance(node.value, ast.Name)}
+            forwarded_names = _keyword_reason_names(function)
+            # A conditional between literal codes bound to a local before it lands in a payload's "reason_code" entry
+            # (question_answers' late answer) is the same producer the line scan reads when written inline.
+            sinks = _payload_reason_names(function)
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Assign) and isinstance(node.value, (ast.IfExp, ast.BoolOp))
+                        and any(isinstance(target, ast.Name) and target.id in sinks for target in node.targets)):
+                    for code in values(node.value):
+                        if code:
+                            found.setdefault(code, f"{path.relative_to(root.parent)}:{node.lineno}")
             for argument, default in zip(function.args.kwonlyargs, function.args.kw_defaults):
                 if argument.arg in forwarded_names:
                     value = constants.get(default.id) if isinstance(default, ast.Name) else default

@@ -360,6 +360,17 @@
                 "settingKey": "OPENAI_COMPATIBLE_API_KEY",
                 "settingsInputId": "s-compatible-key",
                 "stateKey": "compatibleApiKey"
+              },
+              {
+                "group": "more",
+                "id": "openai-compatible-continue",
+                "inputType": "text",
+                "label": "Continue via the compatible API without confirmation that history is preserved",
+                "note": "The Base URL you let Ouroboros send to although that server names no program, saved as the address's id. Empty withdraws it; it never opens an address where Ollama was seen.",
+                "placeholder": "",
+                "settingKey": "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED",
+                "settingsInputId": "s-compatible-continue",
+                "stateKey": "compatibleContinueUnconfirmed"
               }
             ],
             "providerProfiles": {
@@ -887,6 +898,17 @@
                 "settingKey": "OPENAI_COMPATIBLE_API_KEY",
                 "settingsInputId": "s-compatible-key",
                 "stateKey": "compatibleApiKey"
+              },
+              {
+                "group": "more",
+                "id": "openai-compatible-continue",
+                "inputType": "text",
+                "label": "Continue via the compatible API without confirmation that history is preserved",
+                "note": "The Base URL you let Ouroboros send to although that server names no program, saved as the address's id. Empty withdraws it; it never opens an address where Ollama was seen.",
+                "placeholder": "",
+                "settingKey": "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED",
+                "settingsInputId": "s-compatible-continue",
+                "stateKey": "compatibleContinueUnconfirmed"
               }
             ],
             "providerProfiles": {
@@ -1699,6 +1721,17 @@
                 "settingKey": "OPENAI_COMPATIBLE_API_KEY",
                 "settingsInputId": "s-compatible-key",
                 "stateKey": "compatibleApiKey"
+              },
+              {
+                "group": "more",
+                "id": "openai-compatible-continue",
+                "inputType": "text",
+                "label": "Continue via the compatible API without confirmation that history is preserved",
+                "note": "The Base URL you let Ouroboros send to although that server names no program, saved as the address's id. Empty withdraws it; it never opens an address where Ollama was seen.",
+                "placeholder": "",
+                "settingKey": "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED",
+                "settingsInputId": "s-compatible-continue",
+                "stateKey": "compatibleContinueUnconfirmed"
               }
             ]
           },
@@ -1716,6 +1749,7 @@
             "cloudruKey": "",
             "compatibleApiKey": "",
             "compatibleBaseUrl": "",
+            "compatibleContinueUnconfirmed": "",
             "connections": [],
             "consciousnessModel": "",
             "deepseekKey": "",
@@ -2016,6 +2050,17 @@
                 "settingKey": "OPENAI_COMPATIBLE_API_KEY",
                 "settingsInputId": "s-compatible-key",
                 "stateKey": "compatibleApiKey"
+              },
+              {
+                "group": "more",
+                "id": "openai-compatible-continue",
+                "inputType": "text",
+                "label": "Continue via the compatible API without confirmation that history is preserved",
+                "note": "The Base URL you let Ouroboros send to although that server names no program, saved as the address's id. Empty withdraws it; it never opens an address where Ollama was seen.",
+                "placeholder": "",
+                "settingKey": "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED",
+                "settingsInputId": "s-compatible-continue",
+                "stateKey": "compatibleContinueUnconfirmed"
               }
             ]
           },
@@ -2033,6 +2078,7 @@
             "cloudruKey": "",
             "compatibleApiKey": "***set***",
             "compatibleBaseUrl": "https://llm.example.test/v1",
+            "compatibleContinueUnconfirmed": "",
             "connections": [],
             "consciousnessModel": "",
             "deepseekKey": "",
@@ -3346,6 +3392,9 @@
             "read_complete": true,
             "rows": [],
             "schema": 1,
+            "stores": [
+              "canonical"
+            ],
             "total": 0
           },
           "parent_cognitive_route": null,
@@ -3354,6 +3403,12 @@
           "project_id": "",
           "prompt_tokens": null,
           "question_rooms": {},
+          "read_spans": {
+            "events": [],
+            "messages": [],
+            "room": null,
+            "spans": []
+          },
           "reason_code": "final_message",
           "reasoning_effort": null,
           "requested_executor": null,
@@ -3666,14 +3721,14 @@
       "frames": [],
       "history": [
         {
-          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI0OTUsInByb2dyZXNzIjoxMDAyfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0IjoyNDk1LCJwcm9ncmVzcyI6MTAwMn0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnYWxsZXJ5LXNoYXJlLWNhcmQiOjh9LCJuZXdlc3QiOiIyMDI2LTExLTIwVDEyOjAwOjA5KzAwOjAwIiwibGlmZWN5Y2xlIjpmYWxzZX0",
+          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI1NjgsInByb2dyZXNzIjoxMDAyfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0IjoyNTY4LCJwcm9ncmVzcyI6MTAwMn0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnYWxsZXJ5LXNoYXJlLWNhcmQiOjh9LCJuZXdlc3QiOiIyMDI2LTExLTIwVDEyOjAwOjA5KzAwOjAwIiwibGlmZWN5Y2xlIjpmYWxzZX0",
           "coverage": {
             "spans": {
               "chat": {
                 "chain": "dialog",
                 "from": 0,
                 "gaps": [],
-                "to": 2495
+                "to": 2568
               },
               "progress": {
                 "chain": "dialog",
@@ -3683,7 +3738,7 @@
               }
             },
             "upper": {
-              "chat": 2495,
+              "chat": 2568,
               "progress": 1002
             },
             "v": 1,
@@ -3965,7 +4020,7 @@
               "quiet_effective": false,
               "reply_author_label": "System",
               "role": "system",
-              "row_address": "row:1@2026-11-20T12:00:29+00:00#008d7420b586",
+              "row_address": "row:1@2026-11-20T12:00:29+00:00#1e166a990017",
               "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
               "summary_kind": "terminal_root_projection",
               "system_type": "task_summary",
@@ -3988,7 +4043,7 @@
             }
           ],
           "next_cursor": null,
-          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI0OTUsInByb2dyZXNzIjoxMDAyfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjI0OTUsInByb2dyZXNzIjoxMDAyfSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
+          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI1NjgsInByb2dyZXNzIjoxMDAyfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjI1NjgsInByb2dyZXNzIjoxMDAyfSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
           "window": {
             "complete": true,
             "latest_message": {
@@ -4547,9 +4602,326 @@
       "frames": [],
       "history": [
         {
-          "error": "migrating",
-          "has_more": true,
+          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI0MDMsInByb2dyZXNzIjoxMDEwfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0IjoyNDAzLCJwcm9ncmVzcyI6MTAxMH0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnYWxsZXJ5LXNoYXJlLWxldHRlciI6OH0sIm5ld2VzdCI6IjIwMjYtMTEtMjBUMTI6MDA6MDkrMDA6MDAiLCJsaWZlY3ljbGUiOmZhbHNlfQ",
+          "coverage": {
+            "spans": {
+              "chat": {
+                "chain": "dialog",
+                "from": 0,
+                "gaps": [],
+                "to": 2403
+              },
+              "progress": {
+                "chain": "dialog",
+                "from": 0,
+                "gaps": [],
+                "to": 1010
+              }
+            },
+            "upper": {
+              "chat": 2403,
+              "progress": 1010
+            },
+            "v": 1,
+            "view": "7cb1b390c16a71fc9cbee8510e3c5f5b0640e09f7ce368cfe41f3f2a3b93e4a6"
+          },
+          "has_more": false,
           "messages": [
+            {
+              "cancelable": true,
+              "history_id": "progress:0",
+              "history_position": {
+                "offset": 0,
+                "source": "progress"
+              },
+              "is_progress": true,
+              "markdown": true,
+              "narration": true,
+              "reply_author_label": "Ouroboros",
+              "role": "assistant",
+              "root_task_id": "gallery-share-letter",
+              "row_address": "row:1@2026-11-20T12:00:05+00:00#c361cc4890d7",
+              "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
+              "system_type": "model_narration",
+              "task_id": "gallery-share-letter",
+              "task_terminal_status": "completed",
+              "text": "💬 Reading both saved reports first: the summary, then the material it points to.",
+              "ts": "2026-11-20T12:00:05+00:00"
+            },
+            {
+              "_is_direct_chat": false,
+              "accounted_upper_bound_usd": 0.0,
+              "accounted_upper_bound_usd_with_children": 0.0,
+              "cancelable": true,
+              "continuation_offer": {
+                "cause": "finished",
+                "eligible": false,
+                "refusal": "author_finished"
+              },
+              "cost_accounting_status": "available",
+              "cost_custody": {
+                "closed_unrecorded_run_ids": [],
+                "open_run_ids": [],
+                "pending_invocation_ids": [],
+                "status": "available",
+                "unrecorded_run_ids": []
+              },
+              "cost_final": true,
+              "cost_presentation": {
+                "accounting_open": false,
+                "has_rows": false,
+                "has_unpriced": false,
+                "scope": "root_tree",
+                "tracked_amount": null,
+                "tracked_final": false
+              },
+              "cost_with_children_partial": false,
+              "history_id": "progress:513",
+              "history_position": {
+                "offset": 513,
+                "source": "progress"
+              },
+              "is_progress": true,
+              "ledger_integrity_degraded": false,
+              "markdown": true,
+              "narration": true,
+              "non_final_rows": 0,
+              "outcome_axes": {
+                "artifacts": {
+                  "status": "not_applicable"
+                },
+                "execution": {
+                  "cosmetic_tool_errors": [],
+                  "failure": null,
+                  "ignored_tool_errors": [],
+                  "policy_denials": [],
+                  "reason_code": "final_message",
+                  "recoveries": [],
+                  "status": "ok",
+                  "unresolved_tool_errors": []
+                },
+                "lifecycle": {
+                  "status": "completed"
+                },
+                "objective": {
+                  "review_status": "skipped",
+                  "source": "none",
+                  "status": "not_evaluated"
+                },
+                "review": {
+                  "eligibility": "not_eligible",
+                  "run_count": 0,
+                  "status": "skipped",
+                  "trigger": "not_evaluated"
+                },
+                "schema_version": 1
+              },
+              "outcome_final": true,
+              "outcome_phase": "done",
+              "reason_code": "final_message",
+              "reply_author_label": "Ouroboros",
+              "reserved_usd": 0.0,
+              "role": "assistant",
+              "root_task_id": "gallery-share-letter",
+              "rounds": 6,
+              "row_address": "row:1@2026-11-20T12:00:08+00:00#220543b669d7",
+              "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
+              "system_type": "model_narration",
+              "task_id": "gallery-share-letter",
+              "task_terminal_status": "completed",
+              "terminal_time": {
+                "attempt": {
+                  "_attempt": null,
+                  "metadata_attempt": null,
+                  "metadata_task_attempt": null,
+                  "started_at": null,
+                  "task_attempt": null
+                },
+                "occurred_at": "2026-11-20T12:00:19+00:00",
+                "source": "executor_terminal",
+                "v": 1
+              },
+              "text": "💬 Comparing the two summaries at the working width and in a narrow room.",
+              "tool_evidence": {
+                "coverage": {
+                  "archive_sources": [],
+                  "archives": 0,
+                  "archives_available": 0,
+                  "archives_bounded": false,
+                  "gaps": [],
+                  "live_size": 0,
+                  "live_window": 0,
+                  "matched": 0,
+                  "quota_met": false,
+                  "shown": 0,
+                  "source": "logs/tools.jsonl",
+                  "task_id": "gallery-share-letter",
+                  "unit": "calls"
+                },
+                "legacy": {
+                  "calls": 0,
+                  "errors": 0,
+                  "unknown": false,
+                  "wait_ended": false
+                },
+                "observations": []
+              },
+              "ts": "2026-11-20T12:00:08+00:00",
+              "unknown_unmetered": 0,
+              "unresolved_upper_bound_usd": 0.0
+            },
+            {
+              "_is_direct_chat": false,
+              "accounted_upper_bound_usd": 0.0,
+              "accounted_upper_bound_usd_with_children": 0.0,
+              "client_message_id": "",
+              "continuation_offer": {
+                "cause": "finished",
+                "eligible": false,
+                "refusal": "author_finished"
+              },
+              "cost_accounting_status": "available",
+              "cost_custody": {
+                "closed_unrecorded_run_ids": [],
+                "open_run_ids": [],
+                "pending_invocation_ids": [],
+                "status": "available",
+                "unrecorded_run_ids": []
+              },
+              "cost_final": true,
+              "cost_presentation": {
+                "accounting_open": false,
+                "has_rows": false,
+                "has_unpriced": false,
+                "scope": "root_tree",
+                "tracked_amount": null,
+                "tracked_final": false
+              },
+              "cost_with_children_partial": false,
+              "history_id": "chat:0",
+              "history_position": {
+                "offset": 0,
+                "source": "chat"
+              },
+              "is_progress": false,
+              "ledger_integrity_degraded": false,
+              "markdown": true,
+              "narration": false,
+              "non_final_rows": 0,
+              "outcome_axes": {
+                "artifacts": {
+                  "status": "not_applicable"
+                },
+                "execution": {
+                  "cosmetic_tool_errors": [],
+                  "failure": null,
+                  "ignored_tool_errors": [],
+                  "policy_denials": [],
+                  "reason_code": "final_message",
+                  "recoveries": [],
+                  "status": "ok",
+                  "unresolved_tool_errors": []
+                },
+                "lifecycle": {
+                  "status": "completed"
+                },
+                "objective": {
+                  "review_status": "skipped",
+                  "source": "none",
+                  "status": "not_evaluated"
+                },
+                "review": {
+                  "eligibility": "not_eligible",
+                  "run_count": 0,
+                  "status": "skipped",
+                  "trigger": "not_evaluated"
+                },
+                "schema_version": 1
+              },
+              "outcome_final": true,
+              "outcome_phase": "done",
+              "reason_code": "final_message",
+              "reply_author_label": "Ouroboros",
+              "reserved_usd": 0.0,
+              "role": "assistant",
+              "root_task_id": "gallery-share-letter",
+              "rounds": 6,
+              "row_address": "row:1@2026-11-20T12:00:09+00:00#ca950b183070",
+              "sender_label": "",
+              "sender_session_id": "",
+              "source": "",
+              "system_type": "",
+              "task_id": "gallery-share-letter",
+              "task_terminal_status": "completed",
+              "terminal_time": {
+                "attempt": {
+                  "_attempt": null,
+                  "metadata_attempt": null,
+                  "metadata_task_attempt": null,
+                  "started_at": null,
+                  "task_attempt": null
+                },
+                "occurred_at": "2026-11-20T12:00:19+00:00",
+                "source": "executor_terminal",
+                "v": 1
+              },
+              "text": "Done.",
+              "ts": "2026-11-20T12:00:09+00:00",
+              "unknown_unmetered": 0,
+              "unresolved_upper_bound_usd": 0.0
+            },
+            {
+              "historical_terminal": {
+                "phase": "done",
+                "provenance": "canonical_task_result_after_finalization",
+                "quiet_effective": false,
+                "status": "completed",
+                "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
+                "terminal_time": {
+                  "attempt": {
+                    "_attempt": null,
+                    "metadata_attempt": null,
+                    "metadata_task_attempt": null,
+                    "started_at": null,
+                    "task_attempt": null
+                  },
+                  "occurred_at": "2026-11-20T12:00:19+00:00",
+                  "source": "executor_terminal",
+                  "v": 1
+                },
+                "ts": "2026-11-20T12:00:29+00:00",
+                "wake_silent": false
+              },
+              "history_id": "chat:438",
+              "history_position": {
+                "offset": 438,
+                "source": "chat"
+              },
+              "is_progress": false,
+              "quiet_effective": false,
+              "reply_author_label": "System",
+              "role": "system",
+              "row_address": "row:1@2026-11-20T12:00:29+00:00#06b3d7f97fa1",
+              "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
+              "summary_kind": "terminal_root_projection",
+              "system_type": "task_summary",
+              "task_id": "gallery-share-letter",
+              "terminal_time": {
+                "attempt": {
+                  "_attempt": null,
+                  "metadata_attempt": null,
+                  "metadata_task_attempt": null,
+                  "started_at": null,
+                  "task_attempt": null
+                },
+                "occurred_at": "2026-11-20T12:00:19+00:00",
+                "source": "executor_terminal",
+                "v": 1
+              },
+              "text": "",
+              "ts": "2026-11-20T12:00:29+00:00",
+              "wake_silent": false
+            },
             {
               "history_id": "letter-h900",
               "history_position": 900,
@@ -4726,12 +5098,14 @@
             }
           ],
           "next_cursor": null,
-          "reason_code": "migrating",
+          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI0MDMsInByb2dyZXNzIjoxMDEwfSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjI0MDMsInByb2dyZXNzIjoxMDEwfSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
           "window": {
-            "complete": false,
-            "truncated_by": [
-              "migrating"
-            ]
+            "complete": true,
+            "latest_message": {
+              "history_id": "chat:0",
+              "out_of_order": false
+            },
+            "truncated_by": []
           }
         }
       ],
@@ -4957,6 +5331,9 @@
             "read_complete": true,
             "rows": [],
             "schema": 1,
+            "stores": [
+              "canonical"
+            ],
             "total": 0
           },
           "parent_cognitive_route": null,
@@ -4965,6 +5342,12 @@
           "project_id": "",
           "prompt_tokens": null,
           "question_rooms": {},
+          "read_spans": {
+            "events": [],
+            "messages": [],
+            "room": null,
+            "spans": []
+          },
           "reason_code": "final_message",
           "reasoning_effort": null,
           "requested_executor": null,
@@ -5277,14 +5660,14 @@
       "frames": [],
       "history": [
         {
-          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI0NjgsInByb2dyZXNzIjoxMDA2fSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0IjoyNDY4LCJwcm9ncmVzcyI6MTAwNn0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnYWxsZXJ5LXNoYXJlLXRhYmxlIjo4fSwibmV3ZXN0IjoiMjAyNi0xMS0yMFQxMjowMDowOSswMDowMCIsImxpZmVjeWNsZSI6ZmFsc2V9",
+          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI1NDEsInByb2dyZXNzIjoxMDA2fSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0IjoyNTQxLCJwcm9ncmVzcyI6MTAwNn0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnYWxsZXJ5LXNoYXJlLXRhYmxlIjo4fSwibmV3ZXN0IjoiMjAyNi0xMS0yMFQxMjowMDowOSswMDowMCIsImxpZmVjeWNsZSI6ZmFsc2V9",
           "coverage": {
             "spans": {
               "chat": {
                 "chain": "dialog",
                 "from": 0,
                 "gaps": [],
-                "to": 2468
+                "to": 2541
               },
               "progress": {
                 "chain": "dialog",
@@ -5294,7 +5677,7 @@
               }
             },
             "upper": {
-              "chat": 2468,
+              "chat": 2541,
               "progress": 1006
             },
             "v": 1,
@@ -5576,7 +5959,7 @@
               "quiet_effective": false,
               "reply_author_label": "System",
               "role": "system",
-              "row_address": "row:1@2026-11-20T12:00:29+00:00#c8b22541ac80",
+              "row_address": "row:1@2026-11-20T12:00:29+00:00#cea9fb63e87d",
               "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
               "summary_kind": "terminal_root_projection",
               "system_type": "task_summary",
@@ -5599,7 +5982,7 @@
             }
           ],
           "next_cursor": null,
-          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI0NjgsInByb2dyZXNzIjoxMDA2fSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjI0NjgsInByb2dyZXNzIjoxMDA2fSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
+          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI1NDEsInByb2dyZXNzIjoxMDA2fSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjI1NDEsInByb2dyZXNzIjoxMDA2fSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
           "window": {
             "complete": true,
             "latest_message": {
@@ -5764,6 +6147,7 @@
           "skills": [
             {
               "author_disposition": {},
+              "catalog_id": null,
               "category": [],
               "conflict": null,
               "conflicts": [],
@@ -5776,12 +6160,15 @@
               "executable_review": false,
               "grants": {
                 "all_granted": true,
+                "blocked": false,
                 "content_hash": "",
                 "earlier_grant": null,
                 "granted_keys": [],
                 "granted_permissions": [],
                 "missing_keys": [],
                 "missing_permissions": [],
+                "pending_keys": [],
+                "pending_permissions": [],
                 "requested_keys": [],
                 "requested_permissions": [],
                 "unsupported_for_skill_type": false,
@@ -5835,6 +6222,7 @@
               "server_reconcile": "",
               "skill_review": {},
               "source": "external",
+              "source_key": null,
               "submit_hub": {
                 "disabled": true,
                 "publication_ready": false,
@@ -5845,7 +6233,8 @@
               },
               "title": "",
               "type": "instruction",
-              "version": "1.0.0"
+              "version": "1.0.0",
+              "widget_title": ""
             }
           ],
           "voice": {
@@ -6061,6 +6450,9 @@
             "read_complete": true,
             "rows": [],
             "schema": 1,
+            "stores": [
+              "canonical"
+            ],
             "total": 0
           },
           "parent_cognitive_route": null,
@@ -6069,6 +6461,12 @@
           "project_id": "",
           "prompt_tokens": null,
           "question_rooms": {},
+          "read_spans": {
+            "events": [],
+            "messages": [],
+            "room": null,
+            "spans": []
+          },
           "reason_code": "final_message",
           "reasoning_effort": null,
           "requested_executor": null,
@@ -6381,14 +6779,14 @@
       "frames": [],
       "history": [
         {
-          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI5ODMsInByb2dyZXNzIjo5OTh9LCJ1bmZpbmlzaGVkIjpbXSwicXVvdGFzIjp7Imh1bWFuIjo1MCwicHJvZ3Jlc3MiOjYwfSwia2luZCI6ImFmdGVyIiwiYmVmb3JlIjp7ImNoYXQiOjI5ODMsInByb2dyZXNzIjo5OTh9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnsiZ2FsbGVyeS10YXNrLWRvbmUiOjh9LCJuZXdlc3QiOiIyMDI2LTExLTIwVDEyOjAwOjA5KzAwOjAwIiwibGlmZWN5Y2xlIjpmYWxzZX0",
+          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjMwNTYsInByb2dyZXNzIjo5OTh9LCJ1bmZpbmlzaGVkIjpbXSwicXVvdGFzIjp7Imh1bWFuIjo1MCwicHJvZ3Jlc3MiOjYwfSwia2luZCI6ImFmdGVyIiwiYmVmb3JlIjp7ImNoYXQiOjMwNTYsInByb2dyZXNzIjo5OTh9LCJxdWlldCI6ZmFsc2UsIm5vdGVzIjoiIiwidGFza3MiOnsiZ2FsbGVyeS10YXNrLWRvbmUiOjh9LCJuZXdlc3QiOiIyMDI2LTExLTIwVDEyOjAwOjA5KzAwOjAwIiwibGlmZWN5Y2xlIjpmYWxzZX0",
           "coverage": {
             "spans": {
               "chat": {
                 "chain": "dialog",
                 "from": 0,
                 "gaps": [],
-                "to": 2983
+                "to": 3056
               },
               "progress": {
                 "chain": "dialog",
@@ -6398,7 +6796,7 @@
               }
             },
             "upper": {
-              "chat": 2983,
+              "chat": 3056,
               "progress": 998
             },
             "v": 1,
@@ -6680,7 +7078,7 @@
               "quiet_effective": false,
               "reply_author_label": "System",
               "role": "system",
-              "row_address": "row:1@2026-11-20T12:00:30+00:00#7971b8c77cbb",
+              "row_address": "row:1@2026-11-20T12:00:30+00:00#666a1bb95914",
               "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
               "summary_kind": "terminal_root_projection",
               "system_type": "task_summary",
@@ -6703,7 +7101,7 @@
             }
           ],
           "next_cursor": null,
-          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI5ODMsInByb2dyZXNzIjo5OTh9LCJ1bmZpbmlzaGVkIjpbXSwicXVvdGFzIjp7Imh1bWFuIjo1MCwicHJvZ3Jlc3MiOjYwfSwia2luZCI6InBhZ2UiLCJiZWZvcmUiOnsiY2hhdCI6Mjk4MywicHJvZ3Jlc3MiOjk5OH0sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
+          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjMwNTYsInByb2dyZXNzIjo5OTh9LCJ1bmZpbmlzaGVkIjpbXSwicXVvdGFzIjp7Imh1bWFuIjo1MCwicHJvZ3Jlc3MiOjYwfSwia2luZCI6InBhZ2UiLCJiZWZvcmUiOnsiY2hhdCI6MzA1NiwicHJvZ3Jlc3MiOjk5OH0sInF1aWV0IjpmYWxzZSwibG93ZXIiOnsiY2hhdCI6MCwicHJvZ3Jlc3MiOjB9LCJyZWNlbnQiOnRydWV9",
           "window": {
             "complete": true,
             "latest_message": {
@@ -6944,6 +7342,9 @@
             "read_complete": true,
             "rows": [],
             "schema": 1,
+            "stores": [
+              "canonical"
+            ],
             "total": 0
           },
           "parent_cognitive_route": null,
@@ -6952,6 +7353,12 @@
           "project_id": "",
           "prompt_tokens": null,
           "question_rooms": {},
+          "read_spans": {
+            "events": [],
+            "messages": [],
+            "room": null,
+            "spans": []
+          },
           "reason_code": "provider_unavailable",
           "reasoning_effort": null,
           "requested_executor": null,
@@ -7274,14 +7681,14 @@
       "frames": [],
       "history": [
         {
-          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI3MTksInByb2dyZXNzIjoxMDA2fSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0IjoyNzE5LCJwcm9ncmVzcyI6MTAwNn0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnYWxsZXJ5LXRhc2stZmFpbGVkIjo4fSwibmV3ZXN0IjoiMjAyNi0xMS0yMFQxMjowMDowOSswMDowMCIsImxpZmVjeWNsZSI6ZmFsc2V9",
+          "after_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI3OTIsInByb2dyZXNzIjoxMDA2fSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJhZnRlciIsImJlZm9yZSI6eyJjaGF0IjoyNzkyLCJwcm9ncmVzcyI6MTAwNn0sInF1aWV0IjpmYWxzZSwibm90ZXMiOiIiLCJ0YXNrcyI6eyJnYWxsZXJ5LXRhc2stZmFpbGVkIjo4fSwibmV3ZXN0IjoiMjAyNi0xMS0yMFQxMjowMDowOSswMDowMCIsImxpZmVjeWNsZSI6ZmFsc2V9",
           "coverage": {
             "spans": {
               "chat": {
                 "chain": "dialog",
                 "from": 0,
                 "gaps": [],
-                "to": 2719
+                "to": 2792
               },
               "progress": {
                 "chain": "dialog",
@@ -7291,7 +7698,7 @@
               }
             },
             "upper": {
-              "chat": 2719,
+              "chat": 2792,
               "progress": 1006
             },
             "v": 1,
@@ -7581,7 +7988,7 @@
               "quiet_effective": false,
               "reply_author_label": "System",
               "role": "system",
-              "row_address": "row:1@2026-11-20T12:00:29+00:00#4fb417f9d313",
+              "row_address": "row:1@2026-11-20T12:00:29+00:00#07bf196845be",
               "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
               "summary_kind": "terminal_root_projection",
               "system_type": "task_summary",
@@ -7604,7 +8011,7 @@
             }
           ],
           "next_cursor": null,
-          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI3MTksInByb2dyZXNzIjoxMDA2fSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjI3MTksInByb2dyZXNzIjoxMDA2fSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
+          "page_cursor": "eyJ2IjoxLCJjaGF0X2lkIjoxLCJ2aWV3IjoiN2NiMWIzOTBjMTZhNzFmYzljYmVlODUxMGUzYzVmNWIwNjQwZTA5ZjdjZTM2OGNmZTQxZjNmMmEzYjkzZTRhNiIsInVwcGVyIjp7ImNoYXQiOjI3OTIsInByb2dyZXNzIjoxMDA2fSwidW5maW5pc2hlZCI6W10sInF1b3RhcyI6eyJodW1hbiI6NTAsInByb2dyZXNzIjo2MH0sImtpbmQiOiJwYWdlIiwiYmVmb3JlIjp7ImNoYXQiOjI3OTIsInByb2dyZXNzIjoxMDA2fSwicXVpZXQiOmZhbHNlLCJsb3dlciI6eyJjaGF0IjowLCJwcm9ncmVzcyI6MH0sInJlY2VudCI6dHJ1ZX0",
           "window": {
             "complete": true,
             "latest_message": {
@@ -7686,6 +8093,12 @@
           },
           "question_rooms": {},
           "queue_reconciliation_warning": "queue snapshot missing or invalid",
+          "read_spans": {
+            "events": [],
+            "messages": [],
+            "room": null,
+            "spans": []
+          },
           "result": "Task accepted and scheduled.",
           "root_task_id": "gallery-task-paused",
           "status": "scheduled",
@@ -8053,6 +8466,12 @@
           },
           "question_rooms": {},
           "queue_reconciliation_warning": "queue snapshot missing or invalid",
+          "read_spans": {
+            "events": [],
+            "messages": [],
+            "room": null,
+            "spans": []
+          },
           "result": "running",
           "root_task_id": "gallery-task-running",
           "status": "running",
@@ -8073,11 +8492,11 @@
           "reply_author_label": "Ouroboros",
           "role": "assistant",
           "root_task_id": "gallery-task-running",
-          "row_address": "row:1@2026-11-20T12:00:14+00:00#7a5d7af2fc65",
+          "row_address": "row:1@2026-11-20T12:00:13+00:00#22f3af8acbff",
           "system_type": "model_narration",
           "task_id": "gallery-task-running",
           "transport": {},
-          "ts": "2026-11-20T12:00:14+00:00",
+          "ts": "2026-11-20T12:00:13+00:00",
           "type": "chat"
         }
       ],
