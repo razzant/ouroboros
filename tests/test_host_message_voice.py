@@ -166,7 +166,7 @@ HOST_ROW_CLASSES = {
     "body_adoption": ("card_row", 1),  # the authorizing task's settled adoption; a task-unbound one stays restart_notice
     "budget_notice": ("runtime_state", 1),
     "cancel_receipt": ("owner_act_receipt", 2),
-    "command_reply": ("owner_act_receipt", 2),
+    "command_reply": ("owner_act_receipt", 3),  # bridge slash commands, startup /restart, post-Panic start (panic_choice._run_launcher_start)
     "consciousness_notice": ("runtime_state", 1),
     "context_mode_changed": ("owner_act_receipt", 1),  # a room's context mode switched: old → new in that room
     "deep_self_review_queued": ("owner_act_receipt", 1),
