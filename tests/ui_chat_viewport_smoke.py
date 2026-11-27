@@ -1278,6 +1278,9 @@ def run_chat_viewport_smoke(
                 }
                 history_hits = []
 
+                # The answer names the data profile this document proves, as the host's does (api_client.js).
+                scope = page.evaluate("document.querySelector('meta[name=\"ouroboros-chat-preview-scope\"]')?.content || ''")
+
                 def serve_history(route):
                     history_hits.append(True)
                     route.fulfill(
@@ -1285,7 +1288,7 @@ def run_chat_viewport_smoke(
                         content_type="application/json",
                         body=json.dumps({"messages": [{
                             **terminal_detail, "role": "system", "system_type": "task_summary",
-                        }], "window": {}}),
+                        }], "window": {}, "profile_scope": scope}),
                     )
 
                 page.route("**/api/chat/history*", serve_history)
