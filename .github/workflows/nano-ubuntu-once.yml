@@ -1,0 +1,163 @@
+# One-shot QA overlay. Do not include either overlay file in the product PR.
+name: Nano R5 composed Ubuntu QA (one shot)
+on:
+  push:
+    branches: ['qa/nano-r5-ubuntu-once']
+
+permissions:
+  contents: read
+
+jobs:
+  qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [s47, s48, s49, s50, supplement, browser, contracts, reference]
+    env:
+      NANO_BASE: 'a4c694fb4f2143d65676a13432a8606e95c4df63'
+      NANO_BASE_TREE: '55bcf3346cd7732cf5323000701028c156038f49'
+      NANO_PRODUCT: 'e192ebe621e88c496fc8eb31626b84208770c4ae'
+      NANO_PRODUCT_TREE: '23bdb68018bd8eb54ab06d64423428d1b1a11117'
+      NANO_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the exact base, product and QA overlay
+        id: bind
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL=file GIT_NO_REPLACE_OBJECTS=1
+          for v in "$NANO_BASE" "$NANO_BASE_TREE" "$NANO_PRODUCT" "$NANO_PRODUCT_TREE" "$GITHUB_SHA"; do
+            [[ "$v" =~ ^[0-9a-f]{40}$ ]]
+          done
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/qa/nano-r5-ubuntu-once
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$NANO_PRODUCT"
+          test "$(git show -s --format=%P "$NANO_PRODUCT")" = "$NANO_BASE"
+          test "$(git rev-parse "$NANO_BASE^{tree}")" = "$NANO_BASE_TREE"
+          test "$(git rev-parse "$NANO_PRODUCT^{tree}")" = "$NANO_PRODUCT_TREE"
+          test "$(git cat-file -t "$NANO_PRODUCT:tests/test_cold_return_window_park_browser.py")" = blob
+          test "$(git diff-tree --no-renames -r --no-commit-id --name-status "$NANO_PRODUCT" "$GITHUB_SHA")" = \
+            "$(printf 'A\t.github/workflows/nano-ubuntu-once.yml\nA\tscripts/nano_ubuntu_once.py')"
+          git ls-tree HEAD .github/workflows/nano-ubuntu-once.yml scripts/nano_ubuntu_once.py | awk '$1 == "100644" && $2 == "blob" {n++} END {exit n != 2}'
+          test -z "$(git status --porcelain --untracked-files=all)"
+          install -m 600 scripts/nano_ubuntu_once.py "$RUNNER_TEMP/nano_ubuntu_once.py"
+          git switch --quiet --detach "$NANO_PRODUCT"
+          test "$(git rev-parse HEAD^{tree})" = "$NANO_PRODUCT_TREE"
+      - uses: ./.github/actions/setup-python-env
+        id: python
+        with:
+          install-project: 'false'
+      - name: Stage only public count-only pins
+        id: reference_setup
+        if: matrix.lane == 'reference'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip --isolated --disable-pip-version-check install --no-deps --require-hashes \
+            --target "$RUNNER_TEMP/nano-reference-wheels" -r scripts/nano_reference_requirements.txt
+          python -I -S "$RUNNER_TEMP/nano_ubuntu_once.py" stage-reference "$RUNNER_TEMP/nano-reference-assets"
+      - name: Count joint whole-index memory, work and reply fit offline
+        id: reference
+        if: matrix.lane == 'reference'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"; python="$(command -v python)"
+          scratch="$(mktemp -d "$RUNNER_TEMP/nano-reference-XXXXXX")"
+          mkdir -m 700 "$scratch/home" "$scratch/tmp" "$RUNNER_TEMP/nano-proof"
+          printf 'overlay=%s\nrun_id=%s\nrun_attempt=%s\nbase=%s\nbase_tree=%s\nproduct=%s\nproduct_tree=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$NANO_BASE" "$NANO_BASE_TREE" "$NANO_PRODUCT" "$NANO_PRODUCT_TREE" \
+            >"$RUNNER_TEMP/nano-proof/reference-subject.txt"
+          outside="$(readlink /proc/self/ns/net)"
+          sudo -n unshare --net -- /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs \
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME="$scratch/home" TMPDIR="$scratch/tmp" \
+            PYTHONPATH="$RUNNER_TEMP/nano-reference-wheels" PYTHONDONTWRITEBYTECODE=1 \
+            /bin/bash -eu -o pipefail -c '
+              test "$(readlink /proc/self/ns/net)" != "$1"
+              test "$(tail -n +2 /proc/net/route | wc -l)" = 0
+              test "$(/usr/sbin/ip -o link show | wc -l)" = 1
+              /usr/sbin/ip -o link show dev lo | grep -q "state DOWN"
+              PY="$2"; pins="$3"; private="$4"; proof="$5"; runner="$6"
+              printf "isolated_net_namespace=verified\n" >>"$proof/reference-subject.txt"
+              positive=0; growth=0; instruction=0
+              "$PY" scripts/nano_reference_capacity.py --cache "$pins" >"$private/normal.json" 2>"$private/normal.stderr" || positive=$?
+              "$PY" scripts/nano_reference_capacity.py --cache "$pins" --negative-control growth >"$private/growth.json" 2>"$private/growth.stderr" || growth=$?
+              "$PY" scripts/nano_reference_capacity.py --cache "$pins" --negative-control missing-instruction >"$private/instruction.json" 2>"$private/instruction.stderr" || instruction=$?
+              printf "normal=%s\ngrowth=%s\nmissing_instruction=%s\n" \
+                "$positive" "$growth" "$instruction" >"$proof/reference-exits.txt"
+              # Keep a truthful red report, too. The reference CLI emits selected numbers/hashes only.
+              checked=not_run; incomplete=0
+              if test -s "$private/normal.json" && "$PY" -m json.tool "$private/normal.json" >"$proof/reference.json"; then
+                checked=0
+                "$PY" -I -S "$runner" check-reference "$proof/reference.json" || checked=$?
+              fi
+              printf "joint_report_check=%s\n" "$checked" >>"$proof/reference-exits.txt"
+              "$PY" -m json.tool "$private/growth.json" >"$proof/reference-growth.json"
+              "$PY" scripts/nano_reference_capacity.py --cache "$private/absent-reference-pins" \
+                >"$private/incomplete.json" 2>"$private/incomplete.stderr" || incomplete=$?
+              printf "missing_reference_pins=%s\n" "$incomplete" >>"$proof/reference-exits.txt"
+              test "$positive:$growth:$instruction:$checked:$incomplete" = "0:1:2:0:2"
+              test ! -s "$private/incomplete.json"
+              grep -q "shipped governance exceeds the reference growth allowance" "$private/growth.stderr"
+              grep -Eq "(framing is incorrect|exact public anti-slop bodies)" "$private/instruction.stderr"
+            ' _ "$outside" "$python" "$RUNNER_TEMP/nano-reference-assets" "$scratch" "$RUNNER_TEMP/nano-proof" \
+              "$RUNNER_TEMP/nano_ubuntu_once.py"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          printf 'accepted=true\n' >>"$RUNNER_TEMP/nano-proof/reference-subject.txt"
+      - name: Install Chromium for the synthetic browser cases
+        id: browser_setup
+        if: matrix.lane == 'browser'
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/nano-chromium
+        run: python -I -S scripts/ci_browser_install.py --python "$(command -v python)" chromium
+      - name: Run the frozen cases once, on the detached product
+        id: cases
+        if: matrix.lane != 'reference'
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          # S48/49/50 have 1800 s per-case markers; the browser lane includes a server/Chromium journey.
+          python -I -S scripts/safe_test.py --timeout 1950 --evidence-dir "$RUNNER_TEMP/nano-private" -- \
+            "$(command -v python)" "$RUNNER_TEMP/nano_ubuntu_once.py" "$NANO_LANE" "$RUNNER_TEMP" \
+            "$NANO_BASE" "$NANO_BASE_TREE" "$NANO_PRODUCT" "$NANO_PRODUCT_TREE" "$GITHUB_SHA" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >"$RUNNER_TEMP/nano-runner.private.log" 2>&1 || status=$?
+          mkdir -p "$RUNNER_TEMP/nano-proof"
+          printf '%s\n' "$status" >"$RUNNER_TEMP/nano-proof/safe-test.exit"
+          exit "$status"
+      - name: Retain which verification stage failed or did not run
+        if: always()
+        shell: bash
+        env:
+          CHECKOUT: ${{ steps.checkout.outcome }}
+          BIND: ${{ steps.bind.outcome }}
+          PYTHON_SETUP: ${{ steps.python.outcome }}
+          REFERENCE_SETUP: ${{ steps.reference_setup.outcome }}
+          REFERENCE: ${{ steps.reference.outcome }}
+          BROWSER_SETUP: ${{ steps.browser_setup.outcome }}
+          CASES: ${{ steps.cases.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nano-proof"
+          printf 'run_id=%s\nrun_attempt=%s\noverlay=%s\nrequested_product=%s\nlane=%s\ncheckout=%s\nbind=%s\npython=%s\nreference_setup=%s\nreference=%s\nbrowser_setup=%s\ncases=%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$NANO_PRODUCT" "$NANO_LANE" \
+            "$CHECKOUT" "$BIND" "$PYTHON_SETUP" "$REFERENCE_SETUP" "$REFERENCE" "$BROWSER_SETUP" "$CASES" \
+            >"$RUNNER_TEMP/nano-proof/stages.txt"
+      - name: Upload the sanitized receipt and checked synthetic frames
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nano-r5-ubuntu-${{ matrix.lane }}
+          path: ${{ runner.temp }}/nano-proof
+          if-no-files-found: error
+          retention-days: 3
