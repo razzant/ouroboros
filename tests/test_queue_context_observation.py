@@ -119,6 +119,23 @@ def test_a_model_wait_is_not_worker_saturation(tmp_path):
     assert "model" not in line.split("project worker pool", 1)[1].split(";", 1)[0]
 
 
+def test_the_mind_sees_memory_admission_without_the_operators_macos_measurement(tmp_path):
+    """Measuring macOS memory pressure changes no behaviour, and what the mind sees is behaviour: a memory_admission
+    whose reading carries the measurement-only ``vm_measurement`` (``pool_admission``, issue #3397) reaches the
+    runtime facts with exactly its ordinary fields, while the loaded queue document keeps the block for operators."""
+    admission = {"read_at": "2026-11-28T00:00:00+00:00", "status": "measured", "total_bytes": 10 * 2 ** 30,
+                 "available_bytes": 9 * 2 ** 30, "reserve_bytes": 2 ** 30, "pressure": "not_critical",
+                 "typical_worker_bytes": 2 ** 30, "typical_basis": "heartbeat_mean", "starting_processes": 0,
+                 "starts_admitted": 8, "reason": "memory_room"}
+    measurement = {"pressure_level": "warn", "file_bounded_upper_bytes": 0, "rates_bytes_per_sec": {"swapouts": 1}}
+    _write(tmp_path, {**_snapshot(), "pool_observation_status": "observed",
+                      "memory_admission": {**admission, "vm_measurement": measurement}})
+    fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
+    assert fact["memory_admission"] == admission, "the ordinary fields, exactly, without the measurement"
+    document = task_status._load_queue_snapshot(tmp_path)
+    assert document["memory_admission"] == {**admission, "vm_measurement": measurement}, "operators keep it"
+
+
 def test_pending_hold_projection_uses_stop_and_project_hold_owners(tmp_path):
     """Explicit pending holds count without treating ordinary queued rows as held."""
     snapshot = {"ts": datetime.fromtimestamp(1000, timezone.utc).isoformat(),

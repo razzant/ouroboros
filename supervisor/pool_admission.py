@@ -22,10 +22,13 @@ no task and could carry new work, so a confirmed critical verdict holds it like 
 (``worker_pool_lifecycle._replacement_waits``, its own reading outside Q and lifecycle serialization): the dead slot is forgotten and the next
 ordinary pass admits a process on its reading; the table's last member, or a slot past its first readiness attempt
 (its count), stays dead for the crash detector. The machine is read at most once a pass, outside Q and the lifecycle serializer, only when chosen work
-needs a new process (``dispatch_choice.run_pass``), and never kept.
+needs a new process (``dispatch_choice.run_pass``), and never kept (only its macOS VM sample, the next rates' base).
 Workers report RSS, never probe host memory. Pressure stops or cools nobody;
 it refuses a new process. Dated admission facts are published with the pool's counts (``facts``) and said in words
-by the owner's /status (``status_words``); the queue census hashes only whether starts are admitted and why.
+by the owner's /status (``status_words``); the queue census hashes only whether starts are admitted and why. On macOS
+they also carry ``vm_measurement`` (``host_memory.DarwinVM.measurement``, rated against this process's previous
+reading) for operators: nothing here reads it, the mind's runtime facts leave it out, and issue #3397's rule is
+decided on its numbers.
 Disclosed residuals: growth after a start is not predicted; neighbours on the host share memory without a common
 ledger; Windows Job and commit limits are not read; running out of memory is not prevented, only starting a process
 into a measured shortage; a slot held through critical pressure may be replaced beside a process growth
@@ -35,7 +38,7 @@ started meanwhile, a surplus quiescence retires.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from ouroboros.host_memory import MemorySnapshot, physical_memory
@@ -44,26 +47,35 @@ from ouroboros.utils import utc_now_iso
 
 @dataclass(frozen=True)
 class Reading:
-    """One pass's reading of the machine: ``memory`` is None when unknown and ``unmeasured`` then says why."""
+    """One pass's reading of the machine: ``memory`` is None when unknown and ``unmeasured`` then says why;
+    ``measurement`` is macOS's measurement-only figures (None elsewhere), computed with the reading."""
 
     memory: Optional[MemorySnapshot]
     unmeasured: str
     at: str
+    measurement: Optional[Dict[str, Any]] = field(default=None, compare=False)
 
 
 PROBE = Reading(None, "", "")  # before the pass reads: whether a start could be admitted at all
 _READY: Dict[str, Any] = {"seq": 0, "generation": None, "rss_bytes": None}  # successful openings; the newest size
 _FACTS: Dict[str, Any] = {}  # the last reading's facts, published with the pool's counts (written and read under Q)
+_VM: Dict[str, Any] = {}  # this process's last macOS VM sample: the base of the next measurement's rates, no more
 
 
 def read() -> Reading:
-    """The machine now. Called outside Q and the lifecycle serializer; never kept beyond its pass."""
+    """The machine now. Called outside Q and the lifecycle serializer; never kept beyond its pass, except the macOS
+    VM sample the next reading's rates are taken against (readers may interleave: any earlier sample is a valid
+    base, and a later-stamped one gives no rate)."""
     try:
         memory = physical_memory()
     except Exception as exc:  # the probe answers None for its own failures; anything else is unknown too
         return Reading(None, f"memory_unmeasured: {type(exc).__name__}", utc_now_iso())
     why = "" if memory is not None else "memory_unmeasured: the host memory probe gave no reading"
-    return Reading(memory, why, utc_now_iso())
+    vm = memory.vm if memory is not None else None
+    if vm is None:
+        return Reading(memory, why, utc_now_iso())
+    previous, _VM["sample"] = _VM.get("sample"), vm
+    return Reading(memory, why, utc_now_iso(), vm.measurement(previous))
 
 
 def note_ready(row: Dict[str, Any]) -> None:
@@ -178,6 +190,8 @@ def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[An
         "pressure": memory and {True: "critical", False: "not_critical"}.get(memory.pressure, "unknown"),
         "typical_worker_bytes": typical, "typical_basis": basis, "starting_processes": starting,
         "starts_admitted": starts, "reason": why})
+    if reading.measurement is not None:
+        _FACTS["vm_measurement"] = reading.measurement  # published beside the verdict, read by none of it
     return starts
 
 
