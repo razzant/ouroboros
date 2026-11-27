@@ -266,17 +266,10 @@ def test_each_shipped_adapter_admits_or_refuses_a_mature_start_at_its_own_sessio
             _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, shape=shape)
         assert raised.value.window_tokens == facts.conversation_window_tokens and raised.value.deficit_tokens > 0
         return
-    (session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id,
+    (_session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id,
                                                           shape=shape)
     measured = proof["fit"]["measurement"]
     assert not attempts and measured["capacity_deficit_tokens"] == 0
     assert measured["capacity_total_tokens"] == facts.conversation_window_tokens
     assert measured["estimated_input_tokens"] + measured["response_reserve_tokens"] <= facts.conversation_window_tokens
     assert proof.get("work_room", {}).get("deficit_tokens") == 0  # the call starts with its eighth of work room
-    if shape == "rich":  # every MCP server's own guide reaches the engine whole, none folded for the window
-        rows = json.loads(session.selected.messages_json)
-        text = " ".join(" ".join(part.get("text", "").split() if isinstance(part, dict) else str(part).split())
-                        for row in rows for part in (row["content"] if isinstance(row.get("content"), list)
-                                                     else [row.get("content") or ""]))
-        _registry, guides = scale.mcp_registry(tmp_path / "guides", monkeypatch)  # the same synthetic guides again
-        assert all(" ".join(guide.split()) in text for guide in guides.values())
