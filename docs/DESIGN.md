@@ -887,7 +887,7 @@ card in another chat keeps the excerpt.
 
 | Role | Foreground | Background | Border |
 | --- | --- | --- | --- |
-| Success / connected | `--status-ok-fg` | `--status-ok-bg` | `--status-ok-border` |
+| Success / connected | `--status-ok-fg` | `--status-ok-bg` | none: no surface draws a success edge |
 | The owner's attention: the owner's move, or a warning worth reading | `--status-warn-fg` | `--status-warn-bg` | `--status-warn-border` |
 | Error / failed | `--status-error-fg` | `--status-error-bg` | `--status-error-border` |
 | Neutral / classification | `--status-neutral-fg` | `--status-neutral-bg` | `--status-neutral-border` |
