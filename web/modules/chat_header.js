@@ -39,6 +39,7 @@ export function roomBarHtml({ asPanel, title }) {
             title,
             variant: 'overlay',
             className: 'chat-page-header',
+            roomEdge: true,
             toolbarClass: 'ui-chrome-group',
             actionsHtml: mainHeaderActionsHtml(),
             showMobileNav: false,  // a room's ☰ is its composer row's first control

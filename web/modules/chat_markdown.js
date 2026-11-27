@@ -419,7 +419,7 @@ function transformRenderedMarkdown(fragment, literal) {
         if (item) item.classList.add('task-list-item');
         item?.closest('ul, ol')?.classList.add('task-list');
         const marker = document.createElement('span');
-        marker.className = `md-checkbox${input.checked ? ' is-checked' : ''}`;
+        marker.className = `ui-checkbox md-checkbox${input.checked ? ' is-checked' : ''}`;
         marker.setAttribute('aria-hidden', 'true');
         marker.textContent = input.checked ? '✓' : '';
         input.replaceWith(marker);

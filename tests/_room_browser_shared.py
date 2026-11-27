@@ -8,6 +8,7 @@ another test module (docs/development/02-naming-and-boundaries.md).
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from ouroboros import dialogue_store
@@ -126,15 +127,20 @@ def recording_chat_bridge(tmp_path, monkeypatch):
     return bridge, frames
 
 
-def serve_chat_history(page, data_root):
-    """The real history endpoint over the same data root (Playwright's routes run in its loop)."""
+def serve_chat_history(page, data_root, scope=""):
+    """The real history endpoint over the same data root (Playwright's routes run in its loop). It answers as the host
+    does, from the profile its app proves (``ServedUI.serving_profile_scope``): a document that proves a profile reads
+    only an answer naming it (web/modules/api_client.js ``chatHistory``), so ``scope`` is the proof the page's document
+    carries; ``""`` is an app that applied none."""
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
 
     from ouroboros.gateway.history import make_chat_history_endpoint
 
-    client = TestClient(Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(data_root))]))
+    app = Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(data_root))])
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: scope)
+    client = TestClient(app)
 
     def history(route):
         url = urlsplit(route.request.url)

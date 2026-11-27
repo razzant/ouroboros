@@ -1,6 +1,6 @@
 # 10. Key Invariants
 
-This part gives me the rules every other part keeps: cross-cutting owners and the continuity map (exact sources, working views and authority), and the closed roads (§10.2), approaches already rejected and why. Before I design or edit a part of my body, I read it whole.
+This part gives me the rules every other part keeps: cross-cutting owners and the continuity map (exact sources, working views and authority), and the closed roads (§10.2), approaches already rejected and why. A review of a change to my body carries it whole; before non-trivial work on my body I consult it with the owning chapter (BIBLE P6).
 
 1. **Constitution and identity persist.** Outside Cyber Pro neither `BIBLE.md` nor `identity.md` is deleted; content evolves.
 2. **Release metadata has one projection.** `VERSION` is canonical; `ouroboros/tools/release_sync.py::VERSION_CARRIER_SPANS` names carriers, `sync_release_metadata()` writes them, `version_carrier_desyncs()` checks them, and BIBLE P9 governs neutral commits.

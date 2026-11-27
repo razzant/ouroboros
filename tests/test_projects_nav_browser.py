@@ -80,7 +80,7 @@ def test_reads_meet_in_either_order_by_request_time_and_a_deleted_room_stays_gon
     ui, page, root, control = pins_ui, pins_ui["page"], pins_ui["root"], pins_ui["control"]
     seed_archive(root)
     refresh(page)
-    find = page.locator('#nav-projects .nav-find-input')
+    find = page.locator('#primary-sidebar .nav-find-input')
     status = page.locator('.nav-find-status')
     find.fill("Recent project")
     expect()(status).to_have_text("1 project found")  # the first complete read settled
@@ -185,7 +185,7 @@ def test_browse_keeps_the_row_in_view_when_rooms_above_it_come_or_go_and_says_a_
     page, root, control = pins_ui["page"], pins_ui["root"], pins_ui["control"]
     seed_archive(root)
     refresh(page)
-    page.locator('#nav-projects .nav-find-input').fill("no such name")
+    page.locator('#primary-sidebar .nav-find-input').fill("no such name")
     page.locator('#nav-projects-list > .nav-projects-more', has_text="Show all projects").click()
     items = page.locator('#nav-projects-list > .nav-project-item')
     expect()(items).to_have_count(499)
@@ -323,7 +323,7 @@ def test_find_matches_every_name_in_any_case_or_accent_and_never_claims_a_room_i
     page.on("request", lambda request: reads.append(request.url))
     refresh(page)
     expect()(page.locator('.nav-project-item')).to_have_count(51)
-    find = page.locator('#nav-projects .nav-find-input')
+    find = page.locator('#primary-sidebar .nav-find-input')
     note = page.locator('#nav-projects-list > .nav-projects-note')
     # An unreadable list is said as such: never "no match", with a way to try again.
     control["fail_list"] = True
@@ -736,7 +736,7 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
     evidence = producer_evidence_dir(tmp_path, "project-find", env="OUROBOROS_BROWSER_EVIDENCE_OUT")
     geometry = page.evaluate("""() => {
         const box = (el) => el.getBoundingClientRect();
-        const find = document.querySelector('#nav-projects .nav-projects-find');
+        const find = document.querySelector('#primary-sidebar .nav-projects-find');
         const input = find.querySelector('.nav-find-input');
         const row = document.querySelector('#nav-projects-list .nav-project-row');
         const style = getComputedStyle(find);
@@ -745,7 +745,9 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
             glyphX: box(find.querySelector('.nav-find-glyph')).left,
             textX: box(input).left + parseFloat(getComputedStyle(input).paddingLeft),
             labelX: box(row.querySelector('.nav-row-label')).left,
-                above: box(find).top - box(document.querySelector('.nav-projects-header')).top,
+            above: box(find).top - box(document.querySelector('.nav-projects-header')).top,
+            leads: document.querySelector('#primary-sidebar .sidebar-head').firstElementChild
+                === document.querySelector('.nav-projects-header'),
             below: box(row).top - box(find).bottom,
             shadow: style.boxShadow, inputBorder: getComputedStyle(input).borderTopWidth,
             fontSize: parseFloat(getComputedStyle(input).fontSize), placeholder: input.placeholder,
@@ -765,19 +767,20 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
     assert geometry["shadow"] != "none" and geometry["inputBorder"] == "0px", geometry
     assert geometry["fontSize"] >= (16 if touch else 14), geometry
     assert geometry["above"] >= 0 and geometry["below"] > 0, geometry
+    assert geometry["leads"] is True, "Find a project and + are the column's first row, the card under them (owner 27.11)"
     assert geometry["placeholder"] == "Find a project" and geometry["clearHidden"] is True
-    find = page.locator('#nav-projects .nav-find-input')
+    find = page.locator('#primary-sidebar .nav-find-input')
     find.fill("Recent")
-    expect()(page.locator('#nav-projects .nav-find-clear')).to_be_visible()
+    expect()(page.locator('#primary-sidebar .nav-find-clear')).to_be_visible()
     find.focus()
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"field-focused-{ui['tag']}.png"), animations="disabled")
-    page.locator('#nav-projects .nav-find-clear').click()
+    page.locator('#primary-sidebar .nav-find-clear').click()
     expect()(find).to_have_value("")
     expect()(find).to_be_focused()
-    expect()(page.locator('#nav-projects .nav-find-clear')).to_be_hidden()
+    expect()(page.locator('#primary-sidebar .nav-find-clear')).to_be_hidden()
     # The field is permanent; clearing it returns to the resting feed without a collapse control.
     assert page.locator('#nav-projects-toggle').count() == 0
-    expect()(page.locator('#nav-projects .nav-projects-find')).to_be_visible()
+    expect()(page.locator('#primary-sidebar .nav-projects-find')).to_be_visible()
     assert order(page) == ["newer", "older"]
 
 
@@ -1028,17 +1031,86 @@ SHOWS = """(el) => {
 }"""
 
 
+FIRST_MATCH = """() => {
+    const side = document.getElementById('primary-sidebar'), head = side.querySelector('.sidebar-head').getBoundingClientRect();
+    const first = document.querySelector('#nav-projects-list > .nav-project-item'), r = first.getBoundingClientRect();
+    return {id: first.dataset.navProjectId, top: r.top, bottom: r.bottom, headBottom: head.bottom, height: innerHeight};
+}"""
+
+
+@pytest.mark.parametrize("height", [480, 900])  # the whole column scrolls / the list scrolls
+def test_a_new_find_starts_at_its_first_match_in_view_and_enter_opens_that_one(pins_ui, height):
+    """Starting a find deep in a browse shows its first match where the owner can see it, under the pinned head, in
+    whatever scrolls (a short window scrolls the whole column, a tall one the list), even when the row being read is
+    a match too; Enter then opens the match on screen."""
+    ui, page = pins_ui, pins_ui["page"]
+    page.set_viewport_size({"width": ui["width"], "height": height})
+    seed_archive(ui["root"])
+    refresh(page)
+    find = page.locator('#primary-sidebar .nav-find-input')
+    find.fill("no such name")
+    page.locator('#nav-projects-list > .nav-projects-more', has_text="Show all projects").click()
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
+    row(page, "archive-250").scroll_into_view_if_needed()  # the owner reads deep in the browse, a future match
+    find.click()
+    page.keyboard.type("archive")
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(51)
+    first = page.evaluate(FIRST_MATCH)
+    assert first["top"] >= first["headBottom"] - 1 and first["bottom"] <= first["height"], first
+    page.evaluate("""() => document.addEventListener('click', (event) => {
+        const item = event.target.closest('.nav-project-item'); if (item) window.__opened = item.dataset.navProjectId;
+    }, {capture: true})""")
+    page.keyboard.press("Enter")
+    assert page.evaluate("window.__opened") == first["id"]
+
+
+def test_escape_with_the_field_scrolled_away_in_a_crowded_column_returns_to_the_browse_row(pins_ui):
+    """In a window so short that the head scrolls away with the list (data-bars-crowd), the owner can keep the
+    keyboard in the field while reading far down: Escape empties it, puts the row first in view back at its place, and
+    gives the keyboard to that row, because the field is out of view there."""
+    ui, page = pins_ui, pins_ui["page"]
+    page.set_viewport_size({"width": ui["width"], "height": 170})
+    seed_archive(ui["root"])
+    refresh(page)
+    find = page.locator('#primary-sidebar .nav-find-input')
+    find.fill("no such name")
+    page.locator('#nav-projects-list > .nav-projects-more', has_text="Show all projects").click()
+    items = page.locator('#nav-projects-list > .nav-project-item')
+    expect()(items).to_have_count(499)
+    sidebar = page.locator('#primary-sidebar')
+    assert sidebar.evaluate("el => el.hasAttribute('data-bars-crowd')"), "the head scrolls with the list here"
+    find.click()
+    row(page, "archive-250").evaluate("el => el.scrollIntoView({block: 'start'})")  # the keyboard stays in the field
+    expect()(find).to_be_focused()
+    assert not find.evaluate(SHOWS), "the unpinned head left the view with the field"
+    saved = page.evaluate(FIRST_IN_VIEW)
+    page.keyboard.type("archive")
+    expect()(items).to_have_count(51)
+    sidebar.evaluate("el => { el.scrollTop += 600; }")  # the owner reads on through the matches
+    assert not find.evaluate(SHOWS)
+    expect()(find).to_be_focused()
+    page.keyboard.press("Escape")
+    expect()(find).to_have_value("")
+    expect()(items).to_have_count(499)
+    current, top = page.evaluate(FIRST_IN_VIEW)
+    assert current == saved[0] and top == pytest.approx(saved[1], abs=1), (saved, current, top)
+    assert not find.evaluate(SHOWS)
+    focused = page.evaluate("document.activeElement?.closest('.nav-project-item')?.dataset.navProjectId || null")
+    assert focused == saved[0], focused
+
+
 @pytest.mark.parametrize("how", ["escape", "clear-button", "clear-command"])
 def test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_focus(pins_ui, how):
     """Real presses in a short window, where the whole column scrolls (480 px: a desk's zones fit from 500). The find
     begins with the field in view (a click brings it there), so Escape, the field's × and Clear search put the row
     that was first in view back at its place, and the keyboard stays in the field, which shows; nothing scrolls after
-    that. Escape is pressed after the owner scrolled the column on through the matches, the field gone from view."""
+    that. Escape is pressed after the owner scrolled the column on through the matches; the field leads the pinned head
+    (owner 27.11), so it stays in view."""
     ui, page = pins_ui, pins_ui["page"]
     page.set_viewport_size({"width": ui["width"], "height": 480})
     seed_archive(ui["root"])
     refresh(page)
-    find = page.locator('#nav-projects .nav-find-input')
+    find = page.locator('#primary-sidebar .nav-find-input')
     find.fill("no such name")
     page.locator('#nav-projects-list > .nav-projects-more', has_text="Show all projects").click()
     items = page.locator('#nav-projects-list > .nav-project-item')
@@ -1052,10 +1124,10 @@ def test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_foc
     expect()(items).to_have_count(0 if how == "clear-command" else 51)
     if how == "escape":
         sidebar.evaluate("el => { el.scrollTop += 600; }")
-        assert not find.evaluate(SHOWS)
+        assert find.evaluate(SHOWS)  # the column's first row stays pinned while the matches scroll under it
         page.keyboard.press("Escape")
     elif how == "clear-button":
-        page.locator('#nav-projects .nav-find-clear').click()
+        page.locator('#primary-sidebar .nav-find-clear').click()
     else:
         page.locator('#nav-projects-list > .nav-projects-more', has_text="Clear search").click()
     expect()(find).to_have_value("")

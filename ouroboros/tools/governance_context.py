@@ -7,9 +7,12 @@ carry inline and which it reaches through a navigation map. Three tiers:
 1. **Rules, always inline.** The surface's applicable ``docs/CHECKLISTS.md``
    section (supplied by the caller, which owns its own section name), the
    shared section every reviewer of this repository's code applies
-   (:data:`SHARED_CHECKLIST_SECTION`, loaded here), ``BIBLE.md`` whole and
-   ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is byte-stable across
-   commits, so the caller puts it in its cache-marked prefix.
+   (:data:`SHARED_CHECKLIST_SECTION`, loaded here), ``BIBLE.md`` whole,
+   ``docs/CHECKLISTS_ARCHIVE.md`` whole and the installed key-invariants chapter
+   (:data:`BODY_INVARIANTS_CHAPTER`) whole, for packet and retrieving rows alike,
+   so a proposal is judged by the installed text even where it edits that chapter.
+   This tier is byte-stable across commits, so the caller puts it in its
+   cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
    change touches ``web/`` (its design bible alone when the whole book does not fit
    the share), its design bible alone for changed words elsewhere, and its numbered
@@ -21,9 +24,10 @@ carry inline and which it reaches through a navigation map. Three tiers:
    inlined, every body reviewer receives its generated heading map.
 3. **Map, never whole.** ``docs/ARCHITECTURE.md`` arrives as book navigation for
    every delivery. A PACKET reviewer (a row with no tools of its own)
-   additionally receives the top-level sections whose text mentions a touched
-   file name, from the same budget; a RETRIEVING row gets the navigation and
-   reads what it needs with its own ``read_file``.
+   additionally receives, from the same budget, the top-level sections and the
+   opening blocks (text before a chapter's first subheading; of a code listing,
+   only its lines) whose text mentions a touched file name; a RETRIEVING row gets
+   the navigation and reads what it needs with its own ``read_file``.
 
 Every document that is not inlined is NAMED in the returned manifest and in the
 navigation text, never silently dropped (BIBLE P1), and the manifest is the
@@ -61,11 +65,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from ouroboros.runtime_limits import REVIEW_GOVERNANCE_INLINE_SHARE
+from ouroboros.tools import governance_module_rows as gmr
 from ouroboros.utils import estimate_tokens
 
 BIBLE_PATH = "BIBLE.md"
@@ -87,15 +92,11 @@ ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
 REVIEW_PROTOCOL_CHAPTER = "docs/development/05-review-and-commit-protocol.md"
 # The body's cross-cutting invariants: one numbered list before the chapter's first subheading, so a section
-# selector never reaches it; every body reviewer gets it whole (packet) or owes its full read (retrieving).
+# selector never reaches it. Every body reviewer gets the installed chapter whole in tier 1, as it gets BIBLE.
 BODY_INVARIANTS_CHAPTER = "docs/architecture/10-key-invariants.md"
-# The body navigation's line on it, where it was not inlined (review-contract words, ``navigation_material``).
-_INVARIANTS_POINTERS = {
-    "unavailable": (f"`{BODY_INVARIANTS_CHAPTER}` (the body's cross-cutting invariants) is UNAVAILABLE at this "
-                    "governance root and was not delivered; state the uncertainty that leaves."),
-    "required": (f"REQUIRED before you judge: read `{BODY_INVARIANTS_CHAPTER}` (the body's cross-cutting invariants) "
-                 "in full with `read_file(root=\"system_repo\", path=...)`."),
-}
+# The body navigation's line when it could not be read (review-contract words, ``navigation_material``).
+_INVARIANTS_UNAVAILABLE = (f"`{BODY_INVARIANTS_CHAPTER}` (the body's cross-cutting invariants) is UNAVAILABLE at this "
+                           "governance root and was not delivered; state the uncertainty that leaves.")
 
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
@@ -199,14 +200,16 @@ class GovernanceContext:
     selected_inline: str = ""
     inline_whole_documents: dict = field(default_factory=dict)
     layer: str = BODY_LAYER
+    owner_rows: int = 0  # owner rows inlined in ``selected_inline`` (``yield_module_rows`` removes them)
 
 
 def _normalize(path: Any) -> str:
     return str(path or "").replace("\\", "/").lstrip("./")
 
 
-def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[str, ...], ...]:
-    """One name group per touched file: its repo-relative path and its basename.
+def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[re.Pattern, ...], ...]:
+    """One group per touched file: its repo-relative path and its basename, each compiled once as a token
+    matcher (a broad change matches hundreds of names against every candidate text).
 
     Directory prefixes are deliberately absent — ``web/`` or ``ouroboros/``
     would match nearly every chapter and so select nothing."""
@@ -218,11 +221,12 @@ def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[str, .
             continue
         seen.add(rel)
         base = rel.rsplit("/", 1)[-1]
-        groups.append((rel,) if base == rel else (rel, base))
+        groups.append(tuple(re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])")
+                            for name in ((rel,) if base == rel else (rel, base))))
     return tuple(groups)
 
 
-def _mentions(text: str, groups: Iterable[tuple[str, ...]]) -> tuple[int, int]:
+def _mentions(text: str, groups: Iterable[tuple[re.Pattern, ...]]) -> tuple[int, int]:
     """``(touched files mentioned, mentions)`` of those files in ``text``.
 
     A name matches only as its own token: ``git.py`` inside ``review_git.py`` is
@@ -231,9 +235,7 @@ def _mentions(text: str, groups: Iterable[tuple[str, ...]]) -> tuple[int, int]:
     beside its own basename is one mention, not two."""
     files = mentions = 0
     for group in groups:
-        found = max(
-            len(re.findall(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", text))
-            for name in group)
+        found = max(len(pattern.findall(text)) for pattern in group)
         if found:
             files += 1
             mentions += found
@@ -374,7 +376,7 @@ def navigation_material(layer: str, delivery: str) -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a layer's governance navigation
     as its renderer composes it for ``delivery``, over placeholders (the subject's documents, the sources a skill
     owes). The documents it names, their headings and the guides' own text are not here."""
-    from ouroboros.context_layout import design_navigation
+    from ouroboros.context_layout import PACKET_BOOK_INDEX, design_navigation
     from ouroboros.tools.review_helpers import GOVERNANCE_OMISSION
 
     words = NAVIGATION_WORDS.get(layer, {})
@@ -384,9 +386,12 @@ def navigation_material(layer: str, delivery: str) -> list:
         if layer == BODY_LAYER:
             pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note)
                             for note in _DESIGN_REVIEW_MAP.values())
-            pointers.extend(_INVARIANTS_POINTERS.values())
+            pointers.append(_INVARIANTS_UNAVAILABLE)
+            if delivery == PACKET_DELIVERY:  # only a packet seat is handed owner rows, under their section title
+                blocks, notices = gmr.contract_material()
+                pointers.extend([*(_render(gmr.MODULE_ROWS_PATH, block) for block in blocks), *notices])
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
-                *(pointers if layer == BODY_LAYER else ())]
+                *(pointers if layer == BODY_LAYER else ()), *([PACKET_BOOK_INDEX] if delivery == PACKET_DELIVERY else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
     (tail,) = words[delivery]
     return [heading, *(rules + subject_words + tail for rules in (with_rules, without_rules)),
@@ -579,6 +584,7 @@ def governance_context(
     subject_root: Any = None,
     manifest_facts: Any = None,
     review_words: Any = None,
+    changes: Optional[Sequence[tuple]] = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -593,7 +599,8 @@ def governance_context(
     body) runs the three tiers; ``core`` (any other subject) runs
     :func:`_core_layer_context` over ``subject_root``; ``skill`` (a skill payload)
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
-    manifest's ``declares``)."""
+    manifest's ``declares``). ``changes`` (the subject's ``(status, path, old path)``
+    rows, when the seam has them) labels a body packet's owner rows."""
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
 
     if layer not in GOVERNANCE_LAYERS:
@@ -656,17 +663,13 @@ def governance_context(
     if unavailable:
         rows.append(_row(BODY_INVARIANTS_CHAPTER, 1, "navigation", 0,
                          f"the body's cross-cutting invariants are unavailable here ({unavailable})"))
-        invariants_pointer = _INVARIANTS_POINTERS["unavailable"]
-    elif packet:
+        invariants_pointer = _INVARIANTS_UNAVAILABLE
+    else:  # inline for every delivery: a session may not reach the installed tree, and a proposal may edit it
         tier1.append((BODY_INVARIANTS_CHAPTER, invariants))
         inline_texts[BODY_INVARIANTS_CHAPTER] = invariants
         rows.append(_row(BODY_INVARIANTS_CHAPTER, 1, "inline", len(invariants),
-                         "tier 1: the body's cross-cutting invariants, whole for every body reviewer"))
+                         "tier 1: the installed body's cross-cutting invariants, whole for every body reviewer"))
         invariants_pointer = ""
-    else:
-        rows.append(_row(BODY_INVARIANTS_CHAPTER, 1, "required", len(invariants),
-                         "tier 1: the body's cross-cutting invariants; read it in full"))
-        invariants_pointer = _INVARIANTS_POINTERS["required"]
 
     # --- the change-class budget: ONE share for tier 2 and tier 3 together,
     # rules by change class drawing first, architecture sections from the rest.
@@ -777,39 +780,46 @@ def governance_context(
     rows.append(_row("docs/ARCHITECTURE.md", 3, "navigation", 0, arch_reason if arch_chapters
                      else arch_problem or "no chaptered membership: navigation only"))
     sections: list[tuple[tuple, str, str, str]] = []
+    any_name = re.compile("|".join(pattern.pattern for group in names for pattern in group)) if names else None
     for chapter in arch_chapters:
-        if chapter.source_path == BODY_INVARIANTS_CHAPTER:  # tier 1 above, whole or a required read
+        if chapter.source_path == BODY_INVARIANTS_CHAPTER:  # tier 1 above, whole
             continue
         rows.append(_row(chapter.source_path, 3, "navigation", len(chapter.text),
                          "the map is never inlined whole; chapter navigation above"))
         if not packet or not names:
             continue
-        units = [(start, f"opening block {number}", text)
-                 for number, (start, text, _code) in enumerate(_opening_units(chapter), 1)]
-        units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section))
+        units = [(start, f"opening block {number}", text, is_code)
+                 for number, (start, text, is_code) in enumerate(_opening_units(chapter), 1)]
+        units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section), False)
                   for heading in _top_sections(chapter)]
-        for start, title, body in units:
+        for start, title, body, is_code in units:
+            if is_code:  # a code listing gives its lines that name a touched file, not all of itself
+                body = "\n".join(line for line in body.splitlines() if any_name.search(line))
+                title += " (excerpt: its lines naming a touched file)"
             files, mentions = _mentions(body, names)
             if not files:
                 continue
             path = f"{chapter.source_path}#{title}"
-            sections.append(((-files * 1000 - mentions, chapter.source_path, start),
+            # Authored prose first: a listing's lines name many files, so by count alone they would displace
+            # the sections that explain those files; they take what share is left.
+            sections.append(((is_code, -files * 1000 - mentions, chapter.source_path, start),
                              path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
             chapter_text[path] = body
-    if packet and touched:  # no module tree in the book: the touched domains' rows, neighbours yield first
-        from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, blocks
-        whole, reduced, left_out, problem = blocks(root, touched)
-        if problem:
-            rows.append(_row(MODULE_ROWS_PATH, 3, "navigation", 0, problem))
-        elif whole and not _admit(MODULE_ROWS_PATH, MODULE_ROWS_PATH, whole, 3, "module rows of the touched domains") \
-                and left_out:
-            _admit(MODULE_ROWS_PATH, MODULE_ROWS_PATH, reduced, 3,
-                   f"touched module rows only; {left_out} neighbour row(s) left out, said in the block")
+    # No module tree in the book: one owner row per path of the change, read from the installed manifest, ahead of
+    # the share (it is optional evidence of the fit ladder instead: ``yield_module_rows``).
+    modules = gmr.module_rows(root, touched, changes) if packet and touched else gmr.ModuleRows()
+    if modules.problem:
+        rows.append(_row(gmr.MODULE_ROWS_PATH, 3, "navigation", 0, modules.problem))
+    elif modules.text:
+        selected.append((gmr.MODULE_ROWS_PATH, modules.text))
+        rows.append(_row(gmr.MODULE_ROWS_PATH, 3, "inline", len(modules.text),
+                         f"owner rows of the {modules.count} touched path(s), outside the inline share"))
     for order, path, title, reason in sorted(sections):
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
 
     # --- navigation -------------------------------------------------------
-    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline), invariants_pointer]
+    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline), invariants_pointer,
+                gmr.UNAVAILABLE if modules.problem else ""]
     design_map = ""
     if DESIGN_PATH not in inline_texts:
         delivered = next((row["path"] for row in rows if row["disposition"] == "inline"
@@ -836,4 +846,25 @@ def governance_context(
         stable_inline=stable_inline,
         selected_inline=selected_inline,
         inline_whole_documents=inline_texts,
+        owner_rows=modules.count if modules.text else 0,
     )
+
+
+def yield_module_rows(governance: GovernanceContext) -> GovernanceContext:
+    """``governance`` without its owner rows, saying so in counted words: the fit ladder's first optional rung, ahead
+    of any part of the change. The manifest row records the yield; a context without the rows is returned unchanged."""
+    row = next((row for row in governance.manifest if row["path"] == gmr.MODULE_ROWS_PATH
+                and row["disposition"] == "inline"), None)
+    if row is None:
+        return governance
+    kept = [(title, text) for title, text in governance.inline_sections if title != gmr.MODULE_ROWS_PATH]
+    rows_text = next(text for title, text in governance.inline_sections if title == gmr.MODULE_ROWS_PATH)
+    before, after = governance.selected_inline.split(_render(gmr.MODULE_ROWS_PATH, rows_text), 1)
+    selected_inline = _join([before.removesuffix("\n\n"), after.removeprefix("\n\n")])
+    navigation = _join([governance.navigation, gmr.YIELDED.format(count=governance.owner_rows)])
+    manifest = [dict(entry, disposition="navigation", reason=gmr.YIELD_REASON) if entry is row else entry
+                for entry in governance.manifest]
+    return replace(
+        governance, inline_sections=kept, navigation=navigation, manifest=manifest, selected_inline=selected_inline,
+        owner_rows=0,
+        tokens_estimate=estimate_tokens(_join([governance.stable_inline, selected_inline, navigation])))

@@ -447,7 +447,9 @@ def test_module_map_answers_through_the_real_registry_on_this_tree(tmp_path, mon
     assert "(0 file(s))" in empty and "no files under this prefix (enumeration complete)" in empty
 
     whole_web = module_map("web/")
-    assert "web/tests/" not in whole_web.split("left out", 1)[1] and "under tests/ left out" in whole_web
+    web_tracked = [path for path in _tracked("web/") if "tests" not in path.split("/")]
+    assert f"web ({len(web_tracked)} file(s))" in whole_web and "under tests/ left out" in whole_web
+    assert "web/tests/" not in whole_web.split("left out", 1)[1]
     assert "web/tests/" in module_map("web/tests/")
 
     domains = module_map("domains")
@@ -467,7 +469,7 @@ def test_module_map_cut_answers_are_typed_incomplete_never_a_complete_zero(tmp_p
     rows = module_map_rows(REPO, "ouroboros/tools/", load_domain_manifest(REPO), deadline=0.0)
     limit = [row for row in rows if row.startswith(ARCHITECTURE_LIMIT_MARKER)]
     assert len(limit) == 1 and "module_map_time_limit" in limit[0]
-    assert "ouroboros/tools/query_code.py" in rows
+    assert any(row.startswith("ouroboros/tools/query_code.py") and " — " not in row for row in rows)
 
     monkeypatch.setattr(code_intelligence, "_MAX_ENUMERATION_PATHS", 2)
     registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path / "data")
@@ -485,7 +487,48 @@ def test_module_leads_are_the_files_own_first_words():
     from ouroboros.code_intelligence_module_map import header_comment_lead, python_lead
 
     assert python_lead('#!/usr/bin/env python\n# c\n\n"""First line.\n\nMore."""\nx = 1\n') == "First line."
+    # A wrapped first paragraph is the lead, whole: never cut mid-sentence or at a fixed width.
+    long = "word " * 80
+    assert python_lead(f'"""Starts here and\nends {long}there.\n\nSecond."""\n') == f"Starts here and ends {long.strip()} there."
+    assert header_comment_lead("/*\n * One\n * two\n *\n * Later.\n */\n") == "One two"
     assert python_lead("import os\n") == "" and python_lead('x = """not a docstring"""\n') == ""
     assert header_comment_lead("// One\n// two\nexport const x = 1;\n") == "One two"
     assert header_comment_lead("/**\n * Block\n * header\n */\nlet y;\n") == "Block header"
     assert header_comment_lead("export const z = 1; // trailing\n") == ""
+
+
+def test_a_wrong_shaped_manifest_is_a_named_error_and_a_refused_prefix_is_incomplete(tmp_path, monkeypatch):
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+    from ouroboros.tools import query_code
+    from ouroboros.tools.registry import ToolRegistry
+
+    (tmp_path / "ouroboros").mkdir()
+    for wrong, named in (("modules = [1, 2]", r"section \[modules\] must be a table"),
+                         ("modules = []", r"section \[modules\] must be a table"),
+                         ("[graph]\nallowed = 7", r"\[graph\] allowed must be a list"),
+                         ('[references]\nD01 = "docs/x.md"', r"\[references\] D01 must be a list")):
+        (tmp_path / "ouroboros" / "domains.toml").write_text(wrong + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=named):
+            load_domain_manifest(tmp_path)
+    (tmp_path / "ouroboros" / "domains.toml").write_text("[modules]\n", encoding="utf-8")  # a valid empty table
+    assert load_domain_manifest(tmp_path).modules == {}
+    bad = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path / "bad-data")
+    (tmp_path / "ouroboros" / "domains.toml").write_text("modules = []\n", encoding="utf-8")
+    refused = bad.execute("query_code", {"op": "architecture", "query": "module_map D01", "root": "system_repo"})
+    assert "must be a table" in refused and "0 of 0" not in refused
+
+    real_visible = query_code._visible_file
+    monkeypatch.setattr(query_code, "_visible_file", lambda ctx, root, rel, *rest: (
+        not str(rel).replace("\\", "/").startswith("web/modules") and real_visible(ctx, root, rel, *rest)))
+    registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path / "data")
+
+    def module_map(arg):
+        return registry.execute("query_code", {"op": "architecture", "query": f"module_map {arg}", "root": "system_repo"})
+
+    refused = module_map("web/modules/")
+    assert "module_map_scope_not_admitted" in refused and "QUERY_CODE_TRUNCATED" in refused
+    assert "enumeration complete" not in refused
+    skipped = module_map("web/node_modules/")  # present or not, the inventory never walks it
+    assert "module_map_excluded_from_inventory" in skipped and "enumeration complete" not in skipped
+    missing = module_map("web/no_such_dir/")
+    assert "enumeration complete" in missing and "module_map_scope_not_admitted" not in missing

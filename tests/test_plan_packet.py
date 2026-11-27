@@ -239,10 +239,9 @@ def test_a_plan_seat_without_tools_gets_the_domain_index_and_a_retrieving_seat_d
     from ouroboros.tools import plan_ask
 
     repo = pathlib.Path(__file__).resolve().parents[1]
-    inline = plan_ask.stable_prompt(None, body=True, system_root=repo, by_retrieval=False)
+    inline, retrieving = plan_ask.stable_prompts(body=True, system_root=repo)
     assert "## Domains (`ouroboros/domains.toml`" in inline
     assert "D06 — Review stack" in inline and "docs/architecture/06-4-self-change-and-review.md" in inline
     assert inline.index("## ARCHITECTURE.md") < inline.index("## Domains")
-    retrieving = plan_ask.stable_prompt(None, body=True, system_root=repo, by_retrieval=True)
     assert "## Domains" not in retrieving
-    assert "## Domains" not in plan_ask.stable_prompt(None, body=False, system_root=repo, by_retrieval=False)
+    assert "## Domains" not in plan_ask.stable_prompts(body=False, system_root=repo)[0]

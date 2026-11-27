@@ -76,14 +76,20 @@ class DomainManifest:
     references: Dict[str, Tuple[str, ...]] = field(default_factory=dict)  # domain or path prefix -> manuals
 
     def manuals_for(self, path: str) -> Tuple[str, ...]:
-        """The manuals ``[references]`` declares for one repository path: its module domain's, else the longest
-        path key that names it or a folder above it; ``()`` where the manifest declares no owner."""
-        domain = self.modules.get(path)
-        if domain:
-            return self.references.get(domain, ())
-        owners = [key for key in self.references if key not in self.domains
-                  and (path == key or path.startswith(key if key.endswith("/") else key + "/"))]
-        return self.references[max(owners, key=len)] if owners else ()
+        """The manuals ``[references]`` declares for one repository path (``path_owner``); ``()`` where the manifest
+        declares no owner."""
+        return tuple(self.references.get(path_owner(self, path)[1], ()))
+
+
+def path_owner(manifest: Any, path: str) -> Tuple[str, str]:
+    """``(kind, key)`` of the owner a manifest declares for one repository path: ``("domain", id)`` of its module
+    row, else ``("surface", key)`` of the longest registered ``[references]`` path key that begins it, else
+    ``("", "")``. The one resolution every reader of ownership shares: the read line, the diff pulse and a packet
+    seat's owner rows."""
+    if manifest.modules.get(path):
+        return "domain", manifest.modules[path]
+    surfaces = [key for key in manifest.references if key not in manifest.domains and path.startswith(key)]
+    return ("surface", max(surfaces, key=len)) if surfaces else ("", "")
 
 
 def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
@@ -113,14 +119,19 @@ def load_domain_manifest(repo_root: pathlib.Path, raw: str | None = None) -> Dom
         data = tomllib.loads(raw)
     except Exception as exc:
         raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} does not parse as TOML: {exc}") from exc
-    # Valid TOML of another shape is as invalid as a syntax error: one ValueError for every reader.
-    for name in ("domains", "modules", "references", "graph"):
-        if not isinstance(data.get(name, {}), dict):
-            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} is invalid: [{name}] is not a table")
-    graph = data.get("graph") or {}
-    for name in ("allowed", "lazy_only"):
-        if not isinstance(graph.get(name, []), list):
-            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} is invalid: graph.{name} is not a list")
+    def shaped(value, kind, name):  # a present value of the wrong container type is the carrier's error, named
+        if not isinstance(value, kind):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} {name} must be a {'table' if kind is dict else 'list'}")
+        return value
+    sections = {section: shaped(data[section], dict, f"section [{section}]") if section in data else {}
+                for section in ("domains", "modules", "references", "graph")}
+    graph = sections["graph"]
+    for key in ("allowed", "lazy_only"):
+        if key in graph:
+            shaped(graph[key], list, f"[graph] {key}")
+    for key, vals in sections["references"].items():
+        shaped(vals, list, f"[references] {key}")
+    data = {**data, **sections}
     for path in data.get("modules") or {}:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or "\\" in path:
@@ -130,8 +141,7 @@ def load_domain_manifest(repo_root: pathlib.Path, raw: str | None = None) -> Dom
         modules={str(k): str(v) for k, v in (data.get("modules") or {}).items()},
         graph_allowed=tuple(str(p) for p in graph.get("allowed") or ()),
         lazy_only=tuple(str(p) for p in graph.get("lazy_only") or ()),
-        references={str(k): tuple(str(v) for v in vals)
-                    for k, vals in (data.get("references") or {}).items() if isinstance(vals, list)},
+        references={str(k): tuple(str(v) for v in vals) for k, vals in data["references"].items()},
     )
 
 

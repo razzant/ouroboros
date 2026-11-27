@@ -568,11 +568,15 @@ class _Revision:
                        if self.ref else _git_bytes(self.root, "ls-files", "-s", "-z", "--", *_MEASURED_PATHS))
             if listing is None:
                 raise UnmeasuredText(f"{self.where} cannot be listed")
-            oids = {}  # path -> blob; in the index stage 0 only (an unmerged path has no single staged form)
+            oids = {}  # path -> blob
             for row in listing.decode("utf-8", "replace").split("\0"):
                 meta, _, path = row.partition("\t")
                 fields = meta.split()
-                if path and len(fields) == 3 and (fields[1] == "blob" if self.ref else fields[2] == "0"):
+                if not path or len(fields) != 3:
+                    continue
+                if not self.ref and fields[2] != "0":  # an unmerged path has no single staged form
+                    raise UnmeasuredText(f"{self.where} holds {path} unmerged")
+                if not self.ref or fields[1] == "blob":
                     oids[path] = fields[2] if self.ref else fields[1]
             out = _git_bytes(self.root, "cat-file", "--batch", stdin="".join(f"{o}\n" for o in oids.values()).encode()
                              ) if oids else b""

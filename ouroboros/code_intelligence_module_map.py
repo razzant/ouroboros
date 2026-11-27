@@ -3,9 +3,9 @@
 The argument is an address, matched literally: ``domains`` (each domain, its module
 count and owning manuals from ``ouroboros/domains.toml`` ``[references]``), a domain id
 (``D06``: its manifest modules), or a repository path prefix (``web/modules/``,
-``ouroboros/tools/``, one file). A lead is the file's own words: the first line of a
-Python module docstring or of a JS/TS/CSS leading header comment; other files are
-listed by path alone. The map replaces a hand-kept module tree, so it never invents a
+``ouroboros/tools/``, one file). A lead is the file's own words, whole: the first
+paragraph of a Python module docstring or of a JS/TS/CSS leading header comment; other
+files are listed by path alone. The map replaces a hand-kept module tree, so it never invents a
 purpose and never ranks or filters by meaning.
 
 A prefix is enumerated through the caller's ``list_prefix`` (the tool passes its admitted,
@@ -24,30 +24,46 @@ import io
 import pathlib
 import time
 import tokenize
+from dataclasses import dataclass, field
 from typing import Callable, List, Tuple
 
 from ouroboros import work_domain
 from ouroboros.code_intelligence_architecture import ARCHITECTURE_LIMIT_MARKER
 
-_LEAD_CHARS = 200
 _JS_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx", ".css")
 
 ListPrefix = Callable[[str], Tuple[List[str], List[str]]]
 
 
-def _first_line(text: str) -> str:
-    return next((line.strip() for line in text.splitlines() if line.strip()), "")[:_LEAD_CHARS]
+def _first_paragraph(lines) -> str:
+    """The first paragraph of authored text, joined into one line and never cut."""
+    words: List[str] = []
+    for line in lines:
+        if line.strip():
+            words.append(line.strip())
+        elif words:
+            break
+    return " ".join(words)
+
+
+@dataclass
+class ModuleMap:
+    """One ``module_map`` answer as data: header lines, ``(path, owner domain, lead)`` entries and limit notes."""
+
+    head: List[str] = field(default_factory=list)
+    entries: List[Tuple[str, str, str]] = field(default_factory=list)
+    limits: List[str] = field(default_factory=list)
 
 
 def python_lead(text: str) -> str:
-    """The first docstring line of a module, read from its first token; ``""`` when it has none."""
+    """The first docstring paragraph of a module, read from its first token; ``""`` when it has none."""
     try:
         for tok in tokenize.generate_tokens(io.StringIO(text).readline):
             if tok.type in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.ENCODING):
                 continue
             if tok.type == tokenize.STRING:
                 value = ast.literal_eval(tok.string)
-                return _first_line(value) if isinstance(value, str) else ""
+                return _first_paragraph(value.splitlines()) if isinstance(value, str) else ""
             return ""
     except (tokenize.TokenError, SyntaxError, ValueError, IndentationError):
         return ""
@@ -55,7 +71,7 @@ def python_lead(text: str) -> str:
 
 
 def header_comment_lead(text: str) -> str:
-    """The leading ``//`` run or ``/* */`` block of a JS/TS/CSS file, as one line; ``""`` when absent."""
+    """The first paragraph of the leading ``//`` run or ``/* */`` block of a JS/TS/CSS file; ``""`` when absent."""
     body = text.lstrip("﻿").lstrip()
     if body.startswith("#!"):
         body = body.split("\n", 1)[1].lstrip() if "\n" in body else ""
@@ -70,7 +86,7 @@ def header_comment_lead(text: str) -> str:
             words.append(line.strip()[2:].strip())
     else:
         return ""
-    return " ".join(word for word in words if word)[:_LEAD_CHARS]
+    return _first_paragraph(words)
 
 
 def _lead(relpath: str, raw: bytes) -> str:
@@ -105,7 +121,6 @@ def _under(path: str, prefix: str) -> bool:
 def module_map_rows(root: pathlib.Path, arg: str, manifest, *, list_prefix: ListPrefix | None = None,
                     read_bytes: Callable[[str], bytes] | None = None, deadline: float | None = None) -> List[str]:
     """Rows for one ``module_map`` argument; limit rows start with the architecture limit marker."""
-    root = pathlib.Path(root)
     refs = manifest.references
     if arg.strip().lower() == "domains":
         counts: dict = {}
@@ -115,8 +130,25 @@ def module_map_rows(root: pathlib.Path, arg: str, manifest, *, list_prefix: List
                 for d in sorted(manifest.domains)]
         return rows + [f"{key} | manuals: {', '.join(paths)}" for key, paths in sorted(refs.items())
                        if key not in manifest.domains]
+    answer = module_map(root, arg, manifest, list_prefix=list_prefix, read_bytes=read_bytes, deadline=deadline)
+    by_domain = arg.strip().upper() in manifest.domains
+    return answer.head + [render_entry(entry, with_owner=not by_domain) for entry in answer.entries] + [
+        f"{ARCHITECTURE_LIMIT_MARKER} {note}" for note in answer.limits]
+
+
+def render_entry(entry: Tuple[str, str, str], *, with_owner: bool = True) -> str:
+    path, owner, lead = entry
+    return path + (f" ({owner})" if owner and with_owner else "") + (f" — {lead}" if lead else "")
+
+
+def module_map(root: pathlib.Path, arg: str, manifest, *, list_prefix: ListPrefix | None = None,
+               read_bytes: Callable[[str], bytes] | None = None, deadline: float | None = None) -> ModuleMap:
+    """A domain id or a path prefix as data (``domains`` is rendered by ``module_map_rows`` alone)."""
+    root = pathlib.Path(root)
+    refs = manifest.references
     domain = arg.strip().upper()
     limits: List[str] = []
+    tests: List[str] = []
     if domain in manifest.domains:
         paths = sorted(path for path, owner in manifest.modules.items() if owner == domain)
         head = [f"{domain} — {manifest.domains[domain]} ({len(paths)} modules) | manuals: "
@@ -124,6 +156,9 @@ def module_map_rows(root: pathlib.Path, arg: str, manifest, *, list_prefix: List
     else:
         prefix = _prefix(arg)
         listed, limits = (list_prefix or _default_list_prefix(root))(prefix)
+        from ouroboros.code_intelligence import _SKIP_DIRS
+        if set(prefix.split("/")) & _SKIP_DIRS:  # the inventory never walks it: not an empty folder
+            limits = [*limits, "module_map_excluded_from_inventory: the code inventory does not walk this prefix"]
         wants_tests = "tests" in prefix.split("/")
         tests = [p for p in listed if not wants_tests and "tests" in p[len(prefix):].split("/")]
         paths = sorted(p for p in listed if _under(p, prefix) and p not in tests)
@@ -138,11 +173,11 @@ def module_map_rows(root: pathlib.Path, arg: str, manifest, *, list_prefix: List
         head = [f"{prefix} ({len(paths)} file(s)) | manuals: {manuals}"]
         if tests:
             head.append(f"{len(tests)} file(s) under tests/ left out; name that directory to list them")
-    rows = []
+    entries: List[Tuple[str, str, str]] = []
     for index, path in enumerate(paths):
         if deadline is not None and time.monotonic() >= deadline:
             limits.append(f"module_map_time_limit: leads of {len(paths) - index} of {len(paths)} files not read")
-            rows.extend(paths[index:])
+            entries.extend((rest, manifest.modules.get(rest, ""), "") for rest in paths[index:])
             break
         lead = ""
         if path.endswith((".py", *_JS_SUFFIXES)):
@@ -153,9 +188,7 @@ def module_map_rows(root: pathlib.Path, arg: str, manifest, *, list_prefix: List
                 raise
             except (OSError, PermissionError, ValueError):
                 limits.append(f"module_map_unreadable: {path}")
-        owner = manifest.modules.get(path)
-        rows.append(path + (f" ({owner})" if owner and domain not in manifest.domains else "")
-                    + (f" — {lead}" if lead else ""))
+        entries.append((path, manifest.modules.get(path, ""), lead))
     if not paths and not limits:
         head.append("no files under this prefix (enumeration complete)")
-    return head + rows + [f"{ARCHITECTURE_LIMIT_MARKER} {note}" for note in limits]
+    return ModuleMap(head, entries, limits)

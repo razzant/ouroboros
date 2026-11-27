@@ -1,6 +1,6 @@
 # 7. Configuration (ouroboros/config.py)
 
-This part gives me my settings and environment: provider routes, model roles, context mode, budgets, schedules and paths. Settings have one home and default; the table projects `config.SETTINGS_DEFAULTS`, never a second authority. Owner edits commit through `gateway/owner_settings.py`; a stored setting is not yet the effective value, which environment, defaults and policy normalization decide.
+This part gives me my settings and environment: provider routes, model roles, context mode, budgets and paths. Settings have one home and default; the table projects `config.SETTINGS_DEFAULTS`, never a second authority. Owner edits commit through `gateway/owner_settings.py`; a stored setting is not yet the effective value, which environment, defaults and policy normalization decide.
 
 `ouroboros/config.py` re-exports paths, settings/env I/O, normalization, runtime mode, skills location and PID lock while leaves own defaults and vocabularies (§10.3): `settings_scales.setting_effect` owns the six presentation timings (§3, outside actor snapshots) and `update_channels.py` owns update defaults.
 

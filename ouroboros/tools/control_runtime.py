@@ -60,17 +60,18 @@ def _evolution_restart_block_reason(ctx: ToolContext) -> str:
 
 
 def _child_candidate_receipt(ctx: ToolContext, refused: Exception, resume: str) -> str:
-    """A subagent's ordinary call is answered with where it already works, not refused.
+    """An acting subagent's ordinary call is answered with where it already works, not refused.
 
-    The parent prepares and integrates the candidate; the child's folder is the copy or view its parent
-    selected, so there is nothing to prepare. ``resume=`` names another candidate and stays refused.
+    Only Cyber Pro offers this tool to an acting child (a read-only child never reaches it). The parent
+    prepares and integrates the candidate; the child's folder is the copy its parent selected, so there is
+    nothing to prepare. ``resume=`` names another candidate and stays refused.
     """
     from ouroboros.contracts.task_constraint import normalize_task_constraint
 
     if getattr(refused, "code", "") != "CANDIDATE_NOT_APPLICABLE" or str(resume or "").strip():
         return ""
     constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-    if getattr(constraint, "mode", "") not in {"acting_subagent", "local_readonly_subagent"}:
+    if getattr(constraint, "mode", "") != "acting_subagent":
         return ""  # the managed-update resolver shares the code and keeps its refusal
     from ouroboros.tools.tool_resolution import active_repo_dir_for
 
@@ -262,8 +263,8 @@ def self_change_tool_entries() -> list:
                 "Idempotent. resume deliberately continues ONE exact retained candidate (its id, owner task or "
                 "branch) whose previous owner has ended. The receipt, like the first automatic bind, names other open "
                 "candidates with the paths they have changed, read at that moment. in_place is Cyber Pro's explicit "
-                "decision to edit the serving checkout directly instead. The parent prepares or resumes the candidate; "
-                "a child works in the workspace or copy its parent selected."),
+                "decision to edit the serving checkout directly instead. An ordinary call from a child is answered with the "
+                "workspace or copy its parent selected, whose candidate the parent prepares or resumes."),
             "parameters": {"type": "object", "properties": {
                 "resume": {"type": "string", "description": "Exact retained candidate to continue; omit for this task's own."},
                 "in_place": {"type": "boolean", "description": "Cyber Pro only: author the serving checkout directly."},

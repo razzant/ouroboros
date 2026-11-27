@@ -111,7 +111,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
                 "shared is disabled for live local subagents. input_sources=declared "
                 "selects automatic inputs independently."),
         },
-        "workspace_root": {"type": "string", "description": "Existing starting folder (default: parent's). Native readers start here, including Git subdirectories; self_worktree copies it; with external_workspace, omit write_root or pass the same folder; with genesis, omit workspace_root. Must already be parent-readable; grants no read/write authority."},
+        "workspace_root": {"type": "string", "description": "Existing starting folder (default: parent's). Native readers start here, including Git subdirectories; self_worktree copies it and needs a Git worktree root; with external_workspace, omit one of workspace_root/write_root or pass the same folder; with genesis, omit workspace_root. Must already be parent-readable; grants no read/write authority."},
         "write_surface": {
             "type": "string",
             # No empty-string member: Google Gemini's function-calling validator

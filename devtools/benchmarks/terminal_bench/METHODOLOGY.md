@@ -27,11 +27,110 @@ OWNER IMMEDIATELY.**
 - Harbor owns task timeouts; Ouroboros deadline milestones are inert unless the
   task carries `deadline_at`. The in-container finalization margin is
   `_DEADLINE_SAFETY_SEC=105` (measured overhead, v6.55.0).
-- k trials per task follow the leaderboard's k; `disclosure_ledger.json`
-  (schema `tb_disclosure_ledger.v1`) records the reward distribution,
-  timeout/rate-limit/provider-failure histograms, per-task pass rate,
-  concurrency, and the multiplier/gating flags actually used, so each run's
-  leaderboard validity is auditable after the fact.
+- k trials per task follow the leaderboard's k; the disclosure ledger
+  (`disclosure_ledger.<invocation>.json`, also mirrored atomically to
+  `disclosure_ledger.json`, schema `tb_disclosure_ledger.v1`) records the
+  reward distribution, timeout/rate-limit/provider-failure histograms,
+  per-task pass rate, concurrency, and the multiplier/gating flags actually
+  used, so each run's leaderboard validity is auditable after the fact.
+
+## Task images
+
+Harbor's `environment.force_build` (default `false`) governs the agent's trial environment. In the
+0.18 Docker backend, `false` runs a task that declares a published image on that image, and
+`--force-build` requests a build from the task's environment definition: a task that declares an
+image but ships no Dockerfile still runs on the image. Both launchers pass
+`--force-build`/`--no-force-build` only for an explicit choice, identically in a preview and an
+`--execute` run; otherwise Harbor's job configuration decides.
+
+`agent_environment_force_build` (`run_manifest.json` `extra`; for `run_tb.py` also
+the disclosure ledger's `run` block) records the configured value and its `source`: `cli`,
+`base_job_config` (`force_build: null` = not a literal boolean, left for Harbor to validate) or
+`harbor_default`. It is configuration only: it does not prove which image a task used, or
+whether that image was pulled or built.
+
+Without this field, read the saved command (`official_command`, `harbor_command.*`) if there is
+one. Earlier wrapper versions appended `--force-build` to every `--execute` argv and not to a
+preview. Resuming an older forced-build job through `run_tb.py` may need explicit `--force-build`
+(or matching `environment.force_build` in `--base-job-config`) so the config matches the saved
+`config.json`; native `harbor job resume -p <job_dir>` uses the saved config directly. A record
+lacking the field is not dated by that alone (a run refused before argv assembly has no command
+either), and neither the flag nor its absence shows whether any image was pulled or built.
+
+## Job attribution (`run_tb.py` and `run_harbor_smoke.py`)
+
+`run_harbor_smoke.py` passes an invocation-unique `--job-name` (`YYYY-MM-DD__HH-MM-SS__<8 hex>`),
+reads authoritative `task_name` outcomes from this job's direct
+`<run_root>/<job_name>/<trial>/result.json` outputs cross-checked against
+`<run_root>/<job_name>/result.json` (never scanning the shared jobs directory for a peer's result
+or splitting trial-name suffixes, and keeping repeated attempts, mixed rewards, ambiguity, and
+missing evidence explicit), and links every `result_index.jsonl` row to its stable per-invocation
+`run_manifest.<job_name>.json` while mirroring the finalized manifest to `run_manifest.json`.
+
+In `run_tb.py`, when a launch assembles a Harbor invocation, it creates its own
+`agent_job_config.<invocation>.json`, and when an `--execute` run produces an attributable ledger
+(dry runs, refusals, unattributed jobs, and reused named jobs with no accepted new/changed trials
+write none), it creates its own authoritative `disclosure_ledger.<invocation>.json` in its
+`--run-root`, never rewritten by another launch. Its manifest's `official_command` names
+`agent_job_config.<invocation>.json` and its `extra.disclosure_ledger` names
+`disclosure_ledger.<invocation>.json` (absent on previews/refusals, initialized to `""` in the
+pre-dispatch checkpoint and kept `""` when an `--execute` run writes no ledger), so a manifest's
+ledger reference identifies that invocation and cannot alias a peer's trials even if launches
+overlap in the same `--run-root` (including the default `tb21_ouroboros_run`). Before Harbor
+starts (`extra.recovery_checkpoint`), the manifest already records `official_command`,
+`agent_environment_force_build`, `harbor_job`, `disclosure_ledger: ""`, and the job-name scope.
+The unversioned files in `--run-root` (`run_manifest.json`, `harbor_command.txt`, and
+`disclosure_ledger.json`, which is updated atomically as a latest compatibility view whenever a
+ledger is written) are shared last-writer-wins conveniences, not a consistent tuple under overlap;
+give every launch its own `--run-root` for independent reporting.
+
+Default unnamed runs create a fresh Harbor job each call (`YYYY-MM-DD__HH-MM-SS__<8 hex>`, Harbor's
+timestamp shape plus a random suffix) and keep their ordinary grades (`leaderboard_valid`,
+`debug_only`, `local_low_k`). An explicit base `job_name` passes unchanged when it stays inside
+`jobs_dir` — including jobs-root spellings `.`, `""`, `./`, and the canonical `jobs_dir` path,
+which Harbor 0.18 resolves to `--jobs-dir` itself and which stay distinct from an omitted
+`job_name`. Non-string, parent-traversing (`..`, `sub/..`), or escaping `job_name` values are
+refused before writing outputs or dispatching Harbor (`outcome: "refused"`, `refusal.stage:
+"job_config"`). Launches that share `--submission-root`, model, and dataset share one jobs dir
+and one `metadata.yaml` (use separate `--submission-root` directories when runs need different
+metadata). The ledger and outcome read only this launch's job, from direct
+`<job>/<trial>/result.json` files and nothing deeper or resolving outside it — so jobs-root
+spellings count legitimate direct trials without recursively scanning sibling jobs or counting
+sibling job-level `result.json` files.
+
+`extra.harbor_job` (`{job_dir, binding, trials}`) records this scope in both preview and execute:
+`invocation` (the generated name: trials are this invocation's, also after a non-zero exit);
+`named_job` (an explicit base `job_name` with neither stored `config.json` nor prior direct trial
+results: a pre-existing empty/parent directory — including one created by a preview with `.` or
+`""` — is not by itself a Harbor resume, but because an explicit operator-selected name can be
+shared by overlapping writers even on first observation, this run record never claims
+`leaderboard_valid: true` and grades `named_job` when `k >= 5` with otherwise faithful settings;
+named full-run outputs and image flags remain available, while leaderboard submission requires a
+qualifying generated-name run); `reused` (stored `<job>/config.json` — which makes Harbor resume a
+matching config or refuse a different one — or prior direct trial results / unreadable direct
+entries existed before dispatch). For `reused`, `harbor_job.trials` is `new_or_changed`: only valid
+trial `result.json` files (JSON objects carrying `task_name` or `verifier_result`) observed to
+appear or change in content during the invocation count, and overlapping writers cannot be told
+apart. The ledger is this run's partial observation, not the job's cumulative score (which Harbor's
+own job result keeps), and both preview and execute grade it `partial_named_job` with
+`leaderboard_valid: false`, whatever `k` and settings (named full-run outputs remain available,
+while leaderboard submission requires a qualifying generated-name run). Unchanged
+earlier trials, trials unreadable before or after, and malformed or non-trial JSON files never
+count. Nothing counts for `unattributed` (`trials: "none"`, when the dispatched job directory never
+appeared). A `reused` job with zero
+accepted trial rows (including malformed-only or non-trial-only deltas) and an `unattributed` one
+write no ledger and leave any existing `disclosure_ledger.json` untouched: `extra.disclosure_ledger`
+stays empty and the outcome fails closed (`trials_unverified`, or Harbor's non-zero exit). Genuine
+unscored trial rows (e.g. `reward: null`) still write a ledger (`no_scored_trials`), numeric zero
+counts as scored (`completed`), and a fresh job without scored trials still writes its ledger
+(`no_scored_trials`).
+
+Harbor deletes incomplete direct subdirectories (those without `result.json`) when resuming a job,
+so jobs-root spellings (`.`, `""`, `./`, or canonical `jobs_dir`) need their own dedicated jobs
+directory (`--submission-root`) and must not share a jobs directory with other jobs. Independent
+or leaderboard-submittable measurements need generated job names (no explicit base `job_name`),
+distinct `--run-root` directories, and separate `--submission-root` directories when metadata
+differs.
 
 ## Dataset identity (v6.79.0 — matters for any non-TB2.1 Harbor dataset)
 
@@ -154,7 +253,8 @@ assumed in two places that used to hardcode TB2.1:
   `--harbor-bin` and leaving `venv-tb` frozen at 0.18.0 so published TB2.1 numbers keep their
   harness. Note `--base-job-config` is OURS, not a harbor flag — harbor only ever had
   `-c/--config`, in both versions. Since v6.79.0 the manifest and the disclosure ledger record
-  `harbor_bin` / `harbor_version` / `harbor_env_effective`, so the harness and backend behind a
+  `harbor_bin` / `harbor_version` / `harbor_env_effective` (CLI `--harbor-env` > `--base-job-config`
+  `environment.import_path`/`type` > Harbor's default `docker`), so the harness and backend behind a
   number are read off the artifact instead of reconstructed from operator memory; an
   un-interrogable binary records `harbor_version: ""` (visibly unknown, never assumed).
 
@@ -230,8 +330,8 @@ leaderboard" for the verified mechanics. Methodology-relevant consequences:
   records `agents[0].name = null` in the job config, which static analysis
   can never match against the trial-side agent name — the submission is
   permanently invalid and the uploaded job config cannot be fixed post hoc
-  (terminal-bench-2-1#121). `run_tb.py` generates `agent_job_config.json`
-  accordingly; `OUROBOROS_EFFORT_TASK` is recorded as the declared
+  (terminal-bench-2-1#121). `run_tb.py` generates such a job config (the file
+  the saved `--config` names); `OUROBOROS_EFFORT_TASK` is recorded as the declared
   `reasoning_effort` of the submission key and forwarded into the container.
 - CI requires an **ATIF trajectory for every rewarded trial** (the direct
   `trajectory.json` upload; the trial row must carry `trajectory_path`). The
@@ -250,9 +350,9 @@ leaderboard" for the verified mechanics. Methodology-relevant consequences:
   before upload. Scrubbing only removes credential values; results, traces,
   and disclosure artifacts are uploaded unmodified.
 - Numbers submitted to the leaderboard must come from `leaderboard_valid`
-  runs (k≥5, no overrides, agent-web off) under the review-mode disclosure
-  rules above; advisory-mode rows must not be presented as the blocking
-  record.
+  generated-name runs (k≥5, no overrides, agent-web off, no explicit base
+  `job_name`) under the review-mode disclosure rules above; advisory-mode rows
+  must not be presented as the blocking record.
 
 ## Known limitations
 

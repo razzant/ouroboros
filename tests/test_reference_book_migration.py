@@ -160,6 +160,9 @@ def test_every_base_section_is_still_exactly_one_chapter(book_id):
             i += 1
         if run:
             regrouped.append(title)
+            # A shortened run is a lost chapter: every split file on disk must be in it.
+            on_disk = sorted((REPO / "docs" / book_id).glob(f"{int(number[:-1]):02d}-[0-9]-*.md"))
+            assert len(run) == len(on_disk) and len(run) > 1, (title, run, on_disk)
         elif i < len(chapter_titles):
             regrouped.append(chapter_titles[i])
             i += 1
@@ -177,11 +180,9 @@ def test_entrypoint_keeps_its_h1_line_and_carries_only_the_membership(book_id):
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     assert lines[0] == OLD_MONOLITHS[book_id]["h1"].replace("v7.0.0", f"v{version}")
     book = load_reference_book(REPO, book_id)
-    # One `## Chapters` heading (and, for Architecture, the Reference Atlas of the
-    # other books and specs) and nothing else: the entrypoint orients, the chapters
-    # carry the book.
-    atlas = ["Reference Atlas"] if book_id == "architecture" else []
-    assert [h.title for h in book.entrypoint.headings] == [lines[0][2:], "Chapters", *atlas]
+    # One `## Chapters` heading and nothing else: the entrypoint orients, the
+    # chapters carry the book.
+    assert [h.title for h in book.entrypoint.headings] == [lines[0][2:], "Chapters"]
     members = [chapter.source_path for chapter in book.chapters]
     assert members == sorted(members), "membership order must be the reading order"
     for chapter in book.chapters:

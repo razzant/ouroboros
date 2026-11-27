@@ -1,6 +1,6 @@
 # 12. Host Service, Companion Processes, and Chat IDs
 
-This part gives me my presence outside the app: the Host Service skills talk through, companion processes, the connector places where I focus and answer, linked Ouroboros and live meeting peers, and the typed chat ids every message targets (Main, Projects, the hidden id, agent-to-agent). Connectors supply facts and identity; the mind judges. Only `kind: user` can match account-scoped owner confirmation, and identity never enters `places.json`.
+This part gives me my presence outside the app: the Host Service skills talk through, companion processes, the connector places where I focus and answer, linked Ouroboros and live meeting peers, and the typed chat ids every message targets (Main, Projects, the hidden id, agent-to-agent). Connectors supply facts and identity; the mind judges. Only `kind: user` can match account-scoped owner confirmation.
 
 ### Host Service boundary
 

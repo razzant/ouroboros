@@ -656,7 +656,7 @@ def test_disclosure_ledger_provider_unavailable_vs_cancellation(tmp_path):
     _write_run_summary(jobs / "p1", False)  # normal terminal finish
     _write_trial(jobs / "p2", "beta", 0.0, reason="provider_unavailable")
     _write_run_summary(jobs / "p2", True)  # interrupted/teardown snapshot
-    led = run_tb.write_disclosure_ledger(jobs_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
+    led = run_tb.write_disclosure_ledger(job_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
     assert led["provider_or_infra_failure_count"] == 1  # only p1 (genuine mid-run provider death)
     assert led["wall_clock_cancellation_count"] == 1  # only p2 (teardown artifact)
     assert led["genuine_failure_count"] == 0
@@ -674,7 +674,7 @@ def test_disclosure_ledger_separates_cost_truncation_from_a_fair_shot_wrong_answ
     jobs = tmp_path / "job"
     _write_trial(jobs / "b1", "alpha", 0.0, reason="budget_exhausted", truncated=True)
     _write_trial(jobs / "b2", "beta", 0.0)  # a real fair-shot wrong answer
-    led = run_tb.write_disclosure_ledger(jobs_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
+    led = run_tb.write_disclosure_ledger(job_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
     assert led["cost_truncated_count"] == 1
     assert led["genuine_failure_count"] == 1  # b2 only
     assert led["provider_or_infra_failure_count"] == 0
@@ -692,7 +692,7 @@ def test_disclosure_ledger_counts(tmp_path):
     _write_trial(jobs / "t3", "beta", None, exc="RuntimeError")  # provider/infra (Harbor exception)
     _write_trial(jobs / "t4", "beta", 0.0, reason="provider_unavailable")  # clean reward-0, 429 artifact
     _write_trial(jobs / "t5", "gamma", 0.0)  # genuine wrong answer (no exc, no provider reason)
-    led = run_tb.write_disclosure_ledger(jobs_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
+    led = run_tb.write_disclosure_ledger(job_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
     assert led["n_trials"] == 5
     assert led["agent_timeout_count"] == 1
     # RuntimeError (t3) + provider_unavailable reason_code (t4) both count; AgentTimeoutError does NOT

@@ -432,7 +432,11 @@ def _query_code_read(
             def list_prefix(prefix: str) -> tuple[list[str], list[str]]:
                 # module_map walks only the named prefix, path-only: no whole-repository parse.
                 listed = admitted_inventory(prefix, parse=False)
-                return [file.path for file in listed.files], list(listed.enumeration_limits)
+                limits = list(listed.enumeration_limits)
+                scope = repo_root / prefix
+                if not listed.files and work_domain.kind(scope) != "missing" and not admitted(scope):
+                    limits.append("module_map_scope_not_admitted: this resource view cannot list that prefix")
+                return [file.path for file in listed.files], limits
 
             try:
                 rows = architecture_fact_rows(

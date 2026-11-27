@@ -405,3 +405,71 @@ def test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_t
     assert all(p['reached'] and p['within'] for p in rows + actions), (rows, actions)
     assert all(p['top'] >= name_bottom for p in actions), f'an action starts on the line under the name: {name_bottom}, {actions}'
 
+
+
+# What a section's band paints as a title or a Back: the place's name, a page's name, the shell's return.
+BAND_WORDS = """() => {
+    const page = document.querySelector('#content > .page.active');
+    const shown = (el) => { const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.clipPath !== 'inset(50%)'; };
+    const header = page.querySelector(':scope > .app-page-header');
+    return {page: page.id, titles: [...header.querySelectorAll('.app-page-title, .app-page-lead-title')].filter(shown)
+        .map((el) => el.textContent.trim()), backs: [...header.querySelectorAll('[data-shell-back]')].filter(shown).length,
+        telegramBack: document.documentElement.dataset.telegramBack || null,
+        // Under the band: the first visible row of the list and the first visible content of the page, each measured
+        // from the band's bottom, and whether both columns show side by side.
+        below: page.id === 'page-dashboard' ? (() => {
+            const first = (sel) => [...page.querySelectorAll(sel)].find((el) => el.getClientRects().length && el.getBoundingClientRect().height > 0);
+            const row = first('.section-rail .section-row'), body = first('.dashboard-panel:not([hidden]) > *');
+            const rail = page.querySelector('.section-rail').getBoundingClientRect(), pane = page.querySelector('.dashboard-panel:not([hidden])')?.getBoundingClientRect();
+            const bottom = header.getBoundingClientRect().bottom;
+            return {row: row ? row.getBoundingClientRect().top - bottom : null, content: body ? body.getBoundingClientRect().top - bottom : null,
+                twoColumns: Boolean(pane && rail.width > 0 && pane.width > 0 && rail.right <= pane.left + 1)};
+        })() : null};
+}"""
+
+
+def test_a_telegram_tablet_band_shows_one_title_and_telegrams_back_alone(shell_ui):
+    """Places that say their own name on a desk (owner 27.11.2026: Circles, Widgets, Dashboard over its list) and a page
+    reached by a jump, whose return names Settings on a desk: in Telegram's fullscreen on a tablet (the docked layout)
+    the host's one title slot holds one title, and Telegram's Back is the only Back."""
+    page = telegram_page(shell_ui, 1024, 768, telegram_sdk(fullscreen='grant', insets={'top': 24, 'bottom': 20},
+                                                           content={'top': 46}))
+    boot(page, shell_ui)
+    page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'active'")
+    assert page.locator('html').get_attribute('data-layout') == 'docked'
+    seen = {}
+    for name in ('circles', 'widgets', 'dashboard', 'settings'):
+        open_nav(page, name)
+        rest(page)
+        seen[name] = page.evaluate(BAND_WORDS)
+    # A Dashboard page other than Logs, chosen from its list.
+    open_nav(page, 'dashboard')
+    page.locator('#page-dashboard [data-dashboard-tab="activity"]').click()
+    rest(page)
+    seen['dashboard-activity'] = page.evaluate(BAND_WORDS)
+    open_nav(page, 'settings')
+    rest(page)
+    # A jump from Settings into Dashboard › Costs: the return is owed, Telegram draws its Back.
+    page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-dashboard', { detail: { tab: 'costs' } }))")
+    page.wait_for_function("() => document.querySelector('#page-dashboard.active > .app-page-header[data-return]')")
+    rest(page)
+    seen['jump'] = page.evaluate(BAND_WORDS)
+    facts(f'telegram-tablet-band-words-{shell_ui["engine"]}', seen)
+    shot(page, f'telegram-tablet-jump-{shell_ui["engine"]}')
+    for name, band in seen.items():
+        assert band['backs'] == 0, (name, seen)
+        # Exactly one where the place says its name or a page is shown; never two anywhere.
+        exact = name in ('circles', 'widgets', 'dashboard', 'dashboard-activity', 'jump')
+        assert (len(band['titles']) == 1) if exact else (len(band['titles']) <= 1), (name, seen)
+    assert seen['jump']['telegramBack'] == 'back' and seen['jump']['titles'] == ['Costs'], seen
+    # A wider tablet holds the Dashboard's two panes in the docked layout: one title, and no void under the band.
+    page.set_viewport_size({'width': 1366, 'height': 1024})
+    open_nav(page, 'dashboard')
+    page.locator('#page-dashboard [data-dashboard-tab="activity"]').click()
+    rest(page)
+    wide = page.evaluate(BAND_WORDS)
+    facts(f'telegram-wide-tablet-dashboard-{shell_ui["engine"]}', wide)
+    assert len(wide['titles']) == 1 and wide['backs'] == 0 and wide['below']['twoColumns'], wide
+    # Each column's first visible row starts within a step or two of the band, never under it, never after a void.
+    assert -0.5 <= wide['below']['row'] <= 40 and -0.5 <= wide['below']['content'] <= 40, wide

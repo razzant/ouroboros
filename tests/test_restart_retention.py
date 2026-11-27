@@ -690,6 +690,46 @@ def _restart_door(tmp_path, monkeypatch, workers):
     return server_restart._stop_owned_work(ctx)
 
 
+def _planned_restart_door(tmp_path, monkeypatch, *, checkout=(True, "fixture checkout landed")):
+    """The agent's planned restart as its drain performs it (``server._perform_supervisor_restart``): the
+    composition root's own teardown; every effect an inert recording double (admission, the checkout, the
+    waits and handoffs, the queue, the returns, the pool, the snapshot, the exit request). Returns the door's
+    steps in order. Nothing here stops a process, writes a store or exits."""
+    import server
+    from ouroboros import body_adoption, delegate_recovery, owner_wait, server_restart
+    from supervisor import evolution_lifecycle, queue, restart_retention, workers
+    from supervisor import workspace_preparation as admission
+
+    steps = []
+    monkeypatch.setattr(admission, "pause_admission", lambda timeout=None: steps.append(("pause_admission",)) or True)
+    monkeypatch.setattr(body_adoption, "bind_restart", lambda restart, *_a: restart)
+    monkeypatch.setattr(server, "_safe_restart_serialized", lambda restart, **kw: restart(**kw))
+    monkeypatch.setattr(server, "_managed_update_pending_kwargs", lambda: {})
+    monkeypatch.setattr(server, "_planned_delegate_restart_transaction_id", "")
+    monkeypatch.setattr(server, "_request_restart_exit", lambda: steps.append(("exit",)))
+    monkeypatch.setattr(server_restart, "release_agent_restart", lambda *_a: None)  # a refused checkout's legs
+    monkeypatch.setattr(evolution_lifecycle, "disable_evolution_projection", lambda: None)
+    monkeypatch.setattr(evolution_lifecycle, "pause_evolution_campaign", lambda *_a: None)
+    monkeypatch.setattr(owner_wait, "prepare_owner_wait_handoffs", lambda *_a: steps.append(("owner_waits",)) or set())
+    monkeypatch.setattr(delegate_recovery, "prepare_planned_restart_handoffs",
+                        lambda *_a, **_k: steps.append(("delegate_handoffs",)) or set())
+    monkeypatch.setattr(workers, "direct_chat_turns", lambda: [])
+    monkeypatch.setattr(queue, "name_queue_returns",
+                        lambda pending, door: steps.append(("read_queue", door)) or pending)
+    monkeypatch.setattr(restart_retention, "prepare_restart_returns",
+                        lambda *_a, transaction_id, **_k: steps.append(("name_returns", transaction_id)))
+    monkeypatch.setattr(restart_retention, "name_late_returns",
+                        lambda _root, named: steps.append(("late_returns", named)))
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda reason: steps.append(("snapshot", reason)) or True)
+    monkeypatch.setattr(queue, "reopen_queue_returns", lambda door: steps.append(("reopen_returns", door)))
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, REPO_DIR=tmp_path, RUNNING={}, PENDING=[], load_state=dict,
+                          update_state=lambda change: change({}),
+                          safe_restart=lambda **kw: steps.append(("checkout", kw)) or checkout,
+                          kill_workers=lambda **kw: steps.append(("kill_workers", kw)))
+    server._perform_supervisor_restart(ctx)
+    return steps
+
+
 def test_the_owner_restart_records_its_cause_so_continue_is_offered_and_an_earlier_stop_stays_a_stop(
         tmp_path, monkeypatch):
     """F1: the Restart door's kill used to write a bare ``cancelled`` (no origin), so
@@ -754,9 +794,13 @@ def test_a_graceful_shutdown_records_its_cause_and_panic_records_none(tmp_path, 
     assert panicked["status"] == "failed" and "cancel_origin" not in panicked
     assert continuation_eligibility(panicked, "panic-root")["refusal"] == "interruption_cause_unrecorded"
 
-    # Every graceful kill door of the composition root passes the typed cause.
-    from ouroboros import server_restart
-    for door in (server.lifespan, server._emergency_process_cleanup, server_restart._perform_supervisor_restart):
+    # Every graceful kill door of the composition root passes the typed cause: the planned restart's
+    # one kill as it runs (inert doubles), the server's teardown and hung-restart cleanup by their source.
+    restart_status, restart_reason = _shutdown_task_cleanup_args(restart_requested=True)
+    planned = [step[1] for step in _planned_restart_door(tmp_path, monkeypatch) if step[0] == "kill_workers"]
+    assert [(kill["terminal_status"], kill["result_reason"], kill["stop_source"]) for kill in planned] == [
+        (restart_status, restart_reason, "server_shutdown")]
+    for door in (server.lifespan, server._emergency_process_cleanup):
         source = inspect.getsource(door)
         kills = source.count("terminal_status=cleanup_status")
         assert kills and source.count('stop_source="server_shutdown"') == kills, door.__name__
