@@ -161,7 +161,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             resize_anchor = page.locator(feed).evaluate("""root => {
                 const feedBox = root.getBoundingClientRect();
                 const bar = root.closest('.project-panel').querySelector('.project-panel-bar');
-                const edge = parseFloat(getComputedStyle(bar).getPropertyValue('--edge-reach'));
+                const tint = bar.querySelector(':scope > .room-edge[data-edge="tint"]'), edge = tint ? tint.getBoundingClientRect().bottom - bar.getBoundingClientRect().bottom : 0;
                 const top = Math.max(feedBox.top, bar.getBoundingClientRect().bottom + (Math.max(0, edge) || 0));
                 const node = [...root.querySelectorAll('.chat-bubble[data-history-id]')].find(n => {
                     const box = n.getBoundingClientRect();

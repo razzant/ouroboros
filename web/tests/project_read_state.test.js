@@ -542,6 +542,14 @@ test('the read band is the viewport less the header above and the composer below
     assert.equal(at(50, { ...chrome, header: typing('auto') }), true, 'no drawn edge and no resolved reach: the bar alone');
     assert.equal(at(50, { ...chrome, header: typing('72px', null) }), true,
         'a bar without the edge\'s node has no edge, whatever its ::before measures');
+    // The read decision itself, as a reviewer witnessed it in the browser: a row at y 72-84 under a 66 px bar with a
+    // 32 px edge whose reach reads back unresolved is under the edge, not read; one below the edge is.
+    const bar66 = Object.assign(el(0, 66), { clientHeight: 66, querySelector: (selector) => (selector === TINT ? tint : null),
+        ownerDocument: { defaultView: drawn('98px') } });
+    const row = (top, bottom) => isAtNewestMessage({ history_id: 'chat:9', out_of_order: true }, {
+        delivered: () => true, nodes: () => [el(top, bottom)], viewport: el(0, 300), atBottom: () => true, ...chrome, header: bar66 });
+    assert.equal(row(72, 84), false, 'a row under the edge is not read while the reach reads back unresolved');
+    assert.equal(row(100, 112), true, 'a row below the edge is read');
     const scaledTyping = { ...scaled, clientHeight: 40, querySelector: (selector) => (selector === TINT ? tint : null),
         ownerDocument: { defaultView: drawn('72px') } };
     assert.deepEqual([ends(69.5, { ...chrome, header: scaledTyping }), ends(69, { ...chrome, header: scaledTyping })],
