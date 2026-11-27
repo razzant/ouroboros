@@ -22,6 +22,11 @@ export function renderMobileNavToggle({ inComposer = false } = {}) {
     `;
 }
 
+/** A room's edge (style.css "A room's edges"): its two blur steps, then its tint, each on the shared edge curve. A
+ * room's bar and its composer's area each carry it. */
+export const ROOM_EDGE_HTML = ['soft', 'deep', 'tint']
+    .map((step) => `<i class="room-edge" data-edge="${step}" aria-hidden="true"></i>`).join('');
+
 /**
  * The one header of every page AND the Project panel (docs/DESIGN.md "Shell", plan P5): one row, one height,
  * one title style, one close control. `☰ · title · status … actions · ×`: the leading slot holds ☰ (the stack
@@ -47,6 +52,7 @@ export function renderPageHeader({
     showMobileNav = true,
     named = true,
     leadHtml = '',  // the page's own navigation written straight into the lead (Settings): the bar is never empty
+    roomEdge = false,  // a room's bar floats over its feed and carries the room's edge
 } = {}) {
     const variantClass = variant ? `app-page-header-${escapeHtml(variant)}` : '';
     const words = title ?? pageLabel(page);
@@ -69,7 +75,7 @@ export function renderPageHeader({
     ].join('');
     const id = titleId ? ` id="${escapeHtml(titleId)}"` : '';
     return `
-        <div class="${classAttr(['page-header', 'app-page-header', variantClass, className])}"${facts}>
+        <div class="${classAttr(['page-header', 'app-page-header', variantClass, className])}"${facts}>${roomEdge ? ROOM_EDGE_HTML : ''}
             <div class="app-page-leading">${leading}</div>
             <div class="app-page-title-block">
                 <div class="app-page-title-row">

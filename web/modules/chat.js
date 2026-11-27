@@ -5,6 +5,7 @@ import { clearReloadParams } from './layers.js';
 import { fluentIcon, renderSkillIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, roomBarHtml } from './chat_header.js';
+import { ROOM_EDGE_HTML } from './page_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
 import { ORIGIN_ADDRESSED_NOTICE_TYPES, lineReplyFields, childRowPlacement, placedCardRow, createPlacedCardAnchors, replayConcludesTask } from './chat_row_placement.js';
@@ -208,7 +209,7 @@ export function createChatInstance({
     page.innerHTML = `
         ${roomBarHtml({ asPanel, title })}${asPanel ? '' : '<div class="chat-page-note"></div>'}
         <div id="chat-messages"></div>
-        <div id="chat-input-area">
+        <div id="chat-input-area">${ROOM_EDGE_HTML}
             <div class="chat-input-wrap">
                 <button class="chat-scroll-bottom-btn ui-hit-area" id="chat-scroll-bottom" type="button" aria-label="Scroll to latest message" title="Scroll to latest message">
                     ${fluentIcon('arrow-down', 16, 'regular')}
