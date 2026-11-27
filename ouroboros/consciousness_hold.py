@@ -73,9 +73,10 @@ def queue_hold(row: Any, budget_fences: Any = None) -> str | None:
     when the row is free to dispatch without anyone's move. A stop before dispatch says its own pause: an owner's
     Pause is ``owner``, a global one the total budget (``total_budget``; no store row records it). A stop of the app
     (owner Restart, saved work) is ``restart``, Panic ``panic``, an owner's unsaved Pause ``owner``; any other stop, a
-    refusal (a consumed or superseded grant, an owner hold) or a passed deadline proves no cause (``""``)."""
+    refusal (a consumed or superseded grant, an owner hold), a writer wait (the worker skips the row until an earlier
+    attempt's writers settle) or a passed deadline proves no cause (``""``)."""
     from ouroboros.deadline_utils import task_deadline, utc_now
-    from ouroboros.work_stop import continuation_refusal, current_stop, hold_fact, pause_marker
+    from ouroboros.work_stop import continuation_refusal, current_stop, hold_fact, pause_marker, writer_wait
 
     row = row if isinstance(row, dict) else {}
     stop = current_stop(row, {"budget": budget_fences if isinstance(budget_fences, dict) else {}})
@@ -84,23 +85,37 @@ def queue_hold(row: Any, budget_fences: Any = None) -> str | None:
         if pause.get("status") in {"paused_before_dispatch", "resource_limited"}:
             return "owner" if pause.get("cause") == "owner_pause" else "total_budget" if pause.get("scope") == "global" else ""
         return {"app_stop": "restart", "panic": "panic", "pause": "owner"}.get(stop.get("cause"), "")
-    if continuation_refusal(row):
+    if continuation_refusal(row) or writer_wait(row):
         return ""
     deadline = task_deadline(row)
     return "" if deadline is not None and deadline <= utc_now() else None
 
 
-def hold_cause(metadata: dict, own: dict, members=(), held: str | None = None) -> dict:
+def queue_veto(row: Any, budget_fences: Any = None) -> bool:
+    """Whether the queue row keeps its own self-waking pause from going on by itself: a stop other than that pause's
+    own marker, a writer wait or a refusal, as the sleeper itself reads it (``supervisor.sleep_wake._vetoed``)."""
+    from ouroboros.work_stop import continuation_refusal, current_stop, writer_wait
+
+    row = row if isinstance(row, dict) else {}
+    observed = ({k: v for k, v in row.items() if k != "_budget_pause"}
+                if (row.get("_budget_pause") or {}).get("reason") == "authority" else row)
+    fences = budget_fences if isinstance(budget_fences, dict) else {}
+    return bool(current_stop(observed, {"budget": fences}) or writer_wait(row) or continuation_refusal(row))
+
+
+def hold_cause(metadata: dict, own: dict, members=(), held: str | None = None, veto: bool = False) -> dict:
     """``{"cause", "ceiling_usd"}``: what holds my own held wake, only as far as its records prove it (pure).
 
     ``own`` is the wake's pause row, ``members`` the pause rows of its paused tree members, ``held`` what its queue
-    row holds it with (``queue_hold``; None: nothing). The wake paused at the
+    row holds it with (``queue_hold``; None: nothing), ``veto`` whether that row keeps a self-waking pause from going
+    on by itself (``queue_veto``, or a row gone at lookup). The wake paused at the
     carried ceiling (initial or renewed), or, child first, its tree's latch refused it while a member
     holding that inherited number paused at it: the launch stamp (``consciousness_wake.wake_task_metadata``) names
     ``allowance``, ``allowance_and_cap`` or ``per_task_cap``, and a record from before the stamp is only
     ``launch_ceiling``. Otherwise the pause's own reason or rail: ``owner``, ``sleep``, ``technical`` (a typed cause
     that continues by itself) or ``technical_resume`` (an older, untyped one: Resume continues it), ``total_budget``,
-    ``per_task_fence``; a stop of the app or Panic the queue row carries replaces a pause's own self-waking door. With
+    ``per_task_fence``; a queue veto takes a self-waking pause's promise (a stop of the app or Panic says itself, an
+    owner's unsaved Pause ``owner``, anything else ``""``). With
     no live pause the queue row decides: its hold, else ``queued`` (none recorded, a Resume granted or consumed: it
     waits for a worker). ``""`` proves nothing: a money stop no limit explains (a lifted allowance), a refusal."""
     from ouroboros.budget_pause import (RAIL_DISPATCH_REFUSED, RAIL_GLOBAL_EXHAUSTED, REASON_AUTHORITY, REASON_OWNER,
@@ -115,8 +130,8 @@ def hold_cause(metadata: dict, own: dict, members=(), held: str | None = None) -
     reason, rail = own.get("reason"), own.get("rail")
     technical = "technical" if own.get("auto_resume") is True else "technical_resume"  # budget_pause's typed cause
     other = {REASON_OWNER: "owner", REASON_SLEEP: "sleep", REASON_AUTHORITY: technical}.get(reason)
-    if other in ("sleep", "technical") and held in ("restart", "panic"):
-        return {"cause": held, "ceiling_usd": None}
+    if other in ("sleep", "technical") and veto:
+        return {"cause": held if held in ("restart", "panic", "owner") else "", "ceiling_usd": None}
     if other or reason != "budget":
         return {"cause": other or "", "ceiling_usd": None}
     lifted = isinstance(metadata.get("producer_allowance_lifted"), dict)
@@ -181,8 +196,12 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
 
     try:
         with q._queue_lock:  # the pool's own row: its metadata and what it holds the wake with, decided in place
-            row = next((task for task in q.PENDING if str(task.get("id") or "") == task_id), None) or {}
-            metadata, held = dict(row.get("metadata") or {}), queue_hold(row, q.BUDGET_ROOT_FENCES)
+            row = next((task for task in q.PENDING if str(task.get("id") or "") == task_id), None)
+            # A row gone since the clock listed the wake held (dispatch or removal won between the two locks) proves
+            # nothing: unknown, never a queue position.
+            metadata = dict((row or {}).get("metadata") or {})
+            held = "" if row is None else queue_hold(row, q.BUDGET_ROOT_FENCES)
+            veto = row is None or queue_veto(row, q.BUDGET_ROOT_FENCES)
         facts = controls(drive_root, task_id)
         own = facts.get("budget_pause") or {}
         started = _start_of(own)
@@ -207,7 +226,7 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
                 metadata = wake_ceiling_metadata(load_task_result(drive_root, task_id, strict=True) or {}) or metadata
         except Exception:
             log.debug("The task record of held wake %s is unreadable; its launch stamp stands", task_id, exc_info=True)
-    result = {**hold_cause(metadata, own, members, held), **started}
+    result = {**hold_cause(metadata, own, members, held, veto), **started}
     if window is not None and allowance_stopped(metadata, own, witnesses):
         result.update(_resume_room(drive_root, task_id, metadata, own))
     return result

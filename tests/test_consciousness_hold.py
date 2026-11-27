@@ -270,3 +270,45 @@ def test_a_bad_start_time_drops_only_the_time_never_the_cause(tmp_path, monkeypa
     held = hold.held_wake_cause(tmp_path, "wake-x")
     assert held["cause"] == "total_budget"
     assert ("started_at" in held) is named
+
+
+def test_a_held_wake_whose_carrier_row_is_gone_at_lookup_is_unknown_never_queued(tmp_path, monkeypatch):
+    """The clock listed the wake held under one lock; dispatch or removal can take the row before this read takes
+    another. A row that is not there proves nothing (``""``); a free row there is queued."""
+    metadata = _launched()
+    seed_result(tmp_path, "wake-x", {"task_id": "wake-x", "status": "queued", "metadata": metadata})
+    monkeypatch.setattr("supervisor.queue.PENDING", [])
+    assert hold.held_wake_cause(tmp_path, "wake-x")["cause"] == ""
+    monkeypatch.setattr("supervisor.queue.PENDING", [{"id": "wake-x", "metadata": metadata}])
+    assert hold.held_wake_cause(tmp_path, "wake-x")["cause"] == "queued"
+
+
+WRITER_WAIT = {"_budget_pause_hold": {"reason": "continuation_writer_unsettled"}}
+
+
+def test_a_writer_wait_is_no_wait_for_a_worker(tmp_path, monkeypatch):
+    """The worker skips a row whose predecessor's writers have not settled (work_stop.writer_wait): it is not waiting
+    for a worker, so "queued" is not said of it."""
+    metadata = _launched()
+    seed_result(tmp_path, "wake-x", {"task_id": "wake-x", "status": "queued", "metadata": metadata})
+    monkeypatch.setattr("supervisor.queue.PENDING", [{"id": "wake-x", "metadata": metadata, **WRITER_WAIT}])
+    assert hold.held_wake_cause(tmp_path, "wake-x")["cause"] == ""
+
+
+@pytest.mark.parametrize("veto", [
+    {"_budget_pause_hold": {"reason": "stale_queue_row_grant_consumed"}},  # a refusal
+    WRITER_WAIT,
+    {"_owner_hold": True},
+])
+@pytest.mark.parametrize("reason,self_waking", [("sleep", "sleep"), ("authority", "technical")])
+def test_a_queue_veto_takes_the_self_waking_promise_from_a_pause(tmp_path, monkeypatch, veto, reason, self_waking):
+    """A sleep or a typed technical pause goes on by itself only while its queue row would let it (the sleeper's own
+    veto: a refusal, a tree stop, a writer wait); with one it proves no cause. Without one it keeps its words."""
+    metadata = _launched()
+    pause = {**_pause("model_sleep", reason=reason, scope="task", basis=None), "cause": "read_failed", "auto_resume": True}
+    seed_result(tmp_path, "wake-x", {"task_id": "wake-x", "status": "paused", "metadata": metadata, "budget_pause": pause})
+    marker = {"_budget_pause": {"reason": reason, "rail": "model_sleep"}}
+    monkeypatch.setattr("supervisor.queue.PENDING", [{"id": "wake-x", "metadata": metadata, **marker, **veto}])
+    assert hold.held_wake_cause(tmp_path, "wake-x")["cause"] == ""
+    monkeypatch.setattr("supervisor.queue.PENDING", [{"id": "wake-x", "metadata": metadata, **marker}])
+    assert hold.held_wake_cause(tmp_path, "wake-x")["cause"] == self_waking
