@@ -165,7 +165,8 @@ def test_source_warning_and_my_skills_opt_in(skills_browser, browser_name, width
         assert skills.posted('/api/skill-sources/my-skills') == [], 'opening Publish has no repository side effect'
         assert dialog.get_by_role('button', name='Create or connect «My skills» on GitHub').count() == 1
         _contained(page)
-        page.locator('.toast').wait_for(state='detached', timeout=10_000)
+        # The source's notice waits, hidden, while the dialog covers the page (toast.js): the dialog is drawn alone.
+        page.locator('.toast').wait_for(state='hidden', timeout=10_000)
         capture(page, browser_name, width, f'{theme}-publish-my-skills')
         for code, next_step in [('no_token', 'Add GITHUB_TOKEN'), ('cannot_create', 'allow repository access'), ('failed', 'check your GitHub connection')]:
             skills.answers['/api/skill-sources/my-skills'] = (400, {'ok': False, 'code': code, 'error': 'fixture refusal'})
