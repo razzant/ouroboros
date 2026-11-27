@@ -107,6 +107,12 @@ def _expect_delivery(oracle, row, tid):
         "delivered", tid, row["row_address"]), found
 
 
+def _offered_work_reply(body):
+    """The keyed return handle the host offered this work for the owner's Reply, or None."""
+    hit = re.search(r"reply_to_relay='(work-reply:[0-9a-f]+)'", "\n".join(_user_rows(body)))
+    return hit[1] if hit else None
+
+
 def _bubble(page, feed, role, words):
     # A later reply may repeat those exact words in its quote. Count only the bubble's own body.
     return feed.locator(f".chat-bubble.{role}[data-row-address]").filter(
@@ -153,6 +159,7 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path, destina
         f"{label}_{nonce}" for label in ("LAUNCH", "WORK", "NEIGHBOR", "EXPLICIT", "PLAIN", "HANDOFF")
     )
     actors = {marker: [] for marker in (work, neighbor, launch)}
+    answered = set()
     target, project = {}, {}
     work_gate = ModelGate(lambda body: _belongs(body, work), timeout=160)
     neighbor_gate = ModelGate(lambda body: _belongs(body, neighbor), timeout=160)
@@ -172,8 +179,15 @@ def test_reply_to_finished_launcher_reaches_only_its_live_work(tmp_path, destina
                     return {"tool": "finish_task", "arguments": {"action": "finish", "answer": final,
                             "about_work": hit[1]}}
             raise AssertionError("No host-confirmed work in start_task's result")
-        return ({"tool": "read_file", "arguments": {"root": "system_repo", "path": "VERSION"}}
-                if first else {"final": f"Done {actor}"})
+        if first:
+            return {"tool": "read_file", "arguments": {"root": "system_repo", "path": "VERSION"}}
+        # #3759: a Reply addressed to this work holds a regular finish until the work answers it in its source room
+        # (loop_messages.work_reply_finish_hold). The work does what a real worker does: keyed answer, then finish.
+        relay = _offered_work_reply(body)
+        if actor == work and relay and relay not in answered:
+            answered.add(relay)
+            return {"tool": "send_user_message", "arguments": {"text": f"Answer from {work}", "reply_to_relay": relay}}
+        return {"final": f"Done {actor}"}
 
     evidence = producer_evidence_dir(tmp_path / "evidence", "reply-reader")
     with candidate_checkout(Path(__file__).resolve().parents[1], tmp_path / "clone", origin_proof=True) as clone, \
@@ -435,6 +449,9 @@ def test_live_reply_to_same_turn_after_it_moves_to_project(tmp_path):
                     return {"tool": "move_to_project", "arguments": {"project_name": project_name}}
                 case 3:
                     return {"tool": "read_file", "arguments": {"root": "system_repo", "path": "VERSION"}}
+                case 4 if (relay := _offered_work_reply(body)):
+                    # #3759: the Reply addressed to this work must be answered under its keyed relay before it may finish.
+                    return {"tool": "send_user_message", "arguments": {"text": "Moved work answers.", "reply_to_relay": relay}}
                 case _:
                     return {"final": "Moved work completed."}
         if _belongs(body, plain):
