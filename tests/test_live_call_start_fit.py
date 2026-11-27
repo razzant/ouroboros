@@ -143,9 +143,11 @@ def test_the_fresh_fixture_starts_on_every_shipped_call_model_and_on_hard_85k_te
     assert not shown.memory_facts.get("host_sections_addressed"), "no host section addressed for the window"
 
 
-def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None, shape="fresh", published=None):
+def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None, shape="fresh", published=None,
+                   published_tools=None):
     """The ``shape`` drive's call start (``rich`` with its twelve MCP servers published through the real manager on
-    the drive the call preparation reads; their guides go into ``published``) through the adapter's own setup: the real ``ToolRegistry``, the call feature's
+    the drive the call preparation reads; their guides go into ``published``, each server's published tool names, with
+    their multiplicity, into ``published_tools``) through the adapter's own setup: the real ``ToolRegistry``, the call feature's
     ``INITIAL_TOOLS``, ``call_tools`` and ``session_options``, the ordinary builder for the call's messages, then
     ``realtime_setup.session_candidate`` with the adapter's registered session factory and a ``connect`` that fails the
     test. ``window`` narrows the catalogue's window for the candidate only (the ordinary build keeps the declared one).
@@ -190,6 +192,10 @@ def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window
         assert all(facts[server]["instructions"] == guide for server, guide in guides.items())
         if published is not None:
             published.update(guides)
+        if published_tools is not None:
+            from collections import Counter
+            for tool in mcp_client.get_manager().list_tools_for_registry():
+                published_tools.setdefault(tool["server_id"], Counter())[tool["raw_name"]] += 1
     env, memory = scale.env_on(drive)
     turn.feature = dict(turn.feature, initial_tools=INITIAL_TOOLS, call_tools=call_tools(drive))
     task = dict(host_world.task, chat_id=1, model=turn.model,
@@ -274,6 +280,60 @@ def _selected_texts(session):
     return texts
 
 
+def selected_tool_names(texts):
+    """``{server: Counter(tool names)}`` as the selected connections map lists them (``- mcp_<server> ...: a, b``)."""
+    from collections import Counter
+
+    listed = {}
+    for line in (line for text in texts for line in text.splitlines()):
+        if line.startswith("- mcp_") and "callable as mcp_" in line:
+            server = line[len("- mcp_"):].split(" ", 1)[0]
+            listed.setdefault(server, Counter()).update(line.partition("__<name>: ")[2].split(", "))
+    return listed
+
+
+START_ROOM = "Start room is smaller than requested"
+
+
+def assert_start_room(proof, window):
+    """The start's work-room record: present, consistent with the window, the selected input and the reserve, and, when
+    less than the requested eighth is left, the recorded reason with the owner-facing detail. Its delivery (the in-model
+    row when it fits, the owner's progress line otherwise) is pinned in tests/test_live_start_room.py and
+    tests/test_live_conversation.py."""
+    measured, room = proof["fit"]["measurement"], proof["work_room"]
+    left = window - measured["estimated_input_tokens"] - measured["response_reserve_tokens"]
+    assert room["remaining_tokens"] == left and room["requested_tokens"] == -(-window // 8)
+    short = left < room["requested_tokens"]
+    assert (room["deficit_tokens"] > 0) is short
+    if short:
+        assert room.get("reason") == "start_room_shortfall" and START_ROOM in room.get("detail", "")
+
+
+def _room_proof(left, *, record=True, reason=True):
+    window, reserve = 290_666, 10_000
+    measured = {"estimated_input_tokens": window - reserve - left, "response_reserve_tokens": reserve}
+    proof = {"fit": {"measurement": measured}}
+    if record:
+        requested = -(-window // 8)
+        proof["work_room"] = {"first_send": True, "requested_tokens": requested, "remaining_tokens": left,
+                              "deficit_tokens": max(0, requested - left)}
+        if reason and left < requested:
+            proof["work_room"].update(reason="start_room_shortfall",
+                                      detail=START_ROOM + ": ... this work starts with less room.")
+    return proof, window
+
+
+def test_the_start_room_guard_reads_the_record_in_both_directions():
+    """A physically valid start one unit short of the eighth passes with its recorded notice, wherever it was
+    delivered; a start whose work-room record is missing, or short without its reason, fails."""
+    requested = -(-290_666 // 8)
+    assert_start_room(*_room_proof(requested - 1))  # one unit short, notice recorded
+    assert_start_room(*_room_proof(requested))  # the eighth exactly
+    for broken in (dict(record=False), dict(reason=False)):
+        with pytest.raises((AssertionError, KeyError)):
+            assert_start_room(*_room_proof(requested - 1, **broken))
+
+
 @pytest.mark.parametrize("shape", ["mature", "rich"])
 @pytest.mark.parametrize("route", [pytest.param(route, id=f"{route[0]}:{route[1]}") for route in scale.call_routes()])
 def test_each_shipped_adapter_admits_or_refuses_a_mature_start_at_its_own_session_candidate(
@@ -283,28 +343,25 @@ def test_each_shipped_adapter_admits_or_refuses_a_mature_start_at_its_own_sessio
     from tests import _live_works_fixture as works
 
     skill, model_id, facts = route
-    guides = {}
+    guides, published_tools = {}, {}
     if skill not in ADMITS:
         with pytest.raises(fit.MinimumViewUnfit) as raised:  # a connection attempt would fail the test instead
             _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, shape=shape, published=guides)
         assert raised.value.window_tokens == facts.conversation_window_tokens and raised.value.deficit_tokens > 0
         assert len(guides) == (scale.MCP_SHAPE["servers"] if shape == "rich" else 0)
         return
-    (session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id,
-                                                          shape=shape, published=guides)
+    (session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, shape=shape,
+                                                          published=guides, published_tools=published_tools)
     measured = proof["fit"]["measurement"]
     assert not attempts and measured["capacity_deficit_tokens"] == 0
     assert measured["capacity_total_tokens"] == facts.conversation_window_tokens
     assert measured["estimated_input_tokens"] + measured["response_reserve_tokens"] <= facts.conversation_window_tokens
     texts = _selected_texts(session)
     flat = " ".join(" ".join(text.split()) for text in texts)
-    room = proof.get("work_room", {})
-    if room.get("deficit_tokens"):  # less than the eighth: the start connects and says so
-        assert room.get("reason") == "start_room_shortfall" and "Start room is smaller than requested" in flat
+    assert_start_room(proof, facts.conversation_window_tokens)
     if shape == "rich":  # the connections map carries every server's whole guide and every tool name, and every work
         assert len(guides) == scale.MCP_SHAPE["servers"]
         assert all(" ".join(guide.split()) in flat for guide in guides.values())
-        listed = [line for text in texts for line in text.splitlines()
-                  if line.startswith("- mcp_srv") and "callable as mcp_" in line]
-        assert sum(len(line.partition("__<name>: ")[2].split(", ")) for line in listed) == scale.MCP_SHAPE["tools"]
+        assert selected_tool_names(texts) == published_tools  # every server, every name, each as often as published
+        assert sum(sum(names.values()) for names in published_tools.values()) == scale.MCP_SHAPE["tools"]
         assert all(f"w{n:02d}{kind[:3]}" in flat for n, kind in enumerate(works.KINDS))
