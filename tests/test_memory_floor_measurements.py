@@ -1045,4 +1045,3 @@ def test_counted_composition_keeps_exact_members_without_focus_or_false_origin_r
     assert "read" not in origin and origin["read_gap"] and origin["ref"] == "chat 1 / origin-a"
     assert "BODY_ONLY" not in json.dumps(result)
     assert result["blocks"]["room"]["json_chars"] == mv.json_chars(mv.render_room(snapshot, level))
-

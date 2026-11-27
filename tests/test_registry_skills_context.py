@@ -544,4 +544,3 @@ def test_registry_keeps_the_whole_source_when_navigation_cannot_be_parsed(tmp_pa
     monkeypatch.setattr("ouroboros.markdown_source.parse_markdown_source", unavailable)
     part = _build_registry_section(env)
     assert part.full_text.endswith(original) and part.operative_view is None
-

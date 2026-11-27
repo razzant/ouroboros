@@ -27,7 +27,10 @@ def test_the_body_map_keeps_every_part_and_address_and_retains_the_whole_map(tmp
         assert chapter.source_path in addresses, chapter.source_path
         stem = chapter.source_path.rpartition("/")[2].removesuffix(".md")
         assert f"\n{stem}: {chapter.headings[0].title}\n" in parts
-    assert {"docs/DESIGN.md", "docs/PERSISTENCE.md"} <= addresses  # the Reference Atlas addresses
+    linked = {path for _text, paths in reference_books._atlas_rows(books[0].entrypoint) for path in paths}
+    assert linked and linked <= addresses  # every linked Reference Atlas address, taken from its parsed link
+    unlinked = [text for text, paths in reference_books._atlas_rows(books[0].entrypoint) if not paths]
+    assert all(text.split(" — ", 1)[0] in parts for text in unlinked)  # a row with no link keeps its address side
     assert parts.endswith('Each reads with `read_file(root="system_repo", path=...)`, its name in place of `<name>`.')
     assert len(parts) < len(view.text) / 4
     assert "## ARCHITECTURE.md" not in view.text and " lines " not in parts  # no whole book, no line ranges
