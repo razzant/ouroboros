@@ -165,6 +165,47 @@ function Invoke-CmdInDir([string]$WorkingDir, [string]$CmdPath, [string[]]$CmdAr
     }
 }
 
+function Open-FileWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][IO.FileAccess]$Access,
+        [Parameter(Mandatory = $true)][IO.FileShare]$Share,
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [int]$TimeoutMs = 15000,
+        [int]$PollMs = 100
+    )
+    $Sw = [Diagnostics.Stopwatch]::StartNew()
+    $Attempts = 0
+    $Leaf = Split-Path -Leaf $Path
+    while ($true) {
+        $Attempts += 1
+        try {
+            $Stream = [IO.File]::Open($Path, [IO.FileMode]::Open, $Access, $Share)
+            Write-Host ("{0}: opened {1} in {2} ms (attempts={3})" -f $Phase, $Leaf, $Sw.ElapsedMilliseconds, $Attempts)
+            return $Stream
+        } catch {
+            $Err = $_.Exception
+            while ($Err -is [System.Management.Automation.MethodInvocationException] -and $Err.InnerException) {
+                $Err = $Err.InnerException
+            }
+            $Hr = $Err.HResult
+            $IsSharingLock = ($Err -is [IO.IOException]) -and ($Hr -eq -2147024864 -or $Hr -eq -2147024863)
+            $ElapsedMs = $Sw.ElapsedMilliseconds
+            if (-not $IsSharingLock) {
+                throw ("{0}: {1} failed to open after {2} ms (attempts={3}, type={4}, hresult=0x{5:X8})" -f `
+                    $Phase, $Leaf, $ElapsedMs, $Attempts, $Err.GetType().FullName, ($Hr -band 0xFFFFFFFFL))
+            }
+            $RemainingMs = [int64]$TimeoutMs - $ElapsedMs
+            if ($RemainingMs -le 0) {
+                throw ("{0}: {1} remained locked after {2} ms (attempts={3}, type={4}, hresult=0x{5:X8})" -f `
+                    $Phase, $Leaf, $ElapsedMs, $Attempts, $Err.GetType().FullName, ($Hr -band 0xFFFFFFFFL))
+            }
+            $SleepMs = [int][Math]::Min([int64]$PollMs, $RemainingMs)
+            if ($SleepMs -gt 0) { Start-Sleep -Milliseconds $SleepMs }
+        }
+    }
+}
+
 function Assert-ExclusiveOpen([string]$Path) {
     [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None).Dispose()
 }
@@ -422,7 +463,8 @@ try {
     $BusyProc = $null
 
     # Also verify a direct OS file lock on Ouroboros.exe or unins*.dat refuses upgrade silently.
-    $ExeLock = [IO.File]::Open($ExpectedExe, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $ExeLock = Open-FileWithRetry -Path $ExpectedExe -Access ([IO.FileAccess]::Read) -Share ([IO.FileShare]::Read) `
+        -Phase 'step 8 locked-exe-upgrade setup'
     try {
         $LockedExeUpgrade = Invoke-SilentSetup @() (Join-Path $Work 'locked-exe-upgrade.log')
         if ($LockedExeUpgrade.ExitCode -eq 0) { throw 'Setup unexpectedly upgraded while Ouroboros.exe was locked' }
@@ -575,9 +617,11 @@ try {
                 } finally {
                     try { $GuiProc.Dispose() } catch { }
                 }
+                # Neither launch mode may keep Ouroboros.exe mapped waiting for a dialog.
+                $GuiReleaseStream = Open-FileWithRetry -Path $ExpectedExe -Access ([IO.FileAccess]::ReadWrite) `
+                    -Share ([IO.FileShare]::None) -Phase "step 11 post-gui-exit ($($GuiCase.Label))"
+                $GuiReleaseStream.Dispose()
             }
-            # Ordinary Start click must not keep Ouroboros.exe mapped waiting for a dialog.
-            Assert-ExclusiveOpen $ExpectedExe
             $PortableShimRun = Invoke-CmdInDir $OrdinaryCwd $MigratedShim @('--help')
             if ($PortableShimRun.ExitCode -ne 0) {
                 throw "Portable CLI shim refused while Setup held the mutex: exit $($PortableShimRun.ExitCode)`n$($PortableShimRun.Output)"

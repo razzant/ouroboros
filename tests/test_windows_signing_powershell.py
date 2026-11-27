@@ -741,6 +741,75 @@ try {
     assert ready.read_text(encoding="utf-8") == "up"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file-sharing HRESULT semantics require Windows")
+def test_smoke_windows_setup_open_with_retry_behavior_on_windows(tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("payload", encoding="utf-8")
+    missing = tmp_path / "missing.txt"
+    res = run_ps(tmp_path, r'''
+$Tokens = $null; $Errors = $null
+$Path = Join-Path $env:TEST_REPO 'scripts/smoke_windows_setup.ps1'
+$Ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$Errors)
+if ($Errors.Count) { throw ($Errors | Out-String) }
+$Fn = $Ast.Find({ param($Node)
+    $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $Node.Name -eq 'Open-FileWithRetry'
+}, $true)
+if (-not $Fn) { throw 'Open-FileWithRetry not found in smoke_windows_setup.ps1' }
+Invoke-Expression $Fn.Extent.Text
+
+# 1. Open handle produces a bounded retry failure with phase, attempts, elapsed, type and HRESULT, without parent path.
+$Lock = [IO.File]::Open($env:TEST_TARGET, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+$LockErr = $null
+try {
+    try {
+        $Unexpected = Open-FileWithRetry -Path $env:TEST_TARGET -Access ([IO.FileAccess]::ReadWrite) `
+            -Share ([IO.FileShare]::None) -Phase 'locked-phase' -TimeoutMs 200 -PollMs 25
+        $Unexpected.Dispose()
+    } catch {
+        $LockErr = $_.Exception.Message
+    }
+} finally {
+    $Lock.Dispose()
+}
+if (-not $LockErr) { throw 'Expected Open-FileWithRetry to fail while handle was held' }
+if ($LockErr -notmatch '^locked-phase: sample\.txt remained locked after (\d+) ms \(attempts=(\d+), type=System\.IO\.IOException, hresult=0x8007002[01]\)$') {
+    throw "Unexpected lock diagnostic: $LockErr"
+}
+if ([int]$Matches[1] -lt 200) { throw "Expected elapsed >= 200 ms, got $($Matches[1])" }
+if ([int]$Matches[2] -lt 2) { throw "Expected multiple retry attempts, got $($Matches[2])" }
+if ($LockErr.Contains($env:TEST_TMP)) { throw "Lock diagnostic leaked parent path: $LockErr" }
+
+# 2. After Dispose, the file opens cleanly.
+$Opened = Open-FileWithRetry -Path $env:TEST_TARGET -Access ([IO.FileAccess]::ReadWrite) `
+    -Share ([IO.FileShare]::None) -Phase 'released-phase' -TimeoutMs 2000 -PollMs 25
+try {
+    if (-not $Opened.CanRead -or -not $Opened.CanWrite) { throw 'Opened stream is not readable/writable' }
+} finally {
+    $Opened.Dispose()
+}
+
+# 3. Missing file fails immediately without waiting out the timeout.
+$MissingErr = $null
+try {
+    $UnexpectedMissing = Open-FileWithRetry -Path $env:TEST_MISSING -Access ([IO.FileAccess]::ReadWrite) `
+        -Share ([IO.FileShare]::None) -Phase 'missing-phase' -TimeoutMs 5000 -PollMs 25
+    $UnexpectedMissing.Dispose()
+} catch {
+    $MissingErr = $_.Exception.Message
+}
+if (-not $MissingErr) { throw 'Expected Open-FileWithRetry to fail on missing file' }
+if ($MissingErr -notmatch '^missing-phase: missing\.txt failed to open after (\d+) ms \(attempts=1, type=System\.IO\.FileNotFoundException, hresult=0x80070002\)$') {
+    throw "Unexpected missing-file diagnostic: $MissingErr"
+}
+if ([int]$Matches[1] -ge 5000) { throw "Missing file waited out timeout: $($Matches[1]) ms" }
+if ($MissingErr.Contains($env:TEST_TMP)) { throw "Missing-file diagnostic leaked parent path: $MissingErr" }
+''', TEST_TARGET=str(target), TEST_MISSING=str(missing), TEST_TMP=str(tmp_path))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert re.search(r"released-phase: opened sample\.txt in \d+ ms \(attempts=1\)", res.stdout), res.stdout
+    assert str(tmp_path) not in res.stdout
+
+
 def test_verifier_checks_every_catalogued_file_of_an_extracted_release(tmp_path):
     for path in CATALOG_PATHS:
         (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)

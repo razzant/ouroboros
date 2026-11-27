@@ -485,6 +485,24 @@ def test_smoke_windows_setup_script_enforces_disposable_guard_aumid_and_safe_cle
     assert "$env:USERPROFILE =" not in smoke and "$env:LOCALAPPDATA =" not in smoke
 
 
+def test_smoke_windows_setup_retries_only_expected_exe_sites_with_windows_hresult():
+    smoke = source("scripts/smoke_windows_setup.ps1")
+    assert smoke.count("function Open-FileWithRetry") == 1
+    assert "function Assert-ExclusiveOpen([string]$Path)" in smoke
+    # Only the two $ExpectedExe sites call Open-FileWithRetry; .dat and held.exe stay direct/immediate.
+    assert smoke.count("Open-FileWithRetry -Path ") == 2
+    assert "Open-FileWithRetry -Path $ExpectedExe -Access ([IO.FileAccess]::Read) -Share ([IO.FileShare]::Read)" in smoke
+    assert '-Phase "step 11 post-gui-exit ($($GuiCase.Label))"' in smoke
+    assert "Assert-ExclusiveOpen ([IO.Path]::ChangeExtension($V1Uninst, '.dat'))" in smoke
+    assert "Assert-ExclusiveOpen $UninstDat" in smoke
+    assert "$LauncherHold = [IO.File]::Open($HeldExe" in smoke
+    helper = smoke[smoke.index("function Open-FileWithRetry"):smoke.index("function Assert-ExclusiveOpen")]
+    assert "[Diagnostics.Stopwatch]::StartNew()" in helper
+    assert "-2147024864" in helper and "-2147024863" in helper
+    assert "being used by another process" not in helper and "$Err.Message" not in helper
+    assert "Start-ExactProcess" not in helper and "Invoke-SilentSetup" not in helper
+
+
 def test_inno_setup_pin_downloader_and_packer_enforce_digest_and_payload_contract():
     pin = json.loads(source("packaging/windows/inno_setup_pin.json"))
     assert pin["schemaVersion"] == 1
