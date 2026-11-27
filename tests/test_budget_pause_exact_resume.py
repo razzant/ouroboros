@@ -469,7 +469,7 @@ def test_a_pause_that_moved_since_it_was_observed_is_never_extended_by_the_obser
 def test_the_card_names_the_allowances_room_and_what_the_total_budget_leaves_of_it(
         tmp_path, monkeypatch, daily, total, additional, available):
     from ouroboros import usage_store
-    from ouroboros.consciousness_view import held_wake_cause
+    from ouroboros.consciousness_hold import held_wake_cause
 
     _daily_wake_pause(tmp_path, monkeypatch)
     reads = _observe_allowance_reads(monkeypatch)

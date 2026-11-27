@@ -271,7 +271,8 @@ def _room_words(after: float, now: float) -> str:
 def _held(bg: dict, room: dict | None = None) -> dict:
     """The server's snapshot with its own wake held at the allowance it started with, as the producers say it; ``room``
     is what a host that estimates a Resume adds (``held_wake_cause``)."""
-    from ouroboros.consciousness_view import describe_consciousness_state, hold_cause
+    from ouroboros.consciousness_hold import hold_cause
+    from ouroboros.consciousness_view import describe_consciousness_state
     from ouroboros.consciousness_wake import wake_task_metadata
 
     pause = {"pause_id": "p", "state": "paused", "reason": "budget", "rail": "graceful_ceiling", "scope": "root",

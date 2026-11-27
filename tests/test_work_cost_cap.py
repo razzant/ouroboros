@@ -690,7 +690,7 @@ def test_review_wave_resume_and_continue_money_reads_see_the_cap(data_root):
 def test_resume_refusal_names_an_independent_fence_not_the_work_cap(data_root, monkeypatch):
     """A producer's own root fence is not the work's conversational cap: the refusal says so, and
     raising the ordinary whole cap — which succeeds — does not lift it."""
-    from ouroboros.consciousness_view import _resume_room
+    from ouroboros.consciousness_hold import _resume_room
     from supervisor.budget_resume import _root_money_refusal
 
     work = _work(data_root, "work-a")
