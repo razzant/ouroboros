@@ -448,6 +448,7 @@ async def _api_identity(request: Request) -> JSONResponse:
     from ouroboros.presence_recovery import WORK_OUTPUT_VERSION
     from ouroboros.place_guard import PLACE_BINDING_VERSION
     from ouroboros.gateway.host_sign_in import SIGN_IN_HANDOVER_VERSION, SIGN_IN_VERSION
+    from ouroboros.gateway.host_telegram_feed import TELEGRAM_GROUP_FEED_VERSION, TELEGRAM_GROUP_POLL_CLAIM_VERSION
     from ouroboros.place_intake import ATTENTION_VERSION
     from ouroboros.extension_late_result import VERSION as LATE_RESULT_VERSION
 
@@ -469,7 +470,9 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "late_result_version": LATE_RESULT_VERSION,
                          "presence_place_binding_version": PLACE_BINDING_VERSION,
                          "notify_version": NOTIFY_VERSION, "sign_in_version": SIGN_IN_VERSION,
-                         "sign_in_handover_version": SIGN_IN_HANDOVER_VERSION})
+                         "sign_in_handover_version": SIGN_IN_HANDOVER_VERSION,
+                         "telegram_group_feed": TELEGRAM_GROUP_FEED_VERSION,
+                         "telegram_group_poll_claim": TELEGRAM_GROUP_POLL_CLAIM_VERSION})
 
 
 async def _api_tool_schemas(request: Request) -> JSONResponse:
@@ -1495,11 +1498,13 @@ def create_host_service_app(
     from ouroboros.gateway.host_call import host_call_routes
     from ouroboros.gateway.host_sign_in import host_sign_in_routes
     from ouroboros.gateway.host_late_result import api_late_result
+    from ouroboros.gateway.host_telegram_feed import host_telegram_feed_routes
 
     app = Starlette(
         routes=[
             *host_call_routes(),
             *host_sign_in_routes(),
+            *host_telegram_feed_routes(),
             Route("/identity", _api_identity, methods=["GET"]),
             Route("/tools/schemas", _api_tool_schemas, methods=["GET"]),
             Route("/chat/allocate-internal", _api_allocate_internal, methods=["POST"]),

@@ -200,6 +200,78 @@ def _presence_error(message: str, status: int, code: str, disposition: str, **fa
                          "disposition": disposition, **facts}, status_code=status)
 
 
+async def _unofficial_owner_bot(ctx: "host.HostServiceContext", admission: Any, token_payload: Any) -> bool:
+    """Whether an event or history meant for an ``owner_bot`` place (the owner's own bot A) comes from anything but an
+    Official ``telegram-bot`` release's exact bytes, the ones its token was issued for: the check A's feed doors make
+    (``telegram_owner_bot.official_connector``), here before capture. Other places, B's included, read nothing."""
+    from ouroboros.gateway import host_service as host_module
+    from ouroboros.telegram_owner_bot import is_owner_bot_place, official_connector
+
+    if not is_owner_bot_place(getattr(admission, "place", None)):
+        return False
+    issued_for = str((token_payload if isinstance(token_payload, dict) else {}).get("content_hash") or "")
+    return not await host_module._bounded_host_read(
+        ctx, functools.partial(official_connector, ctx.data_dir, content_hash=issued_for))
+
+
+_UNOFFICIAL = "Only an Official telegram-bot release, unchanged, brings your own bot's groups."
+
+
+def _capture_connector_arrival(ctx, admission, event, staged_files, turn_id, identity, continuing):
+    """An A event waiting in the connector's inbox still needs the current bridge before its first capture."""
+    from ouroboros.places import place_records
+    from ouroboros.presence_admission import PresenceAdmissionError
+    from ouroboros.presence_events import settled_resend
+    from ouroboros.presence_runner import capture_presence_event
+    from ouroboros.telegram_owner_bot import current_bridge, exact_owner_bot_identity, is_owner_bot_place
+
+    place = admission.place
+    if is_owner_bot_place(place):
+        bridge = current_bridge()
+        period = bridge.intake(event.account_id) if bridge is not None else None
+        if period is not None and bridge.connect_allowed(event.account_id, event.conversation_id):
+            # The group read can wait on the feed store. Read the exact connection again before capture.
+            current = place_records(ctx.data_dir, persist_import=False).places.get(place.place_id)
+            if (current is None or current.connected_revision != place.connected_revision
+                    or current.provider != event.provider or not exact_owner_bot_identity(
+                        current, event.account_id, event.conversation_id, event.thread_id)):
+                raise PresenceAdmissionError("presence_origin_mismatch", "connected_revision")
+            if current_bridge() is bridge and bridge.intake(event.account_id) == period:
+                return capture_presence_event(admission, event, drive_root=ctx.data_dir, staged_files=staged_files), None
+        saved = settled_resend(ctx.data_dir, turn_id, event, identity, continuing)
+        if saved is not None:
+            return None, saved
+        raise PresenceIntakeRefused("The owner's Telegram group feed is unavailable; retry this event.", 503,
+                                    "telegram_group_feed_unavailable", retry_after=5)
+    return capture_presence_event(admission, event, drive_root=ctx.data_dir, staged_files=staged_files), None
+
+
+async def _capture_with_group_membership(ctx, admission, event, staged_files, turn_id, identity, continuing):
+    from ouroboros.gateway import host_service as host
+    from ouroboros.telegram_owner_bot import current_bridge
+
+    capture = functools.partial(_capture_connector_arrival, ctx, admission, event, staged_files, turn_id,
+                                identity, continuing)
+    try:
+        return await host._bounded_host_read(ctx, capture)
+    except PresenceIntakeRefused as exc:
+        if exc.code != "telegram_group_feed_unavailable" or (bridge := current_bridge()) is None:
+            raise
+        place = admission.place
+        binding = {"account_id": event.account_id, "place_id": place.place_id,
+                   "connected_revision": place.connected_revision, "thread_id": event.thread_id}
+        if not await bridge.refresh_membership(binding, event.conversation_id) or current_bridge() is not bridge:
+            raise
+        return await host._bounded_host_read(ctx, capture)
+
+
+def _legacy_outbox_place(root, connector, target):
+    from ouroboros.places import outbox_place
+    from ouroboros.telegram_owner_bot import owner_bot_of
+
+    return outbox_place(root, connector=connector, owner_bot=owner_bot_of(root, connector), **target)
+
+
 def presence_disposition(exc: Exception) -> str:
     """What the sender of an event a typed error answered does next: ``retry`` (the same event again), ``rejected``,
     ``blocked`` or ``retained`` (the runner holds the durable attempt: nothing to resend)."""
@@ -314,9 +386,12 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         payload = await request.json()
         if not isinstance(payload, dict) or set(payload) - {
             "binding_id", "event", "staged_files", "delivery_reporting_version", "continuation_version",
-            "attention_version",
+            "attention_version", "connected_revision",
         }:
             return _presence_error("invalid presence payload", 400, "presence_payload_invalid", "rejected")
+        # The connection an owner_bot event arrived under (telegram_owner_bot); -1 when the sender named none.
+        revision = payload.get("connected_revision", -1)
+        revision = revision if type(revision) is int and revision >= 0 else -1
         reporting_version = delivery_reporting_version(payload.get("delivery_reporting_version", 0))
         continuing = continuation_version(payload.get("continuation_version", 0))
         from ouroboros.place_intake import attention_version
@@ -330,10 +405,12 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         admission = await host._bounded_host_read(ctx, functools.partial(
             host._admit_presence, ctx, skill_name, binding_id, persist_import=False,
             provider=event.provider, account_id=event.account_id, conversation_id=event.conversation_id,
-            thread_id=event.thread_id))
+            thread_id=event.thread_id, connected_revision=revision))
         if outside_origin(admission, event):
             return _presence_error("presence event does not match its owner-created binding", 403,
                                    "presence_origin_mismatch", "rejected")
+        if await _unofficial_owner_bot(ctx, admission, _token_payload):  # before any capture, as at A's feed doors
+            return _presence_error(_UNOFFICIAL, 403, "connector_mismatch", "blocked")
         staged_files = await host._bounded_host_read(
             ctx, functools.partial(host._presence_staged_files, ctx, skill_name, payload.get("staged_files")))
         turn_id = presence_turn_task_id(admission.binding_id, event.source_event_id)
@@ -351,10 +428,12 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             return JSONResponse(await host._bounded_host_read(ctx, functools.partial(
                 turn_response, settled, continuing, ctx.data_dir, attending)))
         admission = replace(admission, fact_labels=declared)
-        from ouroboros.presence_runner import capture_presence_event
         # Hearing precedes allowance, wake and capacity; cached custody remains the replay authority.
-        captured = await host._bounded_host_read(ctx, functools.partial(
-            capture_presence_event, admission, event, drive_root=ctx.data_dir, staged_files=staged_files))
+        captured, saved = await _capture_with_group_membership(ctx, admission, event, staged_files, turn_id,
+                                                               identity, continuing)
+        if saved is not None:
+            return JSONResponse(await host._bounded_host_read(ctx, functools.partial(
+                turn_response, saved, continuing, ctx.data_dir, attending)))
         result, execution = await host._bounded_host_read(ctx, functools.partial(
             presence_intake, ctx, skill_name, admission, event, event_payload, captured,
             staged_files=staged_files, continuing=continuing))
@@ -425,6 +504,8 @@ async def _api_presence_history(request: Request) -> JSONResponse:
         if outside_origin(admission, first):
             return _presence_error("presence history does not match its owner-created binding", 403,
                                    "presence_origin_mismatch", "rejected")
+        if await _unofficial_owner_bot(ctx, admission, _token_payload):
+            return _presence_error(_UNOFFICIAL, 403, "connector_mismatch", "blocked")
         status, body = await run_sync_to_completion(record_history, ctx.data_dir, admission, parsed)
         return JSONResponse(body, status_code=status)
     except PresenceHistoryInvalid as exc:
@@ -520,7 +601,6 @@ async def _api_presence_work(request: Request) -> JSONResponse:
 async def _api_presence_place(request: Request) -> JSONResponse:
     """An authenticated connector's outbox rechecks current state without model work."""
     from ouroboros.gateway import host_service as host
-    from ouroboros.places import outbox_place
     ctx = request.app.state.host_service_context
     try:
         skill, _token = await host._authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
@@ -540,19 +620,18 @@ async def _api_presence_place(request: Request) -> JSONResponse:
                           ("provider", "account_id", "conversation_id", "thread_id")}
                 result = await host._bounded_host_read(ctx, functools.partial(
                     outbox_binding_facts, ctx.data_dir, skill, target, binding=binding,
-                    require_place=request.query_params.get("require_place") == "true", match=match))
+                    require_place=request.query_params.get("require_place") == "true", match=match,
+                    contribution_id=request.query_params.get("contribution_id", "")))
                 return JSONResponse({"ok": True, **result})
             except ValueError as exc:
                 from ouroboros.places import PlaceError
                 if isinstance(exc, PlaceError):
                     raise
                 return _presence_error(str(exc), 400, "place_binding_invalid", "rejected")
+        target = {key: str(request.query_params.get(key) or "")
+                  for key in ("provider", "account_id", "conversation_id", "thread_id")}
         place = await host._bounded_host_read(ctx, functools.partial(
-            outbox_place, ctx.data_dir, connector=skill,
-            provider=str(request.query_params.get("provider") or ""),
-            account_id=str(request.query_params.get("account_id") or ""),
-            conversation_id=str(request.query_params.get("conversation_id") or ""),
-            thread_id=str(request.query_params.get("thread_id") or "")))
+            _legacy_outbox_place, ctx.data_dir, skill, target))
         if place is None:
             return _presence_error("Add this place in Circles.", 404, "place_not_connected", "blocked")
         return JSONResponse({"place_id": place.place_id, "label": place.label, "state": place.state})

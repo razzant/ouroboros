@@ -311,7 +311,7 @@ test('a card: name opens the sheet, Official only on endorsed entries, unknown p
     assert.doesNotMatch(hidden, /City &amp; services/, 'inside a category the chip would repeat the filter');
     const community = renderBrowseCard(item('ouroboros-community/whoop-health'), { state: { status: '', action: '' } });
     assert.doesNotMatch(community, /data-official-mark/);
-    assert.match(community, /▲ 20 votes · needs 2 keys/);
+    assert.match(community, /<div class="skills-card-facts">▲ 20 votes · 2 key fields<\/div>/, 'the catalog says nothing of them: what it reads is counted, not called a need');
     assert.match(community, /Ouroboros Community · by kuznetsoffandrey · updated [^<·]+</);
     assert.doesNotMatch(renderBrowseCard(item('ouroboros-community/happy_farm'), { state: { status: '', action: '' } }), /updated/,
         'an entry without a date says none');
@@ -328,6 +328,22 @@ test('a card: name opens the sheet, Official only on endorsed entries, unknown p
     assert.ok(long.includes(`${description}</p>`), 'the card markup keeps the catalog text');
     assert.match(long, />Read more ›</);
     assert.doesNotMatch(weather, /data-browse-purpose-preview|data-fold-clipped|Read more/);
+});
+
+test('a card says a key as far as the catalog knows it: its own words, authored and escaped; else the count of key fields', () => {
+    const facts = (entry) => renderBrowseCard(entry, { state: { status: '', action: '' } }).match(/<div class="skills-card-facts">(.*?)<\/div>/s)?.[1];
+    const bridge = item('ouroboros/slack-bridge');  // reads two key settings
+    assert.equal(facts(bridge), '▲ 13 votes · 2 key fields', 'the catalog says nothing: what the skill reads is counted');
+    // The catalog speaks: its words stand in place of the count, last in the line and outside the interface's own words.
+    const optional = 'Works with your own bot; a second token is optional';
+    assert.equal(facts({ ...bridge, needs: optional }), `▲ 13 votes · <span data-i18n-authored>${optional}</span>`);
+    assert.equal(facts({ ...bridge, needs: 'Needs a Slack bot token', mark: 'bot token' }), '▲ 13 votes · <span data-i18n-authored>Needs a Slack bot token</span>');
+    assert.equal(facts({ ...bridge, needs: '' }), '▲ 13 votes', '"" says nothing is needed');
+    assert.equal(facts({ ...item('builtin/telegram'), needs: 'Needs a Telegram bot token' }), '<span data-i18n-authored>Needs a Telegram bot token</span>',
+        'without a popularity number the words are the whole line');
+    assert.equal(facts({ ...item('builtin/telegram'), needs: '', permissions: [] }), undefined, 'a line with nothing to say is not drawn');
+    assert.equal(facts({ ...bridge, needs: '<img src=x onerror=alert(1)> & more' }),
+        '▲ 13 votes · <span data-i18n-authored>&lt;img src=x onerror=alert(1)&gt; &amp; more</span>');
 });
 
 test('a connector is known by its place declaration, never a typed tag: icon, «Connects …», the Connectors filter', () => {

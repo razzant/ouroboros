@@ -184,6 +184,9 @@ class _PluginAPIConfig:
     # ("" -> the loader's negotiation default for grandfathered payloads).
     plugin_api_generation: str = ""
     loaded_skill: Any = None
+    # A passive catalog/discovery read shows the token but never claims the bot for the connector's reader; only a
+    # read that feeds a running child (which will poll) claims. The owner's own bot is never claimed either way.
+    claim_bot_on_read: bool = True
 
 
 # Lock-guarded registries; per-surface maps keep unload proportional to one extension.

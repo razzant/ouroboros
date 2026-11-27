@@ -782,3 +782,181 @@ test('a circle editor names a model\'s catalog price while its places pay it, an
         language({ language: '', english: true, revision: 52, entries: {} });
     }
 });
+
+
+test('returning after Telegram setup reopens Add once with its original circle and draft', async (t) => {
+    const view = page(t);
+    await settled();
+    await view.press('[data-circles-act="add-place"][data-circle="team"]');
+    const draft = { words: 'Answer when asked.', description: 'Group plans', branch: 'separate' };
+    view.connects[0].onTelegramSetup(draft);
+    view.state.activePage = 'skills';
+    view.env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'skills' } }));
+    assert.equal(view.connects.length, 1);
+    view.state.activePage = 'circles';
+    await shownAgain(view);
+    assert.equal(view.connects.length, 2);
+    assert.equal(view.connects[1].circle.id, 'team');
+    assert.deepEqual(view.connects[1].resumeTelegram, draft);
+    await shownAgain(view);
+    assert.equal(view.connects.length, 2);
+});
+
+test('Telegram setup resume preserves a changed circle (or none) and clears stale drafts on manual Add; non-telegram owner_bot status is not ignored', async (t) => {
+    const customResponse = {
+        ...RESPONSE,
+        connectors: [
+            ...RESPONSE.connectors,
+            { connector: 'custom-bot', contribution_id: 'owner_bot', label: 'Custom Bot', source: { url: '/api/extensions/custom-bot/status' },
+                readiness: { text: 'Connector on', tone: 'ok' } },
+        ],
+        places: [
+            ...RESPONSE.places,
+            raw('custom-1', { connector: 'custom-bot', contribution_id: '', label: 'Custom Bot', circle: { circle_id: 'team', placed_by: 'owner', placed_at: '' } }),
+        ],
+    };
+    const view = page(t, {
+        response: customResponse,
+        readStatus: async () => ({ team_name: 'Custom Space' }),
+    });
+    await settled();
+    await settled();
+
+    // Non-telegram `owner_bot` connector status resolves cleanly for its legacy place.
+    await view.press('[data-place-open="custom-1"]');
+    assert.equal(view.opened.at(-1)[0], 'custom-1');
+    assert.deepEqual(view.opened.at(-1)[1].connectorStatus, { team_name: 'Custom Space' });
+
+    // onTelegramSetup(draft, nextCircle) updates the resumed circle (including null -> Not in a circle) and carries pending consent key.
+    await view.press('[data-circles-act="add-place"][data-circle="team"]');
+    const draft = { words: 'Keep concise.', description: 'Other chat', branch: 'separate', other: true,
+        consentPending: { accountId: '101', enabled: true, legacy: false } };
+    view.connects.at(-1).onTelegramSetup(draft, null);
+    view.state.activePage = 'settings';
+    view.env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+    view.state.activePage = 'circles';
+    await shownAgain(view);
+    assert.equal(view.connects.at(-1).circle, null);
+    assert.deepEqual(view.connects.at(-1).resumeTelegram, draft);
+
+    // Manually pressing Add a place clears any pending telegramSetup so a later page-shown does not reopen an old draft.
+    view.connects.at(-1).onTelegramSetup(draft, { id: 'home', name: 'Home' });
+    await view.press('[data-circles-act="add-place"][data-circle="team"]');
+    await shownAgain(view);
+    assert.equal(view.connects.at(-1).circle.id, 'team');
+    assert.equal(view.connects.at(-1).resumeTelegram, null);
+});
+
+test('Telegram setup draft survives leaving Circles while return refresh is in flight and clears only when Add actually reopens', async (t) => {
+    const view = page(t);
+    await settled();
+    await view.press('[data-circles-act="add-place"][data-circle="team"]');
+    const draft = { words: 'Keep family private.', description: 'Family chat', branch: 'personal',
+        consentPending: { accountId: '101', enabled: true, legacy: false } };
+    view.connects[0].onTelegramSetup(draft);
+
+    // 1. User returns to Circles, then leaves again before refresh() finishes: Add does not open while away and draft is kept.
+    view.state.activePage = 'settings';
+    const releaseFirst = view.hold();
+    view.state.activePage = 'circles';
+    view.env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'circles' } }));
+    view.state.activePage = 'settings';
+    releaseFirst();
+    await settled();
+    assert.equal(view.connects.length, 1, 'must not open Add after user already left Circles');
+
+    // Next return settles on Circles -> opens once with the preserved circle and draft, then clears it.
+    view.state.activePage = 'circles';
+    await shownAgain(view);
+    assert.equal(view.connects.length, 2);
+    assert.equal(view.connects[1].circle.id, 'team');
+    assert.deepEqual(view.connects[1].resumeTelegram, draft);
+    await shownAgain(view);
+    assert.equal(view.connects.length, 2, 'cleared once Add actually reopened');
+
+    // 2. Rapid bounce (Circles -> Settings -> Circles) while first refresh is still out: stale return neither clears nor double-opens.
+    const draft2 = { words: 'Second draft.', description: 'Ops', branch: 'separate' };
+    view.connects[1].onTelegramSetup(draft2, { id: 'home', name: 'Home' });
+    const releaseStale = view.hold();
+    view.state.activePage = 'circles';
+    view.env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'circles' } }));
+    view.state.activePage = 'settings';
+    const releaseFresh = view.hold();
+    view.state.activePage = 'circles';
+    view.env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'circles' } }));
+    releaseStale();
+    await settled();
+    assert.equal(view.connects.length, 2, 'stale return refresh must ignore superseded visit');
+    releaseFresh();
+    await settled();
+    assert.equal(view.connects.length, 3);
+    assert.equal(view.connects[2].circle.id, 'home');
+    assert.deepEqual(view.connects[2].resumeTelegram, draft2);
+
+    // 3. Manual Add during an in-flight return refresh replaces/clears the older draft without wiping a newer setup draft.
+    const olderDraft = { words: 'Older draft.', description: '', branch: 'personal' };
+    const newerDraft = { words: 'Newer draft.', description: 'New', branch: 'separate' };
+    view.connects[2].onTelegramSetup(olderDraft, { id: 'team', name: 'Team' });
+    const releaseOld = view.hold();
+    view.state.activePage = 'circles';
+    view.env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'circles' } }));
+    await view.press('[data-circles-act="add-place"][data-circle="home"]');
+    assert.equal(view.connects.length, 4);
+    view.connects[3].onTelegramSetup(newerDraft, { id: 'home', name: 'Home' });
+    releaseOld();
+    await settled();
+    assert.equal(view.connects.length, 4, 'superseded in-flight return must not reopen older draft or clear newer draft');
+    view.state.activePage = 'circles';
+    await shownAgain(view);
+    assert.equal(view.connects.length, 5);
+    assert.equal(view.connects[4].circle.id, 'home');
+    assert.deepEqual(view.connects[4].resumeTelegram, newerDraft);
+});
+
+test('an active owner_bot Telegram group with non-green readiness mutes its dot without muting a healthy separate bot or other connectors', () => {
+    const familyCircle = { circle_id: 'family', name: 'Family', text: 'Keep family chat private.', text_author: 'owner', text_at: '', revision: 1 };
+    const quietOff = { cause: 'off', word: 'Hears only · consciousness off', note: 'Consciousness is off.', door: 'consciousness' };
+    const normalized = normalizePlacesResponse({
+        connectors: [
+            { connector: 'telegram-bot', contribution_id: 'place', label: 'Telegram', destination: 'vendor:telegram',
+                readiness: { text: 'Connector on', tone: 'ok' } },
+        ],
+        circles: [familyCircle],
+        places: [
+            raw('tg-family', { connector: 'telegram-bot', contribution_id: 'owner_bot', provider: 'telegram', label: 'Family group',
+                circle: { circle_id: 'family', placed_by: 'owner', placed_at: '' }, readiness: { text: 'Connector unavailable', tone: 'warn' } }),
+            raw('tg-ops', { connector: 'telegram-bot', contribution_id: 'place', provider: 'telegram', label: 'Ops group',
+                circle: { circle_id: 'family', placed_by: 'owner', placed_at: '' }, readiness: { text: 'Connector on', tone: 'ok' } }),
+            raw('tg-family-ok', { connector: 'telegram-bot', contribution_id: 'owner_bot', provider: 'telegram', label: 'Family ready',
+                readiness: { text: 'Connector on', tone: 'ok' } }),
+            raw('tg-family-noreadiness', { connector: 'telegram-bot', contribution_id: 'owner_bot', provider: 'telegram', label: 'Family plain',
+                readiness: null }),
+            raw('tg-family-quiet', { connector: 'telegram-bot', contribution_id: 'owner_bot', provider: 'telegram', label: 'Family quiet',
+                quiet: quietOff, readiness: { text: 'Connector unavailable', tone: 'warn' } }),
+            raw('other-unready', { connector: 'chat-bridge', contribution_id: 'owner_bot', provider: 'chat', label: 'Other unready',
+                readiness: { text: 'Off in Skills', tone: 'warn' } }),
+        ],
+    });
+    const [family, ops, familyOk, familyNoReadiness, familyQuiet, otherUnready] = normalized.places;
+    const rows = placeRowsHtml([family, ops], { circle: normalized.circles[0] });
+    const familyRow = placeRowHtml(family, { title: 'Family group', source: 'telegram' });
+    const opsRow = placeRowHtml(ops, { title: 'Ops group', source: 'Telegram' });
+
+    assert.match(rows, /data-place-open="tg-family" data-state="active"[\s\S]*?<span class="ui-status" data-tone="muted">active<\/span> · <span data-tone="warn">Connector unavailable<\/span>/);
+    assert.match(rows, /data-place-open="tg-ops" data-state="active"[\s\S]*?<span class="ui-status" data-tone="ok">active<\/span>/);
+    assert.match(familyRow, /data-state="active"/, 'saved state stays active');
+    assert.match(familyRow, /aria-label="Open Family group \(telegram\): active; Connector unavailable; last event no captured event"/);
+    assert.doesNotMatch(opsRow, /Connector on/);
+    assert.match(placeRowHtml(familyOk), /<span class="ui-status" data-tone="ok">active<\/span>/, 'healthy owner_bot stays green');
+    assert.match(placeRowHtml(familyNoReadiness), /<span class="ui-status" data-tone="ok">active<\/span>/, 'owner_bot without readiness stays green');
+    assert.match(placeRowHtml(familyQuiet), /<span class="ui-status" data-tone="muted">Hears only · consciousness off<\/span> · <span data-tone="warn">Connector unavailable<\/span>/, 'quiet cause stays intact');
+    assert.match(placeRowHtml(otherUnready), /<span class="ui-status" data-tone="ok">active<\/span> · <span data-tone="warn">Off in Skills<\/span>/, 'other connectors are unchanged');
+
+    const off = { v: 1, enabled: false, reason: 'feed_off', connect: null };
+    const mixed = placeRowsHtml([familyOk, ops], { statuses: { 'telegram-bot:owner_bot': off,
+        'telegram-bot:place': { text: 'Polling ok', tone: 'ok' } } });
+    assert.match(mixed, /data-place-open="tg-family-ok" data-state="active"[\s\S]*?<span class="ui-status" data-tone="muted">active<\/span> · <span data-tone="warn">Group feed off in Telegram<\/span>/);
+    const separate = mixed.slice(mixed.indexOf('data-place-open="tg-ops"'));
+    assert.match(separate, /data-tone="ok">active/);
+    assert.doesNotMatch(separate, /Group feed off/);
+});

@@ -166,6 +166,8 @@ def presence_seed_task(*, admission: PresenceAdmission, event: PresenceTurnEvent
             "continuation_version": int(event.continuation_version or 0),
             "allowance": dict(admission.allowance) if isinstance(admission.allowance, Mapping) else None,
             "gate_wait": bool(gate_wait), "request_waits": True,  # a Host request waits on this turn's result
+            **({"connected_revision": admission.connected_revision}
+               if admission.connected_revision is not None else {}),  # an owner_bot event's connection, rechecked
         },
     }
 
@@ -255,8 +257,10 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
     carrier_owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else None
     physical_id, result, error = turn_id, None, None
     try:
+        revision = facts.get("connected_revision")
         admission = admit_presence_turn(drive_root=root, authenticated_transport_skill=str(facts.get("skill_name") or ""),
                                         binding_id=str(facts.get("binding_id") or ""),
+                                        connected_revision=revision if type(revision) is int else None,
                                         **presence_event_origin(facts.get("event")))
         if facts.get("allowance") is not None:
             admission = replace(admission, allowance=dict(facts["allowance"]))

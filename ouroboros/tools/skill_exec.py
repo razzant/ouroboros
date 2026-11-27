@@ -128,7 +128,7 @@ def _scrub_env(
     skill_state_dir_path: pathlib.Path,
     skill_name: str,
     granted_keys: List[str] | None = None,
-    settings: Dict[str, Any] | None = None,
+    settings: Dict[str, Any] | None = None, drive_root: Any = None,  # the reader's data root, for hand_settings
 ) -> Dict[str, str]:
     env: Dict[str, str] = {}
     for key in _ALWAYS_FORWARDED_ENV:
@@ -141,6 +141,8 @@ def _scrub_env(
         # ``settings``: one strict read a caller already holds (a companion refresh compares and spawns from it).
         # The values and the custom secrets among them both come from this one read.
         settings = skill_settings(load_settings) if settings is None else settings
+        from ouroboros.telegram_owner_bot import hand_settings  # one bot, one local reader, also for a script/companion
+        settings = hand_settings(skill_name, settings, drive_root)
         from ouroboros.skill_loader import requested_core_setting_keys
         protected_upper = {k.upper() for k in _FORBIDDEN_ENV_FORWARD_KEYS}
         protected_upper.update(requested_core_setting_keys(list(manifest_env_keys or []), settings))
@@ -1110,10 +1112,7 @@ def _handle_skill_exec(
         if runtime != "node" or not pinned_node_wait()[1]:  # waiting for the pin's Node: refused after the checks below
             return runtime_unavailable
 
-    def _canonical_declared_path(declared_name: str) -> Optional[pathlib.Path]:
-        name = declared_name.strip()
-        if not name:
-            return None
+    def _canonical_declared_path(name: str) -> Optional[pathlib.Path]:
         if "/" in name or name.startswith("."):
             return _resolve_script_path(loaded.skill_dir, name)
         return _resolve_script_path(loaded.skill_dir, f"scripts/{name}")
@@ -1191,7 +1190,7 @@ def _handle_skill_exec(
     env = _scrub_env(
         manifest_env_keys=list(loaded.manifest.env_from_settings or []),
         skill_state_dir_path=state_dir,
-        skill_name=loaded.name,
+        skill_name=loaded.name, drive_root=drive_root,
         granted_keys=list(grants.get("granted_keys") or []),
     )
     try:

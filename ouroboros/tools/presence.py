@@ -133,8 +133,11 @@ def get_tools() -> list[ToolEntry]:
                        "A folder is an address, not a fence. "
                        "Use canonical account_id and conversation_id from the connector's tools, connection metadata or event route, "
                        "not display labels; an actor ID is not necessarily a conversation ID. "
-                       "For connect, omitted or empty account_id leaves the account scope unrestricted; omitted or empty "
-                       "conversation_id covers all conversations in that scope. For confirm_owner_account/revoke_owner_account, "
+                       "For connect, omitting account_id or conversation_id is admitted only by a generic unrestricted "
+                       "declaration: then empty account_id leaves the account scope unrestricted and empty "
+                       "conversation_id covers all conversations in that scope. contribution_id selects one ordinary "
+                       "published declaration of the connector; omitted, it selects the single non-projected one. "
+                       "Groups for your personal Telegram bot are connected in Circles. For confirm_owner_account/revoke_owner_account, "
                        "omitted account_id inherits the place's account; empty targets only a confirmation with no account restriction. "
                        "Connect starts Silent using the installed connector's declaration; disconnect keeps room history.",
         "parameters": {"type": "object", "properties": {
@@ -143,6 +146,8 @@ def get_tools() -> list[ToolEntry]:
                 "confirm_owner_account", "revoke_owner_account", "set_circle", "set_description",
                 "create_circle", "edit_circle", "delete_circle"]},
             "place_id": {"type": "string"}, "connector": {"type": "string"},
+            "contribution_id": {"type": "string", "description": "One ordinary published declaration id of the "
+                                "connector for connect; omitted selects the single non-projected one."},
             "account_id": {"type": "string"}, "conversation_id": {"type": "string"},
             "state": {"type": "string", "enum": ["active", "silent", "paused"]},
             "fact": {"type": "string", "description": "A core wake fact or signal.<slug> declared by this live connector."},
