@@ -14,9 +14,11 @@ host:
   before its review (``api_connection_identity``);
 - adds the token alone to the completion's one settings write (``completion_settings``); the completion's route
   (``guard_completion``) refuses a card's values from the Telegram Mini App, since a code names the account's owner,
-  and once the write is saved records the owner's consent (the code and the options included) in the starter marker
-  (``record_consent``); the code is never written to Settings or a log. A card carries its code and options only when
-  the wizard drew the QR and the link that hold that code; without them the token comes alone and nothing is posted;
+  and notes the owner's consent (the code and the options included) in the starter marker just before that write,
+  withdrawing it if the write did not land (``record_consent``), so a skill started by the write already knows the
+  link it waits for (``awaited_code_digest``); the code is never written to Settings or a log. A card carries its
+  code and options only when the wizard drew the QR and the link that hold that code; without them the token comes
+  alone and nothing is posted;
 - makes ONE post of every skill-settings value of the card (the code with the options) to the route they declare,
   from this server over loopback: the owner's local session as the route's guard reads it, reachable only from that
   recorded consent (``settle``, one run at a time). Where reviewed skills are granted automatically, that policy
@@ -301,13 +303,57 @@ def guard_completion(endpoint: Callable[[Any], Any]) -> Callable[[Any], Any]:
 
             return unsaved_error("A connection card's token and code are not accepted from the Telegram Mini App; "
                                  "finish setup in Ouroboros itself.", 403, code="connection_owner_only")
+        # The consent is noted BEFORE the write that saves the token: a skill that starts on that write already sees
+        # the link it waits for (``awaited_code_digest``). A write that did not land withdraws it again.
+        drive_root = request_drive_root(request) if cards else None
+        before = await asyncio.to_thread(_connections, drive_root) if cards else None
+        recorded = await asyncio.to_thread(record_consent, drive_root, cards) if cards else []
         response = await endpoint(request)
-        if cards and _saved(response):
-            drive_root = request_drive_root(request)
-            if await asyncio.to_thread(record_consent, drive_root, cards):
-                settle_later(drive_root)  # an installed skill settles now; a starter run still installing settles after it
+        if recorded and _saved(response):
+            settle_later(drive_root)  # an installed skill settles now; a starter run still installing settles after it
+        elif recorded:
+            await asyncio.to_thread(_restore_connections, drive_root, before)
         return response
     return completion
+
+
+def _connections(drive_root: pathlib.Path) -> Optional[List[Any]]:
+    """The marker's cards before this completion: None when there was no marker at all."""
+    from ouroboros.skill_starter import marker_path, read_marker
+
+    return list(read_marker(drive_root).get("connections") or []) if marker_path(drive_root).exists() else None
+
+
+def _restore_connections(drive_root: pathlib.Path, before: Optional[List[Any]]) -> None:
+    """Withdraw a consent whose write did not land: the cards as they were, or no marker where there was none."""
+    from ouroboros.skill_starter import marker_path, write_marker
+
+    try:
+        if before is None:
+            marker_path(drive_root).unlink(missing_ok=True)
+        else:
+            write_marker(drive_root, connections=before)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("The setup's unsaved connection card consent could not be withdrawn (%s)", type(exc).__name__)
+
+
+def awaited_code_digest(drive_root: Any, skill: str) -> Optional[str]:
+    """The SHA-256 of the one-time code the wizard showed for ``skill`` and still holds (noted at Finish, until its
+    post lands or is refused), else None: the skill's own rule for a link it waits for applies from its first moment.
+    Never raises; the code itself never leaves the record."""
+    import hashlib
+
+    from ouroboros.skill_starter import read_marker
+
+    try:
+        records = read_marker(pathlib.Path(drive_root)).get("connections") or []
+    except Exception:  # noqa: BLE001 — unreadable: no promise is known
+        return None
+    for record in records:
+        if (isinstance(record, dict) and record.get("skill") == skill and record.get("post") in ("pending", "waiting")
+                and isinstance(record.get("code"), str) and _CODE.fullmatch(record["code"])):
+            return hashlib.sha256(record["code"].encode("utf-8")).hexdigest()
+    return None
 
 
 def _saved(response: Any) -> bool:
@@ -497,6 +543,6 @@ def settle_later(drive_root: pathlib.Path) -> None:
 
 
 __all__ = [
-    "api_connection_identity", "card_keys", "completion_settings", "declared_card", "guard_completion",
-    "parse_connections", "record_consent", "settle", "settle_later", "starter_connection",
+    "api_connection_identity", "awaited_code_digest", "card_keys", "completion_settings", "declared_card",
+    "guard_completion", "parse_connections", "record_consent", "settle", "settle_later", "starter_connection",
 ]

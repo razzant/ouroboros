@@ -400,3 +400,51 @@ def test_a_skill_finishing_its_load_in_the_server_settles_the_cards_waiting_for_
         monkeypatch.setattr(extension_loader, "is_server_process", lambda server=server: server)
         extension_loader._finalize_extension_reconcile({"skill": "demo"}, tmp_path, None, reason=reason)
         assert calls == expected, (server, reason)
+
+
+def test_the_consent_is_noted_before_the_write_and_withdrawn_when_the_write_did_not_land(skills, tmp_path, monkeypatch):
+    """A skill started by the write that saves its token already sees the link it waits for; an unsaved completion
+    leaves the marker as it was (none where there was none)."""
+    import hashlib
+
+    seen, answer = [], {"status": 200, "body": {"ok": True, "status": "saved"}}
+    drive = tmp_path / "data"
+
+    async def completion(request):
+        seen.append(cards.awaited_code_digest(drive, "demo"))  # what the skill reads while this write runs
+        return JSONResponse(answer["body"], status_code=answer["status"])
+
+    monkeypatch.setattr(cards, "settle_later", lambda drive_root, repo_dir=None: None)
+    client = _client(Route("/complete", endpoint=cards.guard_completion(completion), methods=["POST"]), drive_root=drive)
+    answer.update(status=400, body={"ok": False, "saved": False})
+    assert client.post("/complete", json={"connections": _entry()}).status_code == 400
+    assert seen == [hashlib.sha256(CODE.encode()).hexdigest()] and not skill_starter.marker_path(drive).exists()
+    answer.update(status=200, body={"ok": True, "status": "saved"})
+    assert client.post("/complete", json={"connections": _entry()}).status_code == 200
+    assert cards.awaited_code_digest(drive, "demo") == seen[0] and cards.awaited_code_digest(drive, "other") is None
+
+
+def test_a_code_is_awaited_only_until_its_post_lands_or_is_refused(skills, tmp_path, monkeypatch):
+    drive = tmp_path / "data"
+    assert cards.awaited_code_digest(drive, "demo") is None  # no marker
+    cards.record_consent(drive, {"demo": {"fields": {"botToken": "1:abc"}}})
+    assert cards.awaited_code_digest(drive, "demo") is None  # a card that sent its token alone armed no link
+    cards.record_consent(drive, _entry())
+    assert cards.awaited_code_digest(drive, "demo") is not None
+    monkeypatch.setattr(cards, "_installed", lambda _drive, _name: True)
+    monkeypatch.setattr(cards, "_turn_on", lambda _drive, _name: "")
+    cards.settle(drive, post=lambda path, body: (200, {"ok": True}))
+    assert cards.awaited_code_digest(drive, "demo") is None  # posted: the skill holds it now
+
+
+def test_the_shipped_telegram_card_reaches_the_step_and_its_check_asks_nothing_for_a_non_token(monkeypatch):
+    monkeypatch.setattr("ouroboros.config.get_auto_grant_enabled", lambda: True)
+    monkeypatch.setattr("ouroboros.skill_builtin.bundled_skills_dir",
+                        lambda: pathlib.Path(__file__).resolve().parents[1] / "skills")  # this checkout's own bytes
+    card = cards.declared_card("telegram")
+    assert card is not None and card["token_key"] == "TELEGRAM_BOT_TOKEN"
+    assert cards.card_keys("telegram") == ("TELEGRAM_BOT_TOKEN", "TELEGRAM_PAIRING_CODE")
+    seen = cards.starter_connection("telegram")
+    assert seen["pairing"]["link"] == "https://t.me/{username}?start={code}"
+    assert [option["key"] for option in seen["options"]] == ["TELEGRAM_NOTIFY_TASKS"]
+    assert cards._declared_function(card)("not a token") == {"ok": False, "cause": "refused"}
