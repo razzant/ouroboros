@@ -115,7 +115,7 @@ test('a right-click on a bubble opens its menu at the pointer: Reply, Copy, Open
 });
 
 // Spoken lines as a room draws and revises them: the real text bubble, its Copy binding and the real reply path.
-function spokenRoom(t) {
+function spokenRoom(t, { actions = createMessageActions() } = {}) {
     const env = installDomDouble();
     const { doc, el } = env;
     doc.parseHtml = true;
@@ -131,7 +131,7 @@ function spokenRoom(t) {
     const media = createChatMedia({ replies });
     const draw = createTextBubbles({ chatMedia: media, replies, feed });
     const menu = createChatRowMenu({ feed, replies, cardOf: () => null, readControls: () => ({}),
-        actions: createMessageActions() });
+        actions });
     const frame = (item, version) => ({
         meta: { source: 'live_call', projectId: '' },
         opts: { reply: { role: 'assistant', source: 'live_call', spoken: { call_id: 'call-1', item_id: item },
@@ -179,6 +179,21 @@ test('Reply in a menu opened before a spoken line was revised quotes the same ro
     const staged = room.replies.echoRow()?.reply_to;
     assert.deepEqual([staged?.address, staged?.snippet],
         ['row:1@2026-11-27T10:00:00Z#mine-v2', 'We meet on Friday at ten.']);
+});
+
+test('a registered action in a menu opened before a spoken line was revised acts on the row as it is at the press', (t) => {
+    const actions = createMessageActions();
+    const ran = [];
+    actions.register({ key: 'share', label: 'Share', applies: (row) => row.role === 'assistant',
+        run: (row) => ran.push([row.address, row.text, row.answerWords]) });
+    const room = spokenRoom(t, { actions });
+    room.say('other', 'A neighbouring line.');
+    const line = room.say('mine', 'We meet at ten.');
+    const item = room.openOn(line);
+    room.revise(line, 'mine', 'We meet on Friday at ten.');
+    item('share').click();
+    assert.deepEqual(ran, [['row:1@2026-11-27T10:00:00Z#mine-v2', 'We meet on Friday at ten.',
+        'We meet on Friday at ten.']], 'the action reads the present words and address, not those of the opening');
 });
 
 test('a link, a field or selected words keep the browser menu; a row with nothing to offer opens none', () => {

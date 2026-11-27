@@ -81,7 +81,10 @@ export function createChatRowMenu({ feed, replies, cardOf, readControls, afterAc
             () => { tail.disarm(); replies.selectText(row, point); }]);
         const view = row.matches('.chat-bubble') ? messageRow(row) : null;
         for (const action of view ? actions.actionsFor(view) : []) {
-            items.push([action.key, presentAction(action, view).label, () => runMessageAction(action, view, { anchor: row }), true]);
+            // Registered actions read the row as it is at the press, like the row's own buttons do: a revision under
+            // the open menu (chat_text_bubble.js) must not leave them the words or address it replaced.
+            items.push([action.key, presentAction(action, view).label,
+                () => { const now = messageRow(row); if (now) runMessageAction(action, now, { anchor: row }); }, true]);
         }
         return items;
     }
