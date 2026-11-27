@@ -95,13 +95,11 @@ function Close-OwnWizard([Diagnostics.Process]$started, $w) {
     $limit = [DateTime]::UtcNow.AddSeconds(8)
     while (-not $started.HasExited -and [DateTime]::UtcNow -lt $limit) {
         if (-not $confirmed) {
-            $dialogs = @([BrandQa.Native]::TopWindows($w.Pid) | Where-Object {
-                $_.Title -ceq 'Exit Setup' -and [InertSetupProbe]::GetWindow([IntPtr]$_.Hwnd, 4) -eq [IntPtr]$w.Hwnd
-            })
+            # Setup may own this confirmation through its hidden application window, not the wizard form: the wizard's process binds it.
+            $dialogs = @([BrandQa.Native]::TopWindows($w.Pid) | Where-Object { $_.Title -ceq 'Exit Setup' })
             if ($dialogs.Count -eq 1) {
                 $yes = @(Get-OwnButton $dialogs[0] 'Yes')
-                if ($yes.Count -eq 1 -and $yes[0].Current.ProcessId -eq $w.Pid -and
-                    [InertSetupProbe]::GetWindow([IntPtr]$dialogs[0].Hwnd, 4) -eq [IntPtr]$w.Hwnd) {
+                if ($yes.Count -eq 1 -and $yes[0].Current.ProcessId -eq $w.Pid) {
                     $invoke = $null
                     if ($yes[0].TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
                         $confirmed = $true
@@ -126,12 +124,15 @@ try {
     $p = Start-Process -FilePath $ps -NoNewWindow -PassThru -ArgumentList (
         '-NoProfile -NonInteractive -Sta -File "{0}" -Mode window -OutDir "{1}" -Label inert_ready -ProcessId {2} -Hwnd {3} -TitlePrefix "Setup - " -FramesOnly' -f
         $probe, $capture, $ready.Pid, $ready.Hwnd)
+    $null = $p.Handle  # Windows PowerShell 5.1: without a handle cached while it runs, ExitCode reads $null after exit
     try {
         if (-not $p.WaitForExit(15000)) {
             if (-not $p.HasExited) { $p.Kill() }  # only the exact screenshot helper just started, never Setup or a PID search
             throw 'Capture helper reached its limit; no screenshot is accepted.'
         }
-        if ($p.ExitCode -ne 0) { throw 'Capture helper exited with an error.' }
+        $code = $p.ExitCode
+        Write-Host "Capture helper exit code: $code"
+        if ($null -eq $code -or $code -ne 0) { throw 'Capture helper exited with an error, or its exit code was unreadable.' }
     } finally { $p.Dispose() }
     if (@(Get-OwnButton $ready 'Install').Count -ne 1) { throw 'Ready was not confirmed again after drawing.' }
     $obs = Get-Content -Raw -LiteralPath (Join-Path $capture 'observations.json') | ConvertFrom-Json

@@ -1,5 +1,5 @@
 {
-  "candidate_sha": "ddc624a5d89efddaac39475c0b6a137131a41366",
+  "candidate_sha": "6c9c13ad10b3a94191030ec22abf0d060d13e971",
   "note": [
     "candidate_sha: the 40-character commit of the REVIEWED candidate (the product under test, with the corrected installer). It must be fetchable by that SHA from this repository. An empty or malformed value stops both accept legs before any build. The optional maintenance-smoke job uses the same pinned source on a separate runner; its result is independent of the two GUI jobs.",
     "Its VERSION may be a development marker (X.Y.Z-alpha.0): each accept job builds from a local carrier commit that differs only in VERSION, records both SHAs in projection.json, and the candidate's own unchanged release guard decides.",

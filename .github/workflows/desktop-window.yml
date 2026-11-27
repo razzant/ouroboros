@@ -106,13 +106,16 @@ jobs:
             Write-Host "Capture facts: found=$([bool]$o.window.found) frames=$(@($o.frames).Count) reason=$reason"
           }
           if ($rc -ne 0) { throw 'Inert Ready capture or ordinary cancellation unconfirmed' }
-      - name: Retain the verified Ready frame only
-        if: success()
+      - name: Retain the Ready frames and close facts (also when a check failed)
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-inert-ready-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/inert-setup-ready/ready/window-inert_ready.png
-          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/inert-setup-ready/ready/window-inert_ready.png
+            ${{ runner.temp }}/inert-setup-ready/ready/caption-inert_ready.png
+            ${{ runner.temp }}/inert-setup-ready/close.json
+          if-no-files-found: warn
           retention-days: 7
   accept:
     name: ${{ matrix.mode }} leg (own runner, own profile)
@@ -231,6 +234,13 @@ jobs:
                    else { "stage_inno_setup" }
           & "${{ steps.py.outputs.python-path }}" -I -B "$env:RUNNER_TEMP/qa-harness/run.py" record-stop --evidence "$env:RUNNER_TEMP/qa-evidence" `
             --phase $phase --code "${phase}_failed"
+
+      - name: Check the smoke reader on a temporary file with Windows sharing semantics
+        if: ${{ matrix.mode == 'smoke' }}
+        shell: pwsh
+        run: |
+          & .\.venv\Scripts\python.exe -m pytest -q -o addopts= --noconftest tests/test_windows_signing_powershell.py::test_smoke_windows_setup_open_with_retry_behavior_on_windows
+          exit $LASTEXITCODE
 
       # Only the optional smoke runner uses the maintenance smoke's synthetic installed profile. A failure stays red on that job.
       - name: Pack the Setup once for the smoke (from the extracted ZIP payload)
