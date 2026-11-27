@@ -375,6 +375,69 @@ function browseDom() {
     return { doc, pane, chrome, scroller, restore: () => Object.assign(globalThis, previous) };
 }
 
+test('Compare → Replace confirms the same installed payload across fresh views', async (t) => {
+    const { pane, chrome, restore } = browseDom();
+    t.mock.method(globalThis, 'fetch', () => assert.fail('This display test has no network'));
+    const source = { id: 'my-git', name: 'My git', kind: 'git', trust: 'review' };
+    const offer = { ...item('ouroboros/weather'), id: 'my-git/weather', source_id: source.id, source_name: source.name,
+        source_key: 'git-offer', digest: 'd'.repeat(64), version: '0.1.0' };
+    const legacy = installed('weather'); // the legacy listing omits source_key but names the real folder and landing
+    const modern = { ...legacy, source_key: 'hub-installed' };
+    const manual = { ...legacy, source: 'external', payload_root: 'skills/external/weather', catalog_id: null,
+        source_key: null, install: null, removal: 'delete' };
+    const selfAuthored = { ...manual, source: 'self_authored' };
+    let row, shownOffer = offer, confirm;
+    const installs = [];
+    const browse = createSkillBrowse({ pane, chrome, host: {
+        installedByName: () => new Map([[row.name, structuredClone(row)]]), sourceSnapshot: () => ({ rows: [source] }),
+        sources: async () => [source], catalog: async () => ({ items: [shownOffer], sources: [source] }),
+        compare: () => new Promise((resolve) => { confirm = resolve; }), refreshInstalled: async () => {}, toast: () => {},
+    }, api: { install: async (...args) => { installs.push(args); return { already_installed: true }; } } });
+    const begin = async (initial) => {
+        row = initial;
+        confirm = null;
+        await browse.show();
+        pane.querySelector('[data-browse-action="compare"]').click();
+        assert.equal(typeof confirm, 'function', 'opened Compare for the selected offer');
+    };
+    const replace = async () => {
+        confirm('replace');
+        await new Promise((resolve) => setImmediate(resolve));
+    };
+    try {
+        for (const initial of [legacy, modern, manual, selfAuthored]) {
+            const before = installs.length;
+            await begin(initial);
+            row = { ...initial, enabled: false, lifecycle_status: 'failed', catalog_title: 'A fresh title',
+                install: initial.install && { ...initial.install, update_available: null } };
+            await replace();
+            assert.deepEqual(installs.slice(before), [[offer.id, { turnOnWhenReady: true, replace: true,
+                expectedSourceKey: offer.source_key, expectedDigest: offer.digest }]]);
+        }
+        const confirmedCount = installs.length;
+        for (const [initial, drift] of [[modern, { content_hash: 'e'.repeat(64) }],
+            [modern, { payload_root: 'skills/external/weather' }], [modern, { source_key: 'another-hub' }],
+            [modern, { identity_collision: true }], [manual, { content_hash: 'e'.repeat(64) }],
+            [manual, { payload_root: 'skills/external/moved-weather' }]]) {
+            await begin(initial);
+            row = { ...initial, ...drift }; // same name, a fresh reading rather than a mutation of the shown object
+            await replace();
+            assert.equal(installs.length, confirmedCount, `must not replace ${initial.source} after drift in ${Object.keys(drift).join()}`);
+        }
+        for (const unconfirmed of [{ ...manual, install: legacy.install, removal: 'uninstall' }, { ...manual, removal: '' },
+            { ...manual, source: 'user_repo', payload_root: 'skills/user_repo/weather', removal: '' }]) {
+            await begin(unconfirmed);
+            await replace();
+            assert.equal(installs.length, confirmedCount, 'a null source key alone does not confirm a manual external folder');
+        }
+        await begin(modern);
+        shownOffer = { ...offer, digest: 'f'.repeat(64) };
+        await browse.show();
+        await replace();
+        assert.equal(installs.length, confirmedCount, 'the confirmed offer did not survive the catalog refresh');
+    } finally { browse.destroy(); restore(); }
+});
+
 test('a registry hit drawn from its search answer says that answer\'s setting, and nothing of a confirmation the catalog recorded for another', async (t) => {
     const { pane, chrome, restore } = browseDom();
     t.mock.method(globalThis, 'fetch', () => assert.fail('This display test has no network'));

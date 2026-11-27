@@ -134,6 +134,21 @@ function originUnknown(row) {
     return hasSourceKey(row) && !row.source_key && !row.lifecycle_virtual && !row.identity_collision;
 }
 
+/** The installed payload shown by Compare, independent of recreated rows and lifecycle or catalog decoration. */
+function replacementTarget(row) {
+    if (!row?.name || !row.source || !row.payload_root || !row.content_hash
+        || row.lifecycle_virtual || row.identity_collision || row.collision_row_id) return null;
+    const { source, release, installed_at: landedAt } = row.install || {};
+    const legacy = !hasSourceKey(row);
+    // A manual external folder has no origin record; the host's removal fact distinguishes it from unavailable install facts.
+    const manualExternal = row.source_key === null && row.install === null && row.removal === 'delete';
+    if (legacy ? !source?.kind || !(source.id || (release?.digest && landedAt)) : !row.source_key && !manualExternal) return null;
+    // The modern key names the origin; a connected source id and catalog_id can move without a new landing.
+    return [row.name, row.source, row.payload_root, row.content_hash, row.source_key, release?.digest, landedAt,
+        row.registry_slug || row.provenance?.slug, legacy ? source.kind : '', legacy ? source.id : '',
+        legacy ? source.part : '', legacy ? row.provenance?.registry_url : ''];
+}
+
 export function offeredUpdate(item, installed) {
     const update = installed?.install?.update_available;
     return update?.digest && item.digest === update.digest ? update : null;
@@ -785,9 +800,11 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         }
         if (action === 'compare') {
             // Replace is one host operation: the other copy goes only when this one has landed.
-            if (other && await host.compare(item, other) === 'replace' && !stale() && resolve().other === other) {
-                await install(item, { replace: true });
-            }
+            if (!other) return;
+            const target = replacementTarget(other);
+            if (await host.compare(item, other) !== 'replace' || destroyed || stale() || !target) return;
+            const current = replacementTarget(resolve().other);
+            if (current && target.every((value, index) => value === current[index])) await install(item, { replace: true });
             return;
         }
         if (action === 'installed' || action === 'widgets') {
