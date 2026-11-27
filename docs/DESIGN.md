@@ -193,9 +193,9 @@ On Windows the desktop window keeps its ordinary system caption, buttons, Snap a
 resizing; only their light or dark tint follows the painted palette — the system
 tint, not the page's colour — and a High Contrast theme keeps its own colours.
 On macOS the main window is one surface: the page reaches the top edge under a
-transparent title bar and every header stands on the real traffic lights' line: the page's band is the lights'
-row, as much air under their line as above it. Empty parts of that row drag the window, and a double-click follows
-the Mac's setting:
+transparent title bar and every header stands on the real traffic lights' line where the row has room for its
+controls: the page's band is the lights' row, as much air under their line as above it. Empty parts of that row drag
+the window, and a double-click follows the Mac's setting:
 Zoom, Minimize, Do Nothing or Fill. Fill relies on an available undocumented native
 action, not an imitation by Zoom. Its appearance follows Light or Dark and inherits
 under System. In full screen the bar hides until the pointer reveals it; the setup
@@ -3515,7 +3515,7 @@ and Add"); a destination is a room or a section.
 Destinations come from one registry (`web/modules/pages.js`): it renders the navigation rows, names the titles and
 feeds the shell gate, so a new page is a registry row and its module, checked at phone widths with no further work.
 The column reads from the top: Find a project, with + (New project) at the end of its row, the column's first row:
-on a Mac the traffic lights' row, past the lights; in the drawer beside its ×. Then Ouroboros's card, which is Main (its picture, with one 7 px amber dot on its rim
+on a Mac the traffic lights' row, past the lights where that row has room for it; in the drawer beside its ×. Then Ouroboros's card, which is Main (its picture, with one 7 px amber dot on its rim
 while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then the Projects,
