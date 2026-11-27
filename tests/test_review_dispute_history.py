@@ -487,3 +487,79 @@ def test_an_unreadable_review_state_is_a_named_gap_beside_the_supplied_history(t
     assert "REVIEW_HISTORY_SOURCE_UNAVAILABLE" not in readable
     for said in ("The bounded file is the accepted scope.", "I disagree because atomic writes need a proof."):
         assert said in unreadable and said in readable
+
+
+def test_a_record_with_one_decision_keeps_the_full_row_an_older_reader_binds(tmp_path):
+    """A review record with no seat and one author decision repeats nothing (its subject appears once), so its
+    resident row is the full writer's row, exactly what the reader before the display wrote, and that reader binds
+    its reference."""
+    import json
+
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_history import review_dispute_history
+    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, capture_review_history_messages, project_review_history
+    from tests.test_review_index_row import _old_index_bindings, _old_index_message, _old_review_index_identity
+    from tests.test_review_ledger import _facts
+
+    facts = _facts([], blocked=True, block_reason="review_not_performed", dispatch_refusal={"reason": "No reviewer reached"})
+    stored = ledger.write_record(tmp_path, ledger.build_commit_gate_record(facts, drive_root=tmp_path))
+    ledger.note_author_decision(tmp_path, stored["record_id"], {"disposition": "deferred",
+                                                                "rationale": "Keep the candidate for the next staffed review."})
+    history = review_dispute_history(drive_root=tmp_path, repo_root="/nowhere", task_id="task-1",
+                                     previous_records=[stored["record_id"]])
+    assert stored["rows"] == [] and [row["decision_kind"] for row in history["decision_rows"]] == ["author_decision"]
+    _, captured = capture_review_history_messages(
+        {"commit_review_authority": [{"repo_root": "/nowhere", "dispute_history": history}]}, task_id="task-1")
+    row = next(message for message in captured if REVIEW_CONTEXT_INDEX_KEY in message)
+    assert row == _old_index_message(project_review_history(history)["mandatory"], "commit", "/nowhere", task_id="task-1")
+    current = json.loads(row["content"].partition("\n")[2])["current"]
+    assert _old_review_index_identity(row) == ("commit", "/nowhere") and "subject" in current["decision_rows"][0]
+    assert set(_old_index_bindings(current)) == {current["decision_rows"][0]["decision_ref"]}
+
+
+def test_an_authors_group_on_a_record_unreadable_now_stays_a_stated_gap(tmp_path):
+    """The author grouped two historical decisions of this checkout's earlier record. While that record cannot be read
+    the history names it as a gap and the account no longer applies: it stays a stated gap, this family's account as
+    the reader before the display states it, never taken for another family's. Readable again, it applies again."""
+    from types import SimpleNamespace
+
+    from ouroboros import review_ledger as ledger
+    from ouroboros import review_history_view as view
+    from ouroboros.review_history import review_dispute_history
+    from tests.test_review_history_view import capsule
+    from tests.test_review_ledger import _facts, _panel
+
+    task, repo = "task-missing", "/nowhere"
+
+    def wave(parents):
+        facts = _facts(_panel(), task_id=task, dispute_input={"previous_records": parents, "gaps": []})
+        return ledger.write_record(tmp_path, ledger.build_commit_gate_record(facts, drive_root=tmp_path))["record_id"]
+
+    first = wave([])
+    second = wave([first])
+
+    def groups():
+        history = review_dispute_history(drive_root=tmp_path, task_id=task, repo_root=repo, previous_records=[second])
+        shown = view.selected_review_history(history, drive_root=tmp_path, task_id=task)
+        named = any((gap.get("source") or {}).get("record_id") == first for gap in history["gaps"])
+        return named, len(shown["review_groups"]), [gap["selection"] for gap in shown["unapplied_review_groups"]]
+
+    history = review_dispute_history(drive_root=tmp_path, task_id=task, repo_root=repo, previous_records=[second])
+    members = [entry["bound_decision"] for entry in view.decision_entries(history)
+               if entry["bound_decision"] and entry["row"].get("history_role") == "historical"][:2]
+    note = {"bound_decisions": members, "remark": "The earlier review of this checkout.",
+            "reason": "I retained these two decisions from the earlier wave."}
+    receipt = {"status": "applied", "view_revision": "b" * 64}
+    pointer = view.retain_review_history_view(tmp_path, task, capsule=capsule([]), covered=[], review_notes=[note],
+                                              applied_receipt=receipt)
+    ctx = SimpleNamespace(task_id=task, drive_root=tmp_path)
+    assert len(members) == 2 and view.publish_review_history_view(ctx, capsule([]), receipt, pointer=pointer) == pointer
+    assert groups() == (False, 1, [])
+    path = ledger.record_path(tmp_path, first)
+    offline = path.with_name(path.name + ".offline")
+    path.rename(offline)
+    try:
+        assert groups() == (True, 0, [note])
+    finally:
+        offline.rename(path)
+    assert groups() == (False, 1, [])

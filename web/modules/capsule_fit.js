@@ -48,16 +48,20 @@ export function createCapsuleFit({ el, row, kind, strip, segs, padMax = SEG_PAD.
         beside = { width, count };
         return beside;
     }
-    // The head as it stands open: the ring, then the name and the divider before the levels
-    // unless the strip needs their room (the name is cached: a name that gave way measures 0).
+    // The head as it stands open: the ring and any mark that stays beside it (Subagents' lock), then the name and
+    // the divider before the levels unless the strip needs their room (the name is cached: a name that gave way
+    // measures 0). A mark's own box holds its clearance from the strip, the same closed and open (style.css).
     let nameWidth = 0;
     const measureName = () => { const shown = widthOf(name); if (shown > 0) nameWidth = shown; };
+    const marksWidth = () => Array.from(head?.children || [])
+        .filter((node) => node !== glyph && node !== name && node !== value)
+        .reduce((sum, node) => sum + widthOf(node), 0);
     function headWidths() {
         measureName();
         const headStyle = styleOf(head);
         const nameStyle = styleOf(name);
         const divider = styleOf(body, '::before');
-        const bare = px(headStyle?.paddingLeft) + widthOf(glyph) + px(headStyle?.paddingRight);
+        const bare = px(headStyle?.paddingLeft) + widthOf(glyph) + marksWidth() + px(headStyle?.paddingRight);
         return {
             bare,
             label: bare + px(nameStyle?.marginLeft) + nameWidth + px(nameStyle?.marginRight)

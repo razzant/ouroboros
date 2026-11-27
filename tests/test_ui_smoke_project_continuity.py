@@ -49,6 +49,12 @@ def _wait_status(page, expected, timeout=10_000):
     )
 
 
+def _served_scope(route):
+    """The data profile the serving host proves, from its own answer to this read (api_client.js `chatHistory` reads
+    only a page that names the document's profile)."""
+    return route.fetch().json().get("profile_scope", "")
+
+
 def _goto_main_ready(page, url, expected="Online"):
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     _wait_status(page, expected, timeout=30_000)
@@ -205,7 +211,7 @@ def test_ui_smoke_stale_history_rebuild_keeps_owner_bubble(direct_server_with_da
                     "**/api/chat/history*",
                     lambda route: route.fulfill(
                         content_type="application/json",
-                        body=json.dumps({"messages": []}),
+                        body=json.dumps({"messages": [], "profile_scope": _served_scope(route)}),
                     ),
                 )
                 _goto_main_ready(page, url)
@@ -570,7 +576,8 @@ def test_ui_smoke_queue_loss_converges_terminal_card_once(direct_server_with_dat
 
                 history = {"messages": []}
                 page.route("**/api/state*", _inject)
-                page.route("**/api/chat/history*", lambda route: route.fulfill(content_type="application/json", body=json.dumps(history)))
+                page.route("**/api/chat/history*", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
+                    {**history, "profile_scope": _served_scope(route)})))
                 _goto_main_ready(page, url, "Working")
 
                 page.evaluate(

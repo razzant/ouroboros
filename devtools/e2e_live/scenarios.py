@@ -917,9 +917,9 @@ def run_sw1(ctx: LaneContext) -> None:
 
 
 def sw1_stub_script(_clone: pathlib.Path, _data_root: pathlib.Path | None = None) -> dict:
-    child_id_re = re.compile(r"Subagent request queued ([0-9a-f]{8})")
+    child_id_re = re.compile(r"Subagent request queued ([0-9a-f]{16}|[0-9a-f]{8})(?=:)")
     # The wait_tasks projection pairs each child id with its exact result hash.
-    child_result_re = re.compile(r'"task_id": "([0-9a-f]{8})".{0,400}?"child_result_sha256": "([0-9a-f]{64})"', re.DOTALL)
+    child_result_re = re.compile(r'"task_id": "([0-9a-f]{16}|[0-9a-f]{8})".{0,400}?"child_result_sha256": "([0-9a-f]{64})"', re.DOTALL)
 
     def wait_step(text: str) -> dict:
         ids = sorted(set(child_id_re.findall(text)))

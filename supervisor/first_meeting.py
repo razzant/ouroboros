@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import uuid
 from typing import Any, Dict, Tuple
 
+from ouroboros.task_results import new_task_id
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ def _admit(drive_root: Any, meeting: Dict[str, Any]) -> Tuple[str, Dict[str, Any
         update_state(lambda live: _settle(live, "not_needed", held))
         return "not_needed", {"reason": "a message of mine to my human exists", **({"task_id": held} if held else {})}
     chat_id = WEB_UI_CHAT_ID  # the press's own room, whatever owner chat is bound or unread
-    task_id = str(meeting.get("task_id") or "") or uuid.uuid4().hex[:8]
+    task_id = str(meeting.get("task_id") or "") or new_task_id()  # a held id is this meeting's earlier start
     try:
         update_state(lambda live: _claim(live, task_id, chat_id))
     except _Settled:

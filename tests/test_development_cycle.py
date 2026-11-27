@@ -713,18 +713,24 @@ def test_a_cut_on_its_own_remote_branch_would_become_the_branch_installs_track(c
     assert (result.returncode, branch) == (1, "") and "expected exactly one remote branch" in result.stderr
 
 
-def _release_meta_run(tmp_path, version, tag):
-    """CI's real tag preflight step, on one VERSION and pushed tag; bash and a `python` on PATH, as on the runner."""
+def _release_meta_run(tmp_path, version, tag, repository="", cert=""):
+    """CI's real tag preflight step, on one VERSION and pushed tag; bash and a `python` on PATH, as on the runner.
+
+    The runner's own GITHUB_REPOSITORY and signer are scrubbed: the step reads them, so a hosted CI run of this test
+    would otherwise be an official release preflight without a signer."""
     jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))["jobs"]
     script = next(step for step in jobs["release-preflight"]["steps"] if step.get("id") == "release_meta")["run"]
+    tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "VERSION").write_text(f"{version}\n", encoding="utf-8")
     binaries = tmp_path / "bin"
     binaries.mkdir()
     (binaries / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
     (binaries / "python").chmod(0o755)
     output = tmp_path / "output"
-    env = {**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ.get('PATH', '')}", "PYTHONPATH": str(ROOT),
-           "GITHUB_REF_NAME": tag, "GITHUB_OUTPUT": str(output)}
+    env = {key: value for key, value in os.environ.items() if key not in ("GITHUB_REPOSITORY", "ESIGNER_CERT_SHA1")}
+    env.update({"PATH": f"{binaries}{os.pathsep}{os.environ.get('PATH', '')}", "PYTHONPATH": str(ROOT),
+                "GITHUB_REF_NAME": tag, "GITHUB_OUTPUT": str(output), "GITHUB_REPOSITORY": repository,
+                "ESIGNER_CERT_SHA1": cert})
     result = subprocess.run([shutil.which("bash"), "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
     return result, dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").split())
 
@@ -741,3 +747,13 @@ def test_the_tag_preflight_never_passes_a_marker_to_the_builds(tmp_path, version
     assert outputs == {"tag_valid": valid, "is_prerelease": prerelease}
     if tag == f"v{version}" and code:
         assert "development-cycle marker" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the step is a Bash heredoc on Ubuntu runners")
+def test_the_tag_preflight_requires_a_signer_only_for_the_official_repository(tmp_path):
+    official = "razzant/ouroboros"
+    refused, outputs = _release_meta_run(tmp_path / "unsigned", "7.10.0", "v7.10.0", repository=official)
+    assert refused.returncode == 1 and "require ESIGNER_CERT_SHA1" in refused.stderr
+    assert outputs == {"tag_valid": "false", "is_prerelease": "false"}
+    accepted, outputs = _release_meta_run(tmp_path / "signed", "7.10.0", "v7.10.0", repository=official, cert="A" * 40)
+    assert accepted.returncode == 0 and outputs == {"tag_valid": "true", "is_prerelease": "false"}

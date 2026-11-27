@@ -9,6 +9,7 @@ Find a project and Show more reach every room beyond the feed; a reference opens
 """
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -17,7 +18,7 @@ from starlette.testclient import TestClient
 
 from ouroboros.gateway.router import collect_routes
 from ouroboros import projects_registry as registry, room_messages
-from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, PROFILE_FRAME, subscription_ui  # noqa: F401
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests._shared import producer_evidence_dir
 from tests._work_projection_shared import with_work_fields
@@ -53,6 +54,7 @@ def pins_ui(request, monkeypatch, tmp_path):
     registry.update_project(root, "older", last_active_at="2026-01-01T00:00:00Z")
     app = Starlette(routes=collect_routes(data_dir=root))
     app.state.drive_root = root
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: PREVIEW_SCOPE)  # the proof the page's scope meta names
     control = {"fail": False, "hold": False, "held": [], "hold_writes": False, "held_writes": [],
                "writes": [], "unread": set(), "activities": [], "message_times": {},
                "fail_lookup": False, "hold_lookups": False,
@@ -134,6 +136,7 @@ def pins_ui(request, monkeypatch, tmp_path):
             # A quiet socket that keeps what the page sends (a composer's frame names its room).
             control["sockets"].append(ws)
             ws.on_message(lambda message: control["sent"].append(message))
+            ws.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
             ws.send(json.dumps({"type": "heartbeat"}))
 
         def new_page(height=900, now=None, **options):
@@ -997,6 +1000,8 @@ def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger
     page.locator('.nav-find-input').focus()
     page.keyboard.press("Tab")
     assert page.evaluate("document.activeElement.id") == "nav-projects-add"
+    page.keyboard.press("Tab")  # the head's Main row now stands between Add and the project rows (#4339)
+    assert page.evaluate("document.activeElement.classList.contains('nav-row-main')")
     page.keyboard.press("Tab")
     keyed = pin("newer")
     assert keyed["focused"] and keyed["keyboard"] and keyed["drawn"] and keyed["ring"] == "solid" and keyed["kebabDrawn"], keyed

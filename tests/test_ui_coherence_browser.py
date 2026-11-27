@@ -589,6 +589,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
 
     def connect(ws):
         sockets.append(ws)
+        ws.send(setup_browser.PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({'type': 'heartbeat'}))
     page.route_web_socket('**/ws', connect)
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [project]}))

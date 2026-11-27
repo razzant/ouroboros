@@ -189,7 +189,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         note="a carrier's start phase lands on its RUNNING row for the census"),
     "direct_turn_bound": _handled(
         "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
-        note="the Project basis and admitted tier the carrier bound land on its RUNNING row (snapshot, park, restore)"),
+        note="the Project basis, admitted model and tier the carrier bound land on its RUNNING row (snapshot, park, restore)"),
     "task_named": _handled(
         "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
         note="a carrier coined a title: the bridge broadcasts it as the server's own namer did"),

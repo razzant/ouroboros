@@ -5666,8 +5666,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     margin-inline-end: clamp(2px, var(--capsule-value-cap), var(--space-3));
     text-overflow: ellipsis;
 }
+/* A folded ring draws no lock: it leaves the flow, never the layout, so the strip's fit still reads the room the lock
+   takes once the capsule opens. */
 .chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-subagents-lock {
-    display: none;
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline-start: 0;
+    visibility: hidden;
 }
 /* A folded value is not drawn, and stays in the button: it is the button's accessible name (no hover-only title). */
 .chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-capsule-value {
@@ -5800,10 +5805,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-subagents-mode[data-mode="auto"] .chat-subagents-helper[data-helper="1"],
 .chat-subagents-mode[data-mode="swarm"] :is(.chat-subagents-helper, .chat-subagents-link) { color: var(--accent); }
 .chat-subagents-mode[data-known="false"] :is(.chat-subagents-helper, .chat-subagents-link) { color: rgba(var(--neutral-rgb), 0.28); }
-.chat-subagents-lock { display: none; align-items: center; flex: none; margin-inline-end: var(--space-3); color: var(--text-meta); }
+/* The lock stays in the head while the strip is open, so its own box holds its clearance from the strip: the fit
+   (capsule_fit.js) reads one width for it closed and open. Closed, the capsule's end takes the rest. */
+.chat-subagents-lock { display: none; align-items: center; flex: none; padding-inline-end: var(--space-2); color: var(--text-meta); }
 .chat-subagents-mode[data-locked="true"] .chat-subagents-lock { display: inline-flex; }
 .chat-subagents-mode[data-locked="true"]:not([data-open="true"]) .chat-capsule-value { margin-inline-end: 5px; }
-.chat-subagents-mode[data-locked="true"][data-open="true"] .chat-subagents-lock { margin-inline-end: var(--space-2); }
+.chat-subagents-mode[data-locked="true"]:not([data-open="true"]) .chat-subagents-lock { margin-inline-end: var(--space-1); }
 
 /* Effort: one segment per level, as wide as its word plus the padding; the band and the three
    handles sit over it and share one vertical inset, so their edges meet exactly. The max bracket
@@ -6165,7 +6172,7 @@ body.keyboard-open .model-sheet[data-sheet="bottom"] {
     .chat-model-pin { width: var(--touch-target-min); opacity: 1; }
 }
 .chat-model-pin:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; opacity: 1; }
-.chat-model-section, .chat-model-note {
+.chat-model-section, .chat-model-note, .chat-model-lead {
     margin: 0;
     padding: var(--space-2) var(--space-3) 2px;
     color: var(--text-meta);
@@ -6201,42 +6208,8 @@ body.keyboard-open .model-sheet[data-sheet="bottom"] {
     line-height: var(--line-meta);
 }
 .model-tier-sizer { display: grid; visibility: hidden; pointer-events: none; }
-/* The Main chat's confirming sheet (the shared confirm dialog's content): what Main becomes, and its facts. */
-.chat-model-sheet-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2);
-    margin: 0 0 var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-inner);
-    background: var(--surface-tray);
-    font-size: var(--type-body);
-}
-.chat-model-sheet-row .model-source-mark { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
-.chat-model-sheet-row b { flex: 1 1 12ch; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
-.chat-model-sheet-row span { flex: 0 1 auto; max-width: 100%; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+/* A fact line in the shared confirm dialog's content: what an Ultrafast is asked for (processing_choice.js). */
 .chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
-/* The sheet's lists (owner 10.11, «5. A», «6. A»): what is not on Main now, each row a name over its facts with
-   its own tick; nothing is ticked until the owner ticks it. After the change the same rows say each one's result. */
-.chat-model-sheet-sub { margin: var(--space-3) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.chat-model-off-list { margin: 0 calc(-1 * var(--space-2)); padding: 0; list-style: none; }
-.chat-model-off {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 2px var(--space-3);
-    align-items: center;
-    padding: var(--space-2);
-    border-radius: var(--radius-inner);
-}
-label.chat-model-off { cursor: pointer; }
-@media (hover: hover) {
-    label.chat-model-off:hover { background: var(--menu-item-hover); }
-}
-.chat-model-off-name { min-width: 0; overflow: hidden; font-size: var(--type-body); text-overflow: ellipsis; white-space: nowrap; }
-.chat-model-off-meta { grid-column: 1; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
-.chat-model-off .ui-checkbox { grid-row: 1 / span 2; grid-column: 2; }
-.chat-model-off[data-result="refused"] .chat-model-off-meta { color: var(--status-error-fg); }
 
 /* A work's model on its card (card_model.js; DESIGN "A work's model on its card"): the first fact of the meta line,
    in a node of its own before the rest of the line, whose parts stay items of the line itself. Where the server

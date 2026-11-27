@@ -262,7 +262,7 @@ S6_CHILD_SLUG = "openai-compatible::mock-child"
 S6_CHILD_MARKER = "CHILD_RESULT_PAYLOAD_e2e_w2"
 S6_PARENT_MARKER = "PARENT_FINAL_e2e_w2"
 
-_CHILD_ID_RE = re.compile(r"Subagent request queued ([0-9a-f]{8})")
+_CHILD_ID_RE = re.compile(r"Subagent request queued ([0-9a-f]{16})")
 _CHILD_SHA_RE = re.compile(r"child_result_sha256[\"'=:\s]+([0-9a-f]{64})")
 
 

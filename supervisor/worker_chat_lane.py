@@ -39,7 +39,6 @@ from __future__ import annotations
 import logging
 import pathlib
 import time
-import uuid
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from supervisor.state import append_jsonl
@@ -280,8 +279,10 @@ def _seed_task(
     the name of a late input's head. Everything else is the carrier's first step (``prepare_conversation_task``).
     ``admission_author``: an agent's note this turn answers, its row's recorded author and address, kept at the
     task's top level, where no request body or caller metadata can write (``dialogue_provenance.recorded_author``)."""
+    from ouroboros.task_results import new_task_id
+
     task: Dict[str, Any] = {
-        "id": uuid.uuid4().hex[:8],
+        "id": new_task_id(),
         "type": "task",
         "chat_id": chat_id,
         "text": str(text or ""),
@@ -293,6 +294,10 @@ def _seed_task(
         task["task_constraint"] = dict(task_constraint)
     if task_metadata:
         task["metadata"] = dict(task_metadata)
+        # Words accepted as new work start on what that acceptance assigned (``route_choice.new_work_carriers``).
+        from ouroboros.route_choice import new_work_carriers
+
+        task["metadata"].update(new_work_carriers(task["metadata"].pop("new_work", None)))
         # The ingress-captured origin identity rides on the TASK RECORD so a
         # later post-hoc "Turn into project" reads it from the persisted
         # result instead of re-deriving identity from content.
@@ -378,6 +383,7 @@ def admit_owner_turn(
     client_msg_id = _client_message_id(task_metadata)
     task = _seed_task(chat_id, text, image_data, task_constraint, task_metadata, admission_author)
     root = pathlib.Path(str(task.get("drive_root") or "") or _pool().DRIVE_ROOT)
+    _stamp_admitted_choice(task, root)
     report_ref = (admission_author or {}).get("late_report_ref")
     intake = open_owner_intake(task, root)  # before its row exists: a carrier only ever replaces the fact
     meta = None
@@ -424,6 +430,23 @@ def admit_owner_turn(
     finally:
         if intake and meta is None:  # no admitted row names the fact
             close_owner_intake(task, root)
+
+
+def _stamp_admitted_choice(task: Dict[str, Any], root: Any) -> None:
+    """Before Q: the model and tier this turn starts on, chosen once as its words are accepted as work of their own
+    and kept on the seed, so its queue row holds them from its first moment (``route_choice.capture_lead``: its
+    room's saved choice, the Main chat's own without a room, the decided Default included). What the chip chooses
+    while the turn waits for a carrier, is stopped, paused or resumed reaches only work accepted after it. Words
+    accepted as new work already carry what their acceptance assigned (``_seed_task``), and a Reply or a command
+    given to a running work starts no turn here. An unreadable room or a failure stamps nothing: the carrier's
+    first step captures then, as it always did (``prepare_conversation_task``). Never raises."""
+    try:
+        from ouroboros.route_choice import capture_lead
+
+        capture_lead(task, root)
+    except Exception:
+        log.warning("turn %s: its model and tier were not captured at admission; its carrier captures them",
+                    task.get("id"), exc_info=True)
 
 
 def open_owner_intake(task: Dict[str, Any], root: Any) -> str:
@@ -743,16 +766,19 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     apply_consciousness_authority(task)
     from ouroboros.settings_integrity import record_subagents_admission
     record_subagents_admission(task, root)
-    from ouroboros.route_choice import PROCESSING_KEY, capture_lead  # the admitted primary and tier (route_choice)
-    carried = PROCESSING_KEY in (task.get("metadata") if isinstance(task.get("metadata"), dict) else {})
+    from ouroboros.route_choice import LEAD_KEY, PROCESSING_KEY, capture_lead  # the admitted primary and tier
+    carried = set(task.get("metadata") if isinstance(task.get("metadata"), dict) else ())
     capture_lead(task, root)
-    tier = (task.get("metadata") or {}).get(PROCESSING_KEY) if isinstance(task.get("metadata"), dict) else None
-    if broadcast is not None and not carried and isinstance(tier, dict) and (tier.get("tier") or pid):
-        # The tier admitted now reaches the row by frame as a room's basis does: the turn's card says it, and a room
-        # turn rebuilt from its row keeps even its decided Default rather than reading the room's newer tier. A Main
-        # turn has no room tier to drift to; a resumed step admits nothing new.
+    stamped = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    admitted = {key: stamped[key] for key in (LEAD_KEY, PROCESSING_KEY)
+                if key not in carried and isinstance(stamped.get(key), dict)}
+    if broadcast is not None and admitted:
+        # An owner turn carries both from its admission (``_stamp_admitted_choice``). Where that stamped nothing,
+        # or for a turn admitted another way, what is captured now reaches the row by frame as a room's basis
+        # does: the card says it, and a turn rebuilt from its row (a Pause and its Resume, a park, a restore) keeps
+        # it, the decided Default and the Main chat's own choice included. A step that carries them admits nothing.
         broadcast({"type": "direct_turn_bound", "task_id": str(task["id"]), "task_attempt": int(task.get("_attempt") or 1),
-                   "facts": {PROCESSING_KEY: tier}})
+                   "facts": admitted})
     attach_task_contract(task)
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(task)
