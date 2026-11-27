@@ -65,14 +65,13 @@ def test_task_scoped_service_lifecycle(tmp_path, monkeypatch):
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
     registry._ctx.task_id = "task-1"
 
+    # Only the program name must be non-blank: later arguments (`redis-server --save ""`) reach the child unchanged.
+    args = ["--save", "", " ", "x y", ""]
+    body = "import sys, time; print('ARGV=' + repr(sys.argv[1:]), flush=True); print('READY', flush=True); time.sleep(60)"
     start = registry.execute("start_service", {
         "name": "demo",
-        "cmd": [
-            sys.executable,
-            "-c",
-            "import time; print('READY', flush=True); time.sleep(60)",
-        ],
-        "readiness": {"log_contains": "READY", "timeout_sec": 3},
+        "cmd": [sys.executable, "-c", body, *args],
+        "readiness": {"log_contains": "READY", "timeout_sec": 15},
     })
     start_payload = json.loads(start)
     assert start_payload["state"] == "running"
@@ -81,6 +80,8 @@ def test_task_scoped_service_lifecycle(tmp_path, monkeypatch):
 
     logs = json.loads(registry.execute("service_logs", {"name": "demo", "tail": 200}))
     assert "READY" in logs["tail"]
+    printed = [ln for ln in logs["tail"].splitlines() if ln.startswith("ARGV=")]  # what the child itself received
+    assert printed == ["ARGV=" + repr(args)]
     assert logs["full_log_ref"]["sha256"]
 
     stopped = json.loads(registry.execute("stop_service", {"name": "demo"}))
@@ -88,6 +89,87 @@ def test_task_scoped_service_lifecycle(tmp_path, monkeypatch):
     assert stopped["log_finalization"]["deleted_live_log"] is True
     assert not (drive / "services" / "task-1" / "demo.log").exists()
     assert registry.execute("service_status", {"name": "demo"}).startswith("⚠️ SERVICE_NOT_FOUND")
+
+
+def _must_not_pass_validation(*_args, **_kwargs):
+    raise AssertionError("an invalid start_service cmd passed validation")
+
+
+@pytest.mark.parametrize("cmd", [[], [""], [" \t"], [7], ["python3", "", 7], "python3 -V"])
+def test_start_service_refuses_a_bad_cmd_before_interpreter_resolution(tmp_path, monkeypatch, cmd):
+    """Dispatch judges the original cmd: interpreter resolution, which would stringify an element, is never reached.
+    The raising spy also precedes both launch branches, so a validation regression launches nothing."""
+    _force_advanced_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.tools.tool_resolution.resolve_process_python", _must_not_pass_validation)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path / "data")
+    registry._ctx.task_id = "task-1"
+
+    result = registry.execute_result("start_service", {"name": "bad", "cmd": cmd})
+    assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR"), result
+    assert result.meta.get("operation_outcome") == "completed_no_effect"
+    assert not (tmp_path / "data" / "services" / "task-1").exists()
+
+
+@pytest.mark.parametrize("surface, expected", [
+    ("light_repo", "LIGHT_MODE_BLOCKED"),
+    ("light_task_drive", "TOOL_ARG_ERROR"),
+    ("outside_cwd", "SHELL_CWD_BLOCKED"),
+    ("presence_resource", "PRESENCE_RESOURCE_BLOCKED"),
+])
+def test_start_service_admission_refusals_precede_the_cmd_shape(tmp_path, monkeypatch, surface, expected):
+    """A launch this task may not make keeps that refusal whatever its cmd holds; an admitted one is judged on cmd."""
+    (_force_light_runtime if surface.startswith("light") else _force_advanced_runtime)(monkeypatch)
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-1"
+    args = {"name": "bad", "cmd": ["python3", "", 7]}  # never launchable: dispatch and handler both refuse it
+    if surface == "light_task_drive":
+        args["cwd"] = str(drive / "task_drives" / "task-1")
+        monkeypatch.setattr("ouroboros.tools.tool_resolution.resolve_process_python", _must_not_pass_validation)
+    elif surface == "outside_cwd":
+        args["cwd"] = pathlib.Path(tmp_path.anchor).as_posix()
+    elif surface == "presence_resource":
+        monkeypatch.setattr("ouroboros.tools.registry_core._presence_binding_allowed", lambda *_: False)
+
+    assert expected in registry.execute("start_service", args)
+    assert not (drive / "services" / "task-1").exists()
+
+
+def test_start_service_hands_safety_the_original_list(tmp_path, monkeypatch):
+    """Data only: the observer stands in for the checker and declines, so nothing is launched. Dispatch and a
+    direct handler caller both give it every element of a fictional program's command, in order and unchanged."""
+    from ouroboros.tools import services
+
+    _force_advanced_runtime(monkeypatch)
+    seen = []
+
+    def observe(tool_name, arguments, **_kwargs):
+        seen.append((tool_name, list(arguments["cmd"])))
+        return False, "held for observation"
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", observe)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "data")
+    registry._ctx.task_id = "task-1"
+    cmd = ["fictional-program", "--save", "", " ", "x y", ""]
+
+    registry.execute("start_service", {"name": "observed", "cmd": list(cmd)})
+    services._start_service(registry._ctx, list(cmd), name="observed")
+
+    assert seen == [("start_service", cmd)] * 2
+
+
+def test_start_service_direct_handler_refuses_with_the_same_predicate(tmp_path, monkeypatch):
+    """A direct caller skips dispatch: the handler asks the same owner and keeps its string result."""
+    from ouroboros.tools import services
+
+    monkeypatch.setattr(services, "validate_process_env", _must_not_pass_validation)
+    ctx = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path / "data")._ctx
+    cmd = ["python3", "", 7]
+
+    assert services._start_service(ctx, cmd, name="bad") == services.start_service_command_refusal(cmd).text
 
 
 def test_a_start_whose_names_earlier_log_stays_in_place_writes_a_file_of_its_own(tmp_path, monkeypatch):

@@ -571,6 +571,24 @@ def _refused_before_start(ctx: ToolContext, refusal: str) -> str:
     return _pre_spawn_refusal(ctx, refusal, tool="start_service")
 
 
+def start_service_command_refusal(cmd: Any) -> ToolResult | None:
+    """The one owner of the command shape ``start_service`` accepts: ``None`` when it is valid, else the typed
+    pre-spawn refusal (no process, record or executor submission exists).
+
+    Registry dispatch asks this on the original ``cmd`` of a launch it has not refused on admission, before
+    interpreter resolution can stringify an element, and ``_start_service`` asks it again for direct callers. Only
+    the program name must be non-blank: later arguments reach the child unchanged, an empty or whitespace-only
+    one included (``redis-server --save ""``)."""
+    if not isinstance(cmd, list) or not cmd or not all(isinstance(part, str) for part in cmd):
+        text = "⚠️ TOOL_ARG_ERROR (start_service): cmd must be a non-empty array of strings."
+    elif not cmd[0].strip():
+        text = "⚠️ TOOL_ARG_ERROR (start_service): cmd[0], the program to run, must not be blank."
+    else:
+        return None
+    return ToolResult(status="error", code="TOOL_ARG_ERROR", text=text,
+                      meta={"operation_outcome": "completed_no_effect"})
+
+
 def _start_service(
     ctx: ToolContext,
     cmd: List[str],
@@ -583,8 +601,8 @@ def _start_service(
     env_from_settings: Dict[str, str] | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
 ) -> str:
-    if not isinstance(cmd, list) or not cmd or not all(str(x).strip() for x in cmd):
-        return _refused_before_start(ctx, "⚠️ TOOL_ARG_ERROR (start_service): cmd must be a non-empty array of strings.")
+    if refusal := start_service_command_refusal(cmd):
+        return _publish_tool_result(ctx, refusal)
     proposed_env = dict(env or {})
     try:
         refs = validate_process_env(env_from_settings)

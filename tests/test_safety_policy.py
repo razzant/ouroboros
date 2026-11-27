@@ -220,6 +220,34 @@ def test_run_shell_conditional_unsafe_subject_hits_llm(monkeypatch):
     assert len(stub.calls) == 1
 
 
+@pytest.mark.parametrize("tool_name", ["start_service", "run_command"])
+def test_a_service_command_is_read_with_every_element(monkeypatch, tool_name):
+    """Data only, nothing is launched: what the checker reads of a fictional program's argv. start_service keeps
+    every element, in the resolver-restored reading too; run_command's reading drops blank ones as before."""
+    import ouroboros.safety as safety
+    from ouroboros.process_interpreters import PythonResolutionTrace
+
+    read, split = [], safety._split_shell_command
+
+    def observe(*args, **kwargs):
+        read.append(split(*args, **kwargs))
+        return read[-1]
+
+    monkeypatch.setattr(safety, "_split_shell_command", observe)
+    stub = _StubLLMClient('{"status":"SAFE","reason":"ok"}')
+    _patch_llm_client(monkeypatch, stub)
+    cmd = ["fictional-program", "--save", "", " ", "x y", ""]
+    resolution = PythonResolutionTrace(
+        tool=tool_name, requested_interpreter="python3", resolved_interpreter=cmd[0],
+        surface="external_workspace", environment="ouroboros_agent", reason="agent_python")
+
+    assert safety.check_safety(tool_name, {"cmd": list(cmd)}, python_resolution=resolution) == (True, "")
+    expected = cmd if tool_name == "start_service" else [part for part in cmd if part.strip()]
+    assert read == [expected, ["python3", *expected[1:]]]
+    (call,) = stub.calls  # the LLM reading is shown the whole list for either tool
+    assert safety._render_subject_json({"cmd": cmd}) in call["messages"][-1]["content"]
+
+
 # ---------------------------------------------------------------------------
 # LLM verdict classification
 # ---------------------------------------------------------------------------

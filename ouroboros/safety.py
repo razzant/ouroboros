@@ -216,10 +216,10 @@ _SAFE_PYTHON_MODULE_ALIASES = {
 }
 
 
-def _split_shell_command(raw_cmd: Any) -> List[str]:
-    """Best-effort argv parser for safety whitelist classification."""
+def _split_shell_command(raw_cmd: Any, *, exact: bool = False) -> List[str]:
+    """Best-effort argv parser for safety whitelist classification; ``exact`` keeps every element of a list."""
     if isinstance(raw_cmd, list):
-        return [str(part) for part in raw_cmd if str(part).strip()]
+        return [str(part) for part in raw_cmd if exact or str(part).strip()]
     text = str(raw_cmd or "").strip()
     if not text:
         return []
@@ -251,9 +251,9 @@ def _is_explicit_python_interpreter(executable: str) -> bool:
     return bool(re.fullmatch(r"python\d+(?:\.\d+)?", token))
 
 
-def _normalize_safe_shell_subject(raw_cmd: Any) -> str:
+def _normalize_safe_shell_subject(raw_cmd: Any, *, exact: bool = False) -> str:
     """Return the canonical safe subject for shell allowlisting."""
-    argv = _split_shell_command(raw_cmd)
+    argv = _split_shell_command(raw_cmd, exact=exact)
     if not argv:
         return ""
 
@@ -279,7 +279,7 @@ def _normalize_safe_shell_subject(raw_cmd: Any) -> str:
     return ""
 
 
-def _normalize_resolved_python_subject(raw_cmd: Any, python_resolution: Any) -> str:
+def _normalize_resolved_python_subject(raw_cmd: Any, python_resolution: Any, *, exact: bool = False) -> str:
     """Reuse the literal-Python fast path only for resolver-attested argv.
 
     Arbitrary absolute executables remain ineligible.  The registry passes the
@@ -299,7 +299,7 @@ def _normalize_resolved_python_subject(raw_cmd: Any, python_resolution: Any) -> 
     requested = python_resolution.requested_interpreter
     if requested not in {"python", "python3"}:
         return ""
-    return _normalize_safe_shell_subject([requested, *argv[1:]])
+    return _normalize_safe_shell_subject([requested, *argv[1:]], exact=exact)
 
 
 # LLM check plumbing.
@@ -1462,8 +1462,9 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
             # — force the full LLM review for string checks (no safe-subject bypass).
             check = arguments.get("check")
             raw_cmd = check if isinstance(check, (list, tuple)) else None
-        if _normalize_safe_shell_subject(raw_cmd) or _normalize_resolved_python_subject(
-            raw_cmd, python_resolution
+        exact = tool_name == "start_service"  # its child gets every element, so the reading drops none
+        if _normalize_safe_shell_subject(raw_cmd, exact=exact) or _normalize_resolved_python_subject(
+            raw_cmd, python_resolution, exact=exact
         ):
             # Whitelist-safe subject: FULL mode allows it without any LLM call,
             # so non-full modes wave nothing through here — no skip-audit event
