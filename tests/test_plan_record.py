@@ -571,6 +571,57 @@ def test_an_objection_with_a_retained_source_is_a_bound_decision_notes_and_group
     assert "decision_ref" not in pr.record_history(tmp_path, "task-u", unbound)["decision_rows"][0]
 
 
+def test_a_saved_group_of_withdrawn_objections_stays_a_gap_once_they_are_raised_again(tmp_path):
+    """The author grouped two objections its reviewer had withdrawn; the reviewer raises both again, so each binds
+    to the newer reply and the account no longer applies. It stays a stated gap, as the reader before the display
+    states it: the plan's own decisions, never another family's account. The producer and a fold judge it alike: a
+    fold after the row was written appends no second plan row, and one that may rewrite the row keeps it; withdrawn
+    again, the old account still does not apply and is still stated."""
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from ouroboros import review_history_view as view
+    from ouroboros.review_ledger import retain_text_source
+    from tests.test_review_history_view import capsule
+
+    task, objections = "task-reopen", [{"id": "o1", "text": "no export"}, {"id": "o2", "text": "no title"}]
+    _answered_record(tmp_path, task, objections=objections)
+
+    def ask(n, **reply):
+        raw = json.dumps({"prose": f"ask {n}", "objections": [], "withdrawn": [], **reply})
+        parsed, _ = pr.parse_reply(raw)
+        pr.append_ask(tmp_path, task, {"ask_id": f"a{n}", "ts": f"t{n}", "revision": 1, "message": "look",
+                                       "record_id": f"rec-a{n}", "participants": [_participant(SEAT_A)]})
+        return pr.record_history(tmp_path, task, pr.update_participant(tmp_path, task, ask_id=f"a{n}", seat_id=SEAT_A, facts={
+            "status": "answered", "reply": parsed, "reply_ref": retain_text_source(
+                tmp_path, task, record_id=f"rec-a{n}", seat_id=SEAT_A, role="response", part="intention", text=raw)}))
+
+    withdrawn = ask(2, withdrawn=[{"id": o["id"], "why": "fixed"} for o in objections])
+    note = {"bound_decisions": [e["bound_decision"] for e in view.decision_entries(withdrawn)],
+            "remark": "Both resolved at the second ask.", "reason": "The reviewer withdrew both after checking."}
+    receipt = {"status": "applied", "view_revision": "b" * 64}
+    pointer = view.retain_review_history_view(tmp_path, task, capsule=capsule([]), covered=[], review_notes=[note],
+                                              applied_receipt=receipt)
+    ctx = SimpleNamespace(task_id=task, drive_root=tmp_path, _pending_review_context={})
+    assert view.publish_review_history_view(ctx, capsule([]), receipt, pointer=pointer) == pointer
+    applied = view.selected_review_history(withdrawn, drive_root=tmp_path, task_id=task)
+    assert len(applied["review_groups"]) == 1 and applied["unapplied_review_groups"] == []
+    reopened = ask(3, objections=objections)
+    shown = view.selected_review_history(reopened, drive_root=tmp_path, task_id=task)
+    assert [r["history_role"] for r in reopened["decision_rows"]] == ["open", "open"]
+    assert shown["review_groups"] == [] and [gap["selection"] for gap in shown["unapplied_review_groups"]] == [note]
+    messages = [{"role": "user", "content": "assignment"},
+                *view.review_context_updates(ctx, families={"plan": ""}, messages=[])[0]]
+    row = next(m for m in messages if view.REVIEW_CONTEXT_INDEX_KEY in m)
+    assert json.loads(row["content"].partition("\n")[2])["current"]["unapplied_review_groups"] == shown["unapplied_review_groups"]
+    before = [*messages, {"role": "assistant", "content": "The mind's note."}]
+    for floor in (len(before) - 1, 1, None):
+        assert view.refresh_compacted_review_context(ctx, deepcopy(before), floor=floor) == before, floor
+    again = view.selected_review_history(ask(4, withdrawn=[{"id": o["id"], "why": "fixed again"} for o in objections]),
+                                         drive_root=tmp_path, task_id=task)
+    assert again["review_groups"] == [] and [gap["selection"] for gap in again["unapplied_review_groups"]] == [note]
+
+
 def test_plan_history_views_read_the_record_and_still_read_a_finished_v2_wave(tmp_path):
     """The context views (``current_plan_history`` → the task authority projection →
     compaction's capture) carry an organ plan, a finished earlier-schema wave, both together,

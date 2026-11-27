@@ -343,13 +343,14 @@ def test_organ_asks_without_a_task_id_stay_whole_rather_than_name_an_unresolvabl
     assert sum(e["what"].startswith("reply of") for e in current["addresses"].values()) == REVIEWERS
 
 
-def commit_history():
+def commit_history(prefix="rec"):
+    """A change family's history of three records (``prefix``-1..3: another prefix, another checkout's sources)."""
     answer = lambda j: {"status": "responded", "verdict": "FAIL" if j == 0 else "PASS", "critical": 1 if j == 0 else 0,
                         "coverage": "complete", "findings": [{"item": "parser", "verdict": "FAIL" if j == 0 else "PASS",
                                                               "severity": "critical", "reason": "OPEN CRITIC REASON " * 20}]}
     rounds, decision_rows = [], []
     for n in range(1, 4):
-        rid = f"rec-{n}"
+        rid = f"{prefix}-{n}"
         seats = []
         for j in range(3):
             source = {"role": "response", "part": "change", "seat_id": f"seat{j}", "chars": 500, "status": "retained",
@@ -371,7 +372,7 @@ def commit_history():
                        "author_rebuttal": {"text": "REBUTTAL " * 50, "source": {"role": "rebuttal", "status": "retained",
                                                                                 "ref": ref(f"review-ledger-{rid}-author-rebuttal", {"r": rid})}}})
     return view.canonical_decision_projection({"kind": "review_dispute_history", "status": "complete", "rounds": rounds,
-        "decision_rows": decision_rows, "gaps": [], "record_heads": ["rec-3"],
+        "decision_rows": decision_rows, "gaps": [], "record_heads": [f"{prefix}-3"],
         "open_obligations": [{"obligation_id": "obl-1", "item": "parser", "severity": "critical", "reason": "OPEN OBLIGATION STILL NEEDS REPAIR"}]})
 
 
@@ -389,7 +390,7 @@ def test_commit_row_keeps_open_obligations_and_names_each_record_with_its_record
     assert sum(e["what"].startswith("author decision") for e in current["addresses"].values()) == 3
     assert sum(e["what"].startswith("author rebuttal") for e in current["addresses"].values()) == 3
     assert len(row["content"]) < len(json.dumps(mandatory, ensure_ascii=False, sort_keys=True)) * 0.7
-    bindings = view._index_bindings(current)
+    bindings = view._index_bindings(view._resident_view(row))
     assert bindings == {"decision:" + view._sha(e["bound_decision"]): e["bound_decision"] for e in view.decision_entries(history) if e["bound_decision"]}
     assert len(bindings) == 12
 
@@ -445,10 +446,8 @@ def test_a_folds_refresh_leaves_every_index_before_its_note_and_retires_or_repla
 
 
 def _full_display(current):
-    """The display a reader from before the display writes: the producer's rows inline, no display keys."""
-    full = {key: value for key, value in current.items() if key not in ("record_subjects", "display")}
-    full["decision_rows"] = view._expanded_decision_rows(current)
-    return full
+    """The display a reader from before the display writes: the producer's view of a displayed one, no display keys."""
+    return {key: value for key, value in view._expanded_view(current).items() if key not in ("record_subjects", "display")}
 
 
 def without_sources(rows):
@@ -506,10 +505,10 @@ def test_commit_row_writes_each_repeated_delivery_once_and_reads_back_the_produc
     assert len(aliased) == 8 and all(r["remark_field"] == "findings" and "remark" not in r for r in aliased)
     assert current["display"] == {"version": 1, "remark_rows": [i for i, r in enumerate(shown) if "remark_field" in r]}
     assert any(r.get("remark") == "The actor's own short remark." for r in shown)
-    assert view._bytes(without_sources(view._expanded_decision_rows(current))) == view._bytes(
-        without_sources(mandatory["decision_rows"]))
-    assert view.review_index_identity(current) == view.review_index_identity(_full_display(current)) == meta["sha256"]
-    assert view._index_bindings(current) == bound(history)
+    producer = view._resident_view(row)
+    assert view._bytes(without_sources(producer["decision_rows"])) == view._bytes(without_sources(mandatory["decision_rows"]))
+    assert view.review_index_identity(producer) == view.review_index_identity(_full_display(current)) == meta["sha256"]
+    assert view._index_bindings(producer) == bound(history)
     facts = json.loads(row["content"].partition("\n")[2])
     full_text = "[Current review decisions]\n" + json.dumps({**facts, "current": _full_display(current)},
                                                             ensure_ascii=False, sort_keys=True)
@@ -555,20 +554,85 @@ def test_the_display_restores_only_what_it_named_so_every_shape_round_trips_and_
             extra["display"] = {"version": 1, "remark_rows": [0]}
         mandatory = {**view.split_review_history(history)["mandatory"], **extra}
         row = view._index_message(mandatory, "commit", "/repo", task_id=TASK)
-        current = json.loads(row["content"].partition("\n")[2])["current"]
-        assert view._bytes(without_sources(view._expanded_decision_rows(current))) == view._bytes(
+        current, producer = json.loads(row["content"].partition("\n")[2])["current"], view._resident_view(row)
+        assert view._bytes(without_sources(producer["decision_rows"])) == view._bytes(
             without_sources(mandatory["decision_rows"])), case
-        assert view._index_bindings(current) == bound(history), case
+        assert view._index_bindings(producer) == bound(history), case
         assert all(current[key] == value for key, value in extra.items()), case  # a producer's own key, as written
-        assert row[view.REVIEW_CONTEXT_INDEX_KEY]["sha256"] == view.review_index_identity(_full_display(current)), case
+        assert row[view.REVIEW_CONTEXT_INDEX_KEY]["sha256"] == view.review_index_identity(producer), case
         assert view._review_index_identity(row) == ("commit", "/repo"), case
 
 
+def test_the_envelope_decides_how_a_row_is_read_and_only_the_integer_1_is_the_display_envelope():
+    """The writer's envelope, never the content, says how a resident row is read. A row in the full shape is read
+    verbatim even when its producer's own keys look like a display (a review part naming its own `remark_field`
+    under a producer `display` marker; a producer subject table with no remark row): it binds as the producer's
+    history does and as the reader before the display binds it, and its hash is the full view's. The same content
+    in the display envelope is read as a display. Only the integer 1 is that envelope: a `true`, `1.0`, "1" or 2 tag
+    is an unknown row, never recognized and never retired."""
+    history = commit_history()
+    part = {key: value for key, value in history["decision_rows"][0].items() if key != "remark"}
+    part["remark_field"] = "findings"  # its own field, no separate remark
+    record = [{**deepcopy(r), "remark": "The author's own words."} for r in history["decision_rows"]
+              if r["review_record_id"] == "rec-1"]
+    subject = {"root": "/repo", "snapshot_hash": "s" * 64}
+    for producer, extra in (({**history, "decision_rows": [part]}, {"display": {"version": 1, "remark_rows": [0]}}),
+                            ({**history, "decision_rows": record}, {"record_subjects": {"rec-1": subject},
+                                                                     "display": {"version": 1, "remark_rows": []}})):
+        mandatory = {**view.split_review_history(producer)["mandatory"], **extra}
+        full = view._index_message(mandatory, "commit", "/repo", task_id=TASK)
+        current = json.loads(full["content"].partition("\n")[2])["current"]
+        assert sorted(full[view.REVIEW_CONTEXT_INDEX_KEY]) == ["family", "repo_root", "sha256", "visible_sha256"]
+        old = _old_index_bindings(current)  # what the reader before the display binds from this very row
+        notes = [{"bound_decision": key, "remark": "r", "reason": "x"} for key in old]
+        assert old == bound(producer) and [note["bound_decision"] for note in view.resolve_observed_review_notes(
+            notes, {"messages": [full]})] == list(old.values())
+        assert view._resident_view(full) == current and current["display"] == extra["display"]
+        assert view.review_index_identity(current) == full[view.REVIEW_CONTEXT_INDEX_KEY]["sha256"]
+        shown = rewritten(full, meta={"family": "commit", "checkout": "/repo", "display": 1})
+        assert view._review_index_identity(shown) == ("commit", "/repo") and view._resident_view(shown) != current
+    displayed = view._index_message(view.split_review_history(history)["mandatory"], "commit", "/repo", task_id=TASK)
+    assert view.obsolete_review_index_positions([displayed, displayed]) == (0,)
+    for tag in (True, 1.0, "1", 2):
+        tagged = {**displayed, view.REVIEW_CONTEXT_INDEX_KEY: {**displayed[view.REVIEW_CONTEXT_INDEX_KEY], "display": tag}}
+        assert view._review_index_identity(tagged) is None, tag
+        assert view.obsolete_review_index_positions([tagged, displayed]) == (), tag
+
+
+def test_a_subject_leaves_its_rows_only_when_it_repeats():
+    """A record's subject is written once in `record_subjects` only when two or more of its rows carry it: a record
+    with one decision (one author decision, no seat) keeps its subject inline, and a row with nothing to leave out
+    is written by the full writer exactly as the reader before the display wrote it, which binds its reference; two
+    equal subjects are written once; two different subjects both stay inline."""
+    history = commit_history()
+    decision = next(r for r in history["decision_rows"] if r["review_record_id"] == "rec-1"
+                    and r["decision_kind"] == "author_decision")
+    subject = {"root": "/repo", "snapshot_hash": "s" * 64}
+    second = {**deepcopy(decision), "source": {**decision["source"], "ref": ref("review-ledger-rec-1-author-2", {"n": 2})}}
+    cases = {"one": [decision], "two equal": [decision, second],
+             "two different": [decision, {**second, "subject": {**subject, "snapshot_hash": "t" * 64}}]}
+    for case, rows in cases.items():
+        one = view.canonical_decision_projection({**history, "rounds": history["rounds"][:1], "decision_rows": [
+            {"subject": deepcopy(subject), **deepcopy(row)} for row in rows]})
+        mandatory = view.split_review_history(one)["mandatory"]
+        row = view._index_message(mandatory, "commit", "/repo", task_id=TASK)
+        current = json.loads(row["content"].partition("\n")[2])["current"]
+        if case == "two equal":
+            assert current["record_subjects"] == {"rec-1": subject} and row[view.REVIEW_CONTEXT_INDEX_KEY]["display"] == 1
+            assert all("subject" not in r for r in current["decision_rows"]), case
+            continue
+        assert row == _old_index_message(mandatory, "commit", "/repo", task_id=TASK), case
+        assert "record_subjects" not in current and all("subject" in r for r in current["decision_rows"]), case
+        assert _old_review_index_identity(row) == ("commit", "/repo"), case
+        assert set(_old_index_bindings(current)) == {r["decision_ref"] for r in current["decision_rows"]}, case
+
+
 def test_an_account_of_another_familys_decisions_is_no_gap_here_and_a_missing_member_here_still_is():
-    """A task-wide selection meets every family: a group none of whose members' sources this history holds is
-    another family's account, never an `unapplied_review_groups` gap repeated in every other row; a group naming a
-    member this family does not hold is still a gap, stated once, and so is a group of this family's decisions that
-    all changed since the account was written (their sources are here: stale, not foreign)."""
+    """A task-wide selection meets every family. A group whose members are all the other family's kinds is that
+    family's account, never an `unapplied_review_groups` gap repeated in every other row: plan objections beside a
+    change review, change decisions beside the plan. Any other group is this family's and a gap when it does not
+    apply, as the reader before the display states it: a member this family does not hold, decisions that all changed
+    since the account was written, another checkout's change decisions, a record of this checkout unreadable now."""
     plan, _operative = incident_history()
     commit = commit_history()
     plan_member = next(e["bound_decision"] for e in view.decision_entries(plan) if e["bound_decision"])
@@ -593,6 +657,18 @@ def test_an_account_of_another_familys_decisions_is_no_gap_here_and_a_missing_me
     _shown, groups, gaps = view.project_decision_groups(changed, [account], source_history=changed,
                                                         selected_source=selected)
     assert groups == [] and len(gaps) == 1 and gaps[0]["selection"] == account
+    elsewhere = {**account, "bound_decisions": [e["bound_decision"] for e in view.decision_entries(commit_history("other"))
+                                                if e["bound_decision"] and e["row"].get("history_role") == "historical"][:2]}
+    _shown, groups, gaps = view.project_decision_groups(commit, [elsewhere], source_history=commit, selected_source=selected)
+    assert groups == [] and len(gaps) == 1  # another checkout's change decisions: this family's, stated as before
+    _shown, groups, gaps = view.project_decision_groups(plan, [elsewhere], source_history=plan, selected_source=selected)
+    assert groups == [] and gaps == []  # change decisions beside the plan: the other family's account
+    unreadable = {**commit, "rounds": [w for w in commit["rounds"] if w["review_record_id"] != "rec-1"],
+                  "decision_rows": [r for r in commit["decision_rows"] if r["review_record_id"] != "rec-1"],
+                  "gaps": [{"code": "REVIEW_RECORD_UNAVAILABLE", "source": {"record_id": "rec-1"}}]}
+    _shown, groups, gaps = view.project_decision_groups(unreadable, [account], source_history=unreadable,
+                                                        selected_source=selected)
+    assert groups == [] and len(gaps) == 1  # its record unreadable now: still this family's account
 
 
 def test_a_folds_refresh_never_resends_an_earlier_full_display_copy_of_the_same_decisions(tmp_path, monkeypatch):
@@ -733,6 +809,15 @@ def _old_index_bindings(current):
     return bindings
 
 
+def _old_index_message(mandatory, family, repo="", *, task_id=""):
+    """The resident row as the writer before the display wrote it, over the same full view and 6A hash."""
+    facts = {"family": family, "current": view.review_index_view(mandatory, family, task_id=task_id), "rule": view.INDEX_RULE}
+    text = "[Current review decisions]\n" + json.dumps(facts, ensure_ascii=False, sort_keys=True)
+    return {"role": "user", "content": text, view.REVIEW_CONTEXT_INDEX_KEY: {
+        "family": family, "repo_root": repo, "sha256": view.review_index_identity(facts["current"]),
+        "visible_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}}
+
+
 def _old_review_index_identity(row):
     meta, text = row.get(view.REVIEW_CONTEXT_INDEX_KEY), row.get("content")
     if (not isinstance(meta, dict) or meta.get("family") not in {"plan", "commit"}
@@ -754,12 +839,14 @@ def test_a_reader_from_before_the_display_ignores_a_compact_row_and_binds_every_
         row["subject"] = {"root": "/repo", "record": row["review_record_id"]}
     changes = view.canonical_decision_projection(changes)
     plan, operative = incident_history()
-    compact = view._index_message(view.split_review_history(changes)["mandatory"], "commit", "/repo", task_id=TASK)
+    mandatory = view.split_review_history(changes)["mandatory"]
+    compact = view._index_message(mandatory, "commit", "/repo", task_id=TASK)
     shown = json.loads(compact["content"].partition("\n")[2])["current"]
     assert _old_review_index_identity(compact) is None and view._review_index_identity(compact) == ("commit", "/repo")
     assert "display" in shown and "repo_root" not in compact[view.REVIEW_CONTEXT_INDEX_KEY]
-    assert view._index_bindings(shown) == bound(changes)
-    older = full_copy(compact)
+    assert view._index_bindings(view._resident_view(compact)) == bound(changes)
+    older = _old_index_message(mandatory, "commit", "/repo", task_id=TASK)
+    assert full_copy(compact) == older  # the fold tests' old copy is the old writer's row
     for identity, history, row in ((("plan", ""), plan, row_for(plan, operative)[1]), (("commit", "/repo"), changes, older)):
         assert _old_review_index_identity(row) == view._review_index_identity(row) == identity
         current = json.loads(row["content"].partition("\n")[2])["current"]
