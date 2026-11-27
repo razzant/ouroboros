@@ -2302,6 +2302,10 @@ back. Disconnect and Revoke ask in place first and answer for the consent shown 
 line of its control (the group head's once its row is gone), and the skill's own words (service label, permission
 labels, notes) stay as written.
 
+In a conversation the mind offers this card as a button of its links row (a place, never an address); once a sign-in
+offered there completes, one System row in that conversation says the skill is signed in, naming no account. Telegram,
+where a sign-in that returns to the computer cannot finish, says instead where to finish it (owner, 2026-11-27).
+
 ### Dashboard › Consciousness
 
 The switch is one (owner 15.11, 5A): its name stays Consciousness, glossed “When Ouroboros acts”, and its positions

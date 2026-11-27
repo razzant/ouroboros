@@ -275,7 +275,7 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     download_url_compat: str
     caption: str
     size_bytes: int
-    actions: List[Dict[str, str]]  # LinkAction rows: {label, url}
+    actions: List[Dict[str, str]]  # LinkAction rows: {label, url} or {label, place}
     title: str
     quiz: ChatHistoryQuiz
     card: ChatHistoryCard

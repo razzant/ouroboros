@@ -141,6 +141,8 @@ export function linksMessageHtml(msg) {
     const rows = actions.map((item) => {
         const url = safeHttpUrl(item?.url);
         const label = String(item?.label || '').trim().slice(0, 120);
+        const skill = signInPlaceSkill(item?.place);  // a place inside Ouroboros: the skill's card, never an address
+        if (label && !url && skill) return `<a class="chat-link-button" href="#skills" data-sign-in-place="${escapeHtmlAttr(skill)}">${escapeHtml(label)}</a>`;
         return url && label
             ? `<a class="chat-link-button" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}<span aria-hidden="true">↗</span></a>`
             : '';
@@ -151,6 +153,12 @@ export function linksMessageHtml(msg) {
             ${title ? `<div class="chat-links-title">${escapeHtml(title)}</div>` : ''}
             <div class="chat-links-list">${rows.join('')}</div>
         </div>`;
+}
+
+/** The skill a `skill-sign-in/<skill>/<service>` place opens (ouroboros/link_actions.py), else ''. */
+export function signInPlaceSkill(place) {
+    const found = /^skill-sign-in\/([a-z0-9][a-z0-9_-]{0,63})\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.exec(String(place || ''));
+    return found ? found[1] : '';
 }
 
 export function safeHttpUrl(value) {
@@ -890,7 +898,13 @@ export function createChatMedia({
     function buildLinksMessage(msg) {
         if (destroyed) return null;
         const body = linksMessageHtml(msg);
-        return body ? bubbleFrame(msg, body) : null;
+        const bubble = body ? bubbleFrame(msg, body) : null;
+        // A sign-in place opens the skill's card in Extensions, where the owner chooses the account and signs in.
+        bubble?.querySelectorAll?.('[data-sign-in-place]').forEach((link) => link.addEventListener('click', (event) => {
+            event.preventDefault();
+            globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-skills', { detail: { skill: link.dataset.signInPlace } }));
+        }));
+        return bubble;
     }
 
     function isFeedTailWrapper(wrapper) {

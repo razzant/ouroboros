@@ -40,7 +40,7 @@ from .lib.telegram_state import (
     _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
     _quiet_progress, _reply_target, _reply_ingress_transport, _carried_here, _bridged,
 )
-from .lib import telegram_i18n, telegram_inbound, telegram_quiz
+from .lib import telegram_i18n, telegram_inbound, telegram_places, telegram_quiz
 from .lib.telegram_origin import origin_label
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
@@ -1326,17 +1326,11 @@ def _make_links(api):
                 return
             client = _telegram_client(api, event, chat_id)
             title = str(event.get("title") or "").strip() or "Links"
-            raw_actions = event.get("actions") if isinstance(event.get("actions"), list) else []
-            actions = []
-            for action in raw_actions:
-                if not isinstance(action, dict):
-                    continue
-                label = str(action.get("label") or "").strip()
-                url = str(action.get("url") or "").strip()
-                if label and url:
-                    actions.append((label, url))
-            # Shared link-action contract cap: ouroboros.tools.core._MAX_LINK_ACTIONS.
-            actions = actions[:12]
+            # An address is a button; a place inside Ouroboros (a skill's sign-in) is a line saying where to finish it.
+            actions, places = telegram_places.link_rows(event.get("actions"))
+            if places:
+                _clear_silent_msg(api, chat_id)
+                await client.send_message(chat_id, telegram_places.finish_lines(places, _LOCALIZED_TEXTS[telegram_i18n.language()]))
             if not actions:
                 return
             _clear_silent_msg(api, chat_id)

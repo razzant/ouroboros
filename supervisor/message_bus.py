@@ -875,7 +875,7 @@ class LocalChatBridge:
         title: str = "",
         task_id: str = "",
     ) -> Tuple[bool, str]:
-        """Send validated HTTP(S) actions to UI and host event subscribers."""
+        """Send validated HTTP(S) and place actions to UI and host event subscribers."""
         safe_title = str(title or "")[:240]
         if is_a2a_chat_id(chat_id):
             return True, "ok"
@@ -914,6 +914,8 @@ class LocalChatBridge:
             "actions": validated,
             "ts": ts,
         })
+        from ouroboros.sign_in_offers import note as note_sign_in_offers
+        note_sign_in_offers(DATA_DIR, int(chat_id or 0), validated)  # «connected» comes back to this conversation
         return True, "ok"
 
     def send_quiz(

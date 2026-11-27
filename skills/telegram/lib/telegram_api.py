@@ -1204,6 +1204,8 @@ _MENU_TEXTS_EN = {
     "cmd_panic": "Emergency stop",
     "panic_earlier": "An earlier Panic message was not executed again. Its previous outcome is unknown.",
     "panic_unconfirmed": "Panic was not confirmed and will not be retried. Check Ouroboros on the host computer.",
+    "finish_on_computer": "{label}: finish this on the computer running Ouroboros (Extensions › Skills › {skill}). "
+                          "The sign-in returns to that computer, so a phone that cannot reach it cannot finish it.",
 }
 # Every line the bridge composes is English source here and translated by the install's
 # memory under the one interface language (lib/telegram_i18n.py); the skill ships no

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { documentMessageKey } from '../modules/chat_activity.js';
-import { bindComposerFileTargets, decorateContactSource, fileNames, safeHttpUrl } from '../modules/chat_media.js';
+import { bindComposerFileTargets, decorateContactSource, fileNames, linksMessageHtml, safeHttpUrl, signInPlaceSkill } from '../modules/chat_media.js';
 import { createComposerAttachments } from '../modules/chat_attachments.js';
 import { uploadView } from './helpers/attachment_views.js';
 import { NodeStub, fixture } from './helpers/media_dom.js';
@@ -16,6 +16,22 @@ test('safeHttpUrl accepts only absolute HTTP(S) URLs', () => {
     assert.equal(safeHttpUrl('/relative'), '');
     assert.equal(safeHttpUrl('javascript:alert(1)'), '');
     assert.equal(safeHttpUrl('data:text/plain,no'), '');
+});
+
+test('a sign-in place is a button to the skill in Extensions, never an address', () => {
+    const fx = fixture({ formatMsgTime: () => ({ short: '15:18', full: '19 Oct 2026, 15:18' }) });
+    let html;
+    try { html = linksMessageHtml({ title: 'Calendar needs Google', actions: [
+        { label: 'Sign in to Google', place: 'skill-sign-in/calendar/google' },
+        { label: 'Docs', url: 'https://example.com/docs' },
+        { label: 'Broken', place: 'skill-sign-in/../google' },
+    ] }); } finally { fx.controller.destroy(); fx.restore?.(); }
+    assert.match(html, /<a class="chat-link-button" href="#skills" data-sign-in-place="calendar">Sign in to Google<\/a>/);
+    assert.match(html, /href="https:\/\/example.com\/docs"/);
+    assert.doesNotMatch(html, /Broken/);
+    assert.equal(signInPlaceSkill('skill-sign-in/email-presence/google'), 'email-presence');
+    assert.equal(signInPlaceSkill('skill-sign-in/calendar'), '');
+    assert.equal(signInPlaceSkill('https://example.com'), '');
 });
 
 test('a framed question joins its Project to the voice and ends on its time alone', () => {

@@ -31,7 +31,8 @@ SIGN_IN_VERSION = 1
 SIGN_IN_HANDOVER_VERSION = 2  # unknown returns, verified handover receipts and consent-bound requests
 CARD_PLACE = "Extensions › Skills"  # where the owner signs in: the skill's card
 _HINT = ("SIGN_IN_REQUIRED: {skill} needs the owner's sign-in to {label} for {account} ({reason}). "
-         f"The owner can press Sign in again on its card in {CARD_PLACE}.")
+         f"The owner can press Sign in again on its card in {CARD_PLACE}"
+         " (to give the owner that card as a button here: send_links with place skill-sign-in/{skill}/{service}).")
 
 
 def _masked(text: str) -> str:
@@ -171,7 +172,7 @@ def _required_response(skill: str, service: str, account: str, exc: Any) -> JSON
     hint = fixes.get(exc.reason) or (
         "The token cannot be shown to last that long. Ask for a shorter min_valid interval."
         if exc.reason == "min_valid_unmet" else _HINT.format(
-            skill=skill, label=declared.label if declared else service, account=label, reason=exc.reason))
+            skill=skill, label=declared.label if declared else service, account=label, reason=exc.reason, service=service))
     return JSONResponse({"ok": False, "code": "SIGN_IN_REQUIRED", "reason": exc.reason, "service": service,
                          "account": getattr(exc, "account", "") or account, "note": note, "hint": hint}, status_code=409)
 
@@ -181,7 +182,8 @@ _NO_ACCOUNT = {
     "unknown_service": "This skill declares no such service; use a service id from GET /sign-in/accounts.",
     "unknown_account": "That account is not signed in here; use a key from GET /sign-in/accounts.",
     "account_required": "Several accounts are signed in; pass `account`, one of: {accounts}.",
-    "not_signed_in": "The owner has not signed in to {label}. Ask them to sign in on the skill's card in {place}; do not retry before they have.",
+    "not_signed_in": "The owner has not signed in to {label}. Ask them to sign in on the skill's card in {place} (a button to it here: "
+                     "send_links with place skill-sign-in/{skill}/{service}); do not retry before they have.",
     "no_usable_account": "No signed-in account of {label} can be used now ({accounts}; state and reason: GET /sign-in/accounts). "
                          "The owner can sign in again on the skill's card in {place}.",
 }
@@ -195,7 +197,7 @@ def _not_found(skill: str, service: str, exc: Exception) -> JSONResponse:
     declared = service_sign_in.declared_service(skill, service)
     accounts = ", ".join(f"{key} ({name})" if name else key for key, name in getattr(exc, "accounts", ()))
     hint = _NO_ACCOUNT.get(reason, "No such sign-in; check the service and account in GET /sign-in/accounts.").format(
-        label=declared.label if declared else service, accounts=accounts, place=CARD_PLACE)
+        label=declared.label if declared else service, accounts=accounts, place=CARD_PLACE, skill=skill, service=service)
     return JSONResponse({"ok": False, "error": _masked(str(exc)), "reason": reason, "hint": hint}, status_code=404)
 
 
