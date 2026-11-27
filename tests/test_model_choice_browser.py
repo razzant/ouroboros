@@ -87,9 +87,11 @@ def _theme(page, theme: str) -> None:
 
 
 def _quiet(page) -> None:
-    """No toast left over the page. The pointer goes to a corner first: a toast under it does not expire."""
+    """No toast left over the page. The pointer goes to a corner first: a toast under it does not expire. A notice a
+    sheet covers waits, hidden, until the sheet leaves (toast.js, #4358): it is not on the page the picture shows."""
     page.mouse.move(1, 1)
-    page.wait_for_function("() => !document.querySelector('.toast')", timeout=20_000)
+    page.wait_for_function("() => ![...document.querySelectorAll('.toast')].some((toast) => !toast.closest('.toast-stack[data-held]'))",
+                           timeout=20_000)
 
 
 _WIDE = "() => document.documentElement.scrollWidth - window.innerWidth"

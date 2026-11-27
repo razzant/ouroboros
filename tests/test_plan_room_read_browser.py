@@ -81,6 +81,11 @@ class Provider:
         monkeypatch.setattr(fixtures_mock_llm._Handler, "do_GET", lambda handler: self.get(handler), raising=False)
 
     def get(self, handler):
+        if handler.path == "/props":  # names its program, as the shared loopback server does (#4291)
+            from tests import fixtures_mock_llm
+
+            fixtures_mock_llm.send_props(handler)
+            return
         if handler.path != "/v1/models":
             handler.send_error(404)
             return

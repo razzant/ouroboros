@@ -7,6 +7,7 @@ import re
 import threading
 
 from ouroboros import dialogue_store
+from tests import fixtures_mock_llm
 
 SOURCE = "openai-compatible"
 MAIN, PICKED, OTHER, QUEUED = (f"{SOURCE}::mock-{name}" for name in ("main", "picked", "other", "queued"))
@@ -77,6 +78,9 @@ class Provider:
             return [body["model"] for body in self.received if body["model"] != "mock-light" and self.marker_of(body) == marker]
 
     def get(self, handler) -> None:
+        if handler.path == "/props":  # names its program, as the shared loopback server does (#4291)
+            fixtures_mock_llm.send_props(handler)
+            return
         if handler.path.split("?")[0] != "/v1/models":
             handler.send_error(404)
             return
