@@ -100,7 +100,8 @@ def test_a_refused_start_is_recorded_blocked_not_as_an_unused_substrate(monkeypa
     assert (usage["unavailable_reason"], usage["host_fallback"], usage["terminal_origin"], usage["reason_code"]) == (
         "credential_pool_exhausted", False, "host_notice", "subagent_executor_unavailable")
 
-    # The text names the alternative; its row stays whole in the usage and in the record (below).
+    # The text names the alternative and the exact read of this task's record; the row stays whole in the usage.
+    assert 'get_task_result(task_id="child-refused", authority_fields=["subagent_availability"])' in text
     assert usage["alternatives"] == [{"subagent_id": "api-scout"}]
 
     # Quiet: a leaf the host started keeps its record, and zero runs at completion stay an honest disclosure.

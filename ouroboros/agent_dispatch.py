@@ -118,7 +118,7 @@ def executor_blocked_outcome(
     # Each handle as the scheduler takes it (compared, never parsed: some hold spaces or brackets).
     names = [str(row.get("subagent_id") or "") for row in alternatives if isinstance(row, dict)]
     names = [name for name in names if name]
-    reader = (f" Their rows as recorded at this refusal: get_task_result(task_id={json.dumps(str(task_id))}, "
+    reader = (f" Their rows in this task's record: get_task_result(task_id={json.dumps(str(task_id))}, "
               'authority_fields=["subagent_availability"]).' if task_id else "")
     text = (
         f"⚠️ SUBAGENT_UNAVAILABLE: this subagent could not start: {cause}."
@@ -127,7 +127,7 @@ def executor_blocked_outcome(
         + (f" {availability['detail']}" if availability.get("detail") else "")
         + " The task was NOT run and spent nothing; the host did not substitute another model, route or substrate."
         + (" Configured alternatives at this refusal (not ranked, availability not checked; descriptions in "
-           "Available subagents): " + json.dumps(names, ensure_ascii=False) + "." + reader if names else "")
+           "Available subagents when present): " + json.dumps(names, ensure_ascii=False) + "." + reader if names else "")
     )
     # The codes stay literal (the provenance drift guard reads them from this keyword).
     return text, dict(
