@@ -96,7 +96,6 @@ on:
       - 'tests/test_memory_scale_fit.py'
       - 'tests/test_live_preparation_fit_refusal.py'
       - 'tests/test_live_tool_catalog_transaction.py'
-      - 'tests/test_live_fit_refused.py'
       - 'tests/test_memory_view_forms.py'
       - 'tests/test_memory_view_room.py'
       - 'tests/_memory_scale_fixture.py'
