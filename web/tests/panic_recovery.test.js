@@ -31,7 +31,7 @@ const GAP = 'Some saved work could not be read, so this list may be incomplete.'
 
 // The message alone, over the DOM stub: `answers` answers each task's Resume (a value, an error to throw, or a function
 // of its body and transport options). A real door (`realResume`) leaves the shared client and `fetch` to answer.
-function rig(t, { answers = {}, lifetimeMs, realResume = false, notify } = {}) {
+function rig(t, { answers = {}, lifetimeMs, realResume = false, notify, extra = {} } = {}) {
     const env = installDom();
     document.body = env.mount;  // the shared toasts land here
     t.after(() => restoreDom(env.prior));
@@ -63,6 +63,7 @@ function rig(t, { answers = {}, lifetimeMs, realResume = false, notify } = {}) {
         now: () => state.clock,
         ...(lifetimeMs ? { lifetimeMs } : {}),
         ...(notify ? { notify } : {}),
+        ...extra,
     });
     t.after(() => panic.destroy());
     const message = () => one(feed, node => node.classList?.contains('panic-recovery'));
@@ -476,27 +477,40 @@ test('Main\'s pill counts the Panic choice as one action and lands on its first 
     assert.deepEqual(posts, [], 'landing sends nothing');
 });
 
-test('a list not whole with no row read is no message: a ready host\'s word is one notice per episode, a starting one none', async (t) => {
-    // Owner decision 27.11.2026: the bare line leaves the feed. A host not ready yet is said by the room bar (Starting…);
-    // a ready host's own `false` with nothing read is told once by the page's notice until a whole read ends it.
+// The bare line leaves the feed. A host not ready yet is said by the room bar (Starting…) and the setup wizard covers
+// everything; a ready host's own `false` with nothing read is told once per episode by the page's notice, a reload of the
+// same tab included, until a whole read ends it; a person's Retry that still does not read whole is answered.
+function noticeTrack() {
     const told = [];
-    const r = rig(t, { notify: (text, options) => {
+    const notify = (text, options) => {
         const notice = { text, options, disposed: false, dispose() { this.disposed = true; } };
         told.push(notice);
         return notice;
-    } });
-    const READY = { supervisor_ready: true, boot: { tasks_ready: true } };
+    };
+    const store = new Map();
+    const storage = { getItem: k => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
+    return { told, notify, storage };
+}
+
+test('a list not whole with no row read is no message: a ready host\'s word is one notice per episode, a starting one none', async (t) => {
+    const n = noticeTrack();
+    let covered = false;
+    const r = rig(t, { notify: n.notify, extra: { storage: n.storage, isCovered: () => covered } });
+    const told = n.told;
+    const READY = { supervisor_ready: true, boot: { tasks_ready: true, since: '2026-11-27T10:00:00Z' } };
     for (const starting of [{ supervisor_ready: false }, { supervisor_ready: true, boot: { tasks_ready: false } }, {}]) {
         r.panic.snapshot(census([], false, starting), 1);
         assert.deepEqual([r.message(), r.feed.children.length, told.length], [null, 0, 0],
             `a host not ready, or one that does not say, is told by nothing here (${JSON.stringify(starting)})`);
     }
+    covered = true;  // the setup wizard is up: nothing about rooms or recovery is announced over it
+    r.panic.snapshot(census([], false, READY), 2);
+    assert.equal(told.length, 0, 'not over the setup wizard');
+    covered = false;
     r.panic.snapshot(census([], false, READY), 2);
     assert.deepEqual([r.message(), r.feed.children.length], [null, 0], 'never a System message or an empty card');
-    assert.deepEqual(told.map(n => n.text), ['Saved work could not be checked for anything waiting to resume.']);
-    assert.equal(told[0].options.action.label, 'Retry');
-    told[0].options.action.run();
-    assert.equal(r.state.refreshes, 1, 'its Retry reads the state again, and resumes nothing');
+    assert.deepEqual(told.map(x => x.text), ['Saved work could not be checked for anything waiting to resume.'],
+        'told once the wizard is gone');
     assert.equal(r.panic.target(), null, 'the pill counts nothing');
     r.panic.snapshot(census([], false, READY), 3);
     r.panic.snapshot(null, 4);
@@ -504,21 +518,45 @@ test('a list not whole with no row read is no message: a ready host\'s word is o
     r.panic.setConnected(true);
     r.panic.snapshot(census([], false, READY), 5);
     assert.equal(told.length, 1, 'once per episode: a re-read, a failed read or a reconnect adds nothing');
-    r.panic.snapshot(census([], true, READY), 6);
-    assert.deepEqual([told[0].disposed, r.message()], [true, null], 'a whole read ends the episode and its notice');
-    r.panic.snapshot(census([], false, READY), 7);
-    assert.equal(told.length, 2, 'a new episode is told again');
+    // A person's Retry that still reads not whole is answered; it resumes nothing.
+    r.state.onRefresh = () => r.panic.snapshot(census([], false, READY), 6);
+    await told[0].options.action.run();
+    assert.deepEqual([r.state.refreshes, told.length], [1, 2], 'its Retry reads again and says it still could not');
+    r.state.onRefresh = () => { throw new Error('offline'); };
+    await told[1].options.action.run();
+    assert.equal(told.length, 3, 'a Retry whose read fails is answered too');
+    r.panic.snapshot(census([], true, READY), 7);
+    assert.deepEqual([told[2].disposed, r.message()], [true, null], 'a whole read ends the episode and its notice');
+    r.panic.snapshot(census([], false, READY), 8);
+    assert.equal(told.length, 4, 'a new episode is told again');
     // The working case: the same partial word with a row read is the message with its amber gap, and no notice.
-    r.panic.snapshot(census([ROWS.digest], false, READY), 8);
-    assert.equal(told[1].disposed, true, 'the message now says it');
+    r.panic.snapshot(census([ROWS.digest], false, READY), 9);
+    assert.equal(told[3].disposed, true, 'the message now says it');
     assert.deepEqual([r.part('panicGap').textContent, r.part('panicGap').dataset.tone], [GAP, 'warn']);
     const heading = one(r.message(), node => node.classList?.contains('model-wait-heading'));
     assert.deepEqual([heading.hidden, heading.firstChild?.textContent], [false, 'Stopped by Panic']);
-    r.panic.snapshot(census([], true, READY), 9);
-    assert.equal(r.message(), null, 'a whole and empty list takes it away');
-    assert.equal(told.length, 2);
     await settle();
     assert.deepEqual(r.state.posts, []);
+});
+
+test('a reload of the same tab is not a new episode; another host run is', (t) => {
+    const n = noticeTrack();
+    const READY = (since) => ({ supervisor_ready: true, boot: { tasks_ready: true, since } });
+    const first = rig(t, { notify: n.notify, extra: { storage: n.storage, isCovered: () => false } });
+    first.panic.snapshot(census([], false, READY('run-1')), 1);
+    assert.equal(n.told.length, 1);
+    first.panic.destroy();
+    const reloaded = rig(t, { notify: n.notify, extra: { storage: n.storage, isCovered: () => false } });
+    reloaded.panic.snapshot(census([], false, READY('run-1')), 1);
+    assert.equal(n.told.length, 1, 'the same host run in the same tab: already told');
+    reloaded.panic.snapshot(census([], false, READY('run-2')), 2);
+    assert.equal(n.told.length, 1, 'inside this page the episode is still open');
+    reloaded.panic.destroy();
+    const restarted = rig(t, { notify: n.notify, extra: { storage: n.storage, isCovered: () => false } });
+    restarted.panic.snapshot(census([], false, READY('run-2')), 1);
+    assert.equal(n.told.length, 2, 'a restarted host is a new episode');
+    restarted.panic.snapshot(census([], true, READY('run-2')), 2);
+    assert.equal(n.storage.getItem('ouro.panic_list_unread_told'), null, 'a whole read clears the tab\'s record');
 });
 
 test('an older host that names no completeness is taken as neither whole, incomplete nor stopped', async (t) => {

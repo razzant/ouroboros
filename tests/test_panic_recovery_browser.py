@@ -98,6 +98,7 @@ class FakeCore:
         self.stops: list[tuple[str, dict]] = []   # Stop requests: (task id, body)
         self.writes: list[tuple[str, dict]] = []  # any other write the page made (preferences, read receipts)
         self.answers: dict[str, object] = {}
+        self.state_reads = 0                      # /api/state bodies served
         self.held: dict[str, object] = {}         # Resume requests left unanswered until release()
 
     def attention(self):
@@ -115,6 +116,7 @@ class FakeCore:
         return rows
 
     def state(self):
+        self.state_reads += 1
         return {"sha": "fixture", "supervisor_ready": True, "projects": PROJECTS, "project_chat_ids": [21, 22],
                 "active_chat_activities": [], "active_chat_activities_complete": True,
                 "current_questions": [], "current_questions_complete": True,
@@ -522,10 +524,15 @@ def test_the_final_state_after_a_press_on_an_incomplete_list(spa, viewport, them
 def test_an_empty_first_list_that_is_not_whole_is_one_notice(spa):
     """A ready host's first answer names no work and says its list is not whole: Main holds no System message for it;
     the page's one notice at the top right says so once, claiming no Panic, stop or work, with a Retry that only reads
-    again (owner decision 27.11.2026); the spending-limit card stays its own."""
+    again and, when that read still is not whole, says so again; the spending-limit card stays its own."""
     core = FakeCore(works=[], complete=False)
     page, errors = spa(core, viewport=PHONE, theme="light", touch=True, ready="#toast-stack .toast")
-    page.wait_for_timeout(1500)  # several state reads pass: the notice is not repeated
+    seen = core.state_reads
+    deadline = 30_000
+    while core.state_reads < seen + 2 and deadline > 0:  # at least two more state reads: the notice is not repeated
+        page.wait_for_timeout(250)
+        deadline -= 250
+    assert core.state_reads >= seen + 2, core.state_reads
     capture(page, "panic-final-phone-light-empty-incomplete", crop=False)
     assert page.locator(MESSAGE).count() == 0
     toast = page.locator("#toast-stack .toast")
@@ -534,8 +541,14 @@ def test_an_empty_first_list_that_is_not_whole_is_one_notice(spa):
     box, view = toast.bounding_box(), page.viewport_size
     assert box["x"] >= 0 and box["x"] + box["width"] <= view["width"] and box["y"] >= 0, (box, view)
     assert page.locator(".chat-bubble.owner-action[data-owner-action='task-budget']").count() == 1
+    reads = core.state_reads
     toast.get_by_role("button", name="Retry").click()
-    page.wait_for_timeout(500)
-    assert page.locator("#toast-stack .toast").count() == 0 and page.locator(MESSAGE).count() == 0
+    page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast:not(.is-hiding)').length === 1")
+    assert core.state_reads > reads, "Retry read the state again"
+    assert page.locator(MESSAGE).count() == 0, "a list still not whole is answered by the notice, never a card"
+    core.complete = True
+    page.locator("#toast-stack .toast:not(.is-hiding)").get_by_role("button", name="Retry").click()
+    page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast').length === 0")
+    assert page.locator(MESSAGE).count() == 0, "a whole empty list: nothing waits, nothing to say"
     assert core.posts == [] and core.stops == []
     assert errors == []
