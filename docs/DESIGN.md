@@ -49,9 +49,10 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    menus, popovers and the shared modal dialogs (confirmations, an import, a skill's details) have an opaque neutral
    backing so underlying words cannot bleed through. The rest keep their own paint: the composer field, a note over
    the transcript (the voice offer), toasts and float capsules stay glass, and the document
-   reader and file dialogs keep their near-opaque modal sheet over a scrim. Every floating object rests on the one
-   float shadow; the veils behind the setup wizard, a files drop and an open Project soften with one faint filter
-   (`--scrim-filter`), so the room behind them still reads.
+   reader and file dialogs keep their near-opaque modal sheet over a scrim. The toast, a file's preview, the drop card,
+   the restart card, the file dialog, the document reader and the Project panel rest on the one float shadow, and a
+   staged file on the rest shadow; the veils behind the setup wizard, a files drop and an open Project soften with one
+   faint filter (`--scrim-filter`), so the room behind them still reads.
 3. **Colour says who and what.** Each voice colours its own objects: the owner blue,
    Ouroboros rose (its answers, its work cards and its card in the sidebar alike), System amber (gold on dark), a
    Project fuchsia. A role keeps its hue family in both themes and the theme gives it its
@@ -776,7 +777,8 @@ state of a place is shown by the place: news (a read failed, a restore landed in
 or row of its own, while a place's state (a gap, an upgrade in progress) stays in that place. A toast announces news
 once: its timer pauses on hover or focus, and a non-expiring toast has a visible keyboard-reachable close, whatever its
 tone. The stack stands at the room's top corner, top right in a left-to-right interface. A toast wears the shared float
-material without a rim; its tone is its words' ink; its close is a small plain × in its top corner.
+material without a rim; its tone is its words' ink; its close is a small plain × in its top corner, one line of words
+centred on it, its reach under a finger the touch minimum.
 The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
 in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
 never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
@@ -1219,8 +1221,8 @@ exception, not a pattern for new notices.
 
 Built-in chrome uses words and monochrome `currentColor` vectors, not decorative
 emoji. System keeps its resting body and amber/gold label without an edge; status stays explicit in
-words and the tone primitive. A System row's words, its title and its status sentences read at the voices' 16 px;
-its name, time and metadata (a place, a count, a row's answer) keep 12. Functional icons keep state and accessible names.
+words and the tone primitive. A System row's words, its title and its status sentences read at the voices' 16 px, the
+title strong; its name, time and metadata (a place, a count, a row's answer) keep 12. Functional icons keep state and accessible names.
 A host notice writes no pictograph. For rows written before notices, known typed host prefixes
 are hidden only at display (`host_notice_text.js`) and unlisted or ambiguous records remain
 literal. History, keys and exports keep the stored bytes; Copy keeps a notice's line and, for two

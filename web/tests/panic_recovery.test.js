@@ -585,7 +585,7 @@ test('the Panic notice is Main\'s: withdrawn when Main is left or covered, told 
     assert.equal(h.told.length, 1, 'told when Main is shown');
 });
 
-test('a reload of the same tab is not a new episode; another host run is', (t) => {
+test('a reload of the same tab is not a new episode; a host restart inside the tab is', (t) => {
     const n = noticeTrack();
     const READY = (since) => ({ supervisor_ready: true, boot: { tasks_ready: true, since } });
     const first = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
@@ -596,13 +596,18 @@ test('a reload of the same tab is not a new episode; another host run is', (t) =
     reloaded.panic.snapshot(census([], false, READY('run-1')), 1);
     assert.equal(n.told.length, 1, 'the same host run in the same tab: already told');
     reloaded.panic.snapshot(census([], false, READY('run-2')), 2);
-    assert.equal(n.told.length, 1, 'inside this page the episode is still open');
+    assert.equal(n.told.length, 2, 'the host restarted inside this tab: a new run is a new episode, told at once');
+    n.told[1].dispose();
+    reloaded.panic.notice.hide();
+    reloaded.panic.snapshot(census([], false, READY('run-2')), 3);
+    assert.equal(n.told.length, 2, 'closed: not again on this run');
     reloaded.panic.destroy();
-    const restarted = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
-    restarted.panic.snapshot(census([], false, READY('run-2')), 1);
-    assert.equal(n.told.length, 2, 'a restarted host is a new episode');
-    restarted.panic.snapshot(census([], true, READY('run-2')), 2);
+    const again = rig(t, { notify: n.notify, extra: { storage: n.storage, isVisible: () => true } });
+    again.panic.snapshot(census([], false, READY('run-2')), 1);
+    assert.equal(n.told.length, 2, 'a reload keeps the decision taken on this run');
+    again.panic.snapshot(census([], true, READY('run-2')), 2);
     assert.equal(n.storage.getItem('ouro.panic_list_unread_told'), null, 'a whole read clears the tab\'s record');
+    again.panic.destroy();
 });
 
 test('an older host that names no completeness is taken as neither whole, incomplete nor stopped', async (t) => {

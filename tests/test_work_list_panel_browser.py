@@ -25,8 +25,8 @@ import pytest
 from PIL import Image, ImageChops
 
 from tests.test_room_work_browser import (
-    LONGER_NAME, LONG_NAME, PROJECT, Transport, activity, capture, evidence, facts, open_project, progress, reading,
-    room_ui, settle_frames, settle_unfold, subscription_ui, trigger, wait_facts,
+    LONGER_NAME, LONG_NAME, PROJECT, Transport, activity, capture, evidence, facts, open_project, progress, quiz_detail,
+    reading, room_ui, row as work_row, settle_frames, settle_unfold, subscription_ui, trigger, wait_facts, waited,
 )
 
 pytestmark = [pytest.mark.ui_browser]
@@ -93,10 +93,16 @@ def _transport(page):
                              project_admission_hold={"label": "Waiting for Project access"})])
 
 
-def _open(ui, *, width, height, theme, room, history_fails=False, panic_unread=False, **page_options):
+def _open(ui, *, width, height, theme, room, history_fails=False, panic_unread=False, question=False, **page_options):
     """The app in its own page (its window, theme and motion preference are the test's), the room's list still closed."""
     page = ui["new_page"](viewport={"width": width, "height": height}, color_scheme=theme, **page_options)
     transport = _transport(page)
+    if question:  # each room has a question waiting on the owner: its row's View question is the action under test
+        transport.activities += [activity("rw-ask", **waited("q-main")),
+                                 activity("p-ask", chat_id=42, project_id=PROJECT["id"], **waited("q-proj"))]
+        transport.details.update({"rw-ask": quiz_detail("rw-ask", "q-main", "Which source goes first?", chat_id=1),
+                                  "p-ask": quiz_detail("p-ask", "q-proj", "Which archive goes first?",
+                                                       project_id=PROJECT["id"], chat_id=42)})
     if history_fails:  # registered last, so it answers first: the room's saved history cannot be read
         page.route("**/api/chat/history*", lambda route: route.fulfill(status=503, json={"error": "History unavailable"}))
     if panic_unread:  # a ready host whose list of work Panic stopped is not whole and names none: Main's notice
@@ -454,22 +460,28 @@ def test_escape_outside_press_and_reduced_motion(room_ui, room, reduced):
 @pytest.mark.parametrize("room,notice", [("main", "history"), ("project", "history"), ("main", "panic")])
 def test_a_rooms_notice_leaves_its_open_work_list_reachable(room_ui, room, notice):
     """A room's own notice (its failed history read; Main's unreadable Panic list) waits while its own work list covers
-    the room: the notice leaves and every row's main action under it takes the press (a phone's tap once landed on it)."""
+    the room: the notice leaves as soon as the list opens, even one a pointer holds, and the waiting question's own View
+    question takes the press (a phone's tap once landed on the notice)."""
     words = {"history": "Some saved history could not be loaded.",
              "panic": "Saved work could not be checked for anything waiting to resume."}[notice]
-    page, _transport = _open(room_ui, width=390, height=844, theme="dark", room=room, has_touch=True,
+    page, _transport = _open(room_ui, width=390, height=844, theme="dark", room=room, has_touch=True, question=True,
                              history_fails=notice == "history", panic_unread=notice == "panic")
-    if notice == "history" or room == "main":
-        page.locator("#toast-stack .toast").filter(has_text=words).wait_for()
-    facts = _open_list(page, room)
-    page.wait_for_function("() => !document.querySelector('#toast-stack .toast:not(.is-hiding)')")
-    hits = page.evaluate("""room => {
-        const root = room === 'main' ? document.querySelector('#page-chat') : document.querySelector('#project-panel');
-        return [...root.querySelectorAll('.rw-shade:not(.cx-shade) .rw-row .rw-main')].filter(el => el.getClientRects().length)
-            .map(el => { const b = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(b.left + b.width / 2,
-                b.top + b.height / 2)); });
-    }""", room)
-    assert hits and all(hits), (hits, facts)
+    held = page.locator("#toast-stack .toast").filter(has_text=words)
+    held.wait_for()
+    # Held against its ordinary expiry, as a pointer resting on it holds it: only the cover may take it away.
+    held.evaluate("toast => toast.dispatchEvent(new PointerEvent('pointerenter'))")
+    ask = "rw-ask" if room == "main" else "p-ask"
+    trigger(page, room).click()
+    wait_facts(page, room, lambda f: work_row(f, ask) and work_row(f, ask)["question"], "the waiting question's row")
+    page.wait_for_function("() => !document.querySelector('#toast-stack .toast:not(.is-hiding)')", timeout=1500)
+    settle_unfold(page, room)
+    hit = page.evaluate("""ask => {
+        const button = document.querySelector(`.rw-row[data-id="${ask}"] .rw-pill-question`);
+        const b = button.getBoundingClientRect();
+        return {hit: button.contains(document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)),
+                box: [b.left, b.top, b.width, b.height]};
+    }""", ask)
+    assert hit["hit"], hit
     page.keyboard.press("Escape")
     wait_facts(page, room, lambda f: f["surfaceHidden"], "closed")
     if notice == "history":

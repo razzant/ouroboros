@@ -99,7 +99,7 @@ def room_page(ui, *, width=W, height=H, scheme='dark', panel_width=575, activiti
         chat_id = int(parse_qs(urlparse(route.request.url).query).get('chat_id', ['1'])[0])
         if chat_id == 504:  # a failed read: its note takes the Project's status bar
             return route.fulfill(status=500, json={'error': 'history unavailable'})
-        route.fulfill(json={'messages': HISTORY.get(chat_id, []), 'progress': [], 'has_more': False,
+        route.fulfill(json={'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': HISTORY.get(chat_id, []), 'progress': [], 'has_more': False,
                             'next_cursor': None, 'page_cursor': 'recent',
                             'window': {'complete': True, 'truncated_by': []}})
 

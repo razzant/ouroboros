@@ -263,6 +263,14 @@ def test_work_navigation_clears_persistent_history_error(shell_ui, chat_id, keyb
         page.evaluate("document.body.classList.add('keyboard-open')")
     page.locator(f"{host} .chat-load-older-btn").click()
     page.locator("#toast-stack .toast").wait_for(state="visible")  # the failed read is the page's notice
+    told = page.evaluate("""host => { const toast = document.querySelector('#toast-stack .toast');
+        return {classes: [...toast.classList], role: toast.getAttribute('role'), action: Boolean(toast.querySelector('.toast-action')),
+                words: toast.querySelector('.toast-words').textContent,
+                edge: document.querySelector(host + ' .chat-load-older-btn').textContent,
+                note: document.querySelector(host + ' .chat-load-older-note').textContent}; }""", host)
+    # Its kind's tone and role (a failure: the danger tone, an alert), no action of its own; Retry and the words at the edge.
+    assert "toast-danger" in told["classes"] and told["role"] == "alert" and not told["action"], told
+    assert told["edge"] == "Retry loading messages" and "could not be loaded" in told["note"], told
     page.locator(f"{host} .rw-trigger").click()
     # The room's work sheet covers it: the room's notice leaves rather than lie over the sheet's rows.
     page.wait_for_function("() => !document.querySelector('#toast-stack .toast:not(.is-hiding)')")
@@ -287,23 +295,39 @@ def test_gap_translation_reaches_both_in_feed_copies(shell_ui):
     transport = Transport(page, history={1: reading(14)})
     _gap_history(page, transport)
     translated = "Часть сохранённой истории не загружена. В показанных сообщениях могут быть пропуски."
-    payload = {"language": "ru", "english": False, "entries": {"code:history.gap": {"text": translated}}}
+    failed = "Часть сохранённой истории загрузить не удалось."
+    inexact = "Сохранённое место не удалось восстановить точно."
+    payload = {"language": "ru", "english": False, "entries": {
+        "code:history.gap": {"text": translated},
+        "Some saved history could not be loaded.": {"text": failed},
+        "Saved position could not be restored exactly.": {"text": inexact}}}
     page.route("**/api/ui/i18n*", lambda route: route.fulfill(json=payload))
     page.goto(shell_ui["url"])
     page.wait_for_selector("#page-chat .chat-load-older-note")
     page.wait_for_function("text => document.querySelector('#page-chat .chat-load-older-note').textContent === text",
                            arg=translated, timeout=3000)
-    # Exercise the separate gap copy (the gap beside a failed read's words at the edge) through the real producer.
+    # The real producer, with a failed read and an inexact return at once: the separate gap copy, and both lasting event
+    # sentences at the edge in the interface's language, before and after the notices have gone (they are made in that
+    # language where they are made, as the notices' words are).
     result = page.evaluate("""async () => {
         const {createHistoryControls} = await import('/static/modules/chat_render_batch.js');
         const feed = document.createElement('div'); feed.className = 'chat-messages';
         document.body.append(feed);
-        const controls = createHistoryControls(feed);
+        const told = [];
+        const controls = createHistoryControls(feed, { isVisible: () => true,
+            notify: (text) => { told.push(text); return { dispose() {} }; } });
         controls.render({initialized: true, error: new Error('read failed')}, {gaps: true}, true);
-        const text = feed.querySelector('.chat-history-gap').textContent;
-        controls.destroy(); feed.remove(); return text;
+        const read = () => ({gap: feed.querySelector('.chat-history-gap').textContent,
+                             edge: feed.querySelector('.chat-load-older-note').textContent});
+        const before = read();
+        controls.hideNotice();
+        const after = read();
+        controls.destroy(); feed.remove(); return {before, after, told};
     }""")
-    assert result == translated
+    assert result["before"]["gap"] == translated, result
+    for state in ("before", "after"):
+        assert result[state]["edge"] == f"{failed} {inexact}", result
+    assert result["told"] == [failed, inexact], result
 
 
 @pytest.mark.parametrize("width,theme", [(375, "dark"), (375, "light"), (1100, "dark"), (1100, "light"),

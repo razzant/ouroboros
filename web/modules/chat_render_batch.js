@@ -5,7 +5,7 @@ import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
-import { tr } from './i18n.js';
+import { tr, tx } from './i18n.js';
 import { replaceScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
 import { compareTimelineOrder } from './chat_timeline_order.js';
 
@@ -61,7 +61,7 @@ export function createHistoryControls(messagesDiv, {
     function showNotice() {
         const owed = Object.entries(episodes).filter(([, ep]) => ep.open && !ep.told);
         if (typeof notify !== 'function' || doc.hidden || !(owed.length || extra.some(x => x.owed)) || !isVisible()) return;
-        for (const [kind, ep] of owed) { ep.told = true; ep.notice = notify(ep.words, kind); }
+        for (const [kind, ep] of owed) { ep.told = true; ep.notice = notify(tx(ep.words), kind); }
         extra.forEach(x => x.announce(notify));
     }
     return {
@@ -100,8 +100,8 @@ export function createHistoryControls(messagesDiv, {
             settle(episodes.approximate, Boolean(approximate));
             showNotice();
             // The edge keeps the event's explanation while it is true, beside its Retry.
-            const edgeText = (failed ? [FAILED_NOTICE, approximate && APPROXIMATE_NOTICE]
-                : [approximate && APPROXIMATE_NOTICE, stateText]).filter(Boolean).join(' ');
+            const edgeText = (failed ? [tx(FAILED_NOTICE), approximate && tx(APPROXIMATE_NOTICE)]  // translated where made,
+                : [approximate && tx(APPROXIMATE_NOTICE), stateText]).filter(Boolean).join(' ');  // as the notice's words are
             const separateGap = Boolean(gapText) && !emptyLoading && !edgeText.includes(gapText);
             // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
             // began ends at its older end: ↓ is the way to the present.

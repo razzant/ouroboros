@@ -529,10 +529,13 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
             if (census === 'complete') { unread = false; told.set(''); }
             if (!records.size) {
                 const ready = data.supervisor_ready === true && data.boot?.tasks_ready !== false;
+                const seen = typeof data.boot?.since === 'string' ? data.boot.since : '';
+                // A host that restarted inside this tab is a new run: its own episode, told once.
+                if (unread && seen && run && seen !== run) { unread = false; owed = false; withdraw(); }
                 if (listSaid === 'partial' && ready && !unread) {
                     unread = true;
-                    run = typeof data.boot?.since === 'string' ? data.boot.since : '';
-                    owed = !run || told.get() !== run;
+                    run = seen;
+                    owed = !run || told.get() !== run;  // a reload of this tab keeps the decision taken on this run
                 }
                 if (roomNotice.owed && isVisible()) tell();
                 remove(); onChange(); return;
