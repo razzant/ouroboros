@@ -499,16 +499,29 @@ html[data-layout="docked"] #primary-sidebar {
 :root[data-window-chrome="integrated"][data-layout="stack"] .app-page-header { padding-left: max(12px, var(--window-chrome-clearance)); }
 /* A narrow window's (stack layout's) header row stands on the lights' line too: its 44px controls centred on their
    centre, the row as tall as that needs; a shell without the centre keeps the 56px row centred at 28 as before. */
+/* There the row (the press shield, the window's handle) is never shorter than that header's controls. */
+:root[data-window-chrome="integrated"][data-layout="stack"] {
+    --window-chrome-row: max(var(--shell-icon-size), calc(2 * var(--window-chrome-mid, calc(var(--window-chrome-top) / 2))));
+}
 :root[data-window-chrome="integrated"][data-layout="stack"] :is(.app-page-header, .chat-page-header, .project-panel-bar) {
     min-height: max(var(--shell-icon-size), calc(2 * var(--window-chrome-mid, 28px)));
     padding-block: max(0px, calc(var(--window-chrome-mid, 28px) - var(--shell-icon-size) / 2));
 }
 /* The lights stay on the window's physical left in an RTL page too, over the room's or a page's header there, so that
-   header starts past them; the sidebar's row is clear on the right, and a Project panel beside Main is clear of them
-   unless it fills the content column (a finger's docked Project). */
+   header starts past them; the sidebar's row is clear on the right. A Project panel beside Main pays only what of the
+   clearance its own left edge does not already keep (its width against the content column's: nothing at a wide
+   window, all of it where it reaches the window's edge); a finger's docked Project fills the column. --drag-width
+   does not inherit, so the panel mirrors its width for its bar. */
 :root[data-window-chrome="integrated"][data-layout="docked"][dir="rtl"] :is(.chat-page-header, #content > .page > .app-page-header),
 :root[data-window-chrome="integrated"][data-layout="docked"][data-pointer="coarse"][dir="rtl"] .project-panel-bar {
     padding-left: max(var(--page-header-padding-x), var(--window-chrome-clearance));
+}
+:root[data-window-chrome="integrated"][data-layout="docked"][dir="rtl"] .project-panel {
+    --panel-w: var(--drag-width, var(--project-panel-width));
+}
+:root[data-window-chrome="integrated"][data-layout="docked"]:not([data-pointer="coarse"])[dir="rtl"] .project-panel-bar {
+    padding-left: max(14px, calc(var(--window-chrome-clearance)
+        - max(0px, var(--app-width) - var(--sidebar-effective-width) - var(--panel-w))));
 }
 
 /* Resizable side-section drag handles (v6.33.0). Thin edge strips that resize the sidebar and the Project panel

@@ -283,8 +283,44 @@ def test_a_narrow_window_stands_its_header_on_the_lights_line(subscription_ui):
         return { panic: (r.top + r.bottom) / 2, header: document.querySelector('.chat-page-header').getBoundingClientRect().height }; }"""
     state = page.evaluate(mid)
     assert state["panic"] == pytest.approx(MID + 6, abs=0.6) and state["header"] == pytest.approx(2 * (MID + 6), abs=0.6), state
+    apply(page, top=42, start=58, mid=16)  # 800 pt at 125 %: twice the centre is under the 44px controls
+    assert page.evaluate(mid)["header"] == pytest.approx(44, abs=0.6)
+    gap = page.evaluate("""() => { const h = document.querySelector('.chat-page-header');
+        const a = h.querySelector('.app-page-title-block').getBoundingClientRect(), b = h.querySelector('.app-page-actions').getBoundingClientRect();
+        return (a.right + b.left) / 2; }""")
+    assert page.evaluate("([x, y]) => Boolean(document.elementFromPoint(x, y)?.closest('.chat-page-header'))", [gap, 36])
+    page.mouse.click(gap, 36)  # inside the native bar and the header's row: the window's handle, not the transcript
+    assert drags(page) == ["drag"]
     apply(page)
     assert page.evaluate(mid) == pytest.approx({"panic": 28, "header": 56}, abs=0.6)
+
+
+@pytest.mark.parametrize("width", [1230, 800])
+def test_an_rtl_project_panel_clears_the_lights_only_where_it_reaches_them(subscription_ui, width):
+    """In an RTL page the docked Project panel stands beside Main: at a wide window it keeps its own inset (no gap
+    beside the lights it is far from); where it reaches the window's left edge its Close and Panic start past them."""
+    page = shell_page(subscription_ui, width, 838)
+    page.evaluate("document.documentElement.dir = 'rtl'")
+    if width == 800:  # the owner's stored sidebar: the content column is narrower than the panel, which reaches the edge
+        page.evaluate("document.documentElement.style.setProperty('--sidebar-width', '426px')")
+    apply(page)
+    page.evaluate(OPEN_PANEL)
+    page.wait_for_selector("#project-panel.open:not([hidden]) .chat-panel-statusbar")
+    page.wait_for_function("""() => { const t = getComputedStyle(document.getElementById('project-panel')).transform;
+        return t === 'none' || t === 'matrix(1, 0, 0, 1, 0, 0)'; }""")  # the panel's open transition has ended
+    page.wait_for_timeout(100)
+    panel = box(page, "#project-panel")
+    close, panic = box(page, "#project-panel-close"), box(page, "#project-panel .project-panel-bar [data-chat-command='panic']")
+    facts = page.evaluate("""() => ({ dir: document.documentElement.dir, layout: document.documentElement.dataset.layout,
+        side: document.getElementById('primary-sidebar').getBoundingClientRect().toJSON(),
+        pad: getComputedStyle(document.querySelector('.project-panel-bar')).paddingLeft,
+        bardir: getComputedStyle(document.querySelector('.project-panel-bar')).direction })""")
+    assert clear_of_lights(close) and clear_of_lights(panic), (panel, close, panic, facts)
+    if panel["x"] >= START + 12:  # the panel's own edge already clears the lights: its ordinary 14px inset
+        assert close["x"] - panel["x"] == pytest.approx(14, abs=1), (panel, close, facts)
+    else:
+        assert close["x"] >= START, (panel, close)
+    assert (width == 1230) == (panel["x"] >= START + 12), (panel, box(page, "#primary-sidebar"))
 
 
 ROW = """() => { const b = (s) => document.querySelector(s).getBoundingClientRect();
