@@ -236,7 +236,7 @@ def ws(tmp_path, monkeypatch):
     monkeypatch.setattr(
         edit_ops,
         "_finish_mutation",
-        lambda ctx_, paths, tool, binding=None: "NOT committed.",
+        lambda ctx_, paths, tool, binding=None, facts=None: "NOT committed.",
     )
     return ctx
 
