@@ -7,6 +7,7 @@ import json
 import logging
 import pathlib
 import re
+import secrets
 from functools import partial
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -267,6 +268,11 @@ def validate_task_id(task_id: Any) -> str:
     if not _TASK_ID_RE.fullmatch(text):
         raise ValueError("task_id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
     return text
+
+
+def new_task_id() -> str:
+    """Mint a fresh ordinary task id as 16 lowercase hex digits."""
+    return secrets.token_hex(8)
 
 
 def task_results_dir(drive_root: Any, *, create: bool = True) -> pathlib.Path:

@@ -206,7 +206,9 @@ def enqueue_evolution_task_if_needed() -> None:
     if remaining <= 0 and needs_paid_admission({"metadata": {}}):  # an evolution task opens on Main
         return  # the limit refuses new paid admission; the campaign and its switch stay as they are
     cycle = int(st.get("evolution_cycle") or 0) + 1
-    tid = uuid.uuid4().hex[:8]
+    from ouroboros.task_results import new_task_id
+
+    tid = new_task_id()
     transaction = q.begin_evolution_transaction(tid, cycle=cycle, campaign=campaign)
     if not transaction:
         q.disable_evolution_authority("transaction_attach_failed", campaign_id=str(campaign.get("id") or ""), task_id=tid)
