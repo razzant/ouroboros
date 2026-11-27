@@ -121,9 +121,9 @@ def note_problem_provenance(response: Any, body: Any, error: Any) -> None:
 
 # Exact (engine version, full 40-char build sha) pairs proved to emit ``POST /v2/runs``
 # 409 ``continuation_superseded`` strictly before run/job admission. Authority:
-# ``ouroboros/claudexor_runtime_pin.json`` (6.4.1 / d5a5c399bdc8ad40b95dde3add16b792e27d48d0;
-# 6.4.0 / 87bd5757578754ee68285134adf1c026cfc81768 and 6.3.0 / 0ff3df717c2e807fdbd3a233487e35d81993fdea remain
-# proven historical producers).
+# ``ouroboros/claudexor_runtime_pin.json`` (6.4.2 / 3b8b87982a9362a27d4731f3e411437c0e63041a;
+# 6.4.1 / d5a5c399bdc8ad40b95dde3add16b792e27d48d0, 6.4.0 / 87bd5757578754ee68285134adf1c026cfc81768 and
+# 6.3.0 / 0ff3df717c2e807fdbd3a233487e35d81993fdea remain proven historical producers).
 # No control-plane capability bit certifies arbitrary older, newer, or unhashed builds, so
 # unproven producers stay outside this rule and fall back to unknown/pending custody.
 # Maintenance: when advancing ``claudexor_runtime_pin.json``, verify that ``POST /v2/runs``
@@ -133,6 +133,7 @@ PRE_ADMISSION_CONTINUATION_PRODUCERS: frozenset[Tuple[str, str]] = frozenset({
     ("6.3.0", "0ff3df717c2e807fdbd3a233487e35d81993fdea"),
     ("6.4.0", "87bd5757578754ee68285134adf1c026cfc81768"),
     ("6.4.1", "d5a5c399bdc8ad40b95dde3add16b792e27d48d0"),
+    ("6.4.2", "3b8b87982a9362a27d4731f3e411437c0e63041a"),
 })
 
 
