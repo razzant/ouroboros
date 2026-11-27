@@ -429,11 +429,11 @@ html[data-layout="docked"] #primary-sidebar {
 :root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar {
     --sidebar-top: calc(max(var(--window-chrome-row), var(--nav-item-h)) + var(--space-2));
 }
-:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) > .sidebar-head { padding-top: 0; }
-:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) > .sidebar-head > .nav-projects-header {
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) .sidebar-head { padding-top: 0; }
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) .sidebar-head > .nav-projects-header {
     min-height: var(--window-chrome-row);
 }
-:root[data-window-chrome="integrated"]:not([data-layout="stack"]):not([dir="rtl"]) #primary-sidebar:not([data-bars-crowd]) > .sidebar-head > .nav-projects-header {
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]):not([dir="rtl"]) #primary-sidebar:not([data-bars-crowd]) .sidebar-head > .nav-projects-header {
     padding-left: max(0px, calc(var(--window-chrome-clearance) - var(--nav-rail-w)));
 }
 /* Once the head scrolls away, the scroller itself must still clear the window buttons. */

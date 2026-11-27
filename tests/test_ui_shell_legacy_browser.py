@@ -281,7 +281,13 @@ SIDEBAR_BOX = """() => {
         closeCount: document.querySelectorAll('#nav-drawer-close').length,
         closeFirst: follows(close, main) && follows(close, projects),
         closeIcon: Boolean(close?.querySelector('svg')),
-        wrapper: document.querySelectorAll('#primary-sidebar > .sidebar-scroll').length};
+        wrapper: document.querySelectorAll('#primary-sidebar > .sidebar-scroll').length,
+        // Find a project and + lead the one head, then Main: the same order for reading and Tab in every shape.
+        head: [...(document.querySelector('#primary-sidebar .sidebar-head')?.children || [])].map((el) => el.classList[0]).slice(0, 2),
+        heads: document.querySelectorAll('#primary-sidebar .sidebar-head').length,
+        findFirst: follows(document.querySelector('#primary-sidebar .nav-find-input'), main),
+        headTop: (() => { const f = document.querySelector('#primary-sidebar .nav-projects-find')?.getBoundingClientRect(),
+            m = main.getBoundingClientRect(); return f && f.bottom <= m.top; })()};
 }"""
 
 
@@ -332,6 +338,8 @@ def test_a_retained_document_gets_the_same_rail_as_a_fresh_one(gate_ui, width, h
         assert rail["utilities"] == 0 and rail["leftovers"] == 0 and rail["wrapper"] == (shape in ("v7.7.0", "wrapped")), feet
         assert rail["close"] and rail["closeCount"] == 1 and rail["closeFirst"] and rail["closeIcon"], (
             "one bound #nav-drawer-close caps the rail first in DOM order in every shape", feet)
+        assert rail["heads"] == 1 and rail["head"] == ["nav-projects-header", "nav-row"], ("the find row leads the head", shape, feet)
+        assert rail["findFirst"] and rail["headTop"], ("the field reads and stands before Main", shape, feet)
         if width < 720:
             assert rail.get("closed") is True, ("clicking #nav-drawer-close closes the drawer", shape, feet)
     for shape in ("previous", "v7.12.0", "v7.7.0", "wrapped"):

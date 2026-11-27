@@ -137,6 +137,15 @@ test('Find a project and + are the head\'s first row on every surface, an older 
     leadHeadWithFind(older);  // a second call keeps the one order
     assert.deepEqual(kids(older.querySelector('.sidebar-head')), ['nav-projects-header', 'nav-row nav-row-main']);
     assert.equal(leadHeadWithFind(railDocument('<div class="sidebar-head"></div>')), null);
+    // v7.7.0: no head, Main alone in the old wrapper: the head is made around that Main node, the row leads it.
+    const v770 = railDocument('<div class="sidebar-scroll"><button class="nav-row nav-row-main"></button>'
+        + '<section class="nav-section nav-projects"><div class="nav-projects-header"></div></section></div>');
+    const main = v770.querySelector('.nav-row-main');
+    leadHeadWithFind(v770);
+    const made = v770.querySelector('.sidebar-head');
+    assert.deepEqual(kids(v770.querySelector('.sidebar-scroll')), ['sidebar-head', 'nav-section nav-projects']);
+    assert.deepEqual(kids(made), ['nav-projects-header', 'nav-row nav-row-main']);
+    assert.equal(made.children[1], main, 'the original Main node, not a copy');
 });
 
 test('mountNavRail: rail and × lead in DOM order, retained HTML reuses its ×, v7.7.0 synthesizes one', () => {

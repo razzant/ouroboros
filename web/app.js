@@ -130,10 +130,10 @@ primarySidebar?.querySelector('.sidebar-head')?.insertAdjacentHTML('beforeend', 
 // foot or a version row gets it composed by mountNavRail (pages.js) — the retained version row moves into the
 // column's foot after the Projects, v7.7.0's replaced Utilities group leaves: one set stands.
 if (primarySidebar?.querySelector('.nav-rail, .sidebar-foot, #nav-version')) mountNavRail(primarySidebar);
+const navProjectsHeader = leadHeadWithFind(primarySidebar);  // Find a project and + lead the head (pages.js)
 measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head
 // A short window scrolls the whole column: rows that wait past a pinned bar fade under it (style.css), as the list's do.
 if (primarySidebar) bindScrollFade(primarySidebar);
-const navProjectsHeader = leadHeadWithFind(primarySidebar);
 if (navProjectsHeader) navProjectsHeader.innerHTML = renderProjectsHeader();
 const navDrawerBackdrop = document.getElementById('nav-drawer-backdrop');
 const projectPanelBackdrop = document.getElementById('project-panel-backdrop');
