@@ -224,6 +224,13 @@ class FakeNode {
     replaceChildren(...nodes) { for (const child of [...this.children]) child.remove(); this.append(...nodes); }
     insertBefore(node, before) { node.remove(); node.parentNode = this; this.children.splice(this.children.indexOf(before), 0, node); }
     remove() { if (!this.parentNode) return; this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1); this.parentNode = null; }
+    cloneNode(deep = false) {
+        const copy = new FakeNode(this.tagName.toLowerCase(), this.ownerDocument);
+        Object.assign(copy, { className: this.className, ownText: this.ownText, dataset: { ...this.dataset },
+            attributes: { ...this.attributes } });
+        if (deep) for (const child of this.children) copy.append(child.cloneNode(true));
+        return copy;
+    }
     querySelector(selector) {
         const name = selector.replace(/^\./, '');
         for (const child of this.children) {
@@ -704,6 +711,29 @@ test('the real admission opening echo folds into one call card live and after re
     assert.equal(feed.children.filter(n => n.className === 'call-card').length, 2);
     assert.equal(ordinary.classList.contains('call-folded'), false);
     reloaded.destroy();
+});
+
+test('a refusal that arrived while this page held the call folds into its one line when the call ends', () => {
+    const { feed, cards, card, row, setLive } = feedFixture({ live: () => 'c7' });
+    row('system', 'The owner has just opened this call and can hear you now. Engine: Grok · xAI, grok-voice-3.0; no screen vision.',
+        { clientMessageId: 'call:c7:open', systemType: 'call_open', rowAddress: 'row:1@t#7' }, 1000);
+    const sentence = 'The call could not start on Grok · xAI: this room needs at least 94,000 tokens of input.';
+    const notice = row('system', sentence, { taskId: 't7' }, 2000);
+    const details = new FakeNode('details', feed.ownerDocument);
+    details.className = 'ui-disclosure';
+    details.textContent = 'Stage: before the engine was reached.';
+    const quote = new FakeNode('div', feed.ownerDocument);
+    quote.className = 'chat-quote';
+    quote.dataset.address = 'row:1@t#7';
+    notice.append(details, quote);
+    cards.scan();
+    assert.equal(card().dataset.callCard, 'live');  // the call is still this page's
+    setLive(() => '');
+    cards.finish();  // the call socket's closed state
+    assert.equal(card().dataset.callCard, 'silent');
+    assert.equal(card().querySelector('.call-card-title').textContent, sentence);
+    const copied = card().querySelector('.call-card-details').querySelector('.ui-disclosure');
+    assert.ok(copied && copied !== details && copied.textContent === details.textContent);
 });
 
 test('obsolete time caps have no ending words or action; a deliberate goodbye names Ouroboros', () => {

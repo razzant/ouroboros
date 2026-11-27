@@ -310,9 +310,12 @@ export function createCallCards({ feed, ws = null, doc = feed?.ownerDocument, li
         dropCaption(key(call, item));
     }
 
-    /** The call ended: what is still streaming is as complete as it will get, and its card folds. */
+    /** The call ended: what is still streaming is as complete as it will get, and its card folds. A notice that
+     * arrived while this page held the call folds the card into that one line (the rescan copies its Details);
+     * cards that hold only captions are not visited by the scan, so every card is painted after it. */
     function finish() {
         for (const entry of captions.values()) entry.node.dataset.callCaption = 'final';
+        scan();
         for (const card of cards.values()) paint(card);
     }
 
