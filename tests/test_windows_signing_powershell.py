@@ -41,7 +41,8 @@ def run_ps(tmp_path, body, **overrides):
 def test_powershell_scripts_and_workflow_parse(tmp_path):
     scripts = [ROOT / "build_windows.ps1", *[ROOT / "scripts" / name for name in (
         "download_inno_setup.ps1", "pack_windows_archive.ps1", "pack_windows_setup.ps1",
-        "sign_windows_release.ps1", "smoke_windows_setup.ps1", "verify_windows_signature.ps1")]]
+        "sign_windows_release.ps1", "smoke_windows_setup.ps1",
+        "verify_inno_setup.ps1", "verify_windows_signature.ps1")]]
     jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
     for job_id in ("windows-sign", "windows-proof"):
         for index, step in enumerate(jobs[job_id]["steps"]):
@@ -421,6 +422,207 @@ def test_pack_windows_setup_validates_payload_and_output_guards(tmp_path):
 & "$env:TEST_REPO/scripts/pack_windows_setup.ps1" -PayloadRoot $env:TEST_PAYLOAD -OutputDir $env:TEST_OUT
 ''', TEST_PAYLOAD=str(payload), TEST_OUT=str(tmp_path / "fresh"))
     assert res.returncode != 0 and "not a collected Ouroboros payload" in res.stderr
+
+
+INNO_HASH_MOCK = r'''
+function Get-FileHash {
+    param([string]$LiteralPath, [string]$Algorithm)
+    $Pins = $env:TEST_PINS | ConvertFrom-Json
+    if ($LiteralPath -and (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
+        $Text = [IO.File]::ReadAllText($LiteralPath)
+        if ($Pins.PSObject.Properties.Name -contains $Text) {
+            return [pscustomobject]@{ Hash = $Pins.$Text.ToUpperInvariant() }
+        }
+    }
+    Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm
+}
+'''
+
+
+def _inno_pins():
+    pin = json.loads((ROOT / "packaging" / "windows" / "inno_setup_pin.json").read_text(encoding="utf-8"))
+    return pin, json.dumps({
+        "pinned-installer": pin["sha256"],
+        "pinned-iscc": pin["compilerSha256"]["ISCC.exe"],
+        "pinned-iscmplr": pin["compilerSha256"]["ISCmplr.dll"],
+    })
+
+
+def test_download_inno_setup_verifies_pinned_pair_without_executing(tmp_path):
+    pin, pins_json = _inno_pins()
+    body = INNO_HASH_MOCK + r'''
+$TestRoot = (Get-Location).Path
+function Invoke-WebRequest {
+    param($Uri, $OutFile)
+    Add-Content -LiteralPath (Join-Path $TestRoot 'network-calls') -Value $Uri
+    [IO.File]::WriteAllText($OutFile, $env:TEST_INSTALLER_BODY)
+}
+function Get-Item {
+    param([string]$LiteralPath)
+    if ($LiteralPath -and $LiteralPath.EndsWith($env:TEST_INSTALLER)) {
+        return [pscustomobject]@{ Length = [int64]$env:TEST_SIZE }
+    }
+    Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath
+}
+function Start-Process {
+    param($FilePath, [switch]$Wait, [switch]$PassThru, [string[]]$ArgumentList)
+    Add-Content -LiteralPath (Join-Path $TestRoot 'installer-calls') -Value ($ArgumentList -join ' ')
+    $LogArg = @($ArgumentList | Where-Object { $_ -like '/LOG=*' })[0]
+    if ($LogArg) { Set-Content -LiteralPath $LogArg.Substring(5).Trim('"') -Value 'SYNTHETIC_INNO_INSTALL_LOG' }
+    $DirPath = (@($ArgumentList | Where-Object { $_ -like '/DIR=*' })[0]).Substring(5).Trim('"')
+    New-Item -ItemType Directory -Force -Path $DirPath | Out-Null
+    if ($env:TEST_ISCC_BODY) { [IO.File]::WriteAllText((Join-Path $DirPath 'ISCC.exe'), $env:TEST_ISCC_BODY) }
+    if ($env:TEST_DLL_BODY) { [IO.File]::WriteAllText((Join-Path $DirPath 'ISCmplr.dll'), $env:TEST_DLL_BODY) }
+    [pscustomobject]@{ ExitCode = 0 }
+}
+$Returned = @(& "$env:TEST_REPO/scripts/download_inno_setup.ps1" -Destination $env:TEST_DEST)
+ConvertTo-Json -InputObject $Returned | Set-Content -LiteralPath (Join-Path $TestRoot 'returned.json')
+'''
+    env = dict(
+        RUNNER_TEMP=str(tmp_path),
+        TEST_PINS=pins_json,
+        TEST_INSTALLER=pin["installer"],
+        TEST_SIZE=str(pin["sizeBytes"]),
+        TEST_INSTALLER_BODY="pinned-installer",
+        TEST_ISCC_BODY="pinned-iscc",
+        TEST_DLL_BODY="pinned-iscmplr",
+    )
+
+    # Fresh staging verifies outer installer and staged (ISCC.exe, ISCmplr.dll) pair without executing ISCC.
+    dest = tmp_path / "inno-fresh"
+    res = run_ps(tmp_path, body, TEST_DEST=str(dest), **env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert json.loads((tmp_path / "returned.json").read_text()) == [str(dest / "ISCC.exe")]
+    assert not list(tmp_path.glob("is-*"))
+
+    # Cached pinned pair is reused without network or installer calls.
+    for marker in ("network-calls", "installer-calls", "returned.json"):
+        (tmp_path / marker).unlink()
+    res = run_ps(tmp_path, body, TEST_DEST=str(dest), **env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not (tmp_path / "network-calls").exists() and not (tmp_path / "installer-calls").exists()
+    assert json.loads((tmp_path / "returned.json").read_text()) == [str(dest / "ISCC.exe")]
+
+    # Cached mismatching companion DLL or CLI is refused with its actual SHA-256 and no network call.
+    for filename, bad_bytes, good_bytes in (
+        ("ISCmplr.dll", b"wrong-dll", b"pinned-iscmplr"),
+        ("ISCC.exe", b"wrong-iscc", b"pinned-iscc"),
+    ):
+        (dest / filename).write_bytes(bad_bytes)
+        res = run_ps(tmp_path, body, TEST_DEST=str(dest), **env)
+        assert res.returncode != 0 and filename in res.stderr, res.stdout + res.stderr
+        assert hashlib.sha256(bad_bytes).hexdigest() in res.stderr
+        assert not (tmp_path / "network-calls").exists()
+        (dest / filename).write_bytes(good_bytes)
+
+    # Outer installer digest mismatch stops before Start-Process; post-install pair mismatch prints install.log.
+    res = run_ps(tmp_path, body, TEST_DEST=str(tmp_path / "bad-outer"),
+                 **{**env, "TEST_INSTALLER_BODY": "wrong-installer"})
+    assert res.returncode != 0 and "not the pinned" in res.stderr, res.stdout + res.stderr
+    assert not (tmp_path / "installer-calls").exists()
+    res = run_ps(tmp_path, body, TEST_DEST=str(tmp_path / "bad-staged-dll"),
+                 **{**env, "TEST_DLL_BODY": "wrong-dll"})
+    assert res.returncode != 0 and hashlib.sha256(b"wrong-dll").hexdigest() in res.stderr, res.stdout + res.stderr
+    assert "SYNTHETIC_INNO_INSTALL_LOG" in res.stdout and not list(tmp_path.glob("is-*"))
+
+
+def test_pack_windows_setup_verifies_pinned_pair_before_packing(tmp_path):
+    _, pins_json = _inno_pins()
+    payload = tmp_path / "Ouroboros"
+    (payload / "_internal").mkdir(parents=True)
+    (payload / "bin").mkdir()
+    (payload / "Ouroboros.exe").write_bytes(b"launcher")
+    (payload / "_internal" / "VERSION").write_text("7.6.1-rc.1\n", encoding="utf-8")
+    (payload / "bin" / "ouroboros.cmd").write_bytes(b"@echo off\r\n")
+    empty_env = tmp_path / "empty-env"
+    empty_env.mkdir()
+
+    def stage_pair(name, iscc_bytes, dll_bytes):
+        folder = tmp_path / f"inno-{name}"
+        folder.mkdir()
+        iscc = folder / "ISCC.exe"
+        iscc.write_bytes(iscc_bytes)
+        if dll_bytes is not None:
+            (folder / "ISCmplr.dll").write_bytes(dll_bytes)
+        return iscc
+
+    good = stage_pair("good", b"pinned-iscc", b"pinned-iscmplr")
+    wrong_cli = stage_pair("wrong-cli", b"wrong-iscc", b"pinned-iscmplr")
+    wrong_dll = stage_pair("wrong-dll", b"pinned-iscc", b"wrong-dll")
+    missing_dll = stage_pair("missing-dll", b"pinned-iscc", None)
+
+    # Only the verified compiler path is aliased for the final compile step; unverified candidates stay inert.
+    mock_pack = INNO_HASH_MOCK + r'''
+$TestRoot = (Get-Location).Path
+function Invoke-MockIscc {
+    Add-Content -LiteralPath (Join-Path $TestRoot 'iscc-calls') -Value (ConvertTo-Json -InputObject @($args) -Compress)
+    $OutArg = @($args | Where-Object { $_ -like '/O*' })[0].Substring(2)
+    $FileArg = @($args | Where-Object { $_ -like '/F*' })[0].Substring(2)
+    [IO.File]::WriteAllText((Join-Path $OutArg "$FileArg.exe"), 'mock-compiled-setup')
+    $global:LASTEXITCODE = 0
+}
+Set-Alias -Name (Resolve-Path -LiteralPath $env:TEST_GOOD_ISCC).ProviderPath -Value Invoke-MockIscc
+'''
+    env = {
+        "TEST_PINS": pins_json,
+        "TEST_PAYLOAD": str(payload),
+        "TEST_GOOD_ISCC": str(good),
+        "TEST_WRONG_CLI": str(wrong_cli),
+        "TEST_WRONG_DLL": str(wrong_dll),
+        "TEST_MISSING_DLL": str(missing_dll),
+        "LOCALAPPDATA": str(empty_env),
+        "ProgramFiles": str(empty_env),
+        "ProgramFiles(x86)": str(empty_env),
+    }
+
+    # Explicit -Compiler refuses mismatching CLI, mismatching companion DLL, and missing companion before packing.
+    for key, expected in (
+        ("TEST_WRONG_CLI", hashlib.sha256(b"wrong-iscc").hexdigest()),
+        ("TEST_WRONG_DLL", hashlib.sha256(b"wrong-dll").hexdigest()),
+        ("TEST_MISSING_DLL", "companion ISCmplr.dll is missing"),
+    ):
+        out = tmp_path / f"out-{key}"
+        res = run_ps(tmp_path, mock_pack + f'''
+& "$env:TEST_REPO/scripts/pack_windows_setup.ps1" -PayloadRoot $env:TEST_PAYLOAD -OutputDir $env:TEST_OUT -Compiler $env:{key}
+''', TEST_OUT=str(out), **env)
+        assert res.returncode != 0 and expected in res.stderr, res.stdout + res.stderr
+        assert not list(out.glob("*.exe")) and not (tmp_path / "iscc-calls").exists()
+
+    # Explicit -Compiler accepts the pinned pair and invokes ISCC once for packing.
+    out_good = tmp_path / "out-good"
+    res = run_ps(tmp_path, mock_pack + r'''
+& "$env:TEST_REPO/scripts/pack_windows_setup.ps1" -PayloadRoot $env:TEST_PAYLOAD -OutputDir $env:TEST_OUT -Compiler $env:TEST_GOOD_ISCC
+''', TEST_OUT=str(out_good), **env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert (out_good / "Ouroboros-Setup-7.6.1-rc.1-windows-x64.exe").read_bytes() == b"mock-compiled-setup"
+    calls = _lines(tmp_path / "iscc-calls")
+    assert len(calls) == 1 and json.loads(calls[0])[0] == "/Qp"
+    (tmp_path / "iscc-calls").unlink()
+
+    # Discovery skips unverified candidates without executing them, packs with the pinned pair, and reports rejections if none match.
+    discovery_mock = mock_pack + r'''
+function Get-Command {
+    param($Name, [switch]$All, $ErrorAction)
+    if ($Name -eq 'ISCC.exe') {
+        $Items = @($env:TEST_CANDIDATES | ConvertFrom-Json)
+        return @(foreach ($Item in $Items) { [pscustomobject]@{ Source = $Item } })
+    }
+    Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
+}
+& "$env:TEST_REPO/scripts/pack_windows_setup.ps1" -PayloadRoot $env:TEST_PAYLOAD -OutputDir $env:TEST_OUT
+'''
+    out_auto = tmp_path / "out-auto"
+    res = run_ps(tmp_path, discovery_mock, TEST_OUT=str(out_auto),
+                 TEST_CANDIDATES=json.dumps([str(p) for p in (wrong_cli, wrong_dll, missing_dll, good)]), **env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert (out_auto / "Ouroboros-Setup-7.6.1-rc.1-windows-x64.exe").read_bytes() == b"mock-compiled-setup"
+    assert len(_lines(tmp_path / "iscc-calls")) == 1
+    (tmp_path / "iscc-calls").unlink()
+
+    out_none = tmp_path / "out-none"
+    res = run_ps(tmp_path, discovery_mock, TEST_OUT=str(out_none), TEST_CANDIDATES=json.dumps([str(wrong_dll)]), **env)
+    assert res.returncode != 0 and hashlib.sha256(b"wrong-dll").hexdigest() in res.stderr, res.stdout + res.stderr
+    assert not list(out_none.glob("*.exe")) and not (tmp_path / "iscc-calls").exists()
 
 
 def test_pack_windows_setup_refuses_hidden_entries_its_zip_would_keep(tmp_path):

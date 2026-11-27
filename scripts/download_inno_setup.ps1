@@ -10,14 +10,14 @@ $Pin = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoo
     ConvertFrom-Json
 $Target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination).TrimEnd('\', '/')
 $Iscc = Join-Path $Target 'ISCC.exe'
+$Verify = Join-Path $PSScriptRoot 'verify_inno_setup.ps1'
 
-function Get-CompilerVersion([string]$Path) {
-    $Info = (Get-Item -LiteralPath $Path).VersionInfo
-    "$($Info.FileMajorPart).$($Info.FileMinorPart).$($Info.FileBuildPart)"
-}
 if (Test-Path -LiteralPath $Iscc -PathType Leaf) {
-    $Found = Get-CompilerVersion $Iscc
-    if ($Found -ne $Pin.version) { throw "$Target already holds Inno Setup $Found, not the pinned $($Pin.version)" }
+    try {
+        $null = & $Verify -Compiler $Iscc
+    } catch {
+        throw "$Target already holds an unverified Inno Setup compiler, not the pinned $($Pin.version): $($_.Exception.Message)"
+    }
     Write-Host "Inno Setup $($Pin.version) is already staged in $Target"
     return $Iscc
 }
@@ -43,11 +43,14 @@ try {
         if (Test-Path -LiteralPath $Log) { Get-Content -LiteralPath $Log | Write-Host }
         throw "The Inno Setup $($Pin.version) installer exited $($Process.ExitCode)"
     }
+    try {
+        $null = & $Verify -Compiler $Iscc
+    } catch {
+        if (Test-Path -LiteralPath $Log) { Get-Content -LiteralPath $Log | Write-Host }
+        throw "The Inno Setup $($Pin.version) installer did not stage the pinned compiler in $($Target): $($_.Exception.Message)"
+    }
 } finally {
     Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
-}
-if (-not (Test-Path -LiteralPath $Iscc -PathType Leaf) -or (Get-CompilerVersion $Iscc) -ne $Pin.version) {
-    throw "The Inno Setup installer did not leave ISCC.exe $($Pin.version) in $Target"
 }
 Write-Host "Staged Inno Setup $($Pin.version) in $Target"
 return $Iscc

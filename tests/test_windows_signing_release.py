@@ -491,13 +491,33 @@ def test_inno_setup_pin_downloader_and_packer_enforce_digest_and_payload_contrac
     assert pin["url"].startswith("https://github.com/jrsoftware/issrc/releases/download/")
     assert isinstance(pin["sizeBytes"], int) and pin["sizeBytes"] > 0
     assert re.fullmatch(r"[0-9a-f]{64}", pin["sha256"])
+    compiler_hashes = pin["compilerSha256"]
+    assert set(compiler_hashes) == {"ISCC.exe", "ISCmplr.dll"}
+    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in compiler_hashes.values())
+
+    verifier = source("scripts/verify_inno_setup.ps1")
+    assert "packaging\\windows\\inno_setup_pin.json" in verifier
+    assert "Get-FileHash" in verifier
+    assert "ISCC.exe" in verifier and "ISCmplr.dll" in verifier
+    assert ".VersionInfo" not in verifier and "--version" not in verifier
+    assert "Start-Process" not in verifier and "& $" not in verifier
 
     downloader = source("scripts/download_inno_setup.ps1")
     assert downloader.index("Invoke-WebRequest") < downloader.index("$Size -ne $Pin.sizeBytes -or $Digest -ne $Pin.sha256")
     assert downloader.index("$Size -ne $Pin.sizeBytes -or $Digest -ne $Pin.sha256") < downloader.index("Start-Process")
     assert "'/CURRENTUSER', '/PORTABLE=1'" in downloader
+    # Upstream ISCC.exe and ISCmplr.dll leave 0.0.0.0 in PE VersionInfo; identity is verified
+    # without executing the compiler, on cache hits and before cleanup drops install.log.
+    assert ".VersionInfo" not in downloader and "--version" not in downloader
+    assert "verify_inno_setup.ps1" in downloader
+    assert downloader.index("& $Verify -Compiler $Iscc") < downloader.index("Invoke-WebRequest")
+    assert downloader.index("Start-Process") < downloader.rindex("& $Verify -Compiler $Iscc") < downloader.index("} finally {")
 
     packer = source("scripts/pack_windows_setup.ps1")
+    assert ".VersionInfo" not in packer and "--version" not in packer
+    assert "verify_inno_setup.ps1" in packer
+    assert "& $Verify -Compiler $Compiler" in packer
+    assert "& $Verify -Compiler $Resolved" in packer
     assert "Ouroboros-Setup-$Version-windows-x64" in packer
     assert "_internal\\VERSION" in packer
     assert "@('Ouroboros.exe', '_internal', 'bin')" in packer

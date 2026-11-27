@@ -64,30 +64,38 @@ if (Test-Path -LiteralPath $Output) {
     New-Item -ItemType Directory -Path $Output | Out-Null
 }
 
-function Get-CompilerVersion([string]$Path) {
-    $Info = (Get-Item -LiteralPath $Path).VersionInfo
-    "$($Info.FileMajorPart).$($Info.FileMinorPart).$($Info.FileBuildPart)"
-}
+$Verify = Join-Path $PSScriptRoot 'verify_inno_setup.ps1'
 if ($Compiler) {
-    if (-not (Test-Path -LiteralPath $Compiler -PathType Leaf)) { throw "Inno Setup compiler not found: $Compiler" }
-    $Iscc = (Resolve-Path -LiteralPath $Compiler).Path
-    $Found = Get-CompilerVersion $Iscc
-    if ($Found -ne $Pin.version) { throw "$Iscc is Inno Setup $Found, not the pinned $($Pin.version)" }
+    $Iscc = & $Verify -Compiler $Compiler
 } else {
     $Candidates = @(Get-Command ISCC.exe -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source }) + @(
         "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
         "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
         "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe")
-    $Iscc = $Candidates | Where-Object {
-        $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) -and (Get-CompilerVersion $_) -eq $Pin.version
-    } | Select-Object -First 1
+    $Seen = @{}
+    $Rejected = @()
+    $Iscc = $null
+    foreach ($Candidate in $Candidates) {
+        if (-not $Candidate -or -not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { continue }
+        $Resolved = (Resolve-Path -LiteralPath $Candidate).ProviderPath
+        if ($Seen.ContainsKey($Resolved)) { continue }
+        $Seen[$Resolved] = $true
+        try {
+            $Iscc = & $Verify -Compiler $Resolved
+            break
+        } catch {
+            $Rejected += $_.Exception.Message
+        }
+    }
     if (-not $Iscc) {
-        throw ("Inno Setup $($Pin.version) (ISCC.exe) was not found. Stage the pinned compiler with " +
+        $Detail = if ($Rejected.Count) { " (rejected: $($Rejected -join '; '))" } else { '' }
+        throw ("Inno Setup $($Pin.version) (ISCC.exe) was not found$Detail. Stage the pinned compiler with " +
                "scripts\download_inno_setup.ps1 -Destination <folder>, then pass -Compiler <folder>\ISCC.exe")
     }
 }
 
 Write-Host "Compiling $Name.exe from $Payload with Inno Setup $($Pin.version) ($Iscc)"
+$global:LASTEXITCODE = 0
 & $Iscc /Qp "/DAppVersion=$Version" "/DAppNumericVersion=$NumericVersion" "/DPayloadRoot=$Payload" `
     "/O$Output" "/F$Name" (Join-Path $Repo 'packaging\windows\ouroboros.iss')
 if ($LASTEXITCODE -ne 0) { throw "The Inno Setup compiler exited $LASTEXITCODE" }
