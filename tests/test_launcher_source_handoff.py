@@ -239,7 +239,7 @@ def hand_over(native_guard, tmp_path, monkeypatch):
             **({"windowed": windowed} if windowed is not None else {}))
         return ctx
 
-    run.calls, run.threads = calls, threads
+    run.calls, run.threads, run.tmp_path = calls, threads, tmp_path
     return run
 
 
@@ -261,6 +261,33 @@ def test_windows_starts_the_successor_quoted_after_the_lock_then_leaves(hand_ove
     assert flags == (0 if console_clients else NO_WINDOW), "hidden only without a console to inherit"
     assert not flags & (NEW_GROUP | BREAKAWAY | DETACHED | NEW_CONSOLE), "never a group, breakaway or console change"
     assert kwargs["close_fds"] is True and kwargs["env"][MARK] == "1" and kwargs["env"]["PATH"] == os.environ["PATH"]
+
+
+@pytest.mark.parametrize(("windows", "argv", "owned"), [
+    (True, ["--launch-intent", "owner"], True), (True, ["--launch-intent", "owner"], False),
+    (True, ["--no-ui"], True), (False, ["--launch-intent", "owner"], True)])
+def test_a_setup_owned_windows_copy_hosts_the_checkout_launcher_under_its_identity(hand_over, monkeypatch, windows,
+                                                                                  argv, owned):
+    """The installed copy's packaged leaf starts the checkout's launcher, so an older one that sets no app ID or icon
+    still runs as the Start shortcut's app; a portable copy, a window-less host and other systems start it directly."""
+    from ouroboros import launcher_windows_runtime
+
+    asked = []
+
+    def host(seed):
+        asked.append(seed)
+        return seed / "ouroboros" / "launcher_windows_runtime.py" if owned else None
+
+    monkeypatch.setattr(launcher_windows_runtime, "windows_source_host", host)
+    with pytest.raises(Exited if windows else Handover):
+        hand_over(argv, windows=windows, frozen=True)
+    hosted, seed = windows and "--no-ui" not in argv, context(hand_over.tmp_path).bundle_dir
+    assert asked == ([seed] if hosted else [])
+    started = next(call for call in hand_over.calls if not isinstance(call, str) and call[0] in ("popen", "exec"))
+    args = started[1] if started[0] == "popen" else started[2]
+    launcher = args.index(next(arg for arg in args if str(arg).endswith(os.path.join("repo", "launcher.py"))))
+    assert args[1:launcher] == ([str(seed / "ouroboros" / "launcher_windows_runtime.py")] if hosted and owned else [])
+    assert args[-2:] == ["--seed-bundle", str(seed)], "the seed still rides along"
 
 
 def test_unavailable_parent_handle_keeps_compatible_source_handoff_but_discloses_gap(hand_over, monkeypatch):

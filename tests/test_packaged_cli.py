@@ -570,6 +570,43 @@ def test_installer_replaces_its_own_cmd_whose_app_is_gone(tmp_path):
         plan_windows_install(root, target_dir=target_dir)
 
 
+def test_windows_install_cmd_expands_to_the_shipped_sibling_wrapper(tmp_path, monkeypatch):
+    """The install cmd records ``OUROBOROS_PACKAGED_CLI_WRAPPER=%~dp0ouroboros.cmd``:
+    both wrappers ship beside each other in ``bin\\`` (build_windows.ps1) while the
+    cmd's ROOT resolves into ``_internal``, so the pin must expand from the
+    installer's own folder to the sibling the bundle accepts. The stale ``%ROOT%\\bin``
+    pin named a file the shipped layout never carries, so the default discovery
+    alone cannot install it."""
+    import re
+
+    from ouroboros.packaged_cli import PackagedCLIError
+    from ouroboros.packaged_cli_install import _is_expected_wrapper_source, plan_windows_install
+
+    app = tmp_path / "Ouroboros"
+    root = _make_bundle_root(tmp_path, root=app / "_internal")  # the ROOT the cmd resolves
+    bin_dir = app / "bin"  # where build_windows.ps1 ships both wrappers
+    bin_dir.mkdir()
+    (bin_dir / "install-ouroboros-cli.cmd").write_text("@echo off\r\n", encoding="utf-8")
+    wrapper = bin_dir / "ouroboros.cmd"
+    wrapper.write_text("@echo off\r\n", encoding="utf-8")
+
+    cmd = pathlib.Path("packaging/cli/install-ouroboros-cli.cmd").read_text(encoding="utf-8")
+    pin = re.search(r'set "OUROBOROS_PACKAGED_CLI_WRAPPER=(.*?ouroboros\.cmd)"', cmd)
+    assert pin, "install cmd lost its OUROBOROS_PACKAGED_CLI_WRAPPER pin"
+    recorded = pin.group(1).replace("%~dp0", str(bin_dir) + os.sep)
+    assert recorded.lower() == str(wrapper).lower()
+
+    assert _is_expected_wrapper_source(wrapper, root, windows=True)
+    monkeypatch.setenv("OUROBOROS_PACKAGED_CLI_WRAPPER", recorded)
+    assert plan_windows_install(root).source == wrapper
+
+    monkeypatch.delenv("OUROBOROS_PACKAGED_CLI_WRAPPER", raising=False)
+    stale = root / "bin" / "ouroboros.cmd"  # the pre-fix %ROOT%\bin pin
+    assert not stale.exists()
+    with pytest.raises(PackagedCLIError, match="packaged wrapper is missing"):
+        plan_windows_install(root)
+
+
 def test_installer_under_an_appimage_points_at_its_cli_instead_of_linking_into_the_mount(tmp_path, monkeypatch):
     """Only this app's own AppImage: its runtime exports APPIMAGE/APPDIR to every descendant, so a tar.gz or deb
     install run from another AppImage app's terminal inherits that app's pair and installs as without it."""
