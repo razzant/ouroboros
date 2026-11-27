@@ -586,6 +586,12 @@ def test_a_refused_calls_window_line_credits_the_catalogue_only_for_its_own_numb
     equal = window_line(capacity_notice("Voice", facts, stage="session_candidate", need=170_000, measured=True,
                                         reserve=10_000, window=133_554))
     assert equal.count("133,554") == 1 and "catalogue declaration" in equal and "2026-10-20" in equal
+    # The window is the catalogue's declared count; what is estimated on a provider route is the room's need (Opus N2).
+    need_line = lambda said: next(line for line in said["notice"]["details"].splitlines() if line.startswith("Input"))
+    provider = capacity_notice("Voice", facts, stage="session_candidate", need=170_000, measured=True, reserve=10_000,
+                               window=133_554)
+    assert "estimate" not in window_line(provider) and "provider's units" in window_line(provider)
+    assert "estimate" in need_line(provider)
 
 
 def test_an_unmeasured_call_refusal_lists_its_parts_and_does_not_call_them_the_fixed_part_alone():

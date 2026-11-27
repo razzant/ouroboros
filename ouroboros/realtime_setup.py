@@ -148,8 +148,9 @@ def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fi
         return facts.get(name) if isinstance(facts, dict) else getattr(facts, name, None)
 
     takes, declared = max(0, window - reserve), fact("conversation_window_tokens")
-    unit = ("estimated tokens (characters / 4)" if fact("basis") == "estimator"
-            else "tokens, an estimate in the provider's units")
+    estimator = fact("basis") == "estimator"  # a provider route declares its window; the room's need is estimated
+    unit, needs = (("estimated tokens (characters / 4)", "Input this room needs") if estimator
+                   else ("tokens in the provider's units", "Input this room needs (an estimate in those units)"))
     credit = f"source: {fact('source') or 'not stated'}; observed: {fact('observed') or 'not stated'}"
     lines = [_STAGES.get(stage, f"Stage: {stage}."), *([f"Model: {model}."] if model else []),
              f"Window: {window:,} {unit}; {credit}." if declared in (None, window) else
@@ -157,9 +158,9 @@ def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fi
              f"({credit}).",
              f"Reserve for the reply and the call's working room: {reserve:,} tokens.",
              f"The selected model takes {takes:,} tokens of input on this route today: the window minus the reserve.",
-             (f"Input this room needs: {need:,} tokens" + (f" (fixed part {fixed:,}, memory {need - fixed:,})."
+             (f"{needs}: {need:,} tokens" + (f" (fixed part {fixed:,}, memory {need - fixed:,})."
               if fixed is not None else ", measured whole with the call's instructions and tools.")) if measured else
-             f"Input this room needs: at least {need:,} tokens (the parts below); memory beyond them was not measured."]
+             f"{needs}: at least {need:,} tokens (the parts below); memory beyond them was not measured."]
     if parts:
         lines.append("Parts, largest first (estimated tokens): " + "; ".join(f"{name} {size:,}" for name, size in parts) + ".")
     if extra:
