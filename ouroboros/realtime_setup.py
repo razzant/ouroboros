@@ -121,7 +121,94 @@ def text_input_estimate(messages, tools):
     return estimate_context_prompt_tokens(rows, tools)
 
 
+# The refusal's internal message; the person and the mind read ``capacity_notice``.
 CONTEXT_CAPACITY_DETAIL = "This room's context and working reserve do not fit this engine's window."
+CALL_ENDED = "Call ended. Its transcript is in this room."
+CALL_ENDED_UNSTARTED = "Call ended before it started."  # the owner's End during preparation: there is no transcript
+_NEEDS = {True: "The call could not start on {engine}: this room needs {need} tokens of input, and the selected model takes "
+                "{takes} on this route today.",
+          False: "The call could not start on {engine}: this room needs at least {need} tokens of input, and the selected "
+                 "model takes {takes} on this route today."}
+_STAGES = {"task_preparation": "Stage: before the engine was reached, while this room's context was prepared for the call.",
+           "session_candidate": "Stage: the call's own instructions and tools were added to the room's context, before the "
+                                "session opened."}
+
+
+def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fixed=None, parts=(), extra="", model=""):
+    """The one System line a call that could not start for lack of room leaves, with its step and Details.
+
+    ``engine`` is the engine's name as the call's opening row says it; ``model`` the model id, named in Details.
+
+    ``need`` is the input this room needs (a lower bound when ``measured`` is false: memory was not priced); what the
+    engine takes is the window minus the reserve, in the same units. ``facts`` are the route's ``RouteFacts`` (or
+    their dict). Returns the ``host_notice_row`` the terminal seam turns into the room's row."""
+    from ouroboros.host_notice import STEPS, phrase
+
+    def fact(name):
+        return facts.get(name) if isinstance(facts, dict) else getattr(facts, name, None)
+
+    takes, declared = max(0, window - reserve), fact("conversation_window_tokens")
+    estimator = fact("basis") == "estimator"  # a provider route declares its window; the room's need is estimated
+    unit, needs = (("estimated tokens (characters / 4)", "Input this room needs") if estimator
+                   else ("tokens in the provider's units", "Input this room needs (an estimate in those units)"))
+    credit = f"source: {fact('source') or 'not stated'}; observed: {fact('observed') or 'not stated'}"
+    lines = [_STAGES.get(stage, f"Stage: {stage}."), *([f"Model: {model}."] if model else []),
+             f"Window: {window:,} {unit}; {credit}." if declared in (None, window) else
+             f"Window: {window:,} {unit}, the window in effect on this route; the catalogue declares {declared:,} "
+             f"({credit}).",
+             f"Reserve for the reply and the call's working room: {reserve:,} tokens.",
+             f"The selected model takes {takes:,} tokens of input on this route today: the window minus the reserve.",
+             (f"{needs}: {need:,} tokens" + (f" (fixed part {fixed:,}, memory {need - fixed:,})."
+              if fixed is not None else ", measured whole with the call's instructions and tools.")) if measured else
+             f"{needs}: at least {need:,} tokens (the parts below); memory beyond them was not measured."]
+    if parts:
+        lines.append("Parts, largest first (estimated tokens): " + "; ".join(f"{name} {size:,}" for name, size in parts) + ".")
+    if extra:
+        lines.append(extra)
+    text, said = phrase("context_capacity", _NEEDS[bool(measured)], step="open_calls", details="\n".join(lines),
+                        engine=engine, need=f"{need:,}", takes=f"{takes:,}")
+    return {"text": text, "record": f"{text} {STEPS['open_calls']}", **said}
+
+
+def preparation_refusal_notice(turn, unfit):
+    """Path 1: the ordinary build refused (``MinimumViewUnfit``) before any call host existed."""
+    measured = getattr(unfit, "memory_measured", True)
+    book = getattr(unfit, "required_book_tokens", 0)
+    model = getattr(turn, "native_model", "") or turn.spec.model
+    return capacity_notice(getattr(turn, "engine", "") or model, turn.catalog_model.facts, model=model,
+        stage="task_preparation", need=unfit.estimated_input_tokens, measured=measured,
+        reserve=unfit.response_reserve_tokens, window=unfit.window_tokens,
+        fixed=unfit.fixed_input_tokens if measured else None, parts=tuple(getattr(unfit, "parts", ()) or ()),
+        extra=f"This task directly requires the development handbook: {book:,} tokens of the input." if book else "")
+
+
+def session_refusal_notice(host):
+    """Path 2: the session candidate refused before the first connection opened; ``None`` once a session opened."""
+    refusal = host.trace.get("fit_refusal") or {}
+    measurement = (refusal.get("fit") or {}).get("measurement") or {}
+    if host._session_opened or measurement.get("capacity_total_tokens") is None:
+        return None
+    return capacity_notice(getattr(host.turn, "engine", "") or host.turn.native_model, refusal.get("route_facts") or {},
+        model=host.turn.native_model, stage="session_candidate",
+        need=measurement["estimated_input_tokens"], measured=True, reserve=measurement["response_reserve_tokens"],
+        window=measurement["capacity_total_tokens"], extra=str(refusal.get("detail") or ""))
+
+
+def call_ending(reason, status, detail="", notice=None, *, opened=True):
+    """A call's terminal words and usage: one home for the ending every refusal and End share.
+
+    ``opened`` is false when no session ever opened (the End came during preparation)."""
+    if notice is not None:
+        words = notice["record"]
+    elif reason == "not_connected":  # nobody joined: one short notice, no transcript to point at
+        words = f"The call did not start: {detail.rstrip('.')}."
+    elif reason == "finished" and not opened:
+        words = CALL_ENDED_UNSTARTED
+    else:
+        words = (CALL_ENDED if status in ("ok", "cancelled") or not detail
+                 else f"Call ended: {detail.rstrip('.')}. Its transcript is in this room.")
+    usage = {"terminal_origin": "host_notice", "execution_status": status, "reason_code": reason}
+    return words, ({**usage, "host_notice_row": notice} if notice is not None else usage)
 
 
 def _renewal_window(record, facts):

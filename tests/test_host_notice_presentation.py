@@ -398,7 +398,10 @@ try {
     const painted = live.map((row) => {
         const view = summarizeChatLiveEvent(row);
         const toast = showTaskIncidentToast(row);
-        const shown = toast && { text: toast.textContent, children: toast.children.length };
+        // The words keep their own box beside the close every toast has (owner 26.11, A): inert text, no markup.
+        const words = toast?.querySelector('.toast-words');
+        const shown = toast && { text: words?.textContent, children: words?.children.length,
+            close: Boolean(toast.querySelector('.toast-dismiss')) };
         toast?.dispose();
         return { full: view.fullHeadline, promote: view.promote, toast: shown,
             line: buildTimelineItemHtml({ ...view, lineKey: 'k' }, { expandedLineKeys: new Set(['k']), groupId: 'g' }) };
@@ -525,7 +528,8 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
     assert run.returncode == 0, run.stdout + run.stderr
     painted = json.loads(run.stdout)
     assert [view["full"] for view in painted["live"]] == expected == painted["replay"]
-    assert [view["toast"] for view in painted["live"]] == [{"text": text, "children": 0} for text in expected[:3]] + [None]
+    assert [view["toast"] for view in painted["live"]] == [
+        {"text": text, "children": 0, "close": True} for text in expected[:3]] + [None]
     assert not any(view["promote"] for view in painted["live"]), "a host note never claims the card title"
     assert all("<img" not in view["line"] for view in painted["live"])
     assert "Field &lt;img src=x onerror=alert(1)&gt; is not allowed" in painted["live"][2]["line"]

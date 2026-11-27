@@ -278,8 +278,10 @@ def _finish_mutation(
     changed_paths: List[str],
     source_tool: str,
     binding: ResolvedResourceBinding | None = None,
+    facts: Dict[str, Any] | None = None,
 ) -> str:
-    """Advisory invalidation + the standard commit/patch-artifact footer."""
+    """Advisory invalidation + the standard commit/patch-artifact footer. Into the receipt's ``facts`` go the
+    ``versions`` an ``active_workspace`` write's own capture retained (#4314), never another root's in that folder."""
     from ouroboros.review import diff_pulse
     from ouroboros.tools.commit_gate import _invalidate_advisory
 
@@ -296,10 +298,13 @@ def _finish_mutation(
     if not targets_system:
         from ouroboros.workspace_file_outputs import capture_known_workspace_outputs
 
+        captured: Dict[str, str] = {}
         capture_note = capture_known_workspace_outputs(
             ctx, binding.base_path if binding is not None else active_repo_dir_for(ctx),
-            changed_paths, source_tool=source_tool,
+            changed_paths, source_tool=source_tool, versions=captured,
         )
+        if captured and facts is not None and (binding is None or binding.root == "active_workspace"):
+            facts["versions"] = {**(facts.get("versions") or {}), **captured}
         if capture_note:
             return capture_note
         footer = "Files are on disk but NOT committed."
@@ -319,6 +324,21 @@ def _finish_mutation(
     return footer
 
 
+def shelf_facts(binding: ResolvedResourceBinding | None, contents: Dict[str, str],
+                created: List[str] = (), deleted: List[str] = ()) -> Dict[str, Any]:
+    """Receipt extras for multi-file edits (#4314): ``logical_root`` on non-workspace roots, created targets and exact
+    content versions on the result shelf (``artifact_store``), and ``"deleted"`` for an explicit deletion on any root."""
+    del_versions = {rel: "deleted" for rel in deleted}
+    if binding is None or binding.root == "active_workspace":
+        return {"versions": del_versions} if del_versions else {}
+    if binding.root != "artifact_store":
+        return {"logical_root": binding.root, **({"versions": del_versions} if del_versions else {})}
+    from ouroboros.tools.git_repo_edit import version_witness
+
+    return {"logical_root": binding.root, "created": list(created),
+            "versions": {**{rel: version_witness(text) for rel, text in contents.items()}, **del_versions}}
+
+
 def _partial_write_failure(
     ctx: ToolContext,
     changed_paths: List[str],
@@ -329,8 +349,9 @@ def _partial_write_failure(
     *,
     pending: List[str] = (),
     recovery: List[str] = (),
+    facts: Dict[str, Any] | None = None,
 ) -> str:
-    """Report an I/O failure that landed AFTER some files were already written.
+    """Report an I/O failure that landed AFTER some files were already written (``facts``: ``shelf_facts``).
 
     Validation is atomic — nothing is written until every file and hunk resolves
     — but the write phase itself is a sequence of per-file writes, so a disk
@@ -352,19 +373,22 @@ def _partial_write_failure(
             constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
             if constraint and constraint.has_selected_skill:
                 advance_repair_expected_hash(binding.state_drive_root, constraint, task_id=ctx.task_id)
-        footer = _finish_mutation(ctx, changed_paths, source_tool, binding)
+        meta_facts = dict(facts or {})
+        footer = _finish_mutation(ctx, changed_paths, source_tool, binding, meta_facts)
         # NOT the tools' own *_ERROR prefix: those read as validation refusals
         # (a counted/context miss) and are classified as policy denials. This is a
         # genuine partial mutation from an I/O fault and must stay an execution
         # failure, so it carries its own prefix and lands in the generic `error`.
         from ouroboros.tools.git_repo_edit import _with_path_facts
 
+        if binding is not None and binding.root != "active_workspace" and "logical_root" not in meta_facts:
+            meta_facts["logical_root"] = binding.root
         return _with_path_facts(ctx, source_tool, (
             f"⚠️ EDIT_OPS_PARTIAL_WRITE_FAILED ({tag}): {detail}\n"
             f"PARTIALLY APPLIED — these files WERE written: {', '.join(changed_paths)}.{skipped}\n"
             "Do not repeat this call: read the written files and continue from their current content."
             f"{copies}\n" + footer
-        ), binding.base_path if binding is not None else active_repo_dir_for(ctx), changed_paths)
+        ), binding.base_path if binding is not None else active_repo_dir_for(ctx), changed_paths, (), **meta_facts)
     return f"⚠️ {tag}: {detail}\nNothing was written.{skipped}{copies}"
 
 
@@ -1034,6 +1058,7 @@ def _apply_patch(
     errors: List[str] = []
     seen: Dict[str, str] = {}  # rel path -> pending content (chained updates)
     deleted: set[str] = set()
+    created: List[str] = []  # Add File targets: no entry stood there
     sites: Dict[str, List[int]] = {}
     bindings: Dict[str, ResolvedResourceBinding] = {}
     supplied_bindings = (
@@ -1075,6 +1100,7 @@ def _apply_patch(
                 content += "\n"
             planned_writes.append((target, rel, content))
             seen[rel] = content
+            created.append(rel)
             sites[rel] = [0]
             summaries.append(f"✅ Added {rel} ({len(op.add_lines)} lines)")
             continue
@@ -1185,9 +1211,12 @@ def _apply_patch(
     registered_outputs: List[str] = []
     pending = [*final_content, *(rel for _target, rel in planned_deletes)]
 
+    facts = shelf_facts(mutation_binding, {rel: content for rel, (_target, content) in final_content.items()},
+                        created, [rel for _target, rel in planned_deletes])
+
     def partial(detail: str, *, landed: bool = False) -> str:
         return _partial_write_failure(ctx, changed_paths, "apply_patch", "APPLY_PATCH_ERROR", detail,
-                                      mutation_binding, recovery=recovery,
+                                      mutation_binding, recovery=recovery, facts=facts,
                                       pending=pending[len(changed_paths) + (0 if landed else 1):])
 
     for rel, (target, content) in final_content.items():
@@ -1203,6 +1232,8 @@ def _apply_patch(
                 record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
                 if not record:
                     raise OSError("user file recovery copy was not registered")
+                if record.get("sha256"):
+                    facts.setdefault("versions", {})[rel] = f"sha256:{record['sha256']}"
                 registered_outputs.append(f"ARTIFACT_OUTPUTS: registered user file -> artifact_store:{record['name']}")
             except Exception as exc:
                 return partial(f"{rel} WAS written but its user artifact registration failed: {exc}", landed=True)
@@ -1216,7 +1247,7 @@ def _apply_patch(
     if repair_binding and constraint and constraint.has_selected_skill:
         advance_repair_expected_hash(repair_binding.state_drive_root, constraint, task_id=ctx.task_id)
 
-    footer = _finish_mutation(ctx, changed_paths, "apply_patch", mutation_binding)
+    footer = _finish_mutation(ctx, changed_paths, "apply_patch", mutation_binding, facts)
     body = "\n".join([*summaries, *syntax_notes])
     if all_notes:
         body += "\nNotes:\n" + "\n".join("  " + n for n in all_notes)
@@ -1232,7 +1263,7 @@ def _apply_patch(
     if unchanged:
         body += "\nUnchanged, not rewritten (already held exactly this content): " + ", ".join(unchanged)
     base = mutation_binding.base_path if mutation_binding is not None else active_repo_dir_for(ctx)
-    return _with_path_facts(ctx, "apply_patch", f"{body}\n{footer}", base, changed_paths, unchanged)
+    return _with_path_facts(ctx, "apply_patch", f"{body}\n{footer}", base, changed_paths, unchanged, **facts)
 
 
 # ---------------------------------------------------------------------------
@@ -1401,6 +1432,7 @@ def _edit_batch(
     changed: List[str] = []
     registered_outputs: List[str] = []
     order = list(contents)
+    facts = shelf_facts(mutation_binding, contents)
     for rel, text in contents.items():
         try:
             _land_edit_bytes(targets[rel], text)
@@ -1408,7 +1440,7 @@ def _edit_batch(
             return _partial_write_failure(
                 ctx, changed, source_tool, "EDIT_BATCH_ERROR",
                 f"write failed for {rel}: {e}",
-                mutation_binding, pending=order[len(changed) + 1:],
+                mutation_binding, pending=order[len(changed) + 1:], facts=facts,
             )
         changed.append(rel)
         if bindings[rel].root == "user_files":
@@ -1418,15 +1450,17 @@ def _edit_batch(
                 record = copy_file_to_task_artifacts(ctx, targets[rel], kind="user_file")
                 if not record:
                     raise OSError("user file recovery copy was not registered")
+                if record.get("sha256"):
+                    facts.setdefault("versions", {})[rel] = f"sha256:{record['sha256']}"
                 registered_outputs.append(f"ARTIFACT_OUTPUTS: registered user file -> artifact_store:{record['name']}")
             except Exception as exc:
                 return _partial_write_failure(ctx, changed, source_tool, "EDIT_BATCH_ERROR",
                                               f"{rel} WAS written but its user artifact registration failed: {exc}",
-                                              mutation_binding, pending=order[len(changed):])
+                                              mutation_binding, pending=order[len(changed):], facts=facts)
     if repair_binding and constraint and constraint.has_selected_skill:
         advance_repair_expected_hash(repair_binding.state_drive_root, constraint, task_id=ctx.task_id,
                                      local_edit=local_edit)
-    footer = _finish_mutation(ctx, changed, source_tool, mutation_binding)
+    footer = _finish_mutation(ctx, changed, source_tool, mutation_binding, facts)
     previews = "\n".join(f"Context after {rel}:\n{numbered_edit_preview(contents[rel], sites[rel])}"
                          for rel in changed)
     if registered_outputs:
@@ -1436,7 +1470,8 @@ def _edit_batch(
         + "\n".join("  " + a for a in applied)
         + f"\n{previews}\n{footer}"
         + ("\nUnchanged, not rewritten (already held exactly this content): " + ", ".join(unchanged) if unchanged else "")
-    ), mutation_binding.base_path if mutation_binding is not None else active_repo_dir_for(ctx), changed, unchanged), notes)
+    ), mutation_binding.base_path if mutation_binding is not None else active_repo_dir_for(ctx), changed, unchanged,
+        **facts), notes)
 
 
 # ---------------------------------------------------------------------------

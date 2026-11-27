@@ -122,14 +122,16 @@ class HubFixture:
         ]
 
 
-def author_repo(root: pathlib.Path, name: str, version: str = "2.0.0") -> tuple[pathlib.Path, str, str]:
-    """An author repository holding one skill at its root; returns (bare path, commit, digest)."""
+def author_repo(root: pathlib.Path, name: str, version: str = "2.0.0", *,
+                extra: str = "") -> tuple[pathlib.Path, str, str]:
+    """An author repository holding one skill at its root (``extra``: more manifest lines); returns (bare path,
+    commit, digest)."""
     from ouroboros.skill_source_catalog import tree_release_digest
 
     work = root / f"{name}-author"
     work.mkdir(parents=True)
     git("init", "-q", cwd=work)
-    (work / "SKILL.md").write_text(skill_md(name, version), encoding="utf-8")
+    (work / "SKILL.md").write_text(skill_md(name, version, extra=extra), encoding="utf-8")
     commit = commit_all(work, "author release")
     bare = root / f"{name}-author.git"
     publish(work, bare)

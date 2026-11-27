@@ -14,13 +14,15 @@ gestures are the native qualification's.
 import json
 import os
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import pytest
 
+from ouroboros import dialogue_store
 from ouroboros.launcher_window_chrome import DOCUMENT_SCRIPT, HANDLER, INTEGRATED
+from tests._dialogue import confirm_first_use
+from tests._room_browser_shared import serve_chat_history
 from tests._shared import answer_projects
-from tests.test_subscription_setup_browser import capture
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, capture
 from tests.test_subscription_setup_browser import subscription_ui as _subscription_ui
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
@@ -99,8 +101,8 @@ OPEN_PANEL = """() => window.dispatchEvent(new CustomEvent('ouro:open-project', 
     detail: { project: { id: 'window-chrome', name: 'A project' } } }))"""
 
 
-def serve_room(page):
-    answer = {"id": "window-chrome", "name": "A project", "chat_id": 101, "lifecycle": "active"}
+def serve_room(page, room=None):
+    answer = room or {"id": "window-chrome", "name": "A project", "chat_id": 101, "lifecycle": "active"}
     page.route("**/api/projects?id=*", lambda route: answer_projects(route, [answer]))
 
 
@@ -125,31 +127,27 @@ def drags(page):
     return [m["type"] for m in page.evaluate("window.__shellMessages || []") if m["type"] in ("drag", "double-click")]
 
 
-def seed_history(root, rows=40, chat_id=1):
-    """Ouroboros rows that each carry a link (and, like every row, a reply button): more than the column holds."""
-    (root / "logs").mkdir(parents=True, exist_ok=True)
-    (root / "logs" / "chat.jsonl").write_text("".join(json.dumps({
-        "ts": f"2026-10-17T09:00:{index:02d}Z", "chat_id": chat_id, "direction": "out",
-        "text": f"Note {index}: [the delivered report {index}](https://example.com/report-{index}) and a few words after it.",
-    }) + "\n" for index in range(rows)), encoding="utf-8")
+def seed_history(root, rows=40, *, project_id="", project_name="A project"):
+    """Ouroboros rows in the SQLite dialogue store over a confirmed registry, each carrying a link (and reply button).
 
+    Main confirms first use (empty ``projects.json``) and writes to chat 1; a Project registers its room via
+    ``projects_registry.create_project`` so Main and the Project keep distinct lenses on the real history endpoint.
+    """
+    if project_id:
+        from ouroboros.projects_registry import create_project
 
-def serve_history(page, root):
-    """Main's history from the real endpoint over ``root``; Playwright runs its routes in its own loop."""
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-
-    from ouroboros.gateway.history import make_chat_history_endpoint
-
-    client = TestClient(Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(root))]))
-
-    def answer(route):
-        url = urlsplit(route.request.url)
-        result = client.get(f"{url.path}?{url.query}")
-        route.fulfill(status=result.status_code, content_type="application/json", body=result.content)
-
-    page.route("**/api/chat/history**", answer)
+        project = create_project(root, project_id, name=project_name)
+        chat_id = project["chat_id"]
+    else:
+        confirm_first_use(root)
+        project = None
+        chat_id = 1
+    for index in range(rows):
+        dialogue_store.append(root, "chat", {
+            "ts": f"2026-10-17T09:00:{index:02d}Z", "chat_id": chat_id, "direction": "out",
+            "text": f"Note {index}: [the delivered report {index}](https://example.com/report-{index}) and a few words after it.",
+        })
+    return project
 
 
 GUTTER = 6  # the global ::-webkit-scrollbar width: the band leaves the feed its scrollbar
@@ -512,7 +510,7 @@ def test_band_presses_over_a_scrolled_transcript_are_the_title_bars(request, mon
     (full screen, the ordinary bar) the header is as in a browser again."""
     monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", engine)
     ui = request.getfixturevalue("subscription_ui")
-    seed_history(tmp_path, chat_id=101 if room == "project" else 1)
+    project = seed_history(tmp_path, project_id="window-chrome" if room == "project" else "")
     feed = "#project-panel .chat-messages" if room == "project" else "#chat-messages"
     header = ".project-panel-bar" if room == "project" else ".chat-page-header"
 
@@ -525,8 +523,8 @@ def test_band_presses_over_a_scrolled_transcript_are_the_title_bars(request, mon
 
     name = f"window-chrome-{width}-{room}-{engine}"
     page = ui["new_page"](viewport={"width": width, "height": 722})
-    serve_history(page, tmp_path)
-    serve_room(page)
+    serve_chat_history(page, tmp_path, scope=PREVIEW_SCOPE)
+    serve_room(page, project)
     page.add_init_script(PORT)
     page.add_init_script(DOCUMENT_SCRIPT)
     page.goto(ui["url"])

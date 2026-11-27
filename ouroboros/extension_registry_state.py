@@ -184,6 +184,9 @@ class _PluginAPIConfig:
     # ("" -> the loader's negotiation default for grandfathered payloads).
     plugin_api_generation: str = ""
     loaded_skill: Any = None
+    # A passive catalog/discovery read shows the token but never claims the bot for the connector's reader; only a
+    # read that feeds a running child (which will poll) claims. The owner's own bot is never claimed either way.
+    claim_bot_on_read: bool = True
 
 
 # Lock-guarded registries; per-surface maps keep unload proportional to one extension.
@@ -346,6 +349,20 @@ def live_contribution_projection() -> List[Dict[str, Any]]:
             entry for name, bundle in sorted(_extensions.items())
             if name not in _unloading for entry in bundle.contributions
         ])
+
+
+def published_widget_titles() -> Dict[str, tuple[str, str, List[str]]]:
+    """``{skill: (skill_dir, revision, titles)}``, read under one lock: the headers of the widget tabs each
+    publication this process holds registered, with the resolved folder and revision it loaded them from (maybe
+    older than the folder's bytes while a call holds it). A name unloading or holding no tab is absent; a caller
+    binds the titles to a folder (and a release) itself, never to the name alone."""
+    with _lock:
+        out: Dict[str, tuple[str, str, List[str]]] = {}
+        for name, bundle in _extensions.items():
+            titles = [str((_ui_tabs.get(key) or {}).get("title") or "").strip() for key in bundle.ui_tabs]
+            if name not in _unloading and bundle.skill_dir and any(titles):
+                out[name] = (str(bundle.skill_dir), str(bundle.content_hash or ""), [t for t in titles if t])
+        return out
 
 
 def published_skill_contributions(skill_name: str, revision: str, skill_dir: pathlib.Path) -> Optional[List[Dict[str, Any]]]:

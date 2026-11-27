@@ -45,6 +45,7 @@ from .lib.telegram_origin import origin_label
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
 from .lib.telegram_outbox import outbox_for
+from .lib import telegram_group_wiring as group_wiring
 from .lib.telegram_share import make_prepare_share
 from .lib.telegram_typing import TypingCue, host_reply_preparation
 from .lib.telegram_poll_binding import (
@@ -546,7 +547,8 @@ async def _edit_panel(api, client, chat_id: int, message_id: int, text: str, key
 
 async def _validate_bot(api, client, command_mode: str, lang: str, generation: int | None = None) -> None:
     """Validate the token (getMe) and finish bridge startup bookkeeping; ready names the exact binding proved."""
-    await client.call("getMe")
+    group_wiring.claim_before_contact(client)  # one local reader per bot: none if the connector holds it
+    me = await client.call("getMe")
     # Menu discovery follows command mode; owner Panic has its own immediate door.
     try:
         await client.call("setMyCommands", data={"commands": json.dumps(_bot_commands(command_mode, lang))})
@@ -560,6 +562,7 @@ async def _validate_bot(api, client, command_mode: str, lang: str, generation: i
         if not binding.current(generation):
             raise TelegramBindingChanged(getattr(client, "accepted", 0))
         binding.mark_validated(generation)
+        group_wiring.note_verified(api, generation, client.bot_id, me)  # the bot a group consent may name
     _save_bridge_status(api, "ready", bot=client.bot_id, generation=generation)
     api.log("info", f"Telegram poller started (command_mode={command_mode}, lang={lang})")
 
@@ -575,6 +578,12 @@ async def _start_poller(api):
         try:
             await _validate_bot(api, client, command_mode, lang, generation)
             validated = True
+        except group_wiring.TelegramBotInUse:
+            # The connector reads this bot here: the bridge does not contact Telegram with it. Record why (not a
+            # network deferral); the polling loop re-checks after its back-off, and only a restart frees the bot.
+            validated = False
+            _save_bridge_status(api, "degraded", "telegram_bot_in_use", bot=client.bot_id, generation=generation)
+            api.log("warning", "Telegram bot is read by the Telegram Bot connector here; this bridge waits.")
         except Exception as exc:
             if not is_transient_telegram_error(exc):
                 raise
@@ -777,6 +786,7 @@ async def _poller(api) -> None:
         except (TelegramBindingChanged, TelegramTokenMissing):
             continue
     client, generation, server, cursor, pinned_chat, max_updates, command_mode, lang, validated = started
+    feed = group_wiring.feed(api)
 
     retry_delay = TELEGRAM_RETRY_INITIAL_SEC
     degraded_cause = ""
@@ -795,6 +805,7 @@ async def _poller(api) -> None:
                 # own oldest update, while a rotated token of the same bot keeps its position.
                 validated = validated and not token_changed and server is not None and saved[0] == server[0]
                 (client, generation), server = _bridge_client(api, server=saved), saved
+                feed.accepted_poll = None
                 cursor.follow(saved[0], bot_id(client.token))
                 if token_changed:
                     _save_bridge_status(api, "connecting", "telegram_token_changed", bot=client.bot_id, generation=generation)
@@ -806,10 +817,9 @@ async def _poller(api) -> None:
                 revalidating = True
                 await _validate_bot(api, client, command_mode, lang, generation)  # it records ready
                 revalidating, validated, degraded = False, True, ""
-            updates = await client.get_updates(cursor.offset)
+            updates, period = await group_wiring.get_updates(feed, client, cursor.offset)  # the batch's group consent
             if not binding.current(generation):
-                # Answered for the previous token: neither confirmed nor handled, so the same bot's
-                # rotated token receives these updates again and another bot never sees them.
+                # A previous token's answer stays unconfirmed for the same bot's next poll.
                 continue
             if degraded_cause:
                 api.log("info", f"Telegram poller recovered after {degraded_cause}; polling resumed.")
@@ -820,11 +830,11 @@ async def _poller(api) -> None:
             retry_delay = TELEGRAM_RETRY_INITIAL_SEC
             if updates:
                 local_settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
-
             deferred, lang = await handle_poll_batch(
                 api, client, updates, cursor, binding, generation, pinned_chat, max_updates, command_mode, lang,
                 authorize=_authorized_owner, is_panic=_panic_update, on_message=_handle_owner_message,
-                on_callback=_handle_poll_callback,
+                on_callback=_handle_poll_callback, group_period=period,
+                on_group=group_wiring.on_group(api, feed, client, period, cursor=cursor),
             )
             await asyncio.sleep(_NOT_ACCEPTED_RETRY_SEC if deferred else 0.1)
         except (TelegramBindingChanged, TelegramTokenMissing):
@@ -1020,7 +1030,7 @@ async def _handle_owner_message(
 
 
 def _make_poller(api):
-    return lambda: _poller(api)
+    return lambda: group_wiring.while_polling(api, _poller(api))  # the group feed is reachable only while polling
 
 
 def _make_outbound(api, cue: TypingCue | None = None):
@@ -1467,6 +1477,7 @@ def register(api):
     # GET hydrates the declarative form with what is stored; POST saves it.
     api.register_route("settings/save", handler=_make_settings_save(api), methods=("GET", "POST"))
     api.register_route("miniapp/status", handler=_make_status(api), methods=("POST",))
+    group_wiring.install(api, _bridge_client)  # your own bot in groups: route group_feed
     # Share… in the Mini App: the bridge's own client prepares the owner's message for Telegram's chat picker.
     api.register_route("miniapp/prepare-share", handler=make_prepare_share(api, _bridge_client), methods=("POST",))
     register_connection(api)  # Connection's status and its kept-copies form

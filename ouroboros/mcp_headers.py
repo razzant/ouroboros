@@ -23,7 +23,7 @@ sends it under an unchanged name keeps the saved value.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping
 
 from ouroboros.secret_masking import CONFIGURED_SECRET_PLACEHOLDER
 
@@ -183,6 +183,16 @@ def _origin_text(origin: tuple) -> str:
     return f"{scheme}://{shown}" + ("" if port == {"http": 80, "https": 443}.get(scheme) else f":{port}")
 
 
+def reads_trust(cfg: Any) -> bool:
+    """Whether a server's connections and its sign-in verify TLS with the owner's Extra certificate bundle: an
+    HTTP/SSE server at an ``https`` address. A plain ``http`` address (a loopback server, say) never reads the file;
+    an HTTPS redirect from it keeps httpx's own trust. The scheme is read as the row's address was admitted
+    (``mcp_client._validate_url``): a host that later fails to connect never fails this question."""
+    import urllib.parse
+
+    return cfg.transport in ("streamable_http", "sse") and urllib.parse.urlparse(str(cfg.url)).scheme == "https"
+
+
 class _CredentialOriginGuard:
     """One connection's HTTP client factory: saved credentials stay on the configured origin.
 
@@ -197,17 +207,36 @@ class _CredentialOriginGuard:
     stored sign-in bearer (``mcp_oauth``) is attached only on the configured
     origin and is ``Authorization``, which the HTTP client drops when a redirect
     leaves it. The SDK factory keeps its timeouts and the transport keeps the
-    client's lifetime.
+    client's lifetime. ``trust`` is httpx's own trust plus the owner's Extra
+    certificate bundle (``net_transport.extra_ca_context``), read once per
+    connection where ``reads_trust``: without it the SDK factory runs unchanged;
+    with it the factory's own construction gains only that ``verify`` context
+    (certificate and hostname checks stay on). A file that cannot serve refuses
+    the connection before any request.
     """
 
     def __init__(self, cfg: Any) -> None:  # an MCPServerConfig
-        self.cfg = cfg
-        self.refusal: Optional[MCPRedirectRefused] = None
+        from ouroboros.net_transport import ExtraCaBundleError, extra_ca_context
+
+        self.cfg, self.refusal = cfg, None
+        try:
+            self.trust = extra_ca_context() if reads_trust(cfg) else None
+        except ExtraCaBundleError as refused:
+            refused.mcp_unsent_joined = True  # refused before any transport exists: a proven no-send
+            raise
 
     def client(self, headers: Any = None, timeout: Any = None, auth: Any = None) -> Any:
-        from mcp.shared._httpx_utils import create_mcp_http_client  # the SDK's default factory
+        from mcp.shared import _httpx_utils as sdk  # the SDK's default factory
 
-        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        if self.trust is None:
+            client = sdk.create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        else:  # the factory takes no ``verify``: its construction (mcp 1.30), plus the trust context
+            import httpx
+
+            kwargs: dict = {"timeout": httpx.Timeout(sdk.MCP_DEFAULT_TIMEOUT, read=sdk.MCP_DEFAULT_SSE_READ_TIMEOUT)
+                            if timeout is None else timeout, "verify": self.trust}
+            kwargs.update({key: value for key, value in (("headers", headers), ("auth", auth)) if value is not None})
+            client = httpx.AsyncClient(**kwargs)
         if self.cfg.carries_credentials():
             expected = _origin(self.cfg.url)
 

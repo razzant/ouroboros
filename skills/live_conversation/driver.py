@@ -586,25 +586,46 @@ class _Call:
         task = self.preparing
         if task is None or not task.done() or not task.cancelled() and task.exception() is None:
             return
-        self.preparing = None
         try:
             await task
         except RealtimeSetupError as exc:
-            if exc.code == 'prepared_stale':
-                return  # the existing sequential fallback can now take the quiet boundary
             if exc.code != 'context_capacity':
+                self.preparing = None
+                if exc.code == 'prepared_stale':
+                    return  # the existing sequential fallback can now take the quiet boundary
                 raise  # credentials, quota and policy keep their terminal contract
-            revision = getattr(exc, 'source_revision', None)
-        except (OSError, ConnectionClosed) as exc:
+            revision, rejected = getattr(exc, 'source_revision', None), getattr(exc, 'proposed_schemas', None)
+        except BaseException as exc:
             from ouroboros.realtime_session import transport_loss
-            if transport_loss(exc):
+            self.preparing = None
+            if isinstance(exc, (OSError, ConnectionClosed)) and transport_loss(exc):
                 return
             raise
+        # The failed preparation stays visible until the rollback is recorded: "no preparation" must not read as a
+        # ready successor and retire the serving socket meanwhile.
         self.failed_preparation_revision = revision if revision is not None else self.preparing_revision
         self.renewing = self.resume = False
         self.renewal_deadline = None
+        note, restore = None, getattr(self.host, 'restore_serving_catalog', None)
+        try:
+            if restore is not None and rejected is not None:
+                serving = self.serving_catalog()
+                note = await restore(rejected, serving, revision)
+        finally:
+            self.preparing = None
+        if note is not None:
+            self.failed_preparation_revision = getattr(self.host, '_history_version', None)
+            # The note rides the deferred enable_tools output that carried the refused tools, else it waits as a row.
+            for i in reversed(range(len(self.deferred_tool_outputs))):
+                output, offers = self.deferred_tool_outputs[i]
+                if output is not None and offers is not None and list(output.tools) == rejected:
+                    self.deferred_tool_outputs[i] = (
+                        ToolOutputs((*output.messages, note), serving, silent=output.silent), offers)
+                    break
+            else:
+                self.pending_context_rows.append(note)
         current = getattr(self.host, "_history_version", None)
-        if revision is not None and current is not None and revision != current:
+        if note is None and revision is not None and current is not None and revision != current:
             self.request_renewal()  # the changed view gets its fit before the old socket can refuse
             return
         self.host.state.pop('refit', None)

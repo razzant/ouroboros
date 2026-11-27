@@ -75,3 +75,37 @@ def test_floor_size_depends_on_protected_items_not_history_count():
         assert all(row['line'] in rendered for row in snap.room['lane1'] if row.get('immune'))
     assert abs(sizes[1] / sizes[0] - 1) <= .05, f'floor bytes at 150/100 and 1500/1000: {sizes}'
     print(f'FLOOR_BYTES rows/pages=150/100:{sizes[0]}, 1500/1000:{sizes[1]}')
+
+
+@pytest.mark.parametrize('route', [pytest.param(route, id=f'{route[0]}:{route[1]}') for route in scale.call_routes()
+                                   if route[0] != 'openai_realtime']
+                         + [pytest.param(('text', '85k', None), id='text:85k')])
+def test_the_mature_fixture_is_refused_typed_before_any_socket_on_every_route(tmp_path, monkeypatch, route):
+    """A mature install's call start (and a hard 85k text start) ends in a typed ``MinimumViewUnfit`` today, with no
+    model call; on the estimator-basis route (Grok) the frame alone already exceeds the window, so the memory capture
+    is never reached. Expected to turn into starts by later changes: Grok and Gemini when host forms (the connections
+    text's and lossless memory forms) shrink the always-whole frame below their windows; the 85k text route when the
+    owner-chosen narrowings (the accounts' temporary view; the owner's words of other rooms stay one line per message)
+    land. The positive assertion is added per route by the pull request that makes it true. This prices the ordinary
+    builder with the fixture's synthetic schemas; the adapters' own session candidates are driven on the fresh drive
+    (``tests/test_live_call_start_fit.py``). The mature drive holds no MCP servers, running works, nested account
+    changes or gist-bearing finished works (``install``), so its numbers are a lower bound, and OpenAI's 133,554-token
+    route is not asserted here either way."""
+    from ouroboros import context, llm
+
+    skill, _model, facts = route
+    resolve = (scale.route_resolver(85_000, 'provider', None) if facts is None else scale.route_resolver(
+        facts.conversation_window_tokens, facts.basis, facts.working_reserve_tokens, provider=skill, facts=facts))
+    monkeypatch.setattr(cf, 'main_output_reserve_tokens', lambda **_kw: 16_384)
+    monkeypatch.setattr(llm.LLMClient, 'chat', lambda *_a, **_kw: pytest.fail('no model call'))
+    captured = []
+    real = context._capture_memory_view
+    monkeypatch.setattr(context, '_capture_memory_view', lambda *a, **kw: captured.append(1) or real(*a, **kw))
+    env, memory = scale.env_on(scale.installed(tmp_path, 'mature'))
+    with pytest.raises(cf.MinimumViewUnfit) as raised:
+        context.build_context_fit_plan(env, memory, {'id': 'mature-start', 'type': 'task', 'chat_id': 1, 'text': 'hi',
+                                                     '_is_direct_chat': True}, preferred_mode='nano',
+                                       tool_schemas=scale.tools(), route_resolver=resolve,
+                                       nano_base=None if facts is None else ('list_available_tools', 'enable_tools'))
+    if facts is not None and facts.basis == 'estimator':
+        assert not captured and raised.value.memory_measured is False

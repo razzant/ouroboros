@@ -545,26 +545,11 @@ def _data_write(
     return result
 
 
-def _land_root_bytes(target: pathlib.Path, content: str, *, append: bool = False) -> None:
-    """Land a non-repository root's file: a work path AS THE WORK DOMAIN (``work_domain.write_text``: made, written
-    and resolved in its container), any other path exactly as before (its folder made, an atomic overwrite or a
-    non-atomic append)."""
-    from ouroboros import work_domain
-
-    if work_domain.is_work(target):
-        work_domain.write_text(target, content, append=append)
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if append:
-        with target.open("a", encoding="utf-8", newline="") as fh:
-            fh.write(content)
-    else:
-        write_text_atomic(target, content)
-
-
-def _join_write_results(results: List[str]) -> str:
+def _join_write_results(results: List[str], *, failed: bool | None = None) -> str:
     rendered = "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
-    if any(str(line).lstrip().startswith("⚠️") for result in results for line in str(result).splitlines()):
+    if failed is None:
+        failed = any(str(line).lstrip().startswith("⚠️") for result in results for line in str(result).splitlines())
+    if failed:
         return "⚠️ WRITE_FILE_BATCH_PARTIAL_FAILURE: one or more writes failed.\n" + rendered
     return rendered
 
@@ -666,14 +651,19 @@ def _write_file(
             skill_name=skill_name, display_root=normalized, force=force,
             _resolved_binding=binding_items[0],
         )
+    from ouroboros.tools.git_repo_edit import NonRepoWriteReceipt
+
+    tracker = NonRepoWriteReceipt(ctx, normalized, binding_items, write_atomic=write_text_atomic)
     try:
         if files:
             results = []
+            failed = False
             binding_iter = iter(binding_items)
             for item in files:
                 rel_path = str(item.get("path") or "")
                 item_binding = next(binding_iter, None)
                 if item_binding is None:
+                    failed = True
                     results.append("⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects.")
                     continue
                 target = item_binding.target_path
@@ -682,6 +672,7 @@ def _write_file(
                         target, base_path=item_binding.base_path,
                     )
                     if block_reason:
+                        failed = True
                         results.append(f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}")
                         continue
                 body = str(item.get("content") or "")
@@ -689,21 +680,26 @@ def _write_file(
                     # Batch items honor the declared mode like the single-file path below:
                     # silently overwriting here destroyed every prior chunk of a chunked
                     # large-file write while reporting success (#447 D2).
-                    _land_root_bytes(target, body, append=True)  # append is intentionally NOT atomized
+                    if not tracker.land(target, body, append=True):  # append is intentionally NOT atomized
+                        continue
                 else:
                     # Deferral 5: batch items overwrite too — shrink-guard each (parity with the
                     # single-file path), force=true bypasses.
                     if (shrink := _check_data_shrink_guard(target, body, force)):
+                        failed = True
                         results.append(shrink)
                         continue
-                    _land_root_bytes(target, body)  # crash-safe (G)
+                    if not tracker.land(target, body):  # crash-safe overwrite (G)
+                        continue
                 result = f"OK: wrote {_root_display_path(normalized, rel_path)} ({len(body)} chars)"
                 if normalized == "user_files":
-                    record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
-                    if record:
-                        result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
+                    result, ok = tracker.capture_user_file(
+                        target, rel_path, result, copy_artifact=copy_file_to_task_artifacts,
+                    )
+                    failed = failed or not ok
                 results.append(result)
-            return with_argument_notes(ctx, _join_write_results(results), notes)
+            body_text = _join_write_results(results, failed=failed) if results or not tracker.unchanged else ""
+            return with_argument_notes(ctx, tracker.publish(body_text, failed=failed), notes)
         target = binding_items[0].target_path
         if normalized == "artifact_store":
             block_reason = artifact_store_path_block_reason(
@@ -712,21 +708,23 @@ def _write_file(
             if block_reason:
                 return f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}"
         if mode == "append":
-            _land_root_bytes(target, content, append=True)  # append is intentionally NOT atomized
+            if not tracker.land(target, content, append=True):  # append is intentionally NOT atomized
+                return tracker.publish("")
         else:
             # Deferral 5: shrink-guard the full overwrite (e.g. active_workspace rewrites)
             # — force=true bypasses, matching the tool-schema `force` description.
             if (shrink := _check_data_shrink_guard(target, content, force)):
                 return shrink
-            _land_root_bytes(target, content)  # crash-safe full overwrite (G)
+            if not tracker.land(target, content):  # crash-safe full overwrite (G)
+                return tracker.publish("")
         result = f"OK: wrote {_root_display_path(normalized, path)} ({len(content)} chars)"
+        failed = False
         if normalized == "user_files":
-            record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
-            if record:
-                result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
-        return result
+            result, ok = tracker.capture_user_file(target, path, result, copy_artifact=copy_file_to_task_artifacts)
+            failed = not ok
+        return tracker.publish(result, failed=failed)
     except Exception as exc:
-        return f"⚠️ WRITE_FILE_ERROR: {type(exc).__name__}: {exc}"
+        return tracker.publish(f"⚠️ WRITE_FILE_ERROR: {type(exc).__name__}: {exc}", failed=True)
 
 
 def _edit_text(
@@ -836,6 +834,11 @@ def _edit_text(
         )
         if match_error:
             return publish_no_effect(ctx, match_error, tool_name="edit_text")
+        if normalized == "artifact_store" and new_text == text:  # an exact no-op edit on the shelf writes nothing
+            from ouroboros.tools.git_repo_edit import _holds_exactly, _unchanged_result
+
+            if _holds_exactly(target, new_text):
+                return _unchanged_result(ctx, [_root_display_path(normalized, path)], binding.base_path)
         from ouroboros.tools.edit_ops import _edit_content_block, newline_normalization_note
 
         newline_note = newline_normalization_note(target)
@@ -881,8 +884,11 @@ def _edit_text(
 
             # A bound payload in active_workspace/system_repo is written here, not by the Git editor: the same
             # typed receipt of the target this binding resolved names it for the result review.
-            return _with_path_facts(ctx, "edit_text", result + (f"\n{newline_note}" if newline_note else ""),
-                                    binding.base_path, [target.relative_to(binding.base_path).as_posix()])
+            return _with_path_facts(
+                ctx, "edit_text", result + (f"\n{newline_note}" if newline_note else ""),
+                binding.base_path, [target.relative_to(binding.base_path).as_posix()],
+                logical_root=binding.root if binding.root != "active_workspace" else "",
+            )
         result = (
             f"OK: edited {_root_display_path(normalized, path)} "
             f"(line {replacement_line}; resolved_root={binding.base_path}; source={binding.source})"
@@ -890,19 +896,31 @@ def _edit_text(
         from ouroboros.tools.edit_ops import _partial_write_failure, numbered_edit_preview
 
         result += f"\nContext:\n{numbered_edit_preview(new_text, [replacement_offset])}"
+        captured_version = ""
         if normalized == "user_files":
             try:
                 record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
                 if not record:
                     raise OSError("user file recovery copy was not registered")
+                if isinstance(record, dict) and record.get("sha256"):
+                    captured_version = f"sha256:{record['sha256']}"
             except Exception as exc:  # the edit itself landed; say so instead of a refusal
-                rel = target.relative_to(binding.base_path).as_posix()
+                rel = target.relative_to(binding.base_path).as_posix() if target.is_relative_to(binding.base_path) else str(target)
                 return _partial_write_failure(
                     ctx, [rel], "edit_text", "EDIT_TEXT_ERROR",
                     f"{rel} WAS written but its user artifact registration failed: {exc}", binding)
             result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
         if newline_note:
             result += f"\n{newline_note}"
+        if normalized in {"artifact_store", "task_drive", "user_files"} and (
+                normalized == "user_files" or target.is_relative_to(binding.base_path)):  # (#4314)
+            from ouroboros.tools.git_repo_edit import _with_path_facts, version_witness
+
+            rel = target.relative_to(binding.base_path).as_posix() if target.is_relative_to(binding.base_path) else str(target)
+            versions = ({rel: version_witness(new_text)} if normalized == "artifact_store"
+                        else ({rel: captured_version} if captured_version else None))
+            return _with_path_facts(ctx, "edit_text", result, binding.base_path, [rel], logical_root=normalized,
+                                    versions=versions)
         return result
     except FileNotFoundError:
         return f"⚠️ EDIT_TEXT_ERROR: file not found: {_root_display_path(normalized, path)}"

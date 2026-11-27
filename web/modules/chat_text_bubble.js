@@ -113,6 +113,9 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 
         const notice = role === 'system' ? opts.reply?.notice : null;
+        // A notice's phrase alone, for a reader that sets its step under it (the call card); the bubble says the line.
+        if (typeof notice?.phrase === 'string' && notice.phrase && opts.narration !== true) bubble.dataset.noticePhrase = notice.phrase;
+        else delete bubble.dataset.noticePhrase;
         const { rendered, rich: richMarkdown, shown, skillReview, unparsed } = bubbleWords(text, role, { markdown, systemType, source,
             attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview, notice });
         if (skillReview) bubble.classList.add('chat-skill-review');

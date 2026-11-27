@@ -57,6 +57,22 @@ _OWN_PARAMS = frozenset({"response_type", "client_id", "redirect_uri", "state", 
 NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout)
 
 
+def certificate_refused(exc: BaseException):
+    """The ``ssl.SSLCertVerificationError`` of a connection that failed verifying the server's certificate, else None:
+    found in an ``httpx.ConnectError``'s chain (each link's cause, else the exception it was raised while handling:
+    httpcore's pool re-raises without the cause). The TLS handshake comes before any request bytes, so none were
+    written. Read from the typed chain, never from message text."""
+    import ssl
+
+    seen, link = set(), exc if isinstance(exc, httpx.ConnectError) else None
+    while link is not None and id(link) not in seen:
+        if isinstance(link, ssl.SSLCertVerificationError):
+            return link
+        seen.add(id(link))
+        link = link.__cause__ or link.__context__
+    return None
+
+
 class SignInRequired(RuntimeError):
     """The local sign-in step cannot continue; the provider may already have processed a request."""
 
@@ -67,13 +83,31 @@ class SignInRequired(RuntimeError):
         super().__init__(message or f"SIGN_IN_REQUIRED: {reason}{': ' + detail if detail else ''}")
 
 
+class CertificateRefused(httpx.ConnectError):
+    """A sign-in step stopped because a certificate was refused while connecting (``certificate_refused``): nothing
+    that changes anything had reached the provider, so the same step can run again. The code exchange lifts its
+    return's dispatch mark first; a consumer's begin may have read only metadata before. ``refusal`` is the
+    verification error, ``host`` the host the request was for (a proxy on the way may have presented the certificate),
+    ``bundle`` whether that connection verified with the owner's Extra certificate bundle (``Grant.extra_ca``). Still
+    a connect failure to every handler of one."""
+
+    def __init__(self, exc: httpx.ConnectError, refusal: Exception, *, bundle: bool = False) -> None:
+        try:
+            request = exc.request
+        except RuntimeError:  # httpx raises for an error that carries no request
+            request = None
+        super().__init__(str(exc), request=request)
+        self.refusal, self.host, self.bundle = refusal, request.url.host if request is not None else "", bundle
+
+
 @dataclasses.dataclass(frozen=True)
 class Grant:
     """One sign-in document. ``lock`` names its ``store.name_lock`` under ``state/``; ``binding`` holds the
     fields every write stamps and every read requires; ``refusal(reason, detail)`` is the consumer's
     ``SignInRequired``; ``may_write(doc)`` is the consumer's rule for a document about to be saved.
     ``format_version`` is the version this consumer writes; ``upgrade`` transforms a read record of an older
-    version in memory only (nothing is written until a save)."""
+    version in memory only (nothing is written until a save). ``extra_ca`` makes the grant's
+    authorization-server requests verify against the owner's Extra certificate bundle too (``http_client``)."""
 
     path: pathlib.Path
     lock: str
@@ -84,6 +118,7 @@ class Grant:
     upgrade: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
     data_dir: Optional[pathlib.Path] = None
     strict_read: bool = False
+    extra_ca: bool = False
 
 
 def load(grant: Grant) -> Dict[str, Any]:
@@ -204,9 +239,20 @@ def secret_values(path: pathlib.Path) -> tuple:
 # -- the authorization server -------------------------------------------------------------------
 
 
-def http_client() -> httpx.AsyncClient:
-    """A short-lived client for the authorization server: never a resource transport's, never its headers."""
-    return httpx.AsyncClient(timeout=MCP_OAUTH_HTTP_TIMEOUT_SEC, follow_redirects=False)
+def http_client(*, extra_ca: bool = False) -> httpx.AsyncClient:
+    """A short-lived client for the authorization server: never a resource transport's, never its headers.
+    ``extra_ca`` (a consumer's choice: MCP's, for a server it reaches over TLS) adds the owner's Extra certificate
+    bundle to httpx's own trust (``net_transport.extra_ca_context``); a file that cannot serve raises here."""
+    from ouroboros.net_transport import extra_ca_context
+
+    context = extra_ca_context() if extra_ca else None
+    return httpx.AsyncClient(timeout=MCP_OAUTH_HTTP_TIMEOUT_SEC, follow_redirects=False,
+                             **({"verify": context} if context is not None else {}))
+
+
+def _grant_client(extra_ca: bool) -> httpx.AsyncClient:
+    """``http_client`` as a grant chose: its unchanged call unless the consumer opted into the bundle."""
+    return http_client(extra_ca=True) if extra_ca else http_client()
 
 
 def checked(url: str) -> str:
@@ -323,11 +369,12 @@ async def current_token(grant: Grant, rejected: Optional[str] = None, *, min_val
     return (await current_grant(grant, rejected, min_valid=min_valid))["tokens"]["access_token"]
 
 
-async def refresh_request(doc: Dict[str, Any], *, scope: Optional[str] = None) -> Tuple[httpx.Response, float]:
+async def refresh_request(doc: Dict[str, Any], *, scope: Optional[str] = None,
+                          extra_ca: bool = False) -> Tuple[httpx.Response, float]:
     data = {"grant_type": "refresh_token", "refresh_token": doc["tokens"]["refresh_token"],
             **({"resource": doc["resource"]} if doc.get("resource") else {}),
             **({"scope": scope} if scope else {})}
-    async with http_client() as http:
+    async with _grant_client(extra_ca) as http:
         sent_at = time.time()
         response = await token_request(http, (doc.get("metadata") or {}).get("token_endpoint", ""),
                                        doc.get("client") or {}, data)
@@ -388,7 +435,8 @@ async def current_grant(grant: Grant, rejected: Optional[str] = None, *, min_val
         if marked:
             _save_sign_in(grant, doc)  # the consumer's mark is durable before the request leaves
         try:
-            response, sent_at = await refresh_request(doc, scope=tokens.get("scope") if qualify is not None else None)
+            response, sent_at = await refresh_request(doc, scope=tokens.get("scope") if qualify is not None else None,
+                                                      extra_ca=grant.extra_ca)
             _refresh_failure(grant, doc, response, consent_bound=qualify is not None)
             response.raise_for_status()
         except httpx.HTTPError as exc:
@@ -708,7 +756,8 @@ def _digest(text: str) -> str:
 
 async def _exchange_for_return(grant: Grant, returned: Mapping[str, Any], nonce: str,
                                check: Optional[Callable[[Dict[str, Any]], None]]):
-    """Record dispatch before the provider call; retrieve its saved answer, never resend that code."""
+    """Record dispatch before the provider call; retrieve its saved answer, never resend that code. Only a certificate
+    refused while connecting proves the code never left: that lifts this attempt's mark (``CertificateRefused``)."""
     async with locked(grant):
         doc = load(grant)
         pending = _pending_for(grant, doc, nonce)
@@ -721,16 +770,28 @@ async def _exchange_for_return(grant: Grant, returned: Mapping[str, Any], nonce:
             if exchange.get("code_sha256") != digest or not exchange.get("tokens"):
                 raise grant.refusal("exchange_not_reusable", "no saved exchange for this return; check status before starting again")
             return pending, exchange["tokens"]
-        pending["exchange"] = {"code_sha256": digest}
-        _save_sign_in(grant, doc)
+        # The client that sends, built before the dispatch mark: a trust bundle that cannot serve refuses here and
+        # this return stays unsent and usable.
+        http = _grant_client(grant.extra_ca)
+        try:
+            pending["exchange"] = {"code_sha256": digest}
+            _save_sign_in(grant, doc)
+        except BaseException:
+            await http.aclose()
+            raise
 
     client = pending.get("client") or {}
     data = {"grant_type": "authorization_code", "code": code,
             "redirect_uri": client.get("redirect_uri", ""), "code_verifier": pending.get("code_verifier", ""),
             **({"resource": pending["resource"]} if pending.get("resource") else {})}
-    async with http_client() as http:
-        sent_at = time.time()
-        response = await token_request(http, (pending.get("metadata") or {}).get("token_endpoint", ""), client, data)
+    try:
+        async with http:
+            sent_at = time.time()
+            response = await token_request(http, (pending.get("metadata") or {}).get("token_endpoint", ""), client, data)
+    except httpx.ConnectError as exc:
+        if (refusal := certificate_refused(exc)) and await _lift_dispatch(grant, nonce, digest):
+            raise CertificateRefused(exc, refusal, bundle=grant.extra_ca) from exc
+        raise  # any other failure may have reached the provider: the mark stays and the code is never sent again
     if response.status_code != 200:
         raise grant.refusal("exchange_rejected", oauth_error(response))
     tokens = response_token(response, None, pending.get("scope"), sent_at=sent_at, refusal=grant.refusal)
@@ -742,6 +803,20 @@ async def _exchange_for_return(grant: Grant, returned: Mapping[str, Any], nonce:
         pending["exchange"]["tokens"] = tokens
         _save_sign_in(grant, doc)
     return pending, tokens
+
+
+async def _lift_dispatch(grant: Grant, nonce: str, digest: str) -> bool:
+    """Remove the dispatch mark of an exchange that provably never left, under the lock: only on the same pending
+    sign-in, for the same code and with no answer kept. Anything else keeps the mark (False)."""
+    async with locked(grant):
+        with contextlib.suppress(SignInRequired):
+            doc = load(grant)
+            pending = _pending_for(grant, doc, nonce)
+            if pending.get("exchange") == {"code_sha256": digest}:
+                del pending["exchange"]
+                _save_sign_in(grant, doc)
+                return True
+    return False
 
 
 def _file_consent(target: Grant, doc: Dict[str, Any], signed: Dict[str, Any], nonce: str) -> Dict[str, Any]:
@@ -849,14 +924,15 @@ async def complete(grant: Grant, returned: Mapping[str, Any], *, identity: Optio
         raise
 
 
-async def revoke(endpoint: Optional[str], client: Dict[str, Any], tokens: Dict[str, Any]) -> Optional[bool]:
+async def revoke(endpoint: Optional[str], client: Dict[str, Any], tokens: Dict[str, Any], *,
+                 extra_ca: bool = False) -> Optional[bool]:
     """Ask the provider to revoke a grant's tokens with that grant's own client (RFC 7009), the refresh token
     first: ``True`` when it confirmed every one, ``False`` when it did not or could not be asked, ``None``
     when it publishes no revocation address or there is nothing to revoke."""
     if not endpoint or not tokens:
         return None
     revoked = True
-    async with http_client() as http:
+    async with _grant_client(extra_ca) as http:
         for kind in ("refresh_token", "access_token"):
             if tokens.get(kind):
                 try:

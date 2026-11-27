@@ -58,7 +58,8 @@ async def api_places(request):
         if place_id:
             return JSONResponse(await run_sync_to_completion(update_place, root, place_id, body))
         first_keys = {"note", "description", "circle_id"}  # what an Add says about the new place
-        if not isinstance(body, dict) or set(body) - {"connector", "account_id", "conversation_id", "label", *first_keys}:
+        if not isinstance(body, dict) or set(body) - {"connector", "account_id", "conversation_id", "label",
+                                                     "contribution_id", *first_keys}:
             raise PlaceError("place_connect_invalid")
         if not isinstance(body.get("connector"), str):
             raise PlaceError("place_connect_invalid", "connector")

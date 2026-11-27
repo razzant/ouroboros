@@ -103,16 +103,18 @@ def test_accounts_is_passive_and_provider_activation_is_explicit(accounts_ui):
     home.locator('[data-settings-open="accounts"]').click()
     listing = settings_page(page, "accounts")
     expect(listing.locator('[data-entry-id="openrouter"]')).to_be_visible()
-    # The section list reads the engine's saved quota/roster, which starts no provider or catalogue.
+    # The section list reads the engine's saved quota/roster and its programs as they stand: no start, no catalogue.
     account_reads = [urlsplit(url) for url in ui["reads"] if "/claudexor/status" in url]
     assert account_reads and {(url.path, url.query) for url in account_reads} == {("/api/claudexor/status", "view=quota")}
     starts = [url for url in ui["reads"] if any(part in url for part in ("/model-catalog", "/review-pool"))]
-    assert starts == [] and ui["facts"]["program_reads"] == [] and ui["posts"] == []
+    assert starts == [] and ui["posts"] == []
+    assert ui["facts"]["program_reads"] and {urlsplit(url).query for url in ui["facts"]["program_reads"]} == {""}
+    listed = len(ui["facts"]["program_reads"])
     provider = open_entry(page, "codex")
     expect(provider.locator(".harness-account-row")).to_have_count(18)
     expect(provider.locator(".harness-account-row").first).to_have_attribute("data-profile", "studio-03")
     expect(provider.locator("[data-family-maintenance]")).to_contain_text("3.0.0")
-    assert len(ui["facts"]["program_reads"]) == 1
+    assert ["checkLatest=true" in url for url in ui["facts"]["program_reads"][listed:]] == [True]
     # One full status read; the independent passive roster/quota reads (`?view=quota`) are separate.
     assert [urlsplit(url).query for url in ui["reads"] if "/claudexor/status" in url and urlsplit(url).query != "view=quota"] == [""]
     go_back(page)
@@ -123,6 +125,44 @@ def test_accounts_is_passive_and_provider_activation_is_explicit(accounts_ui):
     assert "accounts:key:openrouter" in search_settings(page, "OpenRouter key")
     page.locator('[data-settings-result="accounts:key:openrouter"]').click()
     expect(settings_page(page, "accounts/key/openrouter").locator("[data-editor-save]")).to_be_visible()
+
+
+def test_a_missing_program_is_found_and_installed_from_its_head(accounts_ui):
+    """Owner's choice A (26.11.2026): programs the engine lacks stand in the list with one press; fictitious engine."""
+    from playwright.sync_api import expect
+    ui, page = accounts_ui, accounts_ui["page"]
+    absent = {"selection": {"path": None, "realPath": None, "version": None, "versionOutput": None, "overrideEnv": None,
+              "overrideValue": None}, "updateAvailable": "cannot_tell", "newest": {"status": "not_read", "source": None}}
+    rows = [_inventory_row("codex"), {**_inventory_row("agy"), **absent}, {**_inventory_row("opencode"), **absent}]
+    page.route("**/api/claudexor/maintenance/harnesses*", lambda route: route.fulfill(json={"harnesses": rows}))
+    logins = []
+
+    def login(route):
+        logins.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Antigravity keeps each account under its own name.",
+                                        "code": "credential_profile_required", "required_actions": ["add_named_account"]})
+
+    page.route("**/api/claudexor/login", login)
+    for index, (width, height) in enumerate(((1100, 750), (390, 844))):
+        page.set_viewport_size({"width": width, "height": height})
+        page.goto(ui["url"] + "/#settings")
+        listing = open_settings(page, "accounts")
+        agy = listing.locator('[data-entry-id="agy"]')
+        expect(agy).to_contain_text("Not installed where Claudexor runs")
+        if not index:  # accounts unread may hold one a first sign-in would duplicate: Install alone until Check reads them
+            expect(agy.get_by_role("button", name="Install Antigravity", exact=True)).to_be_visible()
+            listing.locator("[data-accounts-check]").click()
+        expect(agy.get_by_role("button", name="Install & connect Antigravity")).to_be_visible()
+        expect(listing.locator('[data-entry-id="opencode"]').get_by_role("button", name="Install OpenCode")).to_be_visible()
+        expect(listing.locator('[data-entry-id="codex"] [data-program-install]')).to_have_count(0)
+        no_overflow(page)
+        setup_browser.capture(page, f"settings-missing-programs-{width}")
+    agy.get_by_role("button", name="Install & connect Antigravity").click()
+    provider = settings_page(page, "accounts/agy")
+    expect(provider.locator("[data-profile-name-entry]")).to_be_visible()
+    assert logins == [{"harness": "agy", "login_flow": "device_auth"}] and ui["posts"] == []
+    no_overflow(page)
+    setup_browser.capture(page, "settings-missing-program-signin-390")
 
 
 def test_openai_compatible_key_form_explains_opencode_go(subscription_ui):

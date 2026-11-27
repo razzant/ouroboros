@@ -52,7 +52,7 @@ def test_installed_connector_derived_without_hub_and_catalog_tolerates_optional_
     assert listing["connects"] == ["Service"]
     assert catalog._manifest_facts(replace(skill.manifest, contributes=[]))["connects"] == []
     snapshot = catalog.parse_plain_tree(skill.skill_dir)
-    row = {"id": "local", "kind": "local", "name": "Local", "trust": "review"}
+    row = {"id": "local", "kind": "local", "name": "Local", "trust": "review", "path": str(skill.skill_dir)}
     assert catalog.items_for(row, snapshot)[0]["icon"]["kind"] == "svg"
     assert catalog.items_for(row, snapshot)[0]["connects"] == ["Service"]
     snapshot["entries"][0].pop("connects")

@@ -86,8 +86,15 @@ function updateRow(row, next) {
     toggle.checked = wanted.checked;
     const login = row.querySelector('[data-harness-login]');
     const nextLogin = next.querySelector('[data-harness-login]');
-    updateAttributes(login, nextLogin, ['data-login-command', 'data-rare']);
-    if (login.textContent !== nextLogin.textContent) login.textContent = nextLogin.textContent;
+    // The sign-in button is an optional action (a program the engine cannot install withholds it,
+    // docs/DESIGN.md §7): a repaint adds it back or drops it without assuming either side exists —
+    // updatePart-style attribute writes would throw on a side that just disappeared.
+    if (!nextLogin) login?.remove();
+    else if (!login) row.querySelector('.harness-account-extra')?.prepend(nextLogin);
+    else {
+        updateAttributes(login, nextLogin, ['data-login-command', 'data-rare']);
+        if (login.textContent !== nextLogin.textContent) login.textContent = nextLogin.textContent;
+    }
 }
 
 export function paintAccountFamilies(host, markup, control) {

@@ -339,15 +339,21 @@ def _restart_or_update_refusal(q: Any, task: Any, result_root: pathlib.Path, tas
 
 def panic_resume_refusal(q, task, expected, selected_by):
     """A group press can select this occurrence, not the fence or pause underneath it."""
-    from ouroboros.control_actor import accepted_unknown, owner_door_bound
+    from ouroboros.control_actor import accepted_unknown, owner_door_bound, panic_release_bound
     from ouroboros.installation_stop import installation_panic
     from ouroboros.work_stop import hold_fact, panic_hold_id, record_policy
     from supervisor.restart_retention import panic_recorded
 
     if not expected and record_policy(hold_fact(task))["cause"] != "panic":
         return None
-    if selected_by or not owner_door_bound():
+    if selected_by or not (owner_door_bound() or panic_release_bound()):
         return {"ok": False, "error": "panic_requires_owner_resume"}
+    if not owner_door_bound():  # a wake's release on my human's Turn on: asked again here, where the grant is made
+        from supervisor.panic_choice import choice_stands, parent_refusal
+        if not choice_stands(q, task):
+            return {"ok": False, "error": "panic_selection_changed"}
+        if refusal := parent_refusal(q, task):
+            return refusal
     if expected and accepted_unknown():
         return {"ok": False, "error": "invalid_panic_selection"}
     try:
@@ -377,6 +383,9 @@ def _panic_member_refusal(q, task):
     owner = owner_fence_state(drive, task, task["id"])
     if owner == "unknown":
         return unknown
+    from ouroboros.control_actor import panic_release_bound
+    if panic_release_bound():  # a wake's choice never passes the owner's own Pause on the tree, interrupted or not
+        return refused if (owner or latched) else None
     interrupted = interrupted_owner_resume(drive, task, task["id"])
     if interrupted is None:
         return unknown
@@ -398,6 +407,7 @@ def _panic_member_refusal(q, task):
 def panic_selection_lock(q, task, expected, selected_by, *, wake=False):
     """The Panic selection's and an own wake's allowance grant's recheck under Q and the tree's Pause lock."""
     from contextlib import contextmanager, ExitStack
+    from ouroboros.control_actor import panic_release_bound
     from ouroboros.owner_pause import LaunchBusy, launch_lock
 
     @contextmanager
@@ -414,6 +424,9 @@ def panic_selection_lock(q, task, expected, selected_by, *, wake=False):
                 except LaunchBusy:
                     yield {"ok": False, "error": "selection_authority_unavailable"}, None
                     return
+            if expected and panic_release_bound():  # a wake's choice: an Off waits for this grant, or refuses it
+                from supervisor.panic_choice import grant_lock
+                held.enter_context(grant_lock())
             yield panic_resume_refusal(q, task, expected, selected_by), locked_tree
 
     return locked()
@@ -655,7 +668,10 @@ def _global_money_refusal(q: Any, budget_remaining: Any,
 
 
 def _exact_tree_money_required(pause, reason, external):
-    return (str(pause.get("scope") or "") == "root" or reason == "authority"
+    from ouroboros.control_actor import panic_release_bound
+
+    # A wake's choice after Panic is no owner press: the tree's cap holds for it.
+    return (str(pause.get("scope") or "") == "root" or reason == "authority" or bool(panic_release_bound())
             or isinstance(external, dict) and "start_money_refusal" in external)
 
 

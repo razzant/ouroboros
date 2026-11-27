@@ -495,6 +495,7 @@ class PlaceConnectRequest(TypedDict):
     note: NotRequired[str]
     description: NotRequired[str]
     circle_id: NotRequired[str]
+    contribution_id: NotRequired[str]  # one of the connector's rows (``connectors[].contribution_id``)
 
 
 class PlaceCircleChoice(TypedDict):

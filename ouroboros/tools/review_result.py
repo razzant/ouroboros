@@ -72,9 +72,9 @@ def result_rules() -> Dict[str, Any]:
 _AUTHOR_WORDS = ("## The author's own goal and questions for this review", "## Scope the author names",
                  "## The author's answer to the previous review of this result")
 _READ_SUBJECT = "The subject's exact text is retained at {source}; read it whole. "
-_READ_IN_PLACE = ("Every produced file the subject names has the exact copy named beside it: read that copy, which holds "
-                  "the bytes this subject names; its live path may have changed since. A symbolic link is its exact link "
-                  "text, named there whole. A file without a copy is read at its path, and the subject says why.")
+_READ_IN_PLACE = ("Every produced file the subject names has the exact copy named beside it: read that copy, which holds the bytes this "
+                  "subject names; its live path may have changed since. A symbolic link is its exact link text, named there whole. A file "
+                  "without a retained copy is an unverified gap (the subject says why); unverified live-path contents are not proof.")
 
 
 def result_contract_fingerprint() -> str:

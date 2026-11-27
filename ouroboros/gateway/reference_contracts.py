@@ -102,6 +102,7 @@ class HostNotice(TypedDict, total=False):
     template: str  # a variable phrase's constant English with {name} slots; the template is what gets translated
     values: dict[str, str]  # the words that fill the template's slots, inserted as written, never translated
     line: str  # phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
+    phrase: str  # that line's phrase alone, sent beside it; a reader that sets the step under the phrase reads it
 
 
 class HostNoticeField(TypedDict, total=False):
