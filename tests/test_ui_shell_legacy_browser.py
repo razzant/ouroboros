@@ -344,3 +344,29 @@ def test_a_retained_document_gets_the_same_rail_as_a_fresh_one(gate_ui, width, h
             assert rail.get("closed") is True, ("clicking #nav-drawer-close closes the drawer", shape, feet)
     for shape in ("previous", "v7.12.0", "v7.7.0", "wrapped"):
         assert abs(feet[shape]["height"] - fresh["height"]) <= 0.5 and feet[shape]["width"] == fresh["width"], ("the same rail", feet)
+
+
+# The macOS window's measured band, as the shell writes it (launcher_window_chrome.py): 66 px bar, lights to 79, centred at 25.5.
+INTEGRATED_BAND = """() => { const r = document.documentElement; r.dataset.windowChrome = 'integrated';
+    r.style.setProperty('--window-chrome-top', '66px'); r.style.setProperty('--window-chrome-start', '79px');
+    r.style.setProperty('--window-chrome-mid', '25.5px'); }"""
+FIND_BOX = """() => { const f = document.querySelector('#primary-sidebar .nav-projects-find').getBoundingClientRect();
+    return { left: f.left, middle: (f.top + f.bottom) / 2 }; }"""
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("shape", ["fresh", "wrapped", "v7.7.0"])
+def test_a_retained_documents_find_row_stands_on_the_lights_line_in_the_mac_window(gate_ui, shape):
+    """In the macOS window Find a project stands on the traffic lights' line past them in every shape, the zones in the
+    old .sidebar-scroll wrapper and v7.7.0's made head included (style.css reaches the head through the wrapper)."""
+    page = seed_page(gate_ui, 1230, 838, touch=False)
+    page.route(gate_ui["url"] + "/", _serve(_document(shape)))
+    try:
+        page.goto(gate_ui["url"] + "/")
+        page.wait_for_selector("#nav-projects-list [data-project-id]")
+        page.evaluate(INTEGRATED_BAND)
+        settle(page)
+        find = page.evaluate(FIND_BOX)
+        assert find["middle"] == pytest.approx(25.5, abs=0.6) and find["left"] >= 79 + 12 - 0.5, (shape, find)
+    finally:
+        page.close()

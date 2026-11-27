@@ -243,6 +243,7 @@ LINE = """() => { const mid = (s) => { const r = document.querySelector(s).getBo
 def test_the_header_line_stands_on_the_lights_centre_and_an_older_shell_keeps_the_band(subscription_ui):
     page = shell_page(subscription_ui, 1100)
     apply(page, mid=MID)
+    page.wait_for_timeout(150)  # the head's measured card line (layout.js) follows the band a frame later
     line = page.evaluate(LINE)
     for name in ("restart", "find", "add"):
         assert line[name] == pytest.approx(MID, abs=0.6), (name, line)  # one line: the lights', the header's, the column's
@@ -295,14 +296,18 @@ def test_a_narrow_window_stands_its_header_on_the_lights_line(subscription_ui):
     assert page.evaluate(mid) == pytest.approx({"panic": 28, "header": 56}, abs=0.6)
 
 
-@pytest.mark.parametrize("width", [1230, 800])
-def test_an_rtl_project_panel_clears_the_lights_only_where_it_reaches_them(subscription_ui, width):
+@pytest.mark.parametrize("width,panel_width,sidebar_width", [(1230, None, None), (1024, "650px", None), (800, None, "426px")],
+                         ids=["clear", "partly-under", "fills-the-column"])
+def test_an_rtl_project_panel_clears_the_lights_only_where_it_reaches_them(subscription_ui, width, panel_width, sidebar_width):
     """In an RTL page the docked Project panel stands beside Main: at a wide window it keeps its own inset (no gap
     beside the lights it is far from); where it reaches the window's left edge its Close and Panic start past them."""
     page = shell_page(subscription_ui, width, 838)
     page.evaluate("document.documentElement.dir = 'rtl'")
-    if width == 800:  # the owner's stored sidebar: the content column is narrower than the panel, which reaches the edge
-        page.evaluate("document.documentElement.style.setProperty('--sidebar-width', '426px')")
+    # With a mouse: a stored panel width that reaches part way under the lights, or a stored sidebar that leaves a
+    # content column narrower than the panel, which then fills it to the window's edge.
+    for name, value in (("--project-panel-width", panel_width), ("--sidebar-width", sidebar_width)):
+        if value:
+            page.evaluate("([n, v]) => document.documentElement.style.setProperty(n, v)", [name, value])
     apply(page)
     page.evaluate(OPEN_PANEL)
     page.wait_for_selector("#project-panel.open:not([hidden]) .chat-panel-statusbar")
@@ -323,11 +328,17 @@ def test_an_rtl_project_panel_clears_the_lights_only_where_it_reaches_them(subsc
     else:
         assert close["x"] >= START, (panel, close)
     assert (width == 1230) == (panel["x"] >= START + 12), (panel, box(page, "#primary-sidebar"))
+    if width == 1024:
+        assert 0 < panel["x"] < START + 12, panel  # partly under the lights
+    if width == 800:
+        assert panel["x"] <= 1, panel  # at the window's edge
 
 
 ROW = """() => { const b = (s) => document.querySelector(s).getBoundingClientRect();
     const f = b('#primary-sidebar .nav-projects-find'), a = b('#nav-projects-add'), m = b('.sidebar-head [data-nav-page="chat"]');
-    return { findTop: f.top, findLeft: f.left, findWidth: f.width, addTop: a.top, cardLeft: m.left, cardTop: m.top }; }"""
+    const rail = b('.nav-rail .nav-rail-sections .nav-row');
+    return { findTop: f.top, findLeft: f.left, findWidth: f.width, addTop: a.top, addRight: a.right, cardLeft: m.left,
+             cardTop: m.top, cardRight: m.right, railTop: rail.top }; }"""
 
 
 def test_the_search_wraps_under_the_lights_when_its_row_cannot_hold_a_usable_field(subscription_ui):
@@ -336,12 +347,18 @@ def test_the_search_wraps_under_the_lights_when_its_row_cannot_hold_a_usable_fie
     page = shell_page(subscription_ui, 1100)
     page.evaluate("document.getElementById('primary-sidebar').style.setProperty('--drag-width', '270px')")
     apply(page, top=104, start=126, mid=40)  # 50 %: the native numbers in CSS px are large
+    page.wait_for_timeout(150)  # the head's measured card line (layout.js) after the band arrived
     row = page.evaluate(ROW)
     assert row["findTop"] >= 80 and row["addTop"] == pytest.approx(row["findTop"], abs=0.5), row  # under the 80 px row
     assert row["findLeft"] == pytest.approx(row["cardLeft"], abs=0.5) and row["cardTop"] > row["findTop"], row
+    # The field and + take the column's whole width there, and the rail's first place stands beside Main, not the field.
+    assert row["addRight"] == pytest.approx(row["cardRight"], abs=0.5) and row["findWidth"] >= row["cardRight"] - row["cardLeft"] - 48, row
+    assert row["railTop"] == pytest.approx(row["cardTop"], abs=0.5), row
     apply(page, mid=MID)  # 100 %: room beside the lights
+    page.wait_for_timeout(150)
     row = page.evaluate(ROW)
     assert row["findTop"] < 2 * MID and row["findLeft"] >= START and row["findWidth"] >= 160, row
+    assert row["railTop"] == pytest.approx(row["cardTop"], abs=0.5), row
 
 
 def test_the_search_capsule_is_a_text_target_and_the_band_beside_it_drags(subscription_ui):

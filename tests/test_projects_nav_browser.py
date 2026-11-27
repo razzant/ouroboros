@@ -1086,6 +1086,9 @@ def test_escape_with_the_field_scrolled_away_in_a_crowded_column_returns_to_the_
     saved = page.evaluate(FIRST_IN_VIEW)
     page.keyboard.type("archive")
     expect()(items).to_have_count(51)
+    sidebar.evaluate("el => { el.scrollTop += 600; }")  # the owner reads on through the matches
+    assert not find.evaluate(SHOWS)
+    expect()(find).to_be_focused()
     page.keyboard.press("Escape")
     expect()(find).to_have_value("")
     expect()(items).to_have_count(499)
