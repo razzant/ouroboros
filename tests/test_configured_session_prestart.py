@@ -100,6 +100,10 @@ def test_a_refused_start_is_recorded_blocked_not_as_an_unused_substrate(monkeypa
     assert (usage["unavailable_reason"], usage["host_fallback"], usage["terminal_origin"], usage["reason_code"]) == (
         "credential_pool_exhausted", False, "host_notice", "subagent_executor_unavailable")
 
+    # The text names the alternative and the exact read of this task's record; the row stays whole in the usage.
+    assert 'get_task_result(task_id="child-refused", authority_fields=["subagent_availability"])' in text
+    assert usage["alternatives"] == [{"subagent_id": "api-scout"}]
+
     # Quiet: a leaf the host started keeps its record, and zero runs at completion stay an honest disclosure.
     ctx, task = child("child-started")
     cap_info = {}
@@ -107,6 +111,51 @@ def test_a_refused_start_is_recorded_blocked_not_as_an_unused_substrate(monkeypa
     assert cap_info == {} and (task["effective_executor"], task["executor_route"]) == ("harness", "codex")
     envelope = envelope_from_task(task, status="completed")
     assert "delegated_substrate_unused" in envelope["capability_delta"]["substrate_disclosures"]
+
+
+def test_a_refused_start_names_its_alternatives_and_leaves_their_rows_to_the_record(monkeypatch, tmp_path):
+    """Owner, 27.11.2026: the notice no longer repeats every configured row with its description (14 040 characters
+    on one install, the roster the parent already holds). It names the alternatives recorded at this refusal, quoted
+    as the scheduler takes them, and the exact read of their rows; the usage and the recorded
+    ``subagent_availability`` keep them whole, and the parent's registered reader returns them. Without the task's
+    address the notice names them only; without alternatives it says nothing about them, as before."""
+    import ouroboros.subagent_runtime as runtime
+    from ouroboros.agent_dispatch import executor_blocked_outcome
+    from ouroboros.subagent_bootstrap import bootstrap_before_context
+    from ouroboros.subagents import SubagentExecutorResolution
+    from ouroboros.task_results import write_task_result
+    from tests.test_task_result_authority_fields import _ctx, _read
+
+    advice = {name: f"The owner's own advice for {name}: when to use it and how to brief it. " * 8
+              for name in ("agy=gemini-4-neon-xhigh", "ollama=qwen4 (local)")}
+    rows = [{"subagent_id": name, "recommended_use": text, "route_kind": "agent_session", "target_id": name,
+             "availability": "check_at_dispatch"} for name, text in advice.items()]
+    monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: _fail(
+        "delegate_start", "registration_busy", "The workspace fence is busy.", definitely_unrun=True))
+    monkeypatch.setattr(runtime, "current_subagent_alternatives", lambda _exclude: [dict(row) for row in rows])
+    ctx = SimpleNamespace(task_id="child", drive_root=tmp_path, budget_drive_root=str(tmp_path), task_metadata={})
+    task = {"id": "child", "configured_subagent": _snapshot(_settings(_session_row()), "session-builder"),
+            "task_contract": {"objective": "Critique"}, "budget_drive_root": str(tmp_path)}
+    assert bootstrap_before_context(ctx, task, SimpleNamespace(executor="harness", blocked=False)) == ""
+    refusal = SubagentExecutorResolution(requested="harness", executor="blocked", reason="registration_busy")
+    text, usage = executor_blocked_outcome(refusal, availability=task["subagent_availability"], task_id="child")
+    assert all(json.dumps(name) in text for name in advice)
+    assert 'get_task_result(task_id="child", authority_fields=["subagent_availability"])' in text
+    assert "The workspace fence is busy." in text and "NOT run" in text
+    assert not any(words[:40] in text for words in advice.values())  # no description is repeated
+    assert usage["alternatives"] == rows and task["subagent_availability"]["alternatives"] == rows
+
+    parent = _ctx(tmp_path)  # the parent's own registered reader, on the child's record
+    write_task_result(parent.drive_root, "child", "failed", result=text, terminal_origin="host_notice",
+                      parent_task_id="parent", root_task_id="parent",
+                      subagent_availability=task["subagent_availability"])
+    result, view = _read(parent, authority_fields=["subagent_availability"])
+    assert result.status == "ok" and view["authority"]["subagent_availability"]["alternatives"] == rows
+
+    unaddressed, _usage = executor_blocked_outcome(refusal, availability=task["subagent_availability"])
+    assert all(json.dumps(name) in unaddressed for name in advice) and "get_task_result" not in unaddressed
+    bare, _usage = executor_blocked_outcome(refusal, availability={"alternatives": []}, task_id="child")
+    assert "alternatives" not in bare and "get_task_result" not in bare
 
 
 @pytest.mark.parametrize("payload", [
