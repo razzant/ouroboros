@@ -1,7 +1,7 @@
 ---
 name: grok_realtime
 description: xAI Grok Voice provider for Live Conversation.
-version: 0.1.14
+version: 0.1.15
 type: extension
 runtime: python3
 entry: plugin.py
@@ -16,8 +16,9 @@ secret_fields:
 
 Registers `grok_realtime:grok` for ordinary host-selected context and tools.
 Grok Voice 3.0 declares a conversation window of
-80,000 tokens in Ouroboros's own estimate (characters / 4), based on operator
-probes on 2026-10-21. The 231,828 o200k-token accepted input is separate evidence,
+80,000 tokens in Ouroboros's own estimate (characters / 4), under the spoken-turn
+limit operator probes measured (2026-10-21, 2026-11-27): about 98,300 o200k tokens
+of setup, whatever the text. The 231,828 o200k-token accepted input is separate evidence,
 not a fit target. This package never selects or cuts memory. Host facts keep their roles;
 `Respond` opens the greeting only after setup acknowledgements. Call instructions
 follow host system text; language tags add a recognition sentence, not a session
