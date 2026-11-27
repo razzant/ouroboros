@@ -58,7 +58,7 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
                                 <input class="ui-checkbox" type="checkbox" name="project-init-git" data-np-initgit aria-describedby="new-project-init-git-help">
                                 Initialize Git and commit current files
                             </label>
-                            <p class="ui-field-help" id="new-project-init-git-help">Creates a Git repository here and saves a snapshot of the current files using a local author identity.</p>
+                            <p class="ui-field-help" id="new-project-init-git-help">If this folder is not a Git repository yet, creates one and saves a snapshot of the current files using a local author identity. An existing repository is left as it is.</p>
                         </div>
                     </div>
                     <div data-np-clone hidden>

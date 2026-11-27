@@ -291,8 +291,14 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
         marker.className = 'message-share-marker';
         marker.setAttribute('aria-hidden', 'true');
         if (item.kind === 'item') {
-            const box = item.task === 'done' ? '☑' : item.task === 'open' ? '☐' : '';
-            marker.textContent = [item.marker === '•' && box ? '' : item.marker, box].filter(Boolean).join(' ');
+            // An authored task keeps its own state in the shared inert mark, apart from the part's inclusion box.
+            const lead = item.task && item.marker === '•' ? '' : item.marker;
+            marker.textContent = item.task && lead ? `${lead} ` : lead;
+            if (item.task) {
+                const task = doc.createElement('span');
+                task.className = `ui-checkbox message-share-task${item.task === 'done' ? ' is-checked' : ''}`;
+                marker.append(task);
+            }
         }
         const verbatim = ['code', 'diagram', 'chart', 'table'].includes(item.kind);
         const content = doc.createElement('div');
