@@ -275,7 +275,9 @@ def subscription_ui():
         elif path == "/api/projects":
             body = {"projects": []}
         elif path == "/api/chat/history":
-            body = {"profile_scope": PREVIEW_SCOPE, "messages": [], "progress": []}
+            # A whole, empty room: the newest page with nothing older (web/modules/chat_history.js `land`).
+            body = {"profile_scope": PREVIEW_SCOPE, "messages": [], "progress": [], "has_more": False,
+                    "page_cursor": "recent"}
         elif path == "/api/health":
             body = {"ok": True, "version": "fixture"}
         route.fulfill(content_type="application/json", body=json.dumps(body))
