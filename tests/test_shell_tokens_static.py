@@ -20,6 +20,13 @@ def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
 
 
+def _rule_bodies(css: str, selector: str) -> list[str]:
+    """Every rule whose whole selector is `selector`. A longer selector that merely ends in the same words (a
+    right-to-left or window-chrome variant that sets something else) is another rule and is not read."""
+    head = selector.removesuffix("{").rstrip()
+    return [match.group(1) for match in re.finditer(rf"(?m)^{re.escape(head)}\s*\{{([^}}]*)\}}", css)]
+
+
 def test_shell_rules_read_the_z_tokens_and_the_scale_stays_ordered():
     ui = _read("web/ui.css")
     values = {name: int(re.search(rf"{re.escape(name)}: (\d+);", ui).group(1)) for name in Z_TOKENS}
@@ -31,6 +38,6 @@ def test_shell_rules_read_the_z_tokens_and_the_scale_stays_ordered():
     for rel, selectors in SHELL_RULES.items():
         css = _read(rel)
         for selector in selectors:
-            body = css.split(selector, 1)[1].split("}", 1)[0]
-            z = re.search(r"z-index:\s*([^;]+);", body)
-            assert z and z.group(1).startswith("var(--z-"), f"{rel} {selector} {z.group(1) if z else 'has no z-index'}"
+            levels = [z.strip() for body in _rule_bodies(css, selector) for z in re.findall(r"z-index:\s*([^;]+);", body)]
+            assert levels and all(z.startswith("var(--z-") for z in levels), (
+                f"{rel} {selector} {levels or 'has no z-index'}")
