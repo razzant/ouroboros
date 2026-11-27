@@ -28,6 +28,11 @@ on:
         description: Head SHA of the verification branch you reviewed. Every job refuses to run on any other commit.
         required: true
         type: string
+      compiler_only:
+        description: Check the pinned compiler and compile the product installer script against inert files; no install or app launch.
+        required: false
+        type: boolean
+        default: false
       smoke_installer:
         description: Once, in the visible leg before its acceptance run - the candidate's own installer smoke (with -Compiler). Default false leaves both legs exactly as reviewed.
         required: false
@@ -42,9 +47,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  compiler:
+    if: ${{ inputs.compiler_only && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/qualification/windows-packaging-acceptance' && github.sha == inputs.verified_ref_sha }}
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: kit
+          sparse-checkout: qa-kit
+          persist-credentials: false
+      - id: candidate
+        shell: pwsh
+        run: |
+          $sha = (Get-Content -Raw 'kit/qa-kit/candidate.json' | ConvertFrom-Json).candidate_sha
+          if ($sha -notmatch '^[0-9a-f]{40}$') { throw 'Missing candidate pin' }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha=$sha"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.candidate.outputs.sha }}
+          path: product
+          persist-credentials: false
+      - name: Stage the compiler, then compile the real installer script with inert files
+        shell: pwsh
+        working-directory: product
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'compiler probe'
+          if (Test-Path -LiteralPath $dest) { throw 'Compiler probe requires a new directory' }
+          try { .\scripts\download_inno_setup.ps1 -Destination $dest }
+          finally {
+            foreach ($name in 'ISCC.exe','ISCmplr.dll') {
+              $p = Join-Path $dest $name
+              if (Test-Path -LiteralPath $p -PathType Leaf) {
+                $v = (Get-Item -LiteralPath $p).VersionInfo
+                [pscustomobject]@{name=$name; file=$v.FileVersion; product=$v.ProductVersion; fixedFile="$($v.FileMajorPart).$($v.FileMinorPart).$($v.FileBuildPart).$($v.FilePrivatePart)"; fixedProduct="$($v.ProductMajorPart).$($v.ProductMinorPart).$($v.ProductBuildPart).$($v.ProductPrivatePart)"; sha256=(Get-FileHash -LiteralPath $p).Hash} | ConvertTo-Json -Compress | Write-Host
+              } else { Write-Host "$name missing in the selected destination" }
+            }
+          }
+          $app = Join-Path $env:RUNNER_TEMP 'inert payload'
+          $out = Join-Path $env:RUNNER_TEMP 'compiler output'
+          New-Item -ItemType Directory -Path "$app\bin","$app\_internal\python-standalone" | Out-Null
+          Set-Content "$app\_internal\VERSION" '1.2.3'
+          foreach ($p in 'Ouroboros.exe','_internal\python-standalone\python.exe','bin\fixture.txt') { Set-Content (Join-Path $app $p) 'inert compiler fixture, not executable' }
+          .\scripts\pack_windows_setup.ps1 -PayloadRoot $app -OutputDir $out -Compiler "$dest\ISCC.exe"
+          if (-not (Test-Path "$out\Ouroboros-Setup-1.2.3-windows-x64.exe" -PathType Leaf)) { throw 'Missing compiler output' }
+          Write-Host 'Compiled; this check neither installs nor uploads the output.'
   accept:
     name: ${{ matrix.mode }} leg (own runner, own profile)
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/qualification/windows-packaging-acceptance' && github.sha == inputs.verified_ref_sha }}
+    if: ${{ !inputs.compiler_only && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/qualification/windows-packaging-acceptance' && github.sha == inputs.verified_ref_sha }}
     runs-on: windows-2025
     timeout-minutes: 150
     strategy:
