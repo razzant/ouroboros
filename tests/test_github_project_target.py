@@ -121,7 +121,9 @@ _CALLS = [
 
 
 _NEW_CALLS = [
-    ("github_read", {"method": "get", "kind": "run", "target": 11, "include": ["log"]}, ["run view", "run view"]),
+    # The run metadata read names its target first, then reads the REST route; a named repository skips that leg.
+    ("github_read", {"method": "get", "kind": "run", "target": 11, "include": ["log"]},
+     {"": ["repo view", "api", "run view"], "github.example/owner/selected": ["api", "run view"]}),
     ("github_read", {"method": "list", "kind": "artifact", "target": 11, "limit": 100}, ["run view", "api"]),
     ("github_read", {"method": "download", "kind": "artifact", "target": 23, "max_bytes": 4096}, ["repo view", "api", "api"]),
     ("github_write", {"method": "create_pr", "title": "New title", "head": "feature", "base": "main",
@@ -182,6 +184,10 @@ def complete_gh(monkeypatch):
             return ""
         if args[:1] == ["api"]:
             path = args[1]
+            if path == "repos/owner/selected/actions/runs/11":
+                # The run metadata read takes every run fact from this REST answer.
+                return {"id": 11, "run_attempt": 1, "html_url": BASE + "/actions/runs/11", "name": "CI",
+                        "status": "completed", "conclusion": "failure", "head_sha": SHA}
             if path in ("repos/owner/selected/git/ref/heads/feature",):
                 return {"object": {"sha": SHA}}
             if path in ("repos/owner/selected/git/ref/heads/main",
@@ -236,12 +242,14 @@ def test_new_repository_tools_keep_target_through_read_and_readback(
 
     assert not result.startswith("⚠️"), result
     assert "repo" in entry.schema["parameters"]["properties"]
-    assert len(complete_gh) == len(steps)
-    assert [argv[1] if argv[1] == "api" else " ".join(argv[1:3]) for argv, _ in complete_gh] == steps
+    expected_steps = steps[repo] if isinstance(steps, dict) else steps
+    assert len(complete_gh) == len(expected_steps)
+    assert [argv[1] if argv[1] == "api" else " ".join(argv[1:3]) for argv, _ in complete_gh] == expected_steps
     operation = "draft" if "draft" in args else args["method"]
     result = json.loads(result.partition("\n")[2])
     result = result.get("view", "") + result.get("detail", "")
     api_paths = {
+        "get": ["repos/owner/selected/actions/runs/11"],
         "list": ["repos/owner/selected/actions/runs/11/artifacts?per_page=100&page=1"],
         "download": ["repos/owner/selected/actions/artifacts/23",
                                      "repos/owner/selected/actions/artifacts/23/zip"],
@@ -256,14 +264,17 @@ def test_new_repository_tools_keep_target_through_read_and_readback(
         assert kwargs["env"]["GH_HOST"] == "configured.example"
         if argv[1] == "api":
             assert argv[-2:] == ["--hostname", "github.example"]
-            assert kwargs["cwd"] == str(scratch or ctx.repo_dir)
-            assert kwargs["env"]["GH_REPO"] == "unrelated/wrong-repo"
+            assert kwargs["cwd"] == str(scratch or (expected_cwd if operation == "get" else ctx.repo_dir))
+            if operation == "get" and kind != "system":
+                assert "GH_REPO" not in kwargs["env"]
+            else:
+                assert kwargs["env"]["GH_REPO"] == "unrelated/wrong-repo"
             continue
         assert kwargs["cwd"] == str(scratch or expected_cwd)
         if repo and argv[1:3] == ["repo", "view"]:
             assert argv[3] == repo and "--repo" not in argv
-        elif repo:
-            assert argv[-2:] == ["--repo", repo]
+        elif repo or (operation == "get" and argv[1:3] == ["run", "view"]):
+            assert argv[-2:] == ["--repo", repo or "github.example/owner/selected"]
         else:
             assert "--repo" not in argv
         if kind != "system":

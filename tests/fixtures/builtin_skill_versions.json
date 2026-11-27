@@ -16,8 +16,8 @@
   "version": "0.1.22"
  },
  "grok_realtime": {
-  "content_hash": "1f1c453c6ca2bf6e53f94a7e9bfcb27d73b3b4b9c0154b050bfec1d3da941210",
-  "version": "0.1.12"
+  "content_hash": "ce1588c7c78e540ae4363b9db81103f135a8d1d2f2a68c2a70c54f7cd94140d9",
+  "version": "0.1.14"
  },
  "live_conversation": {
   "content_hash": "d4a5c90537b98f482cdb29c0431a88df4f066e9ccf66f62244ad592e8ab7519c",
@@ -28,8 +28,8 @@
   "version": "0.1.10"
  },
  "telegram": {
-  "content_hash": "83868012869a9a11b32438cc9ada409bd9c5f8168b30e76997cabe111534901c",
-  "version": "1.5.0"
+  "content_hash": "6ae3c69e5afc4b58bdeb22a8d3bd9a7e3c00198aff545ed54edeb00c684f1504",
+  "version": "1.5.1"
  },
  "templates": {
   "content_hash": "618fdf09134e2700d1a7fd2aefe51dde4d23e0c1ec30db7824852bbcb2016f62",

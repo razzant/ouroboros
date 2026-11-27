@@ -3404,10 +3404,11 @@ Disturb still decide. macOS uses `UNUserNotificationCenter`, whose one permissio
 question is asked only from the owner's gesture — switching notifications on, or
 Test — never by an alert, which falls back while the question is unasked; Windows
 shows a balloon on Ouroboros's one notification-area icon, presented as a system
-notification on Windows 10/11; a source handoff can change the window/taskbar
-identity to Python. Handoff removes the old icon before its successor starts;
-a gap or Explorer ghost after a crash remains possible; Linux uses the freedesktop notification service when
-the desktop runs one. Not yet allowed, denied, unavailable or failed is a typed
+notification on Windows 10/11. The installed app shares its Start shortcut's
+identity; a portable copy's handoff can show as Python in the taskbar. Handoff
+removes the old tray icon first; a crash can leave a gap or Explorer ghost.
+Linux uses freedesktop notifications where available.
+Not yet allowed, denied, unavailable or failed is a typed
 answer, never silence (an error the system returns instead of asking is that
 error, not a denial): that alert falls back to the browser banner or the in-app
 toast. One the system took without answering in time may still appear, so
@@ -3801,8 +3802,8 @@ becomes a row of the work list (below). The room's and the drawer's × give way 
 
 Everything that scrolls ends in the same edge: one curve, `--edge-curve` (smoothstep from
 opaque to clear, flat at both ends, so neither end of a fade reads as a line), in `web/ui.css`. Its length is
-`--edge-length` (32 px) for a room's edges and by default for vertical lists; sideways rails take a smaller spacing
-token and a folded answer two of its line heights. A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
+`--edge-length` (32 px) by default for vertical lists; sideways rails take a smaller spacing token, a folded answer two
+of its line heights, and a room's edges run through their capsules' band ("A room's edges"). A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
 more waits), a clipped preview `[data-fold-clipped]`, and a painted fade (a colour into what passes under it) is the
 colour masked by `linear-gradient(var(--edge-curve))`; a sheet sets only where an edge is and how long, never a
 gradient, curve or blur of its own. The Widgets board stays crisp and a room's feed unmasked.
@@ -3814,15 +3815,15 @@ ends what floats over it stands on one material, top and bottom (owner 15.11 «�
 по нашей библии… и в десктопе», his choice 17.11 1A, 3A): two blur steps, a soft one (4 px) over the
 whole taper and a deep one in its depth (12 px in all over the soft), under the room's colour, 72 % at the window's
 edge. Blur and darkening each follow the shared edge curve to clear, the deep blur dissolving into the soft and the
-soft into sharp text, so the blurred zone ends with no line. It is full behind the
-capsules and phone clock and clears one edge length below the bar on every layout; the composer's area has the same
-edge inside its top. It keeps scrolling card actions distinct from the floating controls. The first row and every
-landing clear the header's reach; a row under it is not read yet. The top edge is separate from the desktop
+soft into sharp text, so the blurred zone ends with no line. It is full from the
+window's top, behind the phone clock and the window's lights, down to the capsules, and clears through their band,
+ending at their lower side on every layout: nothing of it shows below the capsules. The composer's edge mirrors it from
+the capsule row's upper side, whatever the composer holds above that row (a staged attachment or reply). It hides what scrolls behind the bar above the capsules; inside their band the feed comes clear toward their lower side. The first row and every landing clear the bar; a row under it is not
+read yet. The top edge is separate from the desktop
 title-band strip. A note or the search sheet floats above it as the capsules do (a Project's status note, in its flow,
 stands below it). The blur belongs to the edge, not to a chip, so it applies in both themes; without backdrop blur,
 or with reduced transparency, a stronger room-colour tint alone fades the edge. While typing in Telegram the feed still passes
-under both. The newest line and time rest just above the measured composer. In a tight room the top extension yields
-to the feed. Reading history holds the passage in place, as it does in a shorter window, and the feed still scrolls.
+under both. The newest line and time rest just above the measured composer. Reading history holds the passage in place, as it does in a shorter window, and the feed still scrolls.
 Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter

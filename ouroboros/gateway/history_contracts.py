@@ -410,6 +410,8 @@ class ChatHistoryResponse(TypedDict, total=False):
     next_cursor: Required[Optional[str]]  # pass back as ?cursor= for the next older page
     page_cursor: Optional[str]  # re-reads this same page
     after_cursor: str  # the newest page and every ``after`` read: pass back as ?cursor= for what arrived since
+    repairs: List[ChatHistoryMessage]  # an ``after`` read asked ``repair=settled``: the rows the window holds of a task
+                                       # it shows that settled, as the newest page shows them now
     window: Required[ChatHistoryWindow]
     coverage: ChatHistoryCoverage
     error: str

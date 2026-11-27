@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import pathlib
+import stat
 import subprocess
 from typing import List, NamedTuple, Optional
 
@@ -163,7 +164,13 @@ def release_metadata_diagnostics(
     numbered release, including documentation-only changes. A partial carrier
     change is neither form and is reported as such.
     """
-    from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS, is_development_marker, release_metadata_findings
+    from ouroboros.tools.release_sync import (
+        CARRIER_SPAN_PATHS,
+        is_development_marker,
+        published_download_version,
+        release_metadata_findings,
+        resolve_release_windows_installer,
+    )
 
     def carrier_texts() -> dict:
         texts = {}
@@ -177,6 +184,34 @@ def release_metadata_diagnostics(
             except Exception as exc:
                 unavailable.append(f"{source}:{path} could not be read ({type(exc).__name__}).")
         return texts
+
+    def _tree_has_file(rel: str) -> bool:
+        try:
+            if read_text is not None:
+                return read_text(rel) is not None
+            if source == "worktree":
+                try:
+                    return stat.S_ISREG((pathlib.Path(repo_dir) / rel).stat().st_mode)
+                except (FileNotFoundError, NotADirectoryError):
+                    return False
+            return read_release_file(repo_dir, rel, source=source) is not None
+        except Exception as exc:
+            unavailable.append(f"{source}:{rel} could not be read ({type(exc).__name__}).")
+            raise
+
+    def _carrier_findings(texts: dict) -> List[str]:
+        version = texts.get("VERSION", "").strip()
+        surfaces = (texts.get("README.md", ""), texts.get("site/install/index.html", ""), texts.get("docs/install/index.html", ""))
+        if not any("[download-" in text or 'data-release-download="' in text for text in surfaces):
+            return release_metadata_findings(texts)
+        published = published_download_version(*surfaces) if is_development_marker(version) else ""
+        try:
+            win_installer = resolve_release_windows_installer(
+                repo_dir, version, published_version=published, path_exists=_tree_has_file,
+            )
+        except Exception:
+            return release_metadata_findings(texts, check_downloads=False)
+        return release_metadata_findings(texts, windows_installer=win_installer)
 
     report = {"source": source, "status": "clean", "findings": [], "unavailable": []}
     findings, unavailable = report["findings"], report["unavailable"]
@@ -218,7 +253,7 @@ def release_metadata_diagnostics(
         if source == "index" and version_in_scope and "README.md" not in touched - removed:
             findings.append("Missing from staged: README.md (badge + changelog). Stage all related files together.")
         texts = carrier_texts()
-        findings.extend(release_metadata_findings(texts))
+        findings.extend(_carrier_findings(texts))
         if is_development_marker(texts.get("VERSION", "")):
             if neutral_ok:
                 report["form"] = "development_marker"
@@ -234,7 +269,7 @@ def release_metadata_diagnostics(
                                          removed)
             if _publishes_release_under_marker(repo_dir, moved):
                 report["form"] = "development_marker"
-                findings.extend(release_metadata_findings(carrier_texts()))
+                findings.extend(_carrier_findings(carrier_texts()))
             else:
                 findings.extend(_neutral_carrier_findings(moved))
         else:

@@ -5,15 +5,22 @@ import pytest
 from tests._governance_docs_shared import architecture_text
 
 from ouroboros.tools.release_sync import (
-    DESKTOP_DOWNLOAD_IDS,
+    WINDOWS_SETUP_PROOF_ID,
+    WINDOWS_ZIP_PROOF_ID,
     _normalize_pep440,
     check_history_limit,
+    desktop_download_ids,
+    download_links_include_windows_installer,
     is_development_marker,
     published_download_version,
     release_asset_download_url,
+    resolve_release_windows_installer,
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+_SETUP_DOWNLOAD_URL_RE = re.compile(
+    r"(?:https?://|/releases/download/|href=[\"'])[^\s\"'<>)]*Ouroboros-Setup-"
+)
 
 
 def _download_version(version: str, text: str) -> str:
@@ -194,18 +201,36 @@ def test_readme_prioritizes_macos_dmg_install_and_model_access():
     )
     assert "/releases/latest/download/" not in readme
     published = _download_version(version, readme)
-    for proof_id in DESKTOP_DOWNLOAD_IDS:
+    has_setup = resolve_release_windows_installer(REPO, version, published_version=published)
+    if has_setup is None:
+        has_setup = download_links_include_windows_installer(readme, version=published)
+    assert has_setup is not None
+    for proof_id in desktop_download_ids(windows_installer=has_setup):
         assert (
             f"[download-{proof_id}]: {release_asset_download_url(proof_id, published)}"
             in readme
         )
+    quickstart = readme.split("### Windows quick start", 1)[1].split("### Linux quick start", 1)[0]
+    if has_setup:
+        assert readme.index(f"[download-{WINDOWS_SETUP_PROOF_ID}]:") < readme.index(
+            f"[download-{WINDOWS_ZIP_PROOF_ID}]:"
+        )
+        assert "Download for Windows (.exe)" in quickstart
+        assert "portable ZIP" in quickstart
+    else:
+        assert f"[download-{WINDOWS_SETUP_PROOF_ID}]:" not in readme
+        assert not _SETUP_DOWNLOAD_URL_RE.search(readme)
+        assert "Download for Windows (.zip)" in quickstart
+        assert "(.exe)" not in quickstart and "installer" not in quickstart.lower()
 
 
 def test_install_page_matches_macos_quick_start_and_model_prerequisite():
     install_page = (REPO / "site" / "install" / "index.html").read_text(encoding="utf-8")
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
 
     assert 'id="macos-quick-start"' in install_page
+    assert 'id="windows"' in install_page
     macos_section = install_page.split('id="macos-quick-start"', 1)[1].split(
         "</section>", 1
     )[0]
@@ -220,9 +245,24 @@ def test_install_page_matches_macos_quick_start_and_model_prerequisite():
         "Advanced: headless CLI with uv"
     ) < install_page.index("Develop or run from source")
     published = _download_version(version, install_page)
-    for proof_id in DESKTOP_DOWNLOAD_IDS:
+    has_setup = resolve_release_windows_installer(REPO, version, published_version=published)
+    if has_setup is None:
+        has_setup = download_links_include_windows_installer(readme, install_page, version=published)
+    assert has_setup is not None
+    for proof_id in desktop_download_ids(windows_installer=has_setup):
         assert f'data-release-download="{proof_id}"' in install_page
         assert release_asset_download_url(proof_id, published) in install_page
+    windows_card = install_page.split('<article id="windows">', 1)[1].split("</article>", 1)[0]
+    if has_setup:
+        assert install_page.index(f'data-release-download="{WINDOWS_SETUP_PROOF_ID}"') < install_page.index(
+            f'data-release-download="{WINDOWS_ZIP_PROOF_ID}"'
+        )
+        assert "Run the signed per-user installer" in windows_card
+    else:
+        assert f'data-release-download="{WINDOWS_SETUP_PROOF_ID}"' not in install_page
+        assert not _SETUP_DOWNLOAD_URL_RE.search(install_page)
+        assert "Extract the ZIP to a permanent folder" in windows_card
+        assert "installer" not in windows_card.lower() and "<code>.exe</code>" not in windows_card
 
 
 def test_system_prompt_lists_bible_in_safety_critical_set():

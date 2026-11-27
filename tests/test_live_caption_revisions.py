@@ -136,3 +136,42 @@ def test_presence_spoken_replacement_keeps_transport_provenance(host_world):
         assert rows[-1].row['presence_provenance']['binding_id'] == 'meeting-binding'
         assert host.messages[-1]['content'] == 'Corrected words.'
     asyncio.run(run())
+
+
+def test_revised_spoken_caption_keeps_its_live_identity_on_history_replay(host_world, monkeypatch):
+    """A page read before a correction and the corrected live frame name one spoken reply alike.
+
+    The revision changes the row address's hash, so only the caption identity the web keys on
+    (``spoken.call_id`` / ``spoken.item_id``, ``captionRevisionKey``) can join them; a page row without it
+    falls back to its row stem and mounts a second bubble. Both sides come from the real writer
+    (``ConversationHost.caption``) and the real history door, never from a fixture's own fields.
+    """
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros import dialogue_store as ds
+    from ouroboros.gateway import history
+    from supervisor import message_bus
+    host = host_world.host
+    frames = []
+    monkeypatch.setattr(message_bus.get_bridge(), '_broadcast_fn', frames.append)
+    def page():
+        request = SimpleNamespace(query_params={'chat_id': str(host.turn.spec.chat_id)},
+                                  app=SimpleNamespace(state=SimpleNamespace()))
+        response = asyncio.run(history.make_chat_history_endpoint(host.ctx.drive_root)(request))
+        assert response.status_code == 200, response.body
+        rows = [row for row in json.loads(response.body)['messages'] if row.get('source') == 'live_call']
+        assert len(rows) == 1, rows
+        return rows[0]
+    asyncio.run(host.caption('ouroboros', 'Встречаемся в десять.', 'item-1', played_ms=800, completed=True))
+    before = page()
+    asyncio.run(host.caption('ouroboros', 'Встречаемся в пятницу в десять.', 'item-1', replace=True))
+    live, after = frames[-1], page()
+    stored = list(ds.iter_rows(host.ctx.drive_root, 'chat'))[-1].row
+    assert (before['text'], live['content'], after['text']) == (
+        'Встречаемся в десять.', 'Встречаемся в пятницу в десять.', 'Встречаемся в пятницу в десять.')
+    assert before['row_address'] != live['row_address'] == after['row_address']
+    assert after['spoken'] == live['spoken'] == stored['spoken']
+    identity = (host.turn.spec.call_id, 'item-1')
+    assert (before['spoken']['call_id'], before['spoken']['item_id']) == identity
+    assert (live['spoken']['call_id'], live['spoken']['item_id']) == identity

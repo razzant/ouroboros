@@ -7,7 +7,7 @@ import json
 import pathlib
 import re
 import shlex
-from typing import Any, List
+from typing import Any, List, Mapping
 
 
 EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.\-])/[^\s'\"\\),;\]]+")
@@ -60,6 +60,19 @@ def normalize_check_argv(check: Any) -> List[str] | None:
             return None
         return [str(part) for part in check if part is not None]
     return None
+
+
+VERIFY_RUN_KINDS = ("visible_verifier", "explicit_command", "explicit_metric")
+
+
+def normalize_verification_kind(value: Any) -> str:
+    """Canonical text of a declared verification kind, without guessing a default."""
+    return str(value or "").strip()
+
+
+def verify_run_kind(args: Mapping[str, Any]) -> str:
+    kind = normalize_verification_kind(args.get("contract_kind"))
+    return kind if kind in VERIFY_RUN_KINDS else ""
 
 
 def shell_argv(raw_cmd: Any) -> List[str]:

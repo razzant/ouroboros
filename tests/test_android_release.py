@@ -14,6 +14,7 @@ from ouroboros.tools.release_sync import (
     DESKTOP_DOWNLOAD_IDS,
     RELEASE_ASSET_TEMPLATES,
     VERSION_CARRIER_SPANS,
+    desktop_download_ids,
     release_asset_download_url,
     release_asset_name,
     version_carrier_desyncs,
@@ -30,8 +31,10 @@ SPEC.loader.exec_module(builder)
 def test_android_assets_share_the_release_registry_without_changing_desktop_carriers():
     assert release_asset_name("android-arm64", "7.1.0-rc.1") == "Ouroboros-7.1.0-rc.1-android-arm64.tar.gz"
     assert release_asset_name("android-apk", "7.1.0-rc.1") == "Ouroboros-7.1.0-rc.1-android.apk"
-    assert len(RELEASE_ASSET_TEMPLATES) == 9
-    assert len(DESKTOP_DOWNLOAD_IDS) == 7
+    assert len(RELEASE_ASSET_TEMPLATES) == 10
+    assert len(DESKTOP_DOWNLOAD_IDS) == 8
+    assert len(desktop_download_ids(windows_installer=False)) == 7
+    assert len(desktop_download_ids(windows_installer=True)) == 8
     assert not any("android" in span.carrier_id for span in VERSION_CARRIER_SPANS)
     references = "".join(
         f"[download-{key}]: {release_asset_download_url(key, '7.1.0')}\n"
