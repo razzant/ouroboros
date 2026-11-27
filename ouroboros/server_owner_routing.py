@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 
 from ouroboros.owner_mailbox import MailboxWriteUnconfirmed
 from ouroboros.server_process import log
+from ouroboros.task_results import new_task_id
 from ouroboros.server_routing_context import (
     RootSnapshot,
     _decision_turn_metadata,
@@ -938,7 +939,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         # validates the payload and records the admitted revision.
         from supervisor.events import _handle_promote_chat_to_task, _notify_host_initiated_refusal
 
-        task_id = uuid.uuid4().hex[:16]
+        task_id = new_task_id()
         event = {
             "type": "promote_chat_to_task",
             "task_id": task_id,

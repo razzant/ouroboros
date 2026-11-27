@@ -10,7 +10,6 @@ import os
 import pathlib
 import queue as _stdqueue  # noqa: F401 — re-exported for the test suite's reap-queue isolation
 import time  # noqa: F401 -- facade name tests read (queue.time)
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.loop_load import MeasuredRLock
@@ -810,7 +809,9 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
             return None
     if (not force) and queue_has_task_type("deep_self_review"):
         return None
-    tid = uuid.uuid4().hex[:8]
+    from ouroboros.task_results import new_task_id
+
+    tid = new_task_id()
     admitted = enqueue_with_admission_receipt({
         "id": tid,
         "type": "deep_self_review",

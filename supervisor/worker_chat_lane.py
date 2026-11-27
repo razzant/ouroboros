@@ -39,7 +39,6 @@ from __future__ import annotations
 import logging
 import pathlib
 import time
-import uuid
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from supervisor.state import append_jsonl
@@ -280,8 +279,10 @@ def _seed_task(
     the name of a late input's head. Everything else is the carrier's first step (``prepare_conversation_task``).
     ``admission_author``: an agent's note this turn answers, its row's recorded author and address, kept at the
     task's top level, where no request body or caller metadata can write (``dialogue_provenance.recorded_author``)."""
+    from ouroboros.task_results import new_task_id
+
     task: Dict[str, Any] = {
-        "id": uuid.uuid4().hex[:8],
+        "id": new_task_id(),
         "type": "task",
         "chat_id": chat_id,
         "text": str(text or ""),
