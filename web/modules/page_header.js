@@ -4,6 +4,7 @@ import { SHELL_ICONS } from './page_icons.js';
 import { pageLabel } from './pages.js';
 import { statusMarkHtml } from './status_mark.js';
 import { currentLayout, onLayoutChange } from './layout.js';
+import { fmt, translateString } from './i18n.js';
 
 function classAttr(parts) {
     return parts.filter(Boolean).join(' ');
@@ -92,22 +93,53 @@ export function renderPageHeader({
 /**
  * Back (docs/DESIGN.md "Page header", the Back control): one recipe for the whole app, a jump's return and a level's
  * Back alike. The shell's round icon control, as ☰ and × are (style.css .shell-icon-control: the chrome height on a
- * desk, the touch minimum in the stack layout), holding the chevron-left alone at 20 px; where it leads is its tooltip
- * and accessible name, never drawn. `attrs` are the caller's hooks (a data attribute its handler finds it by).
+ * desk, the touch minimum in the stack layout), holding the chevron-left at 20 px; where it leads is its tooltip and
+ * accessible name. A return to another place also draws that destination after the chevron on a desk (`‹ Settings`,
+ * owner 27.11.2026; bindPageBack writes it), a level's Back stays the circle. `attrs` are the caller's hooks (a data
+ * attribute its handler finds it by).
  */
 export function renderBackControl({ to = '', title = to, attrs = '' } = {}) {
     const name = title ? `Back to ${title}` : 'Back';
     return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}</button>`;
 }
 
+// A place is a page, a Project its own room: `settings:models` and `settings:tools` are one place, `project:a` and
+// `project:b` two (the keys page_navigation.js writes).
+const placeOf = (key) => (String(key).startsWith('project:') ? String(key) : String(key).split(':')[0]);
+
+/** The destination's localized steps in the capsule, one node each (style.css draws the › between them). A Project's
+ * name is the owner's: written as it is, in its own direction. */
+function nameBack(button, steps, own, doc) {
+    let label = button.querySelector('.shell-back-label');
+    if (!steps) {
+        label?.remove();
+        button.removeAttribute('data-named');
+        return;
+    }
+    if (!label) {
+        label = doc.createElement('span');
+        label.className = 'shell-back-label';
+        button.append(label);
+    }
+    label.replaceChildren(...steps.map((part) => {
+        const step = doc.createElement('span');
+        step.textContent = part;
+        return step;
+    }));
+    if (own) label.setAttribute('dir', 'auto'); else label.removeAttribute('dir');
+    button.setAttribute('data-named', '');
+}
+
 /** An owed jump occupies the level's one Back slot until spent. Placement is a writer fact;
- * late children never decide layout through :has(:empty). */
+ * late children never decide layout through :has(:empty). A return to another place names it (nameBack) and marks the
+ * header `data-return-named`, so the page's own name stands after it. */
 export function bindPageBack({ layers, currentHeader, doc = document, win = window }) {
     let previous = null;
     function paint() {
         const header = currentHeader();
         if (previous && previous !== header) {
             previous.removeAttribute('data-return');
+            previous.removeAttribute('data-return-named');
             previous.querySelector('[data-page-return]')?.replaceChildren();
         }
         previous = header;
@@ -115,8 +147,11 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
         const slot = header.querySelector('[data-page-return]');
         const column = slot?.closest('.section-lead-page');
         const primary = layers.page();  // the top page layer: a level opened after a jump peels before the jump
+        const from = primary?.returnTo?.key;
+        const crossing = Boolean(slot && primary?.back && from && placeOf(from) !== placeOf(primary.destination));
         if (primary?.back) header.setAttribute('data-return', column ? 'column' : 'leading');
         else header.removeAttribute('data-return');
+        if (crossing) header.setAttribute('data-return-named', ''); else header.removeAttribute('data-return-named');
         if (!slot) return;
         let button = slot.querySelector('[data-shell-back]');
         const back = primary?.back;
@@ -129,14 +164,23 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
             button.addEventListener('click', event => layers.back(event.detail ? 'pointer' : 'keyboard', button.dataset.pageLayer));
         }
         button.dataset.pageLayer = primary.id;
-        const title = `Back to ${back.title || back.label}`;
-        button.setAttribute('aria-label', title);
-        button.title = title;
+        // One localized destination for the words, the accessible name and the tooltip, composed here once: the product's
+        // words translated, the names a person gave (a Project's name, a Files path: the layer's `literal`) as written.
+        // The page overlay never enters the control (data-i18n-authored), so nothing rewrites it afterwards.
+        const own = String(from).startsWith('project:');
+        const literal = new Set(back.literal || []);
+        const steps = String(back.title || back.label).split(' › ').map((part) => (own || literal.has(part) ? part : translateString(part)));
+        const name = fmt('Back to {place}', { place: steps.join(' › ') });
+        button.setAttribute('data-i18n-authored', '');
+        button.setAttribute('aria-label', name);
+        button.title = name;
+        nameBack(button, crossing ? steps : null, own, doc);
     }
     const off = layers.onChange(paint);
     win.addEventListener('ouro:page-shown', paint);
+    win.addEventListener('ouro:language-changed', paint);
     paint();
-    return () => { off(); win.removeEventListener('ouro:page-shown', paint); };
+    return () => { off(); win.removeEventListener('ouro:page-shown', paint); win.removeEventListener('ouro:language-changed', paint); };
 }
 
 /**
@@ -159,10 +203,9 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
             node.before(home);
             return { node, bar, how, home };
         });
-    const toolbar = header?.querySelector('.app-page-toolbar');
-    // A bar whose actions are already in it (Circles) still lays out as the desk band of every named page; only a
-    // header with no bar and nothing to move has nothing to do here.
-    if (!moves.length && !toolbar) return () => {};
+    // A bar whose actions are already in it (Circles), or that holds the place's name alone (Widgets), still lays out
+    // as the desk band of every page.
+    if (!header) return () => {};
     let docked = null;
     const place = (layout) => {
         const active = doc.activeElement;

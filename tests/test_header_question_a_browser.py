@@ -370,8 +370,8 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         settings_bar = page.evaluate(BAR, 'settings')
         assert settings_bar['lead'] and 'data-lead' in settings_bar['attrs'] and 'data-empty' not in settings_bar['attrs']
         assert settings_bar['height'] == 66, settings_bar
-        # The macOS window: the bar is the band, its controls centred on it; an empty header (Widgets) is only the
-        # window's handle over the page, and the page's first card sits one inset (not two) under the band.
+        # The macOS window: the bar is the band, its controls centred on it; Widgets' band holds its name (owner
+        # 27.11.2026), and the page's first card sits one inset (not two) under the band.
         for top in (66, 52, 33):
             _band(page, top)
             for name in ('skills', 'files'):
@@ -388,9 +388,10 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         page.locator('.widgets-card').first.wait_for()
         widgets = page.evaluate("""() => ({bar: document.querySelector('#page-widgets .app-page-header').getBoundingClientRect().height,
             empty: document.querySelector('#page-widgets .app-page-header').hasAttribute('data-empty'),
+            name: document.querySelector('#page-widgets .app-page-title').getBoundingClientRect().width,
             card: document.querySelector('.widgets-card').getBoundingClientRect().top,
             margin: getComputedStyle(document.querySelector('#widgets-list')).marginTop})""")
-        assert widgets['empty'] and widgets['bar'] == 52 and widgets['margin'] == '0px', widgets
+        assert not widgets['empty'] and widgets['name'] > 1 and widgets['bar'] == 52 and widgets['margin'] == '0px', widgets
         assert abs(widgets['card'] - (52 + 16)) <= 1, widgets
         setup_browser.capture(page, f'bar-a-widgets-band-{engine}-956')
         # The Dashboard's vertical list keeps its nodes and focus through a resize. On a phone a row opens a
@@ -475,12 +476,12 @@ BOARD_EDGES = """() => {
     const page = document.querySelector('#page-widgets'), band = page.querySelector('.app-page-header');
     const list = page.querySelector('.widgets-scroll'), style = getComputedStyle(list);
     const b = band.getBoundingClientRect(), l = list.getBoundingClientRect();
-    // Every point of the band across the board lands on the window's handle, never on a card or its frame, even
-    // while a card passes under it.
+    // Every point of the band across the board lands on the band (the window's handle, its name), never on a card or
+    // its frame: the board starts under it.
     const missed = [];
     for (let y = b.top + 1; y < b.bottom; y += 10) for (let x = l.left + 1; x < l.right; x += 20) {
         const hit = document.elementFromPoint(x, y);
-        if (hit !== band) missed.push([x, y, hit ? hit.className || hit.tagName : '']);
+        if (!band.contains(hit)) missed.push([x, y, hit ? hit.className || hit.tagName : '']);
     }
     const under = [...page.querySelectorAll('.widgets-card')].some((c) => {
         const r = c.getBoundingClientRect(); return r.top < b.bottom && r.bottom > b.top; });
@@ -494,13 +495,12 @@ BOARD_EDGES = """() => {
 
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
-def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_ui, theme):
+def test_the_widgets_board_scrolls_with_crisp_edges_under_its_named_band(engine_ui, theme):
     """The owner's window (1100 × 750, macOS band): scrolled, the board's live cards keep crisp edges where the list
-    cuts them, with no fade (DESIGN "Widgets board"), while other scroll bodies keep `.scroll-fade-y`. The band is
-    the window's, not a row of the page (owner 22.10: the empty strip cut the board): the board starts at the window's
-    top edge, its first row below the band, scrolled cards pass under the band, and a press anywhere in the band still
-    lands on the window's handle. A frame the owner keeps running is the same frame, never reloaded, across
-    scrolling, another page and a phone width."""
+    cuts them, with no fade (DESIGN "Widgets board"), while other scroll bodies keep `.scroll-fade-y`. The band holds
+    the place's name (owner 27.11.2026, place-name A), so the board starts under it and its cards stop at its edge,
+    crisp; a press anywhere in the band lands on the band (the window's handle), never on a card. A frame the owner
+    keeps running is the same frame, never reloaded, across scrolling, another page and a phone width."""
     engine = engine_ui['engine']
     settle = '() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))'
     loads = []
@@ -532,16 +532,24 @@ def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_
         setup_browser.capture(page, f'widgets-board-scrolled-{engine}-{theme}-1100')
         assert edges['scrolled'] == 300 and edges['room'] > 300, edges
         assert edges['mask'] in (None, 'none') and edges['webkitMask'] in (None, 'none'), 'no fade over the cards'
-        assert edges['empty'] and edges['band'] == 52 and edges['listTop'] == 0 and edges['cursor'] == 'auto', edges
-        assert edges['padTop'] >= 52 + 16 - 0.5 and edges['under'], edges
+        assert not edges['empty'] and edges['band'] == 52 and edges['listTop'] == 52 and edges['cursor'] == 'auto', edges
+        # A scrolled card reaches under the band only as clipped geometry: no point of the band lands on it (missed).
+        assert abs(edges['padTop'] - 16) <= 0.5 and edges['under'], edges
         assert not edges['missed'] and edges['frame'] and edges['page'] <= 0, edges
-        # A dragged card: the band lets the pointer through to the board's top edge, where the engine scrolls a drag
-        # upward, and is the window's handle again once the card is dropped.
-        through = """dragging => { const card = document.querySelector('#widgets-list .widgets-card');
-            card.toggleAttribute('data-widget-lifted', dragging); const l = document.querySelector('#page-widgets .widgets-scroll');
-            return Boolean(document.elementFromPoint(l.getBoundingClientRect().left + 40, 10)?.closest('.widgets-scroll')); }"""
-        assert page.evaluate(through, True), 'a drag reaches the board under the band'
-        assert not page.evaluate(through, False), 'at rest the band is the handle'
+        # A card carried up into the named band still scrolls the board under it (widget_reorder.js reads the
+        # scroller's box, the press holds the pointer), up to the board's top, and is dropped back unsaved by Escape.
+        head = page.locator('#widgets-list .widgets-card-head').nth(2)
+        head.scroll_into_view_if_needed()
+        page.locator('#page-widgets .widgets-scroll').evaluate("el => { el.scrollTop += 200; }")
+        box = head.bounding_box()
+        page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+        page.mouse.down()
+        page.mouse.move(box['x'] + box['width'] / 2, 300, steps=8)
+        page.mouse.move(box['x'] + box['width'] / 2, 20, steps=12)
+        page.wait_for_function("document.querySelector('#page-widgets .widgets-scroll').scrollTop === 0", timeout=8000)
+        assert page.locator('#widgets-list [data-widget-lifted]').count() == 1, 'the card is still carried at the top'
+        page.keyboard.press('Escape')
+        page.mouse.up()
         # Another page's scroll body keeps the shared fade.
         _goto(page, 'settings')
         settings = page.locator('#page-settings [data-settings-home]').element_handle()  # the home is the scroll body
@@ -789,7 +797,11 @@ def test_extensions_pages_and_existing_toolbar_survive_a_narrow_content_column(e
             page.locator('#skills-pane-installed').wait_for(state='visible')
             lead = page.locator('#page-skills [data-shell-back]')
             assert lead.get_attribute('aria-label') == lead.get_attribute('title') == 'Back to Settings'
-            assert lead.evaluate('n => !n.textContent.trim() && Math.abs(n.offsetWidth - n.offsetHeight) < 1')
+            # A return to another place names it (owner 27.11.2026): `‹ Settings`, then the page's own name, one line.
+            named = lead.evaluate("""n => ({words: n.querySelector('.shell-back-label')?.innerText.trim() || '',
+                wide: n.offsetWidth > n.offsetHeight, name: n.closest('.section-lead-page')
+                    .querySelector('[data-extensions-lead-name]').getBoundingClientRect().width})""")
+            assert named['words'] == 'Settings' and named['wide'] and named['name'] > 1, (column, named)
             assert page.locator('#page-skills [data-shell-back]:visible').count() == 1
             for selector in ('#skills-update-all', '#skills-refresh'):
                 button = page.locator(selector)
@@ -870,5 +882,244 @@ def test_answered_question_keeps_its_choice_and_words_after_reload_without_the_h
         page.locator('#chat-messages .chat-quiz-card[data-quiz-id="q-chosen"]').evaluate(
             "el => el.scrollIntoView({block: 'center'})")
         setup_browser.capture(page, f'question-answered-{engine_ui["engine"]}-{width}-{theme}')
+    finally:
+        page.close()
+
+
+# What a header paints after a return: its Back's form, whether the destination's words show, the page's own name and
+# controls. `root` is the header; `name` its own title.
+RETURN_PAINT = """([root, name, control]) => {
+    const header = document.querySelector(root), back = header.querySelector('[data-shell-back]');
+    const box = (el) => { if (!el || !el.getClientRects().length) return null; const r = el.getBoundingClientRect(); return {x: r.x, w: r.width, h: r.height, right: r.right}; };
+    const words = back.querySelector('.shell-back-label');
+    const title = header.querySelector(name), act = control ? header.querySelector(control) : null;
+    const actBox = box(act);
+    return {back: box(back), words: words && getComputedStyle(words).display !== 'none' ? words.textContent : '',
+        wordsW: words && getComputedStyle(words).display !== 'none' ? words.getBoundingClientRect().width : 0,
+        title: box(title), titleWhole: title ? title.scrollWidth <= title.clientWidth + 0.5 : null, control: actBox,
+        right: header.getBoundingClientRect().right};
+}"""
+BETA = {**PROJECT, 'id': 'proj-beta', 'name': 'Beta', 'chat_id': 43}
+LONG_TOO = {**PROJECT, 'id': 'proj-long-too', 'name': 'Review the sidebar navigation and keyboard shortcuts for accessibility', 'chat_id': 45}
+NAMED_SETTINGS = {**PROJECT, 'id': 'proj-settings', 'name': 'Settings', 'chat_id': 44}
+ROOMS = [PROJECT, BETA, LONG_TOO, NAMED_SETTINGS]
+
+
+def _two_projects(page):
+    _seed(page)
+    page.route('**/api/projects', lambda r: r.fulfill(json={'projects': ROOMS}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, ROOMS))
+
+
+def _project(page, project):
+    page.evaluate("p => window.dispatchEvent(new CustomEvent('ouro:project-created', {detail: {project: p}}))", project)
+    page.wait_for_function("name => document.querySelector('.project-panel.open #project-panel-title')?.textContent === name",
+                           arg=project['name'])
+
+
+def test_a_named_return_yields_to_the_pages_own_name_and_controls(engine_ui):
+    """A return from a long-named Project (owner 27.11.2026: the return names where it leads; the page's own name and
+    controls win): on each side of the header's own width, for a section page (Dashboard › Logs, its filters and
+    Clear), a name-only header (Circles) and a room header (a Project opened from it), which Back form paints, whether
+    the destination's words show, and that the page's own name stays whole and its controls stay in the window."""
+    page = _open(engine_ui, 1280, 801, seed=_two_projects)
+    try:
+        _band(page, 66)
+        seen = {}
+        settle = '() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))'
+
+        def from_long_project(event, wait):
+            # A fresh start each time: Main by its sidebar row (a sidebar choice clears every return), the long Project.
+            page.locator('[data-nav-page="chat"]').click()
+            _project(page, PROJECT)
+            page.evaluate(event)
+            page.wait_for_function(wait)
+            page.evaluate(settle)
+
+        for width, sidebar in ((1280, ''), (1110, ''), (860, '600px')):  # the last: the room's 320px minimum column
+            page.set_viewport_size({'width': width, 'height': 801})
+            page.evaluate("w => w ? document.documentElement.style.setProperty('--sidebar-width', w) : null", sidebar)
+            from_long_project("() => window.dispatchEvent(new CustomEvent('ouro:open-dashboard', {detail: {tab: 'logs'}}))",
+                              "() => document.querySelector('#page-dashboard.active [data-shell-back]')")
+            logs = page.evaluate(RETURN_PAINT, ['#page-dashboard > .app-page-header', '[data-dashboard-lead-name]', '.logs-kinds button'])
+            logs['filters'] = page.evaluate("() => document.querySelector('#page-dashboard .logs-kinds').getBoundingClientRect().width")
+            logs['clear'] = page.evaluate("() => document.querySelector('#page-dashboard .logs-clear-list').getBoundingClientRect().right")
+            logs['content'] = page.evaluate("() => document.getElementById('content').getBoundingClientRect().width")
+            from_long_project("() => window.dispatchEvent(new CustomEvent('ouro:open-circles'))",
+                              "() => document.querySelector('#page-circles.active [data-shell-back]')")
+            circles = page.evaluate(RETURN_PAINT, ['#page-circles > .app-page-header', '.app-page-title', '.app-page-toolbar button'])
+            from_long_project(f"() => window.dispatchEvent(new CustomEvent('ouro:open-project', {{detail: {{project: {json.dumps(BETA)}}}}}))",
+                              "() => document.querySelector('.project-panel.open #project-panel-title')?.textContent === 'Beta'")
+            room = page.evaluate(RETURN_PAINT, ['.project-panel.open .project-panel-bar', '#project-panel-title', '[data-chat-command="panic"]'])
+            from_long_project("() => window.dispatchEvent(new CustomEvent('ouro:open-skills', {detail: {skill: 'fixture'}}))",
+                              "() => document.querySelector('#page-skills.active [data-shell-back]')")
+            skills = page.evaluate(RETURN_PAINT, ['#page-skills > .app-page-header', '[data-extensions-lead-name]', '#skills-refresh'])
+            # The page's own controls stay one line each beside the return (they never wrap because of it).
+            skills['wrapped'] = page.evaluate("""() => [...document.querySelectorAll('#page-skills > .app-page-header .extensions-toolbar button')]
+                .filter((b) => b.getClientRects().length && b.getBoundingClientRect().height > 31).map((b) => b.id)""")
+            seen[width] = {'logs': logs, 'circles': circles, 'room': room, 'skills': skills}
+        # Long names on both sides in a room bar at the widths around its threshold (a 1600 px window): once the panel
+        # has settled, Back's centre is Back's, it never overlaps the opened room's name, it is the round arrow or a
+        # capsule whose word reads, and a click on its centre returns to the first room.
+        page.set_viewport_size({'width': 1600, 'height': 801})
+        page.evaluate("() => document.documentElement.style.removeProperty('--sidebar-width')")
+        for panel in (670, 675, 700, 760):
+            page.evaluate("w => document.documentElement.style.setProperty('--project-panel-width', w + 'px')", panel)
+            from_long_project(f"() => window.dispatchEvent(new CustomEvent('ouro:open-project', {{detail: {{project: {json.dumps(LONG_TOO)}}}}}))",
+                              f"() => document.querySelector('.project-panel.open #project-panel-title')?.textContent === {json.dumps(LONG_TOO['name'])}")
+            page.wait_for_function("() => document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming?.().iterations === Infinity)")
+            page.evaluate(settle)
+            paint = page.evaluate(RETURN_PAINT, ['.project-panel.open .project-panel-bar', '#project-panel-title', '[data-chat-command="panic"]'])
+            paint['centre'] = page.evaluate("""() => { const b = document.querySelector('.project-panel.open [data-shell-back]').getBoundingClientRect();
+                const x = b.left + b.width / 2, y = b.top + b.height / 2;
+                return {x, y, mine: Boolean(document.elementFromPoint(x, y)?.closest('[data-shell-back]'))}; }""")
+            seen[f'room-{panel}'] = paint
+            page.mouse.click(paint['centre']['x'], paint['centre']['y'])
+            page.wait_for_function("name => document.querySelector('.project-panel.open #project-panel-title')?.textContent === name", arg=PROJECT['name'])
+        print(json.dumps({'named_return_paint': seen, 'engine': engine_ui['engine']}))
+        setup_browser.capture(page, f'named-return-yields-{engine_ui["engine"]}')
+        rooms = {key: seen.pop(key) for key in [k for k in seen if str(k).startswith('room-')]}
+        for width, places in seen.items():
+            for where, paint in places.items():
+                # Always: the page's own name whole, its controls inside the window, the return never wider than 16rem.
+                assert paint['title'] and paint['title']['w'] > 1 and paint['titleWhole'], (width, where, paint)
+                assert paint['back']['w'] <= 256.5 and paint['control']['right'] <= paint['right'] + 0.5, (width, where, paint)
+            assert seen[width]['logs']['filters'] >= 60 and seen[width]['logs']['clear'] <= width, (width, seen[width]['logs'])
+        # The wide side names where the return leads; the narrow side keeps the circle, its words gone.
+        wide, narrow = seen[1280], seen[860]
+        assert wide['logs']['words'].startswith('Notifications') and wide['circles']['words'].startswith('Notifications'), wide
+        assert narrow['logs']['content'] <= 330, narrow['logs']  # the room's minimum column
+        assert wide['logs']['back']['w'] > wide['logs']['back']['h'], wide
+        for where in ('logs', 'circles', 'room'):
+            assert narrow[where]['words'] == '' and abs(narrow[where]['back']['w'] - narrow[where]['back']['h']) < 1, (where, narrow)
+        for key, room in rooms.items():
+            back, title = room['back'], room['title']
+            assert room['centre']['mine'] and back['right'] <= title['x'] + 0.5, (key, room)
+            assert back['w'] >= back['h'] - 0.5, (key, room)  # never narrower than the round arrow
+            assert (room['wordsW'] >= 36) if room['words'] else abs(back['w'] - back['h']) < 1, (key, room)  # a word that reads, or round
+            assert title['w'] > back['w'] and room['control']['right'] <= room['right'] + 0.5, (key, room)
+        assert rooms['room-760']['words'].startswith('Notifications'), rooms['room-760']
+        for width, places in seen.items():
+            assert not places['skills']['wrapped'], (width, places['skills'])
+    finally:
+        page.close()
+
+
+DASHBOARD_PLACE = """() => {
+    const page = document.querySelector('#page-dashboard'), header = page.querySelector(':scope > .app-page-header');
+    const title = header.querySelector('.app-page-title').getBoundingClientRect(), rail = page.querySelector('.section-rail');
+    const row = rail.querySelector('.section-row').getBoundingClientRect(), body = page.querySelector('.dashboard-panel:not([hidden])');
+    return {titleX: title.x, titleY: title.y, headerBottom: header.getBoundingClientRect().bottom, position: getComputedStyle(header).position,
+        railTop: rail.getBoundingClientRect().top, row: row.top, panel: body ? body.getBoundingClientRect().top : null};
+}"""
+
+
+@pytest.mark.parametrize('band', [66, 0], ids=['mac-band', 'browser'])
+def test_dashboard_heading_stays_put_on_every_page(engine_ui, band):
+    """The Dashboard's name over its list (owner 27.11.2026) stands still while the chosen page changes, on all seven
+    pages, and the band is a row of the page (never laid over the rail, so a short window's scrolled rows never pass
+    behind the name)."""
+    page = _open(engine_ui, 1230, 520)
+    try:
+        if band:
+            _band(page, band)
+        _goto(page, 'dashboard')
+        tabs = page.locator('#page-dashboard [data-dashboard-tab]').evaluate_all('els => els.map(e => e.dataset.dashboardTab)')
+        assert len(tabs) == 7, tabs
+        seen = {}
+        for tab in tabs:
+            page.locator(f'#page-dashboard [data-dashboard-tab="{tab}"]').click()
+            page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+            seen[tab] = page.evaluate(DASHBOARD_PLACE)
+        page.locator('#page-dashboard .section-rail').evaluate('el => { el.scrollTop = el.scrollHeight; }')
+        scrolled = page.evaluate(DASHBOARD_PLACE)
+        print(json.dumps({'dashboard_place': seen, 'scrolled': scrolled, 'band': band, 'engine': engine_ui['engine']}))
+        first = next(iter(seen.values()))
+        for tab, place in seen.items():
+            assert place['position'] != 'absolute', (tab, place)
+            assert abs(place['titleX'] - first['titleX']) < 0.5 and abs(place['titleY'] - first['titleY']) < 0.5, (tab, seen)
+            assert abs(place['railTop'] - first['railTop']) < 0.5 and place['railTop'] >= place['headerBottom'] - 0.5, (tab, place)
+        assert scrolled['railTop'] >= scrolled['headerBottom'] - 0.5, scrolled
+    finally:
+        page.close()
+
+
+def test_widgets_named_row_in_a_browser_keeps_a_clearance_under_its_name(engine_ui):
+    """Without the macOS band Widgets' row is as low as its name needs plus a step of the spacing scale (owner
+    27.11.2026 named the place; its cards are not cut against the name's descenders)."""
+    page = _open(engine_ui, 1100, 750)
+    try:
+        _goto(page, 'widgets')
+        row = page.evaluate("""() => { const h = document.querySelector('#page-widgets > .app-page-header');
+            const t = h.querySelector('.app-page-title').getBoundingClientRect(), b = h.getBoundingClientRect();
+            const list = document.querySelector('#page-widgets .widgets-scroll').getBoundingClientRect();
+            return {titleBottom: t.bottom, headerBottom: b.bottom, height: b.height, listTop: list.top,
+                overflow: getComputedStyle(h).overflowY}; }""")
+        print(json.dumps({'widgets_browser_row': row, 'engine': engine_ui['engine']}))
+        assert row['listTop'] - row['titleBottom'] >= 8 - 0.5, row
+        assert row['height'] < 52 and row['overflow'] == 'visible', row
+    finally:
+        page.close()
+
+
+def test_names_a_person_gave_stay_as_written_in_backs_name_after_a_language_change(engine_ui):
+    """Back's tooltip and accessible name are composed once from the translated template and the names as written
+    (a Project named `Settings`), and the page's own translation pass, with a saved whole-sentence translation that
+    would match, never rewrites them after the language changes while the return is owed."""
+    page = _open(engine_ui, 1280, 801, seed=_two_projects)
+    try:
+        _project(page, NAMED_SETTINGS)
+        page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-circles'))")
+        back = page.locator('#page-circles.active [data-shell-back]')
+        back.wait_for(state='visible')
+        load = """async (entries) => (await import('/static/modules/i18n.js')).applyPayload({language: 'fr', english: false,
+            revision: Object.keys(entries).length, entries})"""
+        said = "b => ({aria: b.getAttribute('aria-label'), title: b.title, words: b.querySelector('.shell-back-label')?.textContent || ''})"
+        settle = '() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))'
+        # A memory with the whole English sentence saved but no template: the template stays English, the name as
+        # written, and the saved sentence must not replace it ("Retour à Réglages" would name another place).
+        page.evaluate(load, {'Settings': {'text': 'Réglages'}, 'Back to Settings': {'text': 'Retour à Réglages'}})
+        page.evaluate(settle)
+        without = back.evaluate(said)
+        # With the template: the template translated, the name still as written.
+        page.evaluate(load, {'Settings': {'text': 'Réglages'}, 'Back to {place}': {'text': 'Retour à {place}'},
+                             'Back to Settings': {'text': 'Retour à Réglages'}})
+        page.evaluate(settle)
+        with_template = back.evaluate(said)
+        print(json.dumps({'literal_back_name': [without, with_template], 'engine': engine_ui['engine']}))
+        assert without == {'aria': 'Back to Settings', 'title': 'Back to Settings', 'words': 'Settings'}, without
+        assert with_template == {'aria': 'Retour à Settings', 'title': 'Retour à Settings', 'words': 'Settings'}, with_template
+        # The page's translation pass never reports Back's composed sentence, nor a Project's name, as a missing string.
+        page.locator('[data-nav-page="chat"]').click()
+        _project(page, PROJECT)
+        page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-circles'))")
+        page.locator('#page-circles.active [data-shell-back]').wait_for(state='visible')
+        page.evaluate(settle)
+        misses = page.evaluate("async () => (await import('/static/modules/i18n.js')).pendingMisses()")
+        print(json.dumps({'misses_after_return': misses, 'engine': engine_ui['engine']}))
+        assert not [m for m in misses if 'Retour' in m or m.startswith('Back to') or PROJECT['name'][:20] in m], misses
+    finally:
+        page.evaluate("async () => (await import('/static/modules/i18n.js')).applyPayload({language: '', english: true, entries: {}})")
+        page.close()
+
+
+def test_back_points_to_the_inline_start_in_rtl(engine_ui):
+    """Back's chevron is mirrored in a right-to-left interface, as the capsule and as the round arrow."""
+    page = _open(engine_ui, 1280, 801, seed=_two_projects)
+    try:
+        _project(page, PROJECT)
+        page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-circles'))")
+        back = page.locator('#page-circles.active [data-shell-back]')
+        back.wait_for(state='visible')
+        page.evaluate("() => { document.documentElement.dir = 'rtl'; }")  # as i18n.js writes it for an RTL language
+        page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+        glyph = "b => ({dir: document.documentElement.dir, scale: getComputedStyle(b.querySelector('svg')).scale, named: getComputedStyle(b.querySelector('.shell-back-label')).display !== 'none'})"
+        capsule = back.evaluate(glyph)
+        page.evaluate("() => document.documentElement.style.setProperty('--sidebar-width', '600px')")
+        page.set_viewport_size({'width': 860, 'height': 801})
+        page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+        round_ = back.evaluate(glyph)
+        print(json.dumps({'rtl_back': [capsule, round_], 'engine': engine_ui['engine']}))
+        assert capsule == {'dir': 'rtl', 'scale': '-1 1', 'named': True} and round_ == {'dir': 'rtl', 'scale': '-1 1', 'named': False}, (capsule, round_)
     finally:
         page.close()
