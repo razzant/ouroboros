@@ -690,13 +690,13 @@ def _pick(skill: str, service: declaration.Service, account: str) -> oauth_engin
 
 
 def _first_proof(doc: Dict[str, Any]) -> Optional[str]:
-    """A moved grant's first-refresh phase: ``due`` (its refresh token not yet proven), ``renewed`` (answered and
-    saved, its identity read pending), ``unconfirmed`` (that refresh left without an answer, or its saved answer is no
-    longer fresh: never repeated, never handed out); None once proven or not moved."""
+    """A moved grant's first-refresh phase: ``due`` (not yet proven, or its saved answer went stale before the identity
+    read: refreshed again), ``renewed`` (saved, identity read pending), ``unconfirmed`` (that refresh left and its answer
+    was lost: never repeated, never handed out); None once proven or not moved."""
     phase = (doc.get("origin") or {}).get("first_refresh") if (doc.get("consent") or {}).get("via") == "handover" else None
-    if phase == "sent" or (phase == "renewed" and not oauth_engine.fresh(doc.get("tokens") or {}, None)):
-        return "unconfirmed"
-    return phase
+    if phase == "renewed" and not oauth_engine.fresh(doc.get("tokens") or {}, None):
+        return "due"
+    return "unconfirmed" if phase == "sent" else phase
 
 
 def _first_refresh_mark(doc: Dict[str, Any], step: str) -> bool:

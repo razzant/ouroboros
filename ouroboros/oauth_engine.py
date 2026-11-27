@@ -274,6 +274,12 @@ def oauth_error(response: httpx.Response) -> str:
     return f"HTTP {response.status_code}"
 
 
+def _refusal_code(response: httpx.Response) -> str:
+    """``oauth_error`` as a short code safe to keep and show (``admin_policy_enforced``), else the HTTP status."""
+    code = oauth_error(response)
+    return code if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code) else f"HTTP {response.status_code}"
+
+
 async def token_request(http: httpx.AsyncClient, endpoint: str, client: Dict[str, Any],
                         data: Dict[str, str]) -> httpx.Response:
     """A token-endpoint (or revocation) POST with the client's own authentication method."""
@@ -440,11 +446,16 @@ async def current_grant(grant: Grant, rejected: Optional[str] = None, *, min_val
             _refresh_failure(grant, doc, response, consent_bound=qualify is not None)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            if marked and on_refresh is not None and isinstance(exc, NOT_SENT):
-                on_refresh(doc, "unsent")  # it never left: the consumer may lift its mark in the same write
-            if qualify is not None and (not isinstance(exc, httpx.HTTPStatusError)
-                                        or exc.response.status_code == 429 or exc.response.status_code >= 500):
-                _save_sign_in(grant, {**doc, "last_error": {"reason": "provider_unreachable", "at": utc_now_iso()}})
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
+            if marked and on_refresh is not None and (isinstance(exc, NOT_SENT) or status == 429 or status >= 500):
+                on_refresh(doc, "unsent")  # it never left, or the provider said it did not serve it: lift the mark
+            if qualify is not None:
+                # A provider's own refusal (an administrator's policy, a client it no longer allows) is not an
+                # outage: it is named, and the grant is kept, as for any answer that does not prove it ended.
+                refused = 400 <= status < 500 and status != 429
+                fact = {"reason": "provider_refused", "error": _refusal_code(exc.response)} if refused else \
+                    {"reason": "provider_unreachable"}
+                _save_sign_in(grant, {**doc, "last_error": {**fact, "at": utc_now_iso()}})
             elif marked:
                 _save_sign_in(grant, doc)
             raise

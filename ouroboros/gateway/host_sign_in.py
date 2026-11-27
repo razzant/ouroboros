@@ -144,12 +144,36 @@ async def api_sign_in_token(request: Request) -> JSONResponse:
                 return _busy()
             except ValueError as exc:
                 return _json_error(_masked(str(exc)), 400)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429 or exc.response.status_code >= 500:
+                    return _unreachable(skill, service, exc)
+                return await asyncio.to_thread(_provider_refused, skill, service, account, exc)
             except httpx.HTTPError as exc:
-                log.info("sign-in token for %s/%s: provider unreachable (%s)", skill, service, type(exc).__name__)
-                return JSONResponse({"ok": False, "code": "SIGN_IN_UNAVAILABLE", "reason": "provider_unreachable",
-                                     "error": _masked(f"{type(exc).__name__}: {exc}")}, status_code=503)
+                return _unreachable(skill, service, exc)
     finally:
         ctx._leave_inflight(skill)
+
+
+def _unreachable(skill: str, service: str, exc: Exception) -> JSONResponse:
+    log.info("sign-in token for %s/%s: provider unreachable (%s)", skill, service, type(exc).__name__)
+    return JSONResponse({"ok": False, "code": "SIGN_IN_UNAVAILABLE", "reason": "provider_unreachable",
+                         "error": _masked(f"{type(exc).__name__}: {exc}")}, status_code=503)
+
+
+def _provider_refused(skill: str, service: str, account: str, exc: Any) -> JSONResponse:
+    """The provider answered the renewal with its own refusal (``admin_policy_enforced``, a client it no longer
+    allows): not an outage, so not repeated as one. The grant is kept; the skill's ``refused`` note says what to do."""
+    from ouroboros import oauth_engine, service_sign_in
+
+    declared = service_sign_in.declared_service(skill, service)
+    code = oauth_engine._refusal_code(exc.response)
+    label = declared.label if declared else service
+    hint = (f"{label} refused this renewal ({code}): an administrator's policy or the client's settings at the provider "
+            f"block it, and repeating will not help. The owner can check the skill's card in {CARD_PLACE} and sign in "
+            "again once the provider allows the client.")
+    return JSONResponse({"ok": False, "code": "SIGN_IN_REQUIRED", "reason": "provider_refused", "service": service,
+                         "account": account, "error": code, "note": declared.notes.get("refused", "") if declared else "",
+                         "hint": hint}, status_code=409)
 
 
 def _required_response(skill: str, service: str, account: str, exc: Any) -> JSONResponse:

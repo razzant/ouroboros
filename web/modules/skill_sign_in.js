@@ -281,7 +281,9 @@ export function signInRowsHtml(service, { results = new Map(), confirm = null } 
             knownGrant && list(account.not_allowed).length ? html('not_allowed', 'Not allowed: {scopes}', { scopes: scopeText(service, account.not_allowed) }) : '',
             view.sentence ? `${view.sentence}${view.note ? ` ${view.note}` : ''}` : '',
             account.last_error?.reason === 'provider_unreachable' ? html('last_check', 'Last check: couldn’t reach {host}, {age}. The sign-in is kept.',
-                { host: hostOf(service.issuer), age: relativeAge(account.last_error.at) }) : ''].filter(Boolean);
+                { host: hostOf(service.issuer), age: relativeAge(account.last_error.at) })
+                : account.last_error?.reason === 'provider_refused' ? html('last_refused', 'Last check: {host} refused the renewal ({error}), {age}. The sign-in is kept.',
+                    { host: hostOf(service.issuer), error: String(account.last_error.error || ''), age: relativeAge(account.last_error.at) }) : ''].filter(Boolean);
         const via = account.client?.label ? ` <span class="skills-card-facts">${html('via', 'via {client}', { client: account.client.label })}</span>` : '';
         const more = escapeHtml(words('more', 'More for {account}', { account: nameOf(account) }));
         return `<div class="ui-row settings-row" data-sign-in-row="${escapeHtml(account.key)}">

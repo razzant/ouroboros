@@ -208,3 +208,12 @@ test('the card has one sign-in tray only while a sign-in needs the owner, and on
         /data-sign-in-tray/, 'an Off skill owes no sign-in now');
     assert.doesNotMatch(renderInstalledSkillCard(row), /data-sign-in|data-skill-sign-ins/, 'without a status the card is as before');
 });
+
+test('an account whose renewal the provider refused says so on its row and keeps the sign-in', () => {
+    const refused = account({ last_error: { reason: 'provider_refused', error: 'admin_policy_enforced', at: new Date().toISOString() } });
+    const rows = text(signInRowsHtml(service({ accounts: [refused] })));
+    assert.ok(rows.includes('Last check: accounts.google.com refused the renewal (admin_policy_enforced)'), rows);
+    assert.ok(rows.includes('The sign-in is kept.'));
+    const unreachable = account({ last_error: { reason: 'provider_unreachable', at: new Date().toISOString() } });
+    assert.ok(text(signInRowsHtml(service({ accounts: [unreachable] }))).includes('couldn’t reach accounts.google.com'));
+});

@@ -799,3 +799,52 @@ def test_a_new_sign_in_finishes_an_interrupted_withdrawal_without_waiting_for_an
     assert ended in taken and other not in taken  # it finished that withdrawal and waited for no other account's lock
     rows = json.loads(service_sign_in._withdrawals_file(CAL).path.read_text(encoding="utf-8"))["accounts"]
     assert [(entry["account"], entry["subject"]) for entry in rows] == [(ended, "sub-1")] and not grant.path.exists()
+
+
+@pytest.mark.parametrize("fault", ["token_503", "userinfo_503_then_stale"])
+def test_a_moved_grant_whose_first_renewal_met_an_outage_renews_again(world, monkeypatch, fault):  # noqa: F811
+    """A 503 answer is not a lost answer, and a saved renewal that went stale before its identity read is renewed
+    again from what was saved: neither strands a moved sign-in as ``handover_unconfirmed``."""
+    provider, _owner, host = world
+    key = _handover(host, provider)[0]["grants"][0]["account"]["key"]
+    grant = service_sign_in._grant(CAL, "google", key)
+    saved = oauth_engine.load(grant)
+    oauth_engine.save(grant, {**saved, "tokens": {**saved["tokens"], "expires_at": 1}})
+    served, outage = provider.handle, [fault]
+
+    def once(request):
+        if outage and request.url.path == ("/token" if fault == "token_503" else "/userinfo"):
+            outage.clear()
+            return httpx.Response(503, json={"error": "temporarily_unavailable"})
+        return served(request)
+
+    monkeypatch.setattr(provider, "handle", once)
+    first = host.post("/sign-in/token", headers={"x-skill-token": "cal-token"}, json={"service": "google"})
+    assert first.status_code == 503
+    if fault == "userinfo_503_then_stale":  # the saved renewal outlives its access token before the next read
+        renewed = oauth_engine.load(grant)
+        assert renewed["origin"]["first_refresh"] == "renewed"
+        oauth_engine.save(grant, {**renewed, "tokens": {**renewed["tokens"], "expires_at": 1}})
+    second = host.post("/sign-in/token", headers={"x-skill-token": "cal-token"}, json={"service": "google"})
+    assert second.status_code == 200, second.text
+    assert "first_refresh" not in oauth_engine.load(grant)["origin"]
+
+
+def test_a_moved_grants_first_renewal_whose_answer_was_lost_is_never_repeated(world, monkeypatch):  # noqa: F811
+    provider, _owner, host = world
+    key = _handover(host, provider)[0]["grants"][0]["account"]["key"]
+    grant = service_sign_in._grant(CAL, "google", key)
+    saved = oauth_engine.load(grant)
+    oauth_engine.save(grant, {**saved, "tokens": {**saved["tokens"], "expires_at": 1}})
+    served = provider.handle
+
+    def lost(request):
+        if request.url.path == "/token":
+            raise httpx.ReadTimeout("the answer never came back", request=request)
+        return served(request)
+
+    monkeypatch.setattr(provider, "handle", lost)
+    assert host.post("/sign-in/token", headers={"x-skill-token": "cal-token"}, json={"service": "google"}).status_code == 503
+    monkeypatch.setattr(provider, "handle", served)
+    again = host.post("/sign-in/token", headers={"x-skill-token": "cal-token"}, json={"service": "google"})
+    assert again.status_code == 409 and again.json()["reason"] == "handover_unconfirmed"
