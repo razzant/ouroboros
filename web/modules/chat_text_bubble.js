@@ -15,6 +15,7 @@ import { attachmentCaption, attachmentViews } from './chat_attachments.js';
 import { renderSkillReviewDisclosure, wireSkillReviewDisclosure } from './skill_review_card.js';
 import { evidenceLinkHtml, formatMsgTime, senderLabel, stampNodeTimestamp } from './chat_activity.js';
 import { adoptsRetainedCopy, captionRevisionKey, rowAddressStem, stampHistoryNode } from './chat_history_replay.js';
+import { nextRevisionOrder } from './chat_timeline_order.js';
 import { decorateContactSource } from './chat_media.js';
 import { recordAnswerWords } from './message_actions.js';
 import { PROJECT_ROW_TYPES, decorateProjectRow, syncSavedProjectContext } from './project_answer.js';
@@ -62,6 +63,31 @@ export function bubbleWords(text, role, { markdown = false, systemType = '', sou
 export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ownProjectId = '',
     onDomWrite = (write) => write(), enhanceMarkdown = () => {} }) {
     const earlyPresentation = new WeakMap();
+    // Per-node provenance of the latest words drawn/revised onto each bubble (WeakMap: GC'd with removed DOM nodes).
+    const revisionState = new WeakMap();
+    const isHistoryWrite = (opts) => Boolean(opts?.historyId || Number.isFinite(opts?.readOrder) || Number.isFinite(opts?.requestedAt));
+    function recordRevision(node, opts, live) {
+        if (live) {
+            revisionState.set(node, { order: nextRevisionOrder(), at: Date.now(), live: true });
+            return;
+        }
+        const order = Number.isFinite(opts?.readOrder) ? opts.readOrder : null;
+        const at = Number.isFinite(opts?.requestedAt) ? opts.requestedAt : null;
+        if (order === null && at === null) return;
+        const current = revisionState.get(node);
+        if (current && order !== null && current.order !== null && order < current.order) return;
+        revisionState.set(node, { order, at, live: false });
+    }
+    function isStaleHistoryWrite(node, opts) {
+        if (!isHistoryWrite(opts)) return false;
+        const current = revisionState.get(node);
+        if (!current) return false;
+        const order = Number.isFinite(opts?.readOrder) ? opts.readOrder : null;
+        if (order !== null && current.order !== null) return order < current.order;
+        const at = Number.isFinite(opts?.requestedAt) ? opts.requestedAt : null;
+        if (at !== null && current.at !== null) return current.live ? current.at >= at : at < current.at;
+        return false;
+    }
     function draw(text, role, { markdown = false, ts, isProgress = false, meta, legacyKey = '', opts = {}, existing = null }) {
         const pending = !!opts.pending;
         const ephemeral = !!opts.ephemeral;
@@ -151,6 +177,8 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
             fold: projectRow && role === 'assistant', addedAt: ts });
         syncSavedProjectContext(bubble, opts.originProjected, opts.originId);
         if (skillReview) wireSkillReviewDisclosure(bubble, { onDomWrite, own: dispose => chatMedia.own(dispose, bubble) });
+        if (isHistoryWrite(opts)) recordRevision(bubble, opts, false);
+        else if (!pending && !ephemeral && (captionKey || opts.reply?.row_address)) recordRevision(bubble, opts, true);
         return { bubble, rich: richMarkdown };
     }
     // Revise an already-mounted live-call caption (or same-stem revised row) in place without replacing its DOM node
@@ -164,7 +192,12 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
             && rowAddressStem(prevAddress) && rowAddressStem(prevAddress) === rowAddressStem(nextAddress));
         const isCaption = Boolean(captionKey || node.dataset.captionKey);
         if (!isCaption && !sameStemRevised) return false;
-        if (prevAddress && nextAddress && prevAddress === nextAddress) return false;
+        const fromHistory = isHistoryWrite(opts);
+        if (prevAddress && nextAddress && prevAddress === nextAddress) {
+            if (fromHistory && !isStaleHistoryWrite(node, opts)) recordRevision(node, opts, false);
+            return false;
+        }
+        if (fromHistory && isStaleHistoryWrite(node, opts)) return false;
         const body = [...(node.children || [])].find((child) => child.classList?.contains('message')) || node.querySelector?.('.message');
         if (!body) return false;
         const { source, systemType } = meta;
@@ -184,12 +217,20 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         if (captionKey) node.dataset.captionKey = captionKey;
         if (legacyKey) node.dataset.messageKey = legacyKey;
 
+        const doc = node.ownerDocument || globalThis.document;
         const actionsRow = [...(node.children || [])].find((child) => child.classList?.contains('chat-message-actions')) || null;
         const oldCopy = [...((actionsRow || node).children || [])].find((child) => child.classList?.contains('chat-message-copy')) || null;
+        const hadCopyFocus = Boolean(oldCopy && doc?.activeElement === oldCopy);
+        const copyBefore = oldCopy && actionsRow && oldCopy.parentNode === actionsRow
+            ? (oldCopy.nextSibling ?? oldCopy.nextElementSibling) : null;
         if (oldCopy) { chatMedia.release?.(oldCopy); oldCopy.remove(); }
         if (!isProgress && shown) {
             const copy = chatMedia.attachCopyControl(node, String(shown));
-            if (copy && actionsRow && copy.parentNode !== actionsRow) actionsRow.appendChild(copy);
+            if (copy && actionsRow && copy.parentNode !== actionsRow) {
+                if (copyBefore && copyBefore.parentNode === actionsRow) actionsRow.insertBefore(copy, copyBefore);
+                else actionsRow.appendChild(copy);
+            }
+            if (hadCopyFocus) copy?.focus?.({ preventScroll: true });
             if (role === 'assistant' && systemType !== 'relay_entry' && !String(systemType).startsWith('peer_letter') && opts.textPlaceholder !== true) {
                 recordAnswerWords(node, String(shown), (close) => chatMedia.holdTransient(node, close));
             }
@@ -204,6 +245,7 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         if (node.classList?.contains('call-folded') && node.parentNode === feed) {
             feed.insertBefore(node, node.nextSibling ?? node.nextElementSibling);
         }
+        recordRevision(node, opts, !fromHistory);
         return true;
     };
     draw.reconcile = function reconcile(node, text, role, { markdown = false, isProgress = false, meta = {}, legacyKey = '', opts = {}, adopt = false } = {}) {

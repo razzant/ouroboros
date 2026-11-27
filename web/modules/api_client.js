@@ -1,4 +1,5 @@
 import './api_types.js';
+import { nextRevisionOrder } from './chat_timeline_order.js';
 import { clearChatPreviews, documentScope, provenScope } from './chat_preview.js';
 
 /**
@@ -605,6 +606,7 @@ export const apiClient = {
      * `detail`): the server counts them, nothing more. */
     chatHistory: async ({ chatId = 1, cursor = null, around = null, repair = '', signal, tags = null } = {}) => {
         const requestedAt = Date.now();
+        const readOrder = nextRevisionOrder();
         const scope = documentScope(globalThis.document);
         const params = new URLSearchParams();
         if (chatId !== 1) params.set('chat_id', String(chatId));
@@ -618,7 +620,7 @@ export const apiClient = {
         if (scope && servingScope !== scope) {
             throw Object.assign(new Error('History does not belong to this data profile.'), { foreignProfile: true, servingScope });
         }
-        return { ...data, requestedAt };
+        return { ...data, requestedAt, readOrder };
     },
     /** While Main's history refuses for the Project registry: one read-only page of a saved room (`room_archive.py`),
      * oldest first; `before` is a page's `next_cursor`. Reads only: it acknowledges nothing.

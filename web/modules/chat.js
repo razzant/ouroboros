@@ -2118,7 +2118,7 @@ export function createChatInstance({
         }
     }
     // `requestedAt` dates the question records in these rows.
-    function applyHistoryMessages(messages, { archived = false, direction = '', anchor = null, requestedAt, quiet } = {}) {
+    function applyHistoryMessages(messages, { archived = false, direction = '', anchor = null, requestedAt, readOrder, quiet } = {}) {
         const sourceRows = messages;  // even rows withheld from replay carry their exact identity
         // ↓ hears only new words, not an older page or an adopted identity.
         const reportActivity = historyLoaded && !archived;
@@ -2228,7 +2228,7 @@ export function createChatInstance({
                     historyId: msg.history_id, historyPosition: msg.history_position,
                     systemType: msg.system_type || '', narration: msg.narration, taskId,
                     source: msg.source || '', initiator: msg.initiator || '',
-                    senderLabel: msg.sender_label || '', senderSessionId: msg.sender_session_id || '', reply: msg,
+                    senderLabel: msg.sender_label || '', senderSessionId: msg.sender_session_id || '', reply: msg, requestedAt, readOrder,
                     ...extra,
                 });
                 for (const msg of messages) {
@@ -2391,7 +2391,7 @@ export function createChatInstance({
                         || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !nextIds.has(id)));
                 let admitted = false;
                 const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect }, () => {
-                    applyHistoryMessages(messages, { requestedAt: data.requestedAt });
+                    applyHistoryMessages(messages, { requestedAt: data.requestedAt, readOrder: data.readOrder });
                     admitted = acceptRecentWindow(data, messages);
                 });
                 if (result.drawFailed) throw result.error;
@@ -2850,9 +2850,9 @@ export function createChatInstance({
             withStableViewport(() => releaseHistoryIds(ids));
         },
         // Rows stored since the newest read join its window (and the saved preview).
-        applyArrivals: (messages, { window, requestedAt, repairs, quiet }) => {
+        applyArrivals: (messages, { window, requestedAt, readOrder, repairs, quiet }) => {
             if (foreignProfile()) return;
-            applyHistoryMessages([...repairs, ...messages], { requestedAt, quiet });
+            applyHistoryMessages([...repairs, ...messages], { requestedAt, readOrder, quiet });
             preview.append(messages);
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
             readReceipt.arrived(window);

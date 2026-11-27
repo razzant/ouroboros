@@ -25,7 +25,7 @@
  * Project deleted where this origin hears none of these keeps its entry until one comes or the total gives it way, and
  * the same Project's rooms under another profile keep theirs. Its imports are the feed's tie rule and the words a
  * bubble draws (a host notice's line), so neither the order nor the words fork. */
-import { compareTimelineOrder, timelineTime } from './chat_timeline_order.js';
+import { compareTimelineOrder, nextRevisionOrder, timelineTime } from './chat_timeline_order.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 
 // The record names the form, under the one key every eraser of every earlier version removes: entries are read only
@@ -459,9 +459,11 @@ export function createRoomProfileLifecycle({
     // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
     async function fetchHistory(cursor, options = {}) {
         const recentVersion = nextReadVersion(cursor == null && !options.around), sent = { socket: servingSocket(), epoch };
+        const readOrder = nextRevisionOrder();
         try {
             // The room's window applies `repairs`: a task it shows that settled is read with what arrived (chat_history.js).
-            return { ...await readHistory({ chatId, cursor, repair: 'settled', ...options }), recentVersion };
+            const data = await readHistory({ chatId, cursor, repair: 'settled', ...options });
+            return { ...data, recentVersion, readOrder: data?.readOrder ?? readOrder };
         } catch (error) {
             if (error && typeof error === 'object') asked.set(error, sent);
             if (!isDestroyed() && !isLeaving() && !options.signal?.aborted) getPreview().refused(error);

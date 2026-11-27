@@ -259,7 +259,7 @@ export function createChatHistoryPager({
         lastDrawError = null;
         try {
             applyPage(data.messages, { ...page, direction, window: data.window ?? null,
-                recentVersion: data.recentVersion, requestedAt: data.requestedAt, page_cursor: data.page_cursor,
+                recentVersion: data.recentVersion, requestedAt: data.requestedAt, readOrder: data.readOrder, page_cursor: data.page_cursor,
                 reason_code: data.reason_code, project_registry: data.project_registry, anchor: data.anchor ?? null, ...extra });
         } catch (error) {
             lastDrawError = error;
@@ -380,7 +380,7 @@ export function createChatHistoryPager({
                 const quiet = new Set(repairs.map(card).filter(id => id
                     && !data.messages.some(row => !isReplayEvidenceRow(row) && card(row) === id)));
                 applyArrivals(data.messages, { window: data.window ?? null, fromReconnect: ask.fromReconnect,
-                    requestedAt: data.requestedAt, repairs, quiet });
+                    requestedAt: data.requestedAt, readOrder: data.readOrder, repairs, quiet });
                 // The arrivals go on from this answer only once it is drawn: one that failed to apply reads the newest page.
                 after = data.after_cursor;
                 arrived += rowCount(data.messages);

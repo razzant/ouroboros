@@ -860,3 +860,252 @@ test('live-call captions mounted from live frames before history reconcile in pl
     await quiet();
     assert.deepEqual(copied, ['canonical spoken']);
 });
+
+test('late HTTP newest snapshot does not roll back newer live WS caption corrections, while a later fresh HTTP read after a gap applies in place', async (t) => {
+    const callTask = 'call-w5';
+    const initialRows = [
+        { role: 'assistant', chat_id: 2, text: 'ordinary unchanged', content: 'ordinary unchanged', ts: ts(1),
+            history_id: 'chat:1', history_position: { source: 'chat', offset: 1 }, row_address: `row:2@${ts(1)}#101010101010` },
+        { role: 'system', chat_id: 2, system_type: 'call_open', source: 'live_call', client_message_id: 'call:w5:open', task_id: callTask,
+            text: 'Call started. Engine: Realtime.', content: 'Call started. Engine: Realtime.', ts: ts(2),
+            history_id: 'chat:2', history_position: { source: 'chat', offset: 2 }, row_address: `row:2@${ts(2)}#202020202020` },
+        { role: 'user', chat_id: 2, source: 'live_call', client_message_id: 'call:w5:line', task_id: callTask,
+            text: 'Meeting at ten', content: 'Meeting at ten', ts: ts(3),
+            history_id: 'chat:3', history_position: { source: 'chat', offset: 3 }, row_address: `row:2@${ts(3)}#aead00000001` },
+        { role: 'assistant', chat_id: 2, source: 'live_call', system_type: 'model_narration', narration: true, markdown: true,
+            spoken: { call_id: 'w5', item_id: 's1' }, task_id: callTask,
+            text: 'Spoken ten', content: 'Spoken ten', ts: ts(4),
+            history_id: 'chat:4', history_position: { source: 'chat', offset: 4 }, row_address: `row:2@${ts(4)}#bebe00000001` },
+        { role: 'system', chat_id: 2, source: 'live_call', system_type: 'call_heard', task_id: callTask,
+            text: 'Heard in the call: ten', content: 'Heard in the call: ten', ts: ts(5),
+            history_id: 'chat:5', history_position: { source: 'chat', offset: 5 }, row_address: `row:2@${ts(5)}#cece00000001` },
+    ];
+    const r = makeReconnectRoom(t, { initialRows });
+    const { copied } = installCaptionTestEnv(t, r.messages);
+    const cards = createCallCards({ feed: r.messages, doc: globalThis.document });
+    t.after(() => cards.destroy());
+
+    await until(() => r.shown().includes('chat:5'));
+    await quiet();
+    cards.scan();
+
+    const byHistory = (id) => r.messages.children.filter((n) => n.dataset?.historyId === id);
+    const ordinaryBefore = byHistory('chat:1')[0];
+    const ownerBefore = byHistory('chat:3')[0];
+    const spokenBefore = byHistory('chat:4')[0];
+    const heardBefore = byHistory('chat:5')[0];
+    assert.ok(ordinaryBefore && ownerBefore && spokenBefore && heardBefore);
+
+    const ordinaryBody = ordinaryBefore.querySelector(':scope > .message');
+    let ordinaryWrites = 0;
+    const htmlDesc = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'innerHTML');
+    Object.defineProperty(ordinaryBody, 'innerHTML', {
+        configurable: true,
+        get() { return htmlDesc.get.call(this); },
+        set(v) { ordinaryWrites += 1; htmlDesc.set.call(this, v); },
+    });
+    const ordinaryCopy = ordinaryBefore.querySelector('.chat-message-copy');
+    ordinaryCopy.focus();
+    assert.equal(globalThis.document.activeElement, ordinaryCopy);
+
+    // Order 1: reconnect newest HTTP snapshot begins with "ten", then live WS delivers "eleven" before HTTP resolves.
+    r.disconnect();
+    const releaseNewest = r.hold('newest');
+    r.reconnect();
+    await until(() => r.reads.some((x) => x.reason === 'reconnect' && x.mode === 'newest'));
+
+    r.rows[2] = { ...r.rows[2], text: 'Meeting at eleven', content: 'Meeting at eleven', row_address: `row:2@${ts(3)}#aead00000002` };
+    r.rows[3] = { ...r.rows[3], text: 'Spoken eleven', content: 'Spoken eleven', row_address: `row:2@${ts(4)}#bebe00000002` };
+    r.rows[4] = { ...r.rows[4], text: 'Heard in the call: eleven', content: 'Heard in the call: eleven', row_address: `row:2@${ts(5)}#cece00000002` };
+    r.rawWs.emit('chat', {
+        type: 'chat', chat_id: 2, role: 'user', source: 'live_call', client_message_id: 'call:w5:line', task_id: callTask,
+        content: 'Meeting at eleven', ts: ts(3), row_address: `row:2@${ts(3)}#aead00000002`, markdown: false, is_progress: false,
+    });
+    r.rawWs.emit('chat', {
+        type: 'chat', chat_id: 2, role: 'assistant', source: 'live_call', system_type: 'model_narration', narration: true,
+        spoken: { call_id: 'w5', item_id: 's1' }, task_id: callTask,
+        content: 'Spoken eleven', ts: ts(4), row_address: `row:2@${ts(4)}#bebe00000002`, markdown: true, is_progress: false,
+    });
+    r.rawWs.emit('chat', {
+        type: 'chat', chat_id: 2, role: 'system', source: 'live_call', system_type: 'call_heard', task_id: callTask,
+        content: 'Heard in the call: eleven', ts: ts(5), row_address: `row:2@${ts(5)}#cece00000002`, markdown: false, is_progress: false,
+    });
+    await quiet();
+    assert.equal(ownerBefore.querySelector(':scope > .message').textContent, 'Meeting at eleven');
+
+    // Late HTTP newest snapshot ("ten") resolves after the WS corrections: must not roll back anything.
+    releaseNewest();
+    await quiet();
+
+    assert.deepEqual(byHistory('chat:1'), [ordinaryBefore]);
+    assert.deepEqual(byHistory('chat:3'), [ownerBefore]);
+    assert.deepEqual(byHistory('chat:4'), [spokenBefore]);
+    assert.deepEqual(byHistory('chat:5'), [heardBefore]);
+    assert.equal(ordinaryWrites, 0, 'unrelated row is never re-rendered');
+    assert.equal(globalThis.document.activeElement, ordinaryCopy, 'focus on unrelated row survives late snapshot');
+
+    assert.equal(ownerBefore.querySelector(':scope > .message').textContent, 'Meeting at eleven');
+    assert.equal(ownerBefore.dataset.rowAddress, `row:2@${ts(3)}#aead00000002`);
+    assert.equal(spokenBefore.querySelector(':scope > .message').textContent, 'Spoken eleven');
+    assert.equal(spokenBefore.dataset.rowAddress, `row:2@${ts(4)}#bebe00000002`);
+    assert.equal(heardBefore.querySelector(':scope > .message').textContent, 'Heard in the call: eleven');
+    assert.equal(heardBefore.dataset.rowAddress, `row:2@${ts(5)}#cece00000002`);
+
+    ownerBefore.querySelector('.chat-message-copy').click();
+    spokenBefore.querySelector('.chat-message-copy').click();
+    heardBefore.querySelector('.chat-message-copy').click();
+    await quiet();
+    assert.deepEqual(copied, ['Meeting at eleven', 'Spoken eleven', 'Heard in the call: eleven']);
+
+    const spokenAction = messageRow(spokenBefore);
+    assert.equal(spokenAction.address, `row:2@${ts(4)}#bebe00000002`);
+    assert.equal(spokenAction.answerWords, 'Spoken eleven');
+    assert.equal(spokenAction.text, 'Spoken eleven');
+
+    spokenBefore.querySelector('.chat-message-reply').click();
+    const replyEleven = JSON.parse(globalThis.sessionStorage.getItem(`ouro_chat_reply:${PREVIEW_SCOPE}:2`));
+    assert.equal(replyEleven.address, `row:2@${ts(4)}#bebe00000002`);
+    assert.equal(replyEleven.snippet, 'Spoken eleven');
+    assert.deepEqual(
+        r.messages.querySelector('.call-card').querySelectorAll('.call-line-text').map((n) => n.textContent),
+        ['Meeting at eleven', 'Spoken eleven', 'Heard in the call: eleven'],
+        'folded call card keeps the newer live WS captions after late HTTP resolves',
+    );
+
+    // Order 2 (reverse): a later live correction is missed during disconnect; a fresh HTTP newest begun after applies it.
+    ordinaryCopy.focus();
+    const readsBeforeSecond = r.reads.length;
+    r.disconnect();
+    r.rows[2] = { ...r.rows[2], text: 'Meeting at twelve', content: 'Meeting at twelve', row_address: `row:2@${ts(3)}#aead00000003` };
+    r.rows[3] = { ...r.rows[3], text: 'Spoken twelve', content: 'Spoken twelve', row_address: `row:2@${ts(4)}#bebe00000003` };
+    r.rows[4] = { ...r.rows[4], text: 'Heard in the call: twelve', content: 'Heard in the call: twelve', row_address: `row:2@${ts(5)}#cece00000003` };
+    r.reconnect();
+    await until(() => r.reads.length === readsBeforeSecond + 1);
+    await quiet();
+
+    assert.deepEqual(byHistory('chat:3'), [ownerBefore]);
+    assert.deepEqual(byHistory('chat:4'), [spokenBefore]);
+    assert.deepEqual(byHistory('chat:5'), [heardBefore]);
+    assert.equal(ordinaryWrites, 0, 'unrelated row stays untouched during fresh HTTP revision');
+    assert.equal(globalThis.document.activeElement, ordinaryCopy, 'focus on unrelated row stays intact');
+
+    assert.equal(ownerBefore.querySelector(':scope > .message').textContent, 'Meeting at twelve');
+    assert.equal(ownerBefore.dataset.rowAddress, `row:2@${ts(3)}#aead00000003`);
+    assert.equal(spokenBefore.querySelector(':scope > .message').textContent, 'Spoken twelve');
+    assert.equal(spokenBefore.dataset.rowAddress, `row:2@${ts(4)}#bebe00000003`);
+    assert.equal(heardBefore.querySelector(':scope > .message').textContent, 'Heard in the call: twelve');
+    assert.equal(heardBefore.dataset.rowAddress, `row:2@${ts(5)}#cece00000003`);
+
+    copied.length = 0;
+    ownerBefore.querySelector('.chat-message-copy').click();
+    spokenBefore.querySelector('.chat-message-copy').click();
+    heardBefore.querySelector('.chat-message-copy').click();
+    await quiet();
+    assert.deepEqual(copied, ['Meeting at twelve', 'Spoken twelve', 'Heard in the call: twelve']);
+    assert.equal(messageRow(spokenBefore).address, `row:2@${ts(4)}#bebe00000003`);
+    assert.equal(messageRow(spokenBefore).answerWords, 'Spoken twelve');
+    spokenBefore.querySelector('.chat-message-reply').click();
+    const replyTwelve = JSON.parse(globalThis.sessionStorage.getItem(`ouro_chat_reply:${PREVIEW_SCOPE}:2`));
+    assert.equal(replyTwelve.address, `row:2@${ts(4)}#bebe00000003`);
+    assert.equal(replyTwelve.snippet, 'Spoken twelve');
+    assert.deepEqual(
+        r.messages.querySelector('.call-card').querySelectorAll('.call-line-text').map((n) => n.textContent),
+        ['Meeting at twelve', 'Spoken twelve', 'Heard in the call: twelve'],
+    );
+});
+
+test('late HTTP after arrival adopts canonical historyId on live-born captions without rolling back newer WS words or breaking Copy focus, and subsequent fresh HTTP still revises in place', async (t) => {
+    const r = makeReconnectRoom(t);
+    const { copied } = installCaptionTestEnv(t, r.messages);
+    await until(() => r.reads.length === 1);
+    await quiet();
+
+    const callTask = 'call-w6';
+    // Server has "ten" when the `after` read begins; hold it in flight.
+    r.rows.push(
+        { role: 'user', chat_id: 2, source: 'live_call', client_message_id: 'call:w6:u1', task_id: callTask,
+            text: 'Draft at ten', content: 'Draft at ten', ts: ts(2),
+            history_id: 'chat:2', history_position: { source: 'chat', offset: 2 }, row_address: `row:2@${ts(2)}#dada00000001` },
+        { role: 'assistant', chat_id: 2, source: 'live_call', system_type: 'model_narration', narration: true, markdown: true,
+            spoken: { call_id: 'w6', item_id: 'a1' }, task_id: callTask,
+            text: 'Spoken at ten', content: 'Spoken at ten', ts: ts(3),
+            history_id: 'chat:3', history_position: { source: 'chat', offset: 3 }, row_address: `row:2@${ts(3)}#dbdb00000001` },
+    );
+    const releaseAfter = r.hold('after');
+    const receiptPromise = r.instance.refreshHistory({ revision: 2 });
+    await until(() => r.reads.some((x) => x.mode === 'after'));
+
+    // While `after` is in flight:
+    // - user caption mounts live at "ten" and is revised live to "eleven"
+    // - assistant caption mounts live directly at "eleven" (first client paint is already newer than the in-flight snapshot)
+    r.rawWs.emit('chat', {
+        chat_id: 2, role: 'user', source: 'live_call', client_message_id: 'call:w6:u1', task_id: callTask,
+        content: 'Draft at ten', ts: ts(2), row_address: `row:2@${ts(2)}#dada00000001`,
+    });
+    r.rawWs.emit('chat', {
+        chat_id: 2, role: 'user', source: 'live_call', client_message_id: 'call:w6:u1', task_id: callTask,
+        content: 'Revised at eleven', ts: ts(2), row_address: `row:2@${ts(2)}#dada00000002`,
+    });
+    r.rawWs.emit('chat', {
+        chat_id: 2, role: 'assistant', source: 'live_call', system_type: 'model_narration', narration: true, markdown: true,
+        spoken: { call_id: 'w6', item_id: 'a1' }, task_id: callTask,
+        content: 'Spoken at eleven', ts: ts(3), row_address: `row:2@${ts(3)}#dbdb00000002`,
+    });
+    await quiet();
+
+    const bubblesOf = (pred) => r.messages.children.filter((n) => n.classList?.contains('chat-bubble') && pred(n));
+    const liveOwner = bubblesOf((n) => n.dataset.clientMessageId === 'call:w6:u1')[0];
+    const liveSpoken = bubblesOf((n) => n.classList.contains('assistant') && n.dataset.systemType === 'model_narration')[0];
+    assert.ok(liveOwner && liveSpoken);
+
+    const ownerCopy = liveOwner.querySelector('.chat-message-copy');
+    ownerCopy.focus();
+    assert.equal(globalThis.document.activeElement, ownerCopy);
+
+    // Late `after` snapshot ("ten") resolves: adopts canonical historyIds with 0 duplicates and keeps "eleven".
+    releaseAfter();
+    assert.equal((await receiptPromise).read, true);
+    await quiet();
+
+    assert.deepEqual(bubblesOf((n) => n.dataset.clientMessageId === 'call:w6:u1'), [liveOwner], 'zero duplicate owner bubbles');
+    assert.deepEqual(bubblesOf((n) => n.classList.contains('assistant') && n.dataset.systemType === 'model_narration'), [liveSpoken], 'zero duplicate spoken bubbles');
+    assert.equal(liveOwner.dataset.historyId, 'chat:2');
+    assert.equal(liveOwner.querySelector(':scope > .message').textContent, 'Revised at eleven');
+    assert.equal(liveOwner.dataset.rowAddress, `row:2@${ts(2)}#dada00000002`);
+    assert.equal(liveSpoken.dataset.historyId, 'chat:3');
+    assert.equal(liveSpoken.querySelector(':scope > .message').textContent, 'Spoken at eleven');
+    assert.equal(liveSpoken.dataset.rowAddress, `row:2@${ts(3)}#dbdb00000002`);
+    assert.equal(messageRow(liveSpoken).answerWords, 'Spoken at eleven');
+    assert.equal(globalThis.document.activeElement, ownerCopy, 'focus on Copy stays untouched when stale after is ignored');
+
+    ownerCopy.click();
+    liveSpoken.querySelector('.chat-message-copy').click();
+    await quiet();
+    assert.deepEqual(copied, ['Revised at eleven', 'Spoken at eleven']);
+
+    // Reverse order: disconnect gap -> server revises to "twelve" -> fresh reconnect newest applies in place and keeps Copy focus.
+    ownerCopy.focus();
+    const newestBefore = r.reads.filter((x) => x.mode === 'newest').length;
+    r.disconnect();
+    r.rows[1] = { ...r.rows[1], text: 'Final at twelve', content: 'Final at twelve', row_address: `row:2@${ts(2)}#dada00000003` };
+    r.rows[2] = { ...r.rows[2], text: 'Spoken at twelve', content: 'Spoken at twelve', row_address: `row:2@${ts(3)}#dbdb00000003` };
+    r.reconnect();
+    await until(() => r.reads.filter((x) => x.mode === 'newest').length === newestBefore + 1);
+    await quiet();
+
+    assert.deepEqual(bubblesOf((n) => n.dataset.clientMessageId === 'call:w6:u1'), [liveOwner]);
+    assert.deepEqual(bubblesOf((n) => n.classList.contains('assistant') && n.dataset.systemType === 'model_narration'), [liveSpoken]);
+    assert.equal(liveOwner.querySelector(':scope > .message').textContent, 'Final at twelve');
+    assert.equal(liveOwner.dataset.rowAddress, `row:2@${ts(2)}#dada00000003`);
+    assert.equal(liveSpoken.querySelector(':scope > .message').textContent, 'Spoken at twelve');
+    assert.equal(liveSpoken.dataset.rowAddress, `row:2@${ts(3)}#dbdb00000003`);
+    assert.equal(messageRow(liveSpoken).answerWords, 'Spoken at twelve');
+    assert.equal(globalThis.document.activeElement, liveOwner.querySelector('.chat-message-copy'),
+        'focus stays on Copy button when fresh HTTP revises bubble in place');
+
+    copied.length = 0;
+    liveOwner.querySelector('.chat-message-copy').click();
+    liveSpoken.querySelector('.chat-message-copy').click();
+    await quiet();
+    assert.deepEqual(copied, ['Final at twelve', 'Spoken at twelve']);
+});
