@@ -15,7 +15,6 @@ import { fmt, fmtInto, tr } from './i18n.js';
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { getMessageActions } from './message_actions.js';
-import { controlIcon } from './page_icons.js';
 import { mountChatMarkdown } from './chat_markdown.js';
 import { readAppText, readCardBody } from './chat_cards.js';
 import { copyTextToClipboard, downloadBlobViaHostBridge } from './ui_helpers.js';
@@ -292,8 +291,14 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
         marker.className = 'message-share-marker';
         marker.setAttribute('aria-hidden', 'true');
         if (item.kind === 'item') {
-            const box = item.task === 'done' ? '☑' : item.task === 'open' ? '☐' : '';
-            marker.textContent = [item.marker === '•' && box ? '' : item.marker, box].filter(Boolean).join(' ');
+            // An authored task keeps its own state in the shared inert mark, apart from the part's inclusion box.
+            const lead = item.task && item.marker === '•' ? '' : item.marker;
+            marker.textContent = item.task && lead ? `${lead} ` : lead;
+            if (item.task) {
+                const task = doc.createElement('span');
+                task.className = `ui-checkbox message-share-task${item.task === 'done' ? ' is-checked' : ''}`;
+                marker.append(task);
+            }
         }
         const verbatim = ['code', 'diagram', 'chart', 'table'].includes(item.kind);
         const content = doc.createElement('div');
@@ -313,7 +318,7 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
         }
         item.runs.forEach((run, index) => target.append(runSpan(run, index)));
         const check = doc.createElement(verbatim ? 'button' : 'span');
-        check.className = 'message-share-check';
+        check.className = 'ui-checkbox message-share-check';
         // A checkbox's descendants are presentational to assistive technology. Give a verbatim part a real
         // checkbox beside its scrollable words, not an interactive region inside a checkbox.
         if (verbatim) {
@@ -326,7 +331,6 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
         const choice = verbatim ? check : row;
         choice.setAttribute('role', 'checkbox');
         choice.setAttribute('aria-checked', String(current.chosen.has(item.index)));
-        check.innerHTML = controlIcon('check', 16);
         row.append(marker, content, check);
         return row;
     }
