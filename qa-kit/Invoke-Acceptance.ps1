@@ -1,13 +1,11 @@
 # One invokable path, ONLY on a disposable GitHub-hosted Windows runner with a fictitious profile.
 #   -Mode visible    leg 1: a CLEAN profile without system Git. The real installer wizard is opened as a person opens it and driven only through UIA
 #                    InvokePattern (Install, Finish) inside its own process tree; frames of the wizard and of the app's first-run wizard.
-#   -Mode migration  leg 2, ITS OWN runner and profile: the published old release ZIP (-OldZip) creates a profile and a chat -> the new package
+#   -Mode migration  leg 2, ITS OWN runner and profile: the published old release ZIP (-OldZip) creates a profile and a chat via its own loopback APIs -> the new package
 #                    through the same ordinary wizard, whose Finish opens the app -> Update + handoff -> cold start by the Start .lnk ->
 #                    uninstall -> new ZIP reopen.
 # Both need the candidate's ONE built dist\ ZIP: the kit extracts its payload and the author's packer packs Setup from exactly
-# the ZIP's files (pack_windows_setup.ps1 refuses a raw PyInstaller dist). No physical input is sent, with one exception named in
-# acceptance.py: #4220's own
-# click for the old release's Main model source, only if UI Automation cannot choose it. OUROBOROS_QA_DISPOSABLE=1 is set by whoever
+# the ZIP's files (pack_windows_setup.ps1 refuses a raw PyInstaller dist). No physical input is sent. OUROBOROS_QA_DISPOSABLE=1 is set by whoever
 # owns the workflow; this script never sets it. Only allowlisted JSON facts and bounded PNG frames are selected into <WorkRoot>\publish.
 [CmdletBinding()]
 param(
@@ -76,9 +74,11 @@ $venv = Join-Path $WorkRoot 'qa-venv'
 & $Python -m venv $venv
 if ($LASTEXITCODE -ne 0) { Stop-Early 'venv' }
 $py = Join-Path $venv 'Scripts\python.exe'
-# the candidate's WindowsComputerUse skill drives UI Automation through comtypes (the pin #4220 used)
-& $py -m pip install --disable-pip-version-check --no-cache-dir comtypes==1.4.17
-if ($LASTEXITCODE -ne 0) { Stop-Early 'comtypes_install' }
+# The UIA skill's #4220 pin; migration also uses the old release's own locked WebSocket client version for Python 3.12.
+$deps = @('comtypes==1.4.17')
+if ($Mode -eq 'migration') { $deps += 'websockets==17.0.1' }
+& $py -m pip install --disable-pip-version-check --no-cache-dir @deps
+if ($LASTEXITCODE -ne 0) { Stop-Early 'qa_dependencies_install' }
 & $py -I -B (Join-Path $kit 'run.py') preflight --out (Join-Path $WorkRoot 'preflight.json') --evidence $evidence --uia --candidate-root $CandidateRoot
 if ($LASTEXITCODE -ne 0) { Stop-Early 'preflight' }
 

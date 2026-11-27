@@ -3,10 +3,11 @@
 # Details view, an on-screen UI Automation row that must be unique, matched geometry across frames, no selection; the
 # PNG is that row only, drawn by the window itself, never cut from the screen). What changed: the frames come from a JSON spec instead of one downloaded release ZIP,
 # and one frame's failure no longer aborts the others. The shared C# helper is explorer-qa's ExplorerCapture.cs, byte for byte.
-# Nothing here runs the app, and nothing judges a pixel: a captured frame is "pending_visual_inspection".
+# If Explorer cannot deliver a row, an opted-in exact Shell item may supply just its native file icon. It is a distinct surface.
+# Nothing here runs the app, and nothing judges the artwork: a captured frame is "pending_visual_inspection".
 #
-# Spec: {"stage": "...", "frames": [{"id": "...", "folder": "<folder shown>", "folder_label": "...", "item": "<file name>"}]}
-# Output: <OutDir>\observations.json (path-free) + <id>.png per captured frame.
+# Spec: {"stage": "...", "frames": [{"id": "...", "folder": "<folder shown>", "folder_label": "...", "item": "<file name>", "shell_item_icon": true}]}
+# Output: <OutDir>\observations.json (path-free) + <id>.png for a row, or shell_item_<id>.png for a file icon.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$SpecFile,
@@ -65,6 +66,34 @@ function Get-ExplorerWindows {
             if ($null -ne $w -and [IO.Path]::GetFileName($w.FullName) -ieq 'explorer.exe') { $w }
         } catch [Runtime.InteropServices.COMException] { }
     }
+}
+
+function Save-ShellItemIcon($f, $facts) {
+    if ($null -eq $f.PSObject.Properties['shell_item_icon'] -or $f.shell_item_icon -ne $true) { return }
+    $label = [string]$f.id
+    $itemName = [string]$f.item
+    if ($label -notmatch '^explorer_[a-z0-9_]+$' -or $itemName -ne [IO.Path]::GetFileName($itemName) -or
+        [IO.Path]::GetExtension($itemName) -notin @('.exe', '.lnk')) { return }
+    $folder = $shell.NameSpace([string]$f.folder)
+    if ($null -eq $folder -or $folder.Self.Path -ine [string]$f.folder) { return }
+    $item = $folder.ParseName($itemName)
+    $expected = Join-Path ([string]$f.folder) $itemName
+    if ($null -eq $item -or $item.IsFolder -or $item.Path -ine $expected) { return }
+    $file = Get-Item -LiteralPath $expected
+    if ($file -isnot [IO.FileInfo] -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return }
+    if (-not ('BrandQa.Native' -as [type])) {
+        Add-Type -Path (Join-Path $PSScriptRoot 'BrandNative.cs') -ReferencedAssemblies System.Drawing
+    }
+    $bitmap = [BrandQa.Native]::ShellItemIcon($file.FullName)
+    if ($null -eq $bitmap) { return }
+    try {
+        if (-not [BrandQa.Native]::HasInk($bitmap)) { return }
+        $name = "shell_item_$label.png"
+        $png = Join-Path $OutDir $name
+        $bitmap.Save($png, [Drawing.Imaging.ImageFormat]::Png)
+        $facts.png = [ordered]@{ file = $name; sha256 = (Get-FileHash -LiteralPath $png -Algorithm SHA256).Hash.ToLowerInvariant() }
+        $facts.status = 'icon_only'
+    } finally { $bitmap.Dispose() }
 }
 
 function Read-Frame($f) {
@@ -167,6 +196,7 @@ function Read-Frame($f) {
     }
     catch {
         $facts.error = Scrub $_.Exception.Message
+        try { Save-ShellItemIcon $f $facts } catch { $facts.icon_error = Scrub $_.Exception.Message }
     }
 }
 

@@ -35,6 +35,14 @@ namespace BrandQa {
     public static class Native {
         private delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
         private const string PropStoreIid = "886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99";
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ShellFileInfo {
+            public IntPtr Icon;
+            public int IconIndex;
+            public uint Attributes;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string DisplayName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string TypeName;
+        }
 
         [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
@@ -51,6 +59,9 @@ namespace BrandQa {
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid riid, out IPropertyStore ppv);
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern int SHGetPropertyStoreFromParsingName(string path, IntPtr pbc, int flags, ref Guid riid, out IPropertyStore ppv);
         [DllImport("ole32.dll")] private static extern int PropVariantClear(ref PROPVARIANT pv);
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern IntPtr SHGetFileInfoW(string path, uint attributes, out ShellFileInfo info, uint size, uint flags);
+        [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
 
         // Visible, non-minimised, titled top-level windows of ONE process; no other process's window is read.
         public static List<WinInfo> TopWindows(int pid) {
@@ -115,6 +126,15 @@ namespace BrandQa {
             using (Icon icon = Icon.FromHandle(new IntPtr(hicon))) {
                 return icon.ToBitmap();
             }
+        }
+
+        // The Shell's icon for an exact, existing file (checked by the caller), not an image of an Explorer row.
+        public static Bitmap ShellItemIcon(string path) {
+            ShellFileInfo info;
+            IntPtr ok = SHGetFileInfoW(path, 0, out info, (uint)Marshal.SizeOf(typeof(ShellFileInfo)), 0x100 | 0x20); // ICON | ADDOVERLAYS
+            if (info.Icon == IntPtr.Zero) return null;
+            try { return ok == IntPtr.Zero ? null : IconBitmap(info.Icon.ToInt64()); }
+            finally { DestroyIcon(info.Icon); }
         }
 
         private static string ReadValue(IPropertyStore store, string fmtid, uint pid) {

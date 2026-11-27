@@ -5,7 +5,8 @@
   visible     leg 1, its own runner and a CLEAN profile without system Git: the real installer wizard opened as a person opens it and driven
               only through UIA InvokePattern in its own process tree; frames of the wizard and of the app's first-run wizard
   migration   leg 2, its own runner: the published old release ZIP creates a profile and a chat -> the new package through the same
-              ordinary wizard, whose Finish opens the app -> Update + handoff -> cold start by the Start .lnk -> uninstall -> new ZIP reopen
+              ordinary wizard, whose Finish opens the app -> Update + handoff -> cold start by the Start .lnk -> uninstall -> new ZIP reopen.
+              Only preparation of the old profile and its first synthetic exchange uses the shipped loopback APIs.
   pack        pack the Setup once from the candidate's one built ZIP (its payload extracted; no leg runs): the installer smoke's route
   summary     the decisions, versions and frames of a finished run
 
@@ -48,8 +49,7 @@ SHIPPED = (*KIT_PY, "Invoke-Acceptance.ps1", "SOURCES.sha256", "candidate.json",
 OLD_RELEASE = {"version": "7.12.0", "source_sha": "6fc2500494fb8d8b2fad38da31db33e3991fa726",
                "zip_sha256": "bd92f35119f86da8361a3aa43f4e694ff7e7f79450219370cbcec0a93832f98d",
                "exe_sha256": "3cf8c391bb65540a2683d2391afe580cd6d29d81b3e9d853e5f2e62ad7a101a0",
-               "remote": "https://github.com/razzant/ouroboros",
-               "main_summary_tail": " \u00b7 Processing: Route default (inherited)"}  # its first-run wizard ends the Main summary row so
+               "remote": "https://github.com/razzant/ouroboros"}
 
 
 class Stop(Exception):
@@ -327,7 +327,8 @@ def summary(evidence: pathlib.Path) -> str:
                   f"{v.get('body_version')} | {v.get('body_revision')} |" for state, v in facts["versions"].items()] + [""]
     lines += ["| Decision | State | Required |", "| --- | --- | --- |"]
     lines += [f"| `{name}` | {o['state']} | {'yes' if o.get('required') else 'no'} |" for name, o in (facts.get("observed") or {}).items()]
-    lines += ["", "| Frame | State |", "| --- | --- |"] + [f"| `{name}` | {f['state']} |" for name, f in (facts.get("frames") or {}).items()]
+    lines += ["", "| Visual evidence | State | Surface |", "| --- | --- | --- |"] + [
+        f"| `{name}` | {f['state']} | {f.get('surface', 'addressed window or Explorer row')} |" for name, f in (facts.get("frames") or {}).items()]
     return "\n".join(lines) + "\n"
 
 

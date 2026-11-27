@@ -117,6 +117,22 @@ def descendants(root_pid: int) -> set[int] | None:
     return found
 
 
+def loopback_listener_owned(port: int, root_pid: int) -> bool:
+    """Prove the exact 127.0.0.1 listener belongs to the launched app's tree before sending fixture writes."""
+    if not 1 <= port <= 65535:
+        return False
+    ps = ("Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort %d -State Listen -ErrorAction Stop | "
+          "Select-Object -ExpandProperty OwningProcess" % port)
+    try:
+        done = subprocess.run([str(POWERSHELL), "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                              text=True, timeout=15, creationflags=NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    pids = done.stdout.split()
+    return (not done.returncode and len(pids) == 1 and pids[0].isdigit()
+            and int(pids[0]) in ({root_pid} | (descendants(root_pid) or set())))
+
+
 def post_close(hwnd: int, pid: int) -> None:
     """WM_CLOSE to a window of ``pid``: what pressing its close button sends."""
     if not wh.window_owned_by(hwnd, pid):

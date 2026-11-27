@@ -5,20 +5,18 @@
 #   gh workflow run desktop-window.yml --ref qualification/windows-packaging-acceptance -f verified_ref_sha=<the 40-hex head you reviewed>
 #
 # The ONLY trigger is workflow_dispatch: no push, no tags, no schedule, no pull_request. Every job refuses any ref or commit but the verified
-# ones. contents: read, no secrets, no publication. Two INDEPENDENT legs, each on its own disposable GitHub-hosted runner and profile:
+# ones. contents: read, no secrets, no publication. Independent legs, each on its own disposable GitHub-hosted runner and profile:
 #   accept/visible    a CLEAN profile without system Git: the script itself drives the real installer wizard, only through UIA InvokePattern
 #                     in its own process tree; frames of the wizard and of the app's first-run wizard of the installed Ouroboros.exe
-#   accept/migration  the published 7.12.0 ZIP creates a profile and a chat (system Git, which it needs) -> the new package through the same
+#   accept/migration  the published 7.12.0 ZIP creates a profile and a chat through its loopback APIs (using system Git) -> the new package through the same
 #                     ordinary wizard, whose Finish opens the app -> Update + handoff -> cold start by the Start shortcut -> uninstall -> ZIP reopen
 # The already-observed old-ZIP-in-Explorer job is dropped here; its reviewed scripts stay in explorer-qa/ and its result stays on the public
 # branch. Each leg builds its own package from the same candidate commit; the digests are recorded per job (the two builds' bytes differ).
 # Setup is packed from the built ZIP's EXTRACTED payload (the candidate's packer refuses a raw PyInstaller dist, whose Hidden entries Setup
 # would silently leave out), so the installer carries exactly the ZIP's files, as the release packs it.
 # Binaries (ZIPs, installer, installed files) never leave a runner: only allowlisted JSON facts and bounded PNG frames are uploaded (7 days).
-# Where UIA lacks the pattern a step needs, the leg records an exact skip: no synthetic click, no pass. One exception (acceptance.py): the
-# old release's own model-source list in the migration leg gets #4220's owner- and foreground-checked click if UIA cannot choose it.
-# The opt-in smoke_installer input runs, in the visible leg only and BEFORE its acceptance step, the candidate's own
-# scripts/smoke_windows_setup.ps1 once (with -Compiler, no signing arguments: this build is unsigned) over the freshly packed Setup.
+# Where UIA lacks a required pattern, the leg records missing evidence. No physical input. The optional smoke job's result/profile
+# cannot block or contaminate the visible or migration leg. It runs the candidate's own smoke once with -Compiler, unsigned.
 name: TEMPORARY qualification - Windows packaging acceptance (not a release)
 
 on:
@@ -34,7 +32,7 @@ on:
         type: boolean
         default: false
       smoke_installer:
-        description: Once, in the visible leg before its acceptance run - the candidate's own installer smoke (with -Compiler). Default false leaves both legs exactly as reviewed.
+        description: Run the candidate's installer maintenance smoke once on a third disposable runner, independently of the two GUI legs.
         required: false
         type: boolean
         default: false
@@ -100,7 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [visible, migration]
+        mode: ${{ fromJSON(inputs.smoke_installer && '["visible","migration","smoke"]' || '["visible","migration"]') }}
     env:
       OUROBOROS_QA_DISPOSABLE: '1'  # the workflow author's conscious confirmation that a GitHub-hosted runner is disposable; no code sets it
       QA_MIRROR_URL: C:/ouroboros-qa/mirror.git
@@ -210,14 +208,10 @@ jobs:
           & "${{ steps.py.outputs.python-path }}" -I -B "$env:RUNNER_TEMP/qa-harness/run.py" record-stop --evidence "$env:RUNNER_TEMP/qa-evidence" `
             --phase $phase --code "${phase}_failed"
 
-      # Opt-in (inputs.smoke_installer), the visible leg only, and BEFORE its acceptance run: the candidate's own end-to-end installer
-      # smoke. The smoke itself refuses a profile that already holds any Ouroboros state, so it must be first; it seeds its own synthetic
-      # %USERPROFILE%\Ouroboros and cleans up only the exact files it created. A failure here stops this job before the acceptance step,
-      # and the leg's own clean-profile guard is the second net. No signing arguments: this QA build is unsigned, so the smoke's signature
-      # checks are skipped by its own design, and with -Compiler its step 4b exercises the update transition between two fixture Setups.
+      # Only the optional smoke runner uses the maintenance smoke's synthetic installed profile. A failure stays red on that job.
       - name: Pack the Setup once for the smoke (from the extracted ZIP payload)
         id: packsmoke
-        if: ${{ matrix.mode == 'visible' && inputs.smoke_installer }}
+        if: ${{ matrix.mode == 'smoke' }}
         shell: pwsh
         run: |
           & "${{ steps.py.outputs.python-path }}" -I -B "$env:RUNNER_TEMP/qa-harness/run.py" pack `
@@ -226,7 +220,7 @@ jobs:
 
       - name: The candidate's own installer smoke, once (its own guard gates it to a disposable runner)
         id: smoke
-        if: ${{ matrix.mode == 'visible' && inputs.smoke_installer }}
+        if: ${{ matrix.mode == 'smoke' }}
         shell: pwsh
         run: |
           $facts = Get-Content -Raw "$env:RUNNER_TEMP/qa-smoke-pack/installer-facts.json" | ConvertFrom-Json
@@ -238,28 +232,23 @@ jobs:
             -Installer "$setup" -Archive "$zip" -Compiler "$env:RUNNER_TEMP\inno\ISCC.exe"
           exit $LASTEXITCODE
 
-      # Creates its venv (comtypes only), runs preflight (nothing is installed or launched if it fails), packs the installer with the author's
-      # packer from the built ZIP's extracted payload - or takes the Setup the smoke route already packed, same payload, same packer - runs the
-      # leg, and selects what may leave the runner. -UninstallRunnerGit is the separate, conscious opt-in to #4220's verified uninstall of
+      # Creates its venv, runs preflight, packs Setup from its own built ZIP, and selects what may leave the runner.
+      # -UninstallRunnerGit is the separate, conscious opt-in to #4220's verified uninstall of
       # THIS hosted runner's Git, used by the visible leg only; the migration keeps it, as the former user did.
       - name: Acceptance (${{ matrix.mode }})
         id: acceptance
+        if: ${{ matrix.mode != 'smoke' }}
         shell: pwsh
         run: |
-          $smokeInstaller = ''
-          if ('${{ inputs.smoke_installer }}' -eq 'true' -and '${{ matrix.mode }}' -eq 'visible') {
-            $facts = Get-Content -Raw "$env:RUNNER_TEMP/qa-smoke-pack/installer-facts.json" | ConvertFrom-Json
-            $smokeInstaller = "$env:RUNNER_TEMP/installer-out/$($facts.installer.name)"
-          }
           & "$env:RUNNER_TEMP/qa-harness/Invoke-Acceptance.ps1" -Mode "${{ matrix.mode }}" -WorkRoot "$env:RUNNER_TEMP/qa-run" `
-            -CandidateRoot "$env:GITHUB_WORKSPACE" -Installer "$smokeInstaller" -Compiler "$env:RUNNER_TEMP\inno\ISCC.exe" -FactsDir "$env:RUNNER_TEMP/qa-evidence" `
+            -CandidateRoot "$env:GITHUB_WORKSPACE" -Compiler "$env:RUNNER_TEMP\inno\ISCC.exe" -FactsDir "$env:RUNNER_TEMP/qa-evidence" `
             -OldZip "$env:RUNNER_TEMP/old-release/Ouroboros-7.12.0-windows-x64.zip" -UninstallRunnerGit `
             -Python "${{ steps.py.outputs.python-path }}"
           exit $LASTEXITCODE
 
       # A job that left no run result still leaves one structured, truthful record and its build facts.
       - name: Facts of a run that stopped early
-        if: ${{ always() }}
+        if: ${{ always() && matrix.mode != 'smoke' }}
         shell: pwsh
         run: |
           $publish = "$env:RUNNER_TEMP/qa-run/publish"
@@ -271,9 +260,7 @@ jobs:
           if (-not (Test-Path "$kit/run.py")) { $kit = "$env:GITHUB_WORKSPACE/qa-src/qa-kit" }
           $py = "${{ steps.py.outputs.python-path }}"
           if ("${{ job.status }}" -ne "success") {
-            # the acceptance run, or the opt-in installer smoke that ran before it: either may have installed and launched things
-            $entered = (@('failure', 'cancelled') -contains "${{ steps.acceptance.outcome }}") -or
-                       (@('failure', 'cancelled') -contains "${{ steps.smoke.outcome }}")
+            $entered = @('failure', 'cancelled') -contains "${{ steps.acceptance.outcome }}"
             if ($py -and (Test-Path "$kit/run.py")) {
               $flag = @(); if ($entered) { $flag = @('--run-may-have-started') }
               & $py -I -B "$kit/run.py" record-stop --evidence $publish @flag
@@ -288,6 +275,10 @@ jobs:
         if: ${{ always() }}
         shell: pwsh
         run: |
+          if ('${{ matrix.mode }}' -eq 'smoke') {
+            'Maintenance smoke: pack `${{ steps.packsmoke.outcome }}`, smoke `${{ steps.smoke.outcome }}` (separate disposable runner).' >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
           $kit = "$env:RUNNER_TEMP/qa-harness"
           if (-not (Test-Path "$kit/run.py")) { $kit = "$env:GITHUB_WORKSPACE/qa-src/qa-kit" }
           $py = "${{ steps.py.outputs.python-path }}"
@@ -298,7 +289,7 @@ jobs:
       # Only what Invoke-Acceptance.ps1 and the step above selected: allowlisted JSON facts and bounded PNG frames. Never logs, private/, the
       # installer, the ZIP, the installed files or the profile.
       - name: Upload allowlisted synthetic facts and frames
-        if: ${{ always() }}
+        if: ${{ always() && matrix.mode != 'smoke' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-packaging-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}

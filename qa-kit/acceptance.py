@@ -5,7 +5,7 @@ Two legs, each on its OWN disposable Windows runner and profile (the workflow ru
              through UI Automation InvokePattern (Install, Finish), inside the windows of the installer's own process tree; frames of its
              pages; the app's first-run wizard, owned by exactly the installed Ouroboros.exe; which Git ran.
   migration  the former user: the PUBLISHED old release ZIP (pinned bytes) creates the profile and a chat with the system Git it needs
-             (wizard, chat, normal Quit) -> the new package through the SAME ordinary installer wizard; only its Finish launches the
+             (its public loopback onboarding and Main chat APIs, normal Quit) -> the new package through the SAME ordinary installer wizard; only its Finish launches the
              app, and the window it opens must belong to the installed copy and show the former exchange (the Start shortcut is never
              used to make up for it) -> first in-app Update, from whichever known revision actually serves and only from the local
              mirror -> normal Quit -> cold start through the Start-menu .lnk, the exchange read again -> normal Quit -> the installer's
@@ -15,13 +15,10 @@ Two legs, each on its OWN disposable Windows runner and profile (the workflow ru
              written), from before the old release starts to the end of the leg; Git confirms that offline before the old release is
              launched, and again, for the profile's own configured source, before Update.
 
-NO PHYSICAL INPUT, with one named exception. #4220's helpers fall back to SendInput (mouse, wheel, keyboard) after a UI Automation verb
-fails; those helpers are replaced here by a refusal, so a step that needed one ends "unconfirmed" (code global_input_forbidden), never as
-a synthetic click and never as a pass. The exception, in the migration leg only: if UI Automation cannot choose the Main model source in
-the published old release's own first-run wizard (a list drawn inside WebView2), that one step is repeated with #4220's own click, which
-acts only on a disposable hosted runner, inside that launcher's window once it is confirmed in the foreground; asking for it is recorded
-(owned_click_asked). The installer's wizard stays InvokePattern only. The only message posted is WM_CLOSE to the app's own main window
-(what its close button sends); the question that follows is answered through UIA, not a key.
+NO PHYSICAL INPUT. #4220's fallback helpers are replaced here by a refusal (global_input_forbidden, unconfirmed). The installer's
+wizard stays InvokePattern only. WM_CLOSE is sent only to an addressed window of the app we started (its normal close gesture).
+The migration seeds the former profile through v7.12.0's documented completion endpoint and an ordinary Main socket turn, not a
+settings or database fixture. Nothing about this is evidence of using the old wizard's controls.
 
 It subclasses #4220's ``scenario.QualificationRun`` (vendor/, unmodified) for the host checks, the first-run wizard, the chat turns,
 the Update flow and the Git traces. Pixels are never judged: a frame is "pending_visual_inspection" or "unknown".
@@ -30,9 +27,9 @@ the Update flow and the Git traces. Pixels are never judged: a frame is "pending
 from __future__ import annotations
 
 import argparse
-import contextlib
 import fnmatch
 import hashlib
+import http.client
 import json
 import os
 import pathlib
@@ -41,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 import zipfile
 from typing import Any, Callable
 
@@ -76,9 +74,6 @@ MAX_NEXT = 4
 FIXTURE: dict[str, Any] = {}
 
 
-OWNED_CLICK = (wh.click, wh._send_inputs)  # noqa: SLF001 - kept before they are refused: only owned_click_for_one_step puts them back
-
-
 def forbid_global_input() -> None:
     """Replace every physical-input helper of the vendored #4220 code by a refusal (idempotent). They are the fallbacks behind
     act_or_click(), reveal_wizard_control(), set_exact_text() and the chat reply witness's right-click; with them gone, a step that
@@ -93,18 +88,6 @@ def forbid_global_input() -> None:
 
 forbid_global_input()
 BaseDriver = sc.UIADesktopDriver  # #4220's UIA driver as it is, kept for the installer's windows
-
-
-@contextlib.contextmanager
-def owned_click_for_one_step():
-    """#4220's own click for the one step inside, refused again right after. Its own checks stay: a disposable hosted runner, a window the
-    driven launcher owns, brought to and confirmed in the foreground, and a point inside that window, checked before and after the pointer
-    moves. Its one caller is the old release's Main model source (AcceptanceRun._select_main_model_source_option)."""
-    wh.click, wh._send_inputs = OWNED_CLICK  # noqa: SLF001
-    try:
-        yield
-    finally:
-        forbid_global_input()
 
 
 class AdoptedProcess:
@@ -122,12 +105,6 @@ class HandoffAwareDriver(BaseDriver):
     a live new holder is adopted, and a launcher that ends is given time to be replaced."""
 
     app_root: pathlib.Path | None = None
-    summary_tail = ""  # while the old release's wizard is driven: what it writes after source and model in its Main summary row
-
-    def wait_unique_node(self, hwnd: int, *, phase: str, label: str, timeout_sec: float = 30.0, **query: Any) -> dict[str, Any]:
-        if label == "Summary Main source and model":  # #4220 names two fields; the whole row, a third one included, is still exact
-            query["name"] += type(self).summary_tail
-        return super().wait_unique_node(hwnd, phase=phase, label=label, timeout_sec=timeout_sec, **query)
 
     def _follow(self) -> None:
         pid = hw.lock_pid(type(self).app_root)
@@ -406,6 +383,43 @@ def drive_installer(root_pid: int, *, pids_of: Callable[[int], set[int] | None],
     return out
 
 
+def profile_http(port: int, path: str, body: dict[str, Any] | None = None) -> tuple[int | None, dict[str, Any]]:
+    """Only the caller's verified loopback listener. No proxy, redirect, retry or response text in evidence."""
+    addr = f"127.0.0.1:{port}"
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        conn.request("GET" if body is None else "POST", path, None if body is None else json.dumps(body),
+                     {"Origin": f"http://{addr}", "Content-Type": "application/json"})
+        response = conn.getresponse()
+        raw = response.read((1 << 20) + 1)
+        data = json.loads(raw) if len(raw) <= 1 << 20 else None
+        return response.status, data if isinstance(data, dict) else {}
+    except (OSError, ValueError, http.client.HTTPException):
+        return None, {}  # a POST may have landed; use only that attempt's readback below
+    finally:
+        conn.close()
+
+
+def send_old_main_turn(port: int, prompt: str, *, timeout: float = 45.0) -> bool:
+    """One ordinary Main message over the public /ws, no retries; only our correlated owner echo settles admission."""
+    from websockets.exceptions import WebSocketException
+    from websockets.sync.client import connect
+
+    addr, message_id = f"127.0.0.1:{port}", f"qa-{uuid.uuid4().hex}"
+    try:
+        with connect(f"ws://{addr}/ws", origin=f"http://{addr}", proxy=None, open_timeout=10, close_timeout=2) as socket:
+            socket.send(json.dumps({"type": "chat", "content": prompt, "chat_id": 1, "client_message_id": message_id}))
+            deadline = time.monotonic() + timeout
+            while (left := deadline - time.monotonic()) > 0:
+                row = json.loads(socket.recv(timeout=left))
+                if (isinstance(row, dict) and row.get("type") == "chat" and row.get("role") == "user" and row.get("chat_id") == 1
+                        and row.get("content") == prompt and row.get("client_message_id") == message_id and row.get("ingress_accepted") is True):
+                    return True
+    except (OSError, ValueError, WebSocketException):
+        return False
+    return False
+
+
 class AcceptanceRun(sc.QualificationRun):
     def __init__(self, spec: dict[str, Any], args: argparse.Namespace, *, app_root_override: pathlib.Path | None = None) -> None:
         forbid_global_input()
@@ -420,12 +434,12 @@ class AcceptanceRun(sc.QualificationRun):
         self.result["declared"].update(ui_driver="candidate_windows_computer_use_uia_only_no_physical_input",  # collected: counted at save
                                        screenshots_policy="addressed_captures_of_this_runs_own_windows_cut_to_the_window_or_row",
                                        code_signature_checked=False, smartscreen_tested=False)
-        if args.mode == "migration":  # #4220's first-run wizard gives the old release its Git trace sinks: they exist on the host, unjudged
+        if args.mode == "migration":  # the old release's Git trace sinks exist only on the host, unjudged
             self.result["declared"].update(git_observation_sink="old_release_launch_only_local_files_unjudged_unpublished",
                                            git_identity_claim="not_claimed_in_this_leg",
                                            update_source_redirect="launch_environment_only_not_the_explorer_start" if self.by_explorer()
                                            else "launch_environment_only_for_the_whole_leg",
-                                           ui_driver="candidate_windows_computer_use_uia_one_owned_click_fallback_old_wizard")
+                                           old_profile_preparation="published_old_app_loopback_onboarding_and_main_chat")
         self.payload_root = pathlib.Path(spec["payload_root"]) if spec.get("payload_root") else None
         self.installer = pathlib.Path(self.inst["path"])
         self.install_dir = pathlib.Path(os.path.expandvars(self.inst["install_dir"]))
@@ -442,10 +456,8 @@ class AcceptanceRun(sc.QualificationRun):
         self.cu: Any = None
         self.first_pid = 0
         self.token =f"QA-PROFILE-TOKEN-{fm._clean_tag(args.tag)}"  # noqa: SLF001
-        policy = ("none: forbidden in code; UIA verbs and one WM_CLOSE only" if args.mode != "migration" else
-                  "forbidden in code except one step: the old release's Main model source, by #4220's owned click, only if UIA cannot choose it")
         self.result["facts"].update(observed=self.obs, frames=self.frames, identity={}, git={}, profile={}, route=self.opt("launch_route", "shellexecute"),
-                                    mode=args.mode, physical_input=policy, owned_click_asked=[],
+                                    mode=args.mode, physical_input="none: UIA verbs and addressed WM_CLOSE only",
                                     contract="read from the installer's source (ouroboros.iss, pack_windows_setup.ps1); not confirmed on Windows",
                                     acceptance_run_started=True, launch_attempts=[], launches_observed=[])
         self.held_before_finish: bool | None = None
@@ -494,14 +506,16 @@ class AcceptanceRun(sc.QualificationRun):
         if unproven or no_frame:
             raise sc.Unconfirmed("gate", "required_observations_or_frames_unproven", unproven=unproven, frames_missing=no_frame)
 
-    def keep(self, fid: str, png: pathlib.Path) -> bool:
+    def keep(self, fid: str, png: pathlib.Path, *, shell_icon: bool = False) -> bool:
         """Records ``fid`` as waiting for a viewer only when the PNG is one the wrapper will publish."""
         if png.stat().st_size > MAX_FRAME_BYTES:
             self.lose(fid, "frame_over_the_publishing_limit")
             return False
-        target = self.frames_dir / f"{fid}.png"
+        target = self.frames_dir / f"{'shell_item_' if shell_icon else ''}{fid}.png"
         shutil.copyfile(png, target)
         self.frames[fid] = {"state": "pending_visual_inspection", "file": target.name, "sha256": wh.sha256_file(target)}
+        if shell_icon:
+            self.frames[fid].update(surface="windows_shell_item_icon_not_explorer_row", explorer_row_state="unknown")
         return True
 
     def lose(self, fid: str, why: str) -> None:
@@ -588,7 +602,7 @@ class AcceptanceRun(sc.QualificationRun):
 
     # ---- frames
     def explorer(self, stage: str, frames: list[dict[str, str]]) -> None:
-        """Explorer rows where a person sees them (explorer-qa's capture, its own new window). Never raises: a frame it cannot take is "unknown"."""
+        """Explorer rows from its own new window, or a separate bounded Shell icon of the exact file. Unobserved remains unknown."""
         if self.opt("skip_explorer"):
             return
         todo = [f for f in frames if pathlib.Path(f["folder"]).is_dir()]
@@ -597,16 +611,24 @@ class AcceptanceRun(sc.QualificationRun):
         if not todo:
             return
         out, spec = self.private / f"explorer-{stage}", self.private / f"explorer-{stage}.json"
-        spec.write_text(json.dumps({"stage": stage, "frames": todo}), encoding="utf-8")
+        # Extract a .lnk's icon only after its resolved target and icon source have been checked against this install.
+        shortcut_safe = all(self.obs.get(f"start_lnk.{field}", {}).get("state") == "pass" for field in ("target", "icon"))
+        spec.write_text(json.dumps({"stage": stage, "frames": [
+            {**f, "shell_item_icon": f["id"] != "explorer_start_shortcut" or shortcut_safe} for f in todo]}), encoding="utf-8")
         code, _tail = hw.run_ps(EXPLORER_PS, ["-SpecFile", spec, "-OutDir", out], timeout=900)
         rows = hw.read_json(out / "observations.json").get("frames") or {}
         for f in todo:
-            row, png = rows.get(f["id"]) or {}, out / f"{f['id']}.png"
-            if row.get("status") == "captured" and png.is_file():
-                self.keep(f["id"], png)
+            fid = f["id"]
+            row, png = rows.get(fid) or {}, out / f"{fid}.png"
+            status = row.get("status")
+            icon = out / f"shell_item_{fid}.png"
+            if status == "captured" and png.is_file():
+                self.keep(fid, png)
+            elif status == "icon_only" and icon.is_file() and (fid != "explorer_start_shortcut" or shortcut_safe):
+                self.keep(fid, icon, shell_icon=True)
             else:
-                stage = str(row.get("stage") or "")
-                self.lose(f["id"], f"explorer_stopped_at_{stage}" if re.fullmatch(r"[a-z_]{1,30}", stage) else f"explorer_script_exit_{code}")
+                stopped = str(row.get("stage") or "")
+                self.lose(fid, f"explorer_stopped_at_{stopped}" if re.fullmatch(r"[a-z_]{1,30}", stopped) else f"explorer_script_exit_{code}")
 
     def probe_window(self, label: str, pid: int, prefix: str, hwnd: int = 0) -> tuple[dict[str, Any], pathlib.Path, str]:
         """brand-probe.ps1 on ONE window of ONE process (``hwnd`` pins the exact one): its title, the icons it supplies, its
@@ -990,10 +1012,98 @@ class AcceptanceRun(sc.QualificationRun):
             return "unread"
         return "mirror" if same_address(lines[0], self.args.mirror_url) else "other"
 
+    def old_profile_port(self, pid: int) -> int:
+        """Bind writes to this freshly created profile, known old checkout and its own live loopback process."""
+        port = 0
+        try:
+            raw = (self.data / "state" / "server_port").read_text(encoding="utf-8").strip()
+            port = int(raw) if raw.isdigit() else int(json.loads(raw)["port"])
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        image = hw.image_path(pid)
+        if (not image or not same_address(image, self.exe) or not hw.loopback_listener_owned(port, pid)
+                or pb.read_git_head(self.app_root / "repo" / ".git") != self.old["source_sha"]):
+            raise sc.Unconfirmed(self.step, "old_profile_loopback_or_revision_unverified")
+        code, health = profile_http(port, "/api/health")
+        if code != 200 or health.get("runtime_version") != self.old["version"]:
+            raise sc.Unconfirmed(self.step, "old_profile_loopback_or_revision_unverified")
+        return port
+
+    def old_complete(self, port: int) -> None:
+        """The v7.12.0 public completion contract. Save once; a lost answer only reads back that attempt."""
+        assert self.model is not None
+        endpoint = self.model.base_url
+        if not re.fullmatch(r"http://127\.0\.0\.1:[0-9]{1,5}/v1", endpoint):
+            raise sc.Unconfirmed(self.step, "old_fixture_endpoint_not_loopback")
+        path, attempt = "/api/onboarding/complete", f"qa-{uuid.uuid4().hex}"
+        status, receipt = profile_http(port, path, {"attempt_id": attempt, "OPENAI_COMPATIBLE_BASE_URL": endpoint,
+            "OPENAI_COMPATIBLE_API_KEY": "", "OUROBOROS_MODEL": f"openai-compatible::{fm.MODEL_ID}",
+            "skipSubscriptionPresets": True, "allow_empty_review_pool": True, "consciousness": False, "starter_skills": []})
+        if status != 200 or receipt.get("ok") is not True or receipt.get("status") != "saved":
+            if receipt.get("saved") is False:
+                raise sc.Unconfirmed(self.step, "old_onboarding_refused", http_status=status)
+
+            def readback() -> dict[str, Any] | None:
+                code, same = profile_http(port, f"{path}?attempt={attempt}")
+                saved = same.get("receipt")
+                return saved if code == 200 and same.get("saved") is True and isinstance(saved, dict) else None
+
+            receipt = sc.poll_until(45.0, readback, interval=1.0) or {}
+            if receipt.get("ok") is not True or receipt.get("status") != "saved":
+                raise sc.Unconfirmed(self.step, "old_onboarding_completion_unconfirmed")
+        if receipt.get("restart_required") is not False:
+            raise sc.Unconfirmed(self.step, "old_onboarding_runtime_not_ready_without_restart")
+
+    def old_ready_for_chat(self, port: int) -> bool:
+        code, health = profile_http(port, "/api/health")
+        boot = health.get("boot")
+        state = self.state_doc()
+        if code != 200 or state is None or not isinstance(boot, dict) or not (boot.get("dialogue_ready") is True and boot.get("tasks_ready") is True):
+            return False
+        # Start can admit a host-origin first meeting in Main. Let it settle before sending the one owner turn;
+        # the strict model fixture declines that greeting and the greeting cannot serve as our saved exchange.
+        meeting = state.get("first_meeting") or {}
+        if not isinstance(meeting, dict):
+            return False
+        if meeting.get("state") != "admitted":
+            return meeting.get("state") not in ("owed", "admitting")
+        task = str(meeting.get("task_id") or "")
+        if not re.fullmatch(r"[0-9a-f]{8}", task):
+            return False
+        code, detail = profile_http(port, f"/api/tasks/{task}")
+        return code == 200 and detail.get("status") in ("completed", "failed", "cancelled", "interrupted")
+
+    def old_first_exchange(self, port: int) -> None:
+        assert self.model is not None
+        prompt, reply = fm.prompt_text(1, self.tag), fm.reply_text(1, self.tag)
+        want = [("user", prompt), ("assistant", reply)]
+        cursor = self.model.cursor()
+        if not send_old_main_turn(port, prompt):
+            raise sc.Unconfirmed(self.step, "old_main_owner_echo_unconfirmed")
+
+        def answered() -> bool:
+            return any(e.get("kind") == "completion" and e.get("slot") == 1 and e.get("status") == 200
+                       for e in self.model.events_since(cursor))
+
+        def saved_pair() -> bool:
+            if not answered():
+                return False
+            ok, _, rows = self.durable_history()
+            return ok and sc.has_exact_subsequence(rows, want)
+
+        if not sc.poll_until(self.TURN_SEC, saved_pair, interval=0.5):
+            raise sc.Unconfirmed(self.step, "old_fixture_reply_or_history_unconfirmed", fixture_completion_seen=answered())
+        self.init_id = self.initialization_id()
+        status, state = self.api("/api/update/status") or {}, self.state_doc() or {}
+        revs = [status.get("running_sha"), status.get("current_sha"), state.get("current_sha"),
+                pb.read_git_head(self.app_root / "repo" / ".git")]
+        if not self.init_id or not all(revs):
+            raise sc.Unconfirmed(self.step, "old_exchange_profile_identity_unreadable")
+        self.observe("old_app_created_and_saved_the_fixture_exchange", jd.tri(set(revs) == {self.old["source_sha"]}),
+                     accepted_main_echo=True, fixture_model_replied=True, history_via_api=True)
+
     def old_release_seed(self) -> None:
-        """The former user: the published release itself creates the profile and the first chat exchange, and quits normally. Its
-        update remote is GitHub, so the redirect to the local mirror is set first, and Git confirms it offline before anything that
-        could fetch is started; an address not confirmed stops here, as a stand that is not ready (never as a product failure)."""
+        """Launch the pinned old ZIP itself. Its own public APIs do the writes; expose its Main only for a normal Quit."""
         self.step = "old_release"
         self.redirect_to_mirror()
         read = [self.effective_source(address, self.private) for address in self.official_addresses()]
@@ -1001,46 +1111,32 @@ class AcceptanceRun(sc.QualificationRun):
                      spellings=len(read), read=sorted(set(read)))
         new = (self.exe, self.package_root, self.candidate)
         self.exe, self.package_root, self.candidate = self.old_root / "Ouroboros.exe", self.old_root, self.old["source_sha"]
-        HandoffAwareDriver.summary_tail = str(self.old.get("main_summary_tail") or "")
         try:
+            self.cu = self._load_uia_skill(pathlib.Path(self.args.candidate_src))
             self.asked("old_release_portable")
-            try:
-                self.launch_and_pass_wizard()
-            finally:
-                if "setup_window_ready" in self.result["marks"]:  # #4220 marks it only once the old release's own window was found
-                    self.saw("old_release_portable")
-            self.cu = self.driver.cu
-            self.run_first_chat_and_check_a()
+            spawn = self._launcher_spawn or (lambda cmd, **kw: subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=hw.NEW_GROUP, **kw))
+            self.proc = spawn([str(self.exe)], cwd=str(self.exe.parent), env=self.env("portable"))
+            self.driver = HandoffAwareDriver(cu=self.cu, proc=self.proc, host_mod=self.wh)
+            win = self.await_setup_window(self.step)
+            image = hw.image_path(win.pid)
+            if not image or not same_address(image, self.exe) or not self.wh.window_owned_by(win.hwnd, win.pid):
+                raise sc.Unconfirmed(self.step, "old_setup_window_not_bound_to_published_exe")
+            self.saw("old_release_portable")
+            self.old_complete(self.old_profile_port(win.pid))
+            hw.post_close(win.hwnd, win.pid)  # dismiss the old wizard after its API has saved; no field or button driven
+            if not sc.poll_until(20.0, lambda: not self.wh.window_owned_by(win.hwnd, win.pid), interval=0.1):
+                raise sc.Unconfirmed(self.step, "old_setup_window_close_unconfirmed")
+            self.await_main_window(self.step)
+            port = self.old_profile_port(self.driver.root_pid)
+            if not sc.poll_until(180.0, lambda: self.old_ready_for_chat(port), interval=1.0):
+                raise sc.Unconfirmed(self.step, "old_dialogue_or_setup_meeting_not_ready")
+            self.old_first_exchange(self.old_profile_port(self.driver.root_pid))
             (self.app_root / "repo" / ".git" / "qa-profile-token").write_text(self.token, encoding="utf-8")  # an unknown file in .git: git status stays clean
             self.versions("old_release_first_run")
-            self.brand("old_release_first_run", judge=False)  # the old release's window is context, never judged
             self.quit("old_release")
         finally:
-            HandoffAwareDriver.summary_tail = ""
             self.exe, self.package_root, self.candidate = new  # the redirect stays in the launch environment to the end of the leg
-
-    def _select_main_model_source_option(self, setup_hwnd: int) -> None:
-        """#4220 chooses the model-source option with ``verbs=()``, which can only mean a native click. The same two steps, addressed
-        first: expand the combo box, then UIA SelectionItem.select (invoke as the second verb) on the option row. Only where addressed UIA
-        cannot act (the refused click), that one step is done with #4220's own owned click inside the old release's wizard window and
-        recorded; #4220's Summary check then proves which source and model are chosen."""
-        assert self.driver is not None
-
-        def step(**act: Any) -> None:
-            try:
-                self.driver.act_or_click(setup_hwnd, phase="wizard", **act)
-            except wh.Unread as unread:
-                if unread.code != "global_input_forbidden":
-                    raise
-                self.result["facts"]["owned_click_asked"].append("old_release_main_model_source")  # asked; the click itself may still be refused
-                with owned_click_for_one_step():
-                    self.driver.act_or_click(setup_hwnd, phase="wizard", **{**act, "verbs": ()})
-
-        step(label=sc.MAIN_SOURCE_LABEL, query={"role": "combo_box", "name": sc.MAIN_SOURCE_LABEL}, verbs=("expand", "invoke"), wizard=True,
-             post_condition=lambda: bool(self.driver.find_nodes(setup_hwnd, phase="wizard", roles={"list_item", "menu_item"}, name=sc.COMPATIBLE_OPTION_LABEL, require_visible=True)))
-        option = {"roles": {"list_item", "menu_item"}, "name": sc.COMPATIBLE_OPTION_LABEL}
-        step(label=sc.COMPATIBLE_OPTION_LABEL, query=option, verbs=("select", "invoke"),
-             post_condition=lambda: not self.driver.find_nodes(setup_hwnd, phase="wizard", require_visible=False, **option))
 
     def install(self) -> None:
         """The same ordinary wizard as the visible leg, over the former user's profile, with nobody holding it."""
