@@ -1356,7 +1356,7 @@ def call_llm_with_retry(
     owner = current_model_wait()
     activity_attempt = task_attempt if task_attempt is not None or not owner or owner.task_id != task_id else owner.attempt
     response_cache_bypass_requested, send_messages = False, None
-    from ouroboros.loop_transport import note_route_caution
+    from ouroboros.loop_transport import note_route_caution, note_withheld_route
     route_caution = (None, False, "")  # a failed send's caution, whether it was withheld and its route; noted when no answer came
     for attempt in range(transient_budget):
         letter = letter_send if attempt == 0 else None
@@ -1559,6 +1559,7 @@ def call_llm_with_retry(
                 note_route_caution(accumulated_usage, e.route_caution_used[0], route=e.route_caution_used[1])
             if getattr(e, "route_caution", None):
                 route_caution = (e.route_caution, bool(getattr(e, "route_withheld", False)), getattr(e, "route_caution_key", ""))
+            note_withheld_route(accumulated_usage, route_caution)
             if letter:
                 capture = _own_capture(physical_attempt_capture_from_exception(e), prior)
                 if letter.settle(capture) and not local_consideration:  # provably unsent: the plain request goes

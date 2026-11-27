@@ -308,7 +308,7 @@ def test_an_rtl_project_panel_clears_the_lights_only_where_it_reaches_them(subsc
             page.evaluate("([n, v]) => document.documentElement.style.setProperty(n, v)", [name, value])
     apply(page)
     page.evaluate(OPEN_PANEL)
-    page.wait_for_selector("#project-panel.open:not([hidden]) .chat-panel-statusbar")
+    page.wait_for_selector("#project-panel.open:not([hidden])")  # its status bar is empty, so not drawn (room_work.css)
     page.wait_for_function("""() => { const t = getComputedStyle(document.getElementById('project-panel')).transform;
         return t === 'none' || t === 'matrix(1, 0, 0, 1, 0, 0)'; }""")  # the panel's open transition has ended
     page.evaluate("document.documentElement.dir = 'rtl'")  # again: the app may have re-applied its language's direction
@@ -488,7 +488,7 @@ def test_from_the_minimum_window_width_every_top_control_clears_the_lights(subsc
     blocked = [c for c in page.evaluate(CONTROLS) if not clear_of_lights(c)]
     assert blocked == []
     page.evaluate(OPEN_PANEL)
-    page.wait_for_selector("#project-panel.open:not([hidden]) .chat-panel-statusbar")
+    page.wait_for_selector("#project-panel.open:not([hidden])")  # its status bar is empty, so not drawn (room_work.css)
     page.wait_for_timeout(400)  # the panel's open transition
     panel = page.evaluate("() => ({ left: document.getElementById('project-panel').getBoundingClientRect().x })")
     with_panel = [c for c in page.evaluate(CONTROLS) if not clear_of_lights(c)]

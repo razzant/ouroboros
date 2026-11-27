@@ -117,7 +117,9 @@ TRACK = """() => { const t = window.__flight = { samples: [], seen: false, done:
 def _open(ui, width, reply=False):
     page = seed_page(ui, width, 844 if width < 720 else 900)
     if reply:
-        page.add_init_script(f"sessionStorage.setItem('ouro_chat_reply', {json.dumps(json.dumps(REPLY))})")
+        # Main's reply slot under the profile the document proves (chat_preview.js `roomStoreKey`).
+        key = f"ouro_chat_reply:{setup_browser.PREVIEW_SCOPE}"
+        page.add_init_script(f"sessionStorage.setItem({json.dumps(key)}, {json.dumps(json.dumps(REPLY))})")
     boot(page, ui)
     return page
 

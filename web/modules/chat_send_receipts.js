@@ -19,12 +19,12 @@ export function createOwnerSendReceipts({ feed, chatId, unconfirmed, replies, co
         return markIngressSaved(feed, row, ownerMessageBubble(feed, row, chatId));
     }
 
-    function confirm(row) {
+    function confirmRow(row) {
         const bubble = ownerMessageBubble(feed, row, chatId);
         const changed = markIngressSaved(feed, row, bubble) | markSwarmLabel(feed, row, bubble) | replies.adopt(row);
         settle(row);
         return changed;
     }
 
-    return { local, ids, settle, mark, confirm };
+    return { local, ids, settle, mark, confirm: confirmRow };
 }

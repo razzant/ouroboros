@@ -256,6 +256,10 @@ def test_turn_into_project_keeps_the_card_as_its_portal(project_chat):
     expect(card.locator('[data-turn-into-project]')).to_have_count(0)
     expect(card.locator(DOOR)).to_have_attribute("aria-label", "Open project Project Gamma")
     assert card.evaluate(LEADS), "the converted card's row leads with its Project"
+    # The server's census now addresses the moved work in its room: a portal takes Stop only from a row positively
+    # addressed to the Project's room (#4116, work_portal.js presentSources), never from the old Main address.
+    state["active_chat_activities"][-1].update({"chat_id": 9, "project_id": "gamma"})
+    page.evaluate("s=>chat.hydrateStateSnapshot(s)", with_work_fields(state))
     expect(card.locator(':scope > .chat-live-foot > .chat-live-foot-end > .chat-live-actions > button')).to_have_text(["Stop…"])
     assert project_chat["requests"][-1]["task_id"] == "local"
 

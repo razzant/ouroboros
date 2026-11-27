@@ -974,6 +974,9 @@ def test_same_app_serves_history_after_a_fresh_lifespan(providerless_history_boo
             assert current is not previous and current.ready.wait(8), current._failure
             assert client.get("/api/chat/history").json()["messages"] == []
             assert current.pid is not None
+        # Teardown only signals the reader (stop() never waits); its launch thread reaps the child.
+        # The product's bounded completion signal is wait_stopped(), not an instant poll.
+        assert current.wait_stopped() == ""
         assert not current.live_children()
         previous = current
 

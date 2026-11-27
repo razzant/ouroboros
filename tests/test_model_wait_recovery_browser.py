@@ -10,7 +10,7 @@ from ouroboros.task_results import load_task_result
 from tests.test_llm_claudexor import setup as subscription_transport
 from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_model_wait_browser import API_LANE, TASK, waiting_ui as waiting_fixture
-from tests.test_subscription_setup_browser import subscription_ui as ui_fixture, capture
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, PROFILE_FRAME, subscription_ui as ui_fixture, capture
 from tests._work_projection_shared import state_fields
 
 setup = subscription_transport
@@ -32,7 +32,7 @@ def test_real_mailbox_refusal_retries_exact_request_and_applies_once(subscriptio
     owner.revision = 1
     page = subscription_ui["page"]
     replies, sockets = [], []
-    page.route_web_socket("**/ws", lambda socket: sockets.append(socket))
+    page.route_web_socket("**/ws", lambda socket: (sockets.append(socket), socket.send(PROFILE_FRAME)))
 
     def reply(route, value):
         route.fulfill(content_type="application/json", body=json.dumps(value))
@@ -41,9 +41,10 @@ def test_real_mailbox_refusal_retries_exact_request_and_applies_once(subscriptio
         "sha": "fixture", "supervisor_ready": True, "projects": [],
         "active_chat_activities": [{"activity_id": "task-one", "kind": "managed_task",
             "chat_id": 1, "phase": "working", "task_attempt": 1, "model_waits": {row["wait_id"]: row}}]}))
-    page.route("**/api/chat/history*", lambda route: reply(route, {"messages": [{
+    page.route("**/api/chat/history*", lambda route: reply(route, {"profile_scope": PREVIEW_SCOPE, "messages": [{
         "role": "system", "text": "", "system_type": "task_model_wait", "task_id": "task-one",
-        "ts": "2026-09-07T00:00:00Z", "model_waits": {row["wait_id"]: row}}]}))
+        "ts": "2026-09-07T00:00:00Z", "model_waits": {row["wait_id"]: row}}],
+        "progress": [], "has_more": False, "page_cursor": "recent"}))
     page.route("**/api/tasks/task-one", lambda route: reply(route, load_task_result(root, "task-one")))
     original_write = owner_mailbox.write_owner_message
     monkeypatch.setattr(owner_mailbox, "write_owner_message", lambda *args, **kwargs: False)

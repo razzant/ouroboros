@@ -2324,11 +2324,11 @@ there in the last 7 days, what it asks to stop and what keeps working, every pla
 button says “Reading…” (on a large install the first read takes seconds). With no place to name the turn goes at once;
 a preview or a place list that cannot be read, or a preview not answered within 15 seconds, does not hold the switch
 (the dialog says so and still offers the turn). Turning on says where it may answer and that at its first wake it sees what is unread there
-and decides what to read and answer. After Panic turning on (or, once consciousness is already on in a new run with Panic-stopped work waiting, “Allow Panic resume”)
-uses one native OS confirmation dialog in the desktop app, places or none: nothing starts right now, and in this run wakes may
+and decides what to read and answer. After Panic the desktop app's Turn on (or, once consciousness is already on in a new run with Panic-stopped work waiting,
+“Allow Panic resume”) uses one native OS confirmation dialog, places or none: nothing starts right now, and in this run wakes may
 choose which shown Panic-stopped tasks to resume (even one Panic was pressed for) until Off or restart, while separate Stops/Pauses
-and limits hold; browsers and older shells explain this (never promising restart updates an old shell) and keep manual Resume
-(ARCHITECTURE §9). The words are the host's (`consciousness_view`): the app shows them from the
+and limits hold. Elsewhere Turn on sends the plain /bg, which hands over no choice, and “Allow Panic resume” says it needs the
+current desktop app (never promising restart updates an old shell); manual Resume stays (ARCHITECTURE §9). The words are the host's (`consciousness_view`): the app shows them from the
 server's answers, and the /bg replies (every surface, headless included) and the mind's own fact come from there too.
 
 The headline reports server state apart from wakes, with the host sentence as its only clock. A past next attempt says

@@ -19,19 +19,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.testclient import TestClient
 
 from ouroboros import delegate_activity
 from ouroboros.agent import OuroborosAgent
-from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.subagent_messages import subagent_message_meta
 from ouroboros.task_results import write_task_result
 from supervisor import events_chat_delivery, message_bus
 from tests.test_delegated_activity import Daemon, _gateway, _harness, _run_event
 from tests.test_reconnect_feed_browser import HISTORY_LANDED
-from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
+from tests._room_browser_shared import history_client
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, PROFILE_FRAME, capture, subscription_ui as subscription_ui
 from tests.test_task_file_serving import _client
 
 pytestmark = [pytest.mark.ui_browser]
@@ -165,8 +162,7 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
     page = ui["page"]
     data = tmp_path / "data"
     producer = Producer(data, monkeypatch)
-    history_app = Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))])
-    history = TestClient(history_app)
+    history = history_client(data, PREVIEW_SCOPE)
     ui["backend"]["task_gateway"] = _client(data)
     served, sockets = [], []
 
@@ -183,6 +179,7 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
 
     def socket_route(ws):
         sockets.append(ws)
+        ws.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({"type": "heartbeat"}))
 
     def state_route(route):
@@ -347,7 +344,7 @@ def test_later_permanent_refusal_updates_earlier_gap_without_losing_words(engine
     ui, data = engine_ui, tmp_path / "data"
     page = ui["page"]
     producer = Producer(data, monkeypatch)
-    history = TestClient(Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))]))
+    history = history_client(data, PREVIEW_SCOPE)
     sockets = []
 
     def history_route(route):
@@ -357,6 +354,7 @@ def test_later_permanent_refusal_updates_earlier_gap_without_losing_words(engine
 
     def socket_route(ws):
         sockets.append(ws)
+        ws.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({"type": "heartbeat"}))
 
     page.route("**/api/chat/history*", history_route)

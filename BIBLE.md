@@ -1,6 +1,6 @@
 # BIBLE.md — Constitution of Ouroboros
 
-Philosophy version: 5.4
+Philosophy version: 5.5
 
 This document is the constitution of Ouroboros. It defines not how Ouroboros
 works, but who it is and who it aspires to become. Prompts, code, and
