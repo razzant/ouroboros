@@ -99,6 +99,23 @@ function refreshFoldsSoon() {
         batch(() => due.forEach(refreshProjectAnswerFold));
     }));
 }
+// An answer's own box decides its fold: whatever changes its width (the window, a sidebar or panel handle, the drawer, a
+// feed whose width is still moving) is seen by observing the body itself, the moment the browser lays it out at that
+// width. A row the browser skips (far from the view while the width moves, or asleep, chat_row_sleep.js) is not laid
+// out and reports nothing; it is measured when it is laid out again, at the width it is shown at. Measured inside the
+// observer's callback, after layout, the reads cost no extra layout.
+let sizes = null;
+function observeFold(bubble) {
+    const message = bubble.querySelector?.('.message');
+    if (!message || typeof window === 'undefined' || typeof window.ResizeObserver !== 'function') return;
+    sizes ||= new window.ResizeObserver((entries) => batch(() => {
+        for (const { target } of entries) {
+            const answer = target.parentElement;
+            if (answer?.classList.contains('project-answer') && !answer.closest('.chat-instance-panel[hidden]')) refreshProjectAnswerFold(answer);
+        }
+    }));
+    sizes.observe(message);
+}
 function watchFolds() {
     if (watching || typeof window === 'undefined') return;
     watching = true;
@@ -117,6 +134,7 @@ export function decorateProjectRow(bubble, { role = 'system', projectId = '', pr
         bubble.classList.add('project-answer');
         watchFolds();
         refreshFoldsSoon();
+        observeFold(bubble);
     }
     const actions = createSystemMessageActions(projectReference({ id: projectId, name: projectName }));
     const message = bubble.querySelector('.message');

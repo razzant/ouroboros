@@ -373,3 +373,48 @@ def test_folded_project_answer_stops_and_restores_keyboard_tabindex(project_chat
     bubble.evaluate("b => b.style.removeProperty('--project-answer-lines')")
     refresh(page, bubble)
     assert bubble.evaluate(state_js) == all_stopped
+
+
+# The answer's own width decides its fold, whatever moved it: no window resize, no settled-width event, no refresh by
+# hand. A boundary answer (just over seven lines at the narrow width, four at the wide one) must lose its fade and give
+# its link back to Tab when the room widens, and take both again when it narrows; while the feed's width is still
+# moving ([data-resizing]) a visible answer crossing the boundary is re-folded at once, in both directions. A real
+# sidebar-handle drag in the full app is covered by the sprint's stand probe (notes: handle_c.py); this fixture mounts
+# the chat alone, so the room's width is moved directly.
+FOLD_STATE = """b => { const m = b.querySelector('.message'), a = m.querySelector('a');
+    return {mask: m.hasAttribute('data-fold-clipped'), folded: b.classList.contains('is-folded'), tab: a.getAttribute('tabindex'),
+        content: m.scrollHeight, height: m.clientHeight}; }"""
+
+
+@pytest.mark.parametrize("project_chat", [("chromium", "dark", 1100), ("webkit", "light", 1100)], indirect=True)
+def test_the_fold_follows_the_answers_own_width_in_both_directions(project_chat):
+    chat = project_chat
+    page = chat["page"]
+    page.set_viewport_size({"width": chat["width"], "height": 750})
+    bubble = emit(page, "fold-width", "Start")
+    room = "document.querySelector('#page-chat')"
+    page.evaluate(f"{room}.style.width = '420px'")
+    bubble.evaluate("""b => { const m = b.querySelector('.message'), a = document.createElement('a');
+        a.href = '#details'; a.textContent = 'Read details'; const words = document.createTextNode('');
+        m.replaceChildren(words, a);
+        for (let i = 0; i < 600 && m.scrollHeight < m.clientHeight + 20; i++) words.data += 'room detail '; }""")
+    settle = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 120))))"
+    page.evaluate(settle)
+    narrow = bubble.evaluate(FOLD_STATE)
+    assert narrow["mask"] and narrow["folded"] and narrow["tab"] == "-1", narrow
+    page.evaluate(f"{room}.style.width = '1000px'")
+    page.evaluate(settle)
+    wide = bubble.evaluate(FOLD_STATE)
+    assert wide["content"] <= wide["height"] + 1, wide
+    assert not wide["mask"] and not wide["folded"] and wide["tab"] is None, ('widened: whole, no fade, back in Tab', wide)
+    page.evaluate(f"{room}.style.width = '420px'")
+    page.evaluate(settle)
+    assert bubble.evaluate(FOLD_STATE) == narrow, 'narrowed again: folded, faded, out of Tab'
+    # While the width is still moving (chat_reading_position.js marks the feed), a visible answer re-folds at once.
+    page.evaluate("document.querySelector('#chat-messages').setAttribute('data-resizing', '')")
+    for width, folded in (("1000px", False), ("420px", True)):
+        page.evaluate(f"{room}.style.width = '{width}'")
+        page.evaluate(settle)
+        moving = bubble.evaluate(FOLD_STATE)
+        assert moving["mask"] is folded and moving["folded"] is folded, (width, moving)
+    page.evaluate("document.querySelector('#chat-messages').removeAttribute('data-resizing')")
