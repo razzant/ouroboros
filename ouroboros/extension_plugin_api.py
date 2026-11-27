@@ -403,6 +403,7 @@ class PluginAPIImpl:
         self._state_dir = pathlib.Path(config.state_dir)
         self._loaded_skill = config.loaded_skill
         self._drive_root = pathlib.Path(config.drive_root) if config.drive_root is not None else self._state_dir
+        self._claim_bot_on_read = getattr(config, "claim_bot_on_read", True)
         self._subscribe_events = frozenset(str(t).strip() for t in (config.subscribe_events or []) if str(t).strip())
         self._companion_specs = {
             str(item.get("name") or "").strip(): dict(item)
@@ -1129,6 +1130,7 @@ class PluginAPIImpl:
                         spawn.descriptor.env.update(companion_spawn_env(
                             spawn.spec, token, env_allow=self._env_allow, granted_upper=self._granted_upper,
                             skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir,
+                            drive_root=self._drive_root,
                         ))
                 bus = get_global_event_bus()
                 for sub in staged.event_subscriptions:
@@ -1217,7 +1219,9 @@ class PluginAPIImpl:
             settings = session_settings(self, document)
             if self._runtime_unloading():
                 return {}
-            return {key: settings[key] for key in self._readable_settings_keys(keys, document) if key in settings}
+            from ouroboros.telegram_owner_bot import hand_settings  # one bot, one local reader (its docstring)
+            return hand_settings(self._skill, {key: settings[key] for key in self._readable_settings_keys(keys, document)
+                                               if key in settings}, self._drive_root, claim=self._claim_bot_on_read)
 
     def _require_api_generation(self, method: str, minimum: str = "2.4") -> None:
         """2.4+ methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's current 2.x, so
@@ -1253,8 +1257,10 @@ class PluginAPIImpl:
             if self._runtime_unloading():
                 return closed
             readable, settings = self._readable_settings_keys(keys, document), session_settings(self, document)
-            values = {key: settings[key] for key in readable
-                      if settings.get(key) is not None and str(settings.get(key)).strip() != ""}
+            from ouroboros.telegram_owner_bot import hand_settings
+            values = hand_settings(self._skill, {key: settings[key] for key in readable
+                                                 if settings.get(key) is not None and str(settings.get(key)).strip() != ""},
+                                   self._drive_root, claim=self._claim_bot_on_read)
             return {"status": "ok", "values": values, "missing": [key for key in readable if key not in values]}
 
     def get_stop_state(self) -> Dict[str, Any]:
@@ -1343,7 +1349,8 @@ class PluginAPIImpl:
             token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
             return companion_spawn_env(
                 spec, token, env_allow=self._env_allow, granted_upper=admitted["granted"],
-                skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir, settings=settings)
+                skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir, settings=settings,
+                drive_root=self._drive_root)
 
         try:
             outcome = supervisor.refresh(self._skill, clean_name, build_env, compare_keys=compare_keys,

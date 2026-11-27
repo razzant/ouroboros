@@ -120,6 +120,11 @@ def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: A
     connector, root = connector_of(name, ext_tool), _drive_root(ctx)
     if call.problem or not connector or root is None:
         return call
+    from ouroboros.telegram_owner_bot import owner_bot_of
+    # Only telegram-bot's calls name the A/B fence (A while the bridge may run here); other connectors have no owner_bot
+    # place, so their lookups keep their earlier answers exactly.
+    owner = owner_bot_of(root, connector)
+    fence = {"owner_bot": owner} if owner else {}
     try:
         call.siblings = places.places_of_connector(root, connector)
     except places.PlaceError as exc:
@@ -146,14 +151,14 @@ def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: A
         # list is no thread, so no id is matched with another's thread.
         thread = "" if same and key != effect.conversation else effect.thread
         place, known = places.place_for_target(root, connector=connector, targets=destination,
-                                             conversation=effect.conversation, thread=thread)
+                                             conversation=effect.conversation, thread=thread, **fence)
         call.attributable = call.attributable and known
         if place is not None:
             account = _call_account(ctx, place, next(iter((destination if via == "account" else targets).get(
                 "account_id", [])), ""))
             call.reach(place, effect.effect, via, account, _conversation_keys(
                 place, effect, destination if effect.touches else targets, account_id=account))
-    _reach_addresses(call, root, connector, ctx)
+    _reach_addresses(call, root, connector, ctx, owner_bot=owner)
     return call
 
 
@@ -180,17 +185,21 @@ def _grouped_destinations(effect: ToolEffect, targets: Mapping[str, list[str]], 
 
 
 def _reach_addresses(call: _CallReach, root: Any, connector: str, ctx: Any, provider: str = "", *,
-                     as_routed: bool = False) -> None:
+                     as_routed: bool = False, owner_bot: str | None = None) -> None:
     """Each group address alone, by its group's ``match``: ``scope`` meets the destination matcher (inside an
     account's places an address none of them covers stays unknown, its account named or not; one outside every
     place's account is no place's), ``exact`` only a place naming it (none: a known absence). ``as_routed`` (an
-    automatic reply's addresses) keeps each address's account, its route's, blank included, never inferring one."""
+    automatic reply's addresses) keeps each address's account, its route's, blank included, never inferring one.
+    ``owner_bot``: the A/B fence the caller already read (``telegram_owner_bot.owner_bot_of``), else read here."""
+    from ouroboros.telegram_owner_bot import owner_bot_of
+    owner = owner_bot_of(root, connector) if owner_bot is None and call.touches else owner_bot or ""
+    fence = {"owner_bot": owner} if owner else {}
     for address in call.touches:
         target = {"conversation_id": [address.conversation], **({"account_id": [address.account]} if address.account
                                                                 else {}),
                   **({"thread_id": [address.thread]} if address.thread else {})}
         place, known = places.place_for_target(root, connector=connector, targets=target, conversation="conversation_id",
-                                             thread="thread_id", provider=provider, match=address.match)
+                                             thread="thread_id", provider=provider, match=address.match, **fence)
         if address.effect != EFFECT_READ:
             call.attributable = call.attributable and known
         if place is not None:
@@ -321,7 +330,12 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         if reach.effects - {EFFECT_READ} and place.state in (places.STATE_SILENT, places.STATE_PAUSED):
             return (_PREFIX + f"{place.label or place.place_id} is {place.state.title()}; {name!r} cannot write there. "
                     "Change its state in Circles or with configure_presence before writing there.")
-    blocked = [place for place in call.siblings if place.state in (places.STATE_SILENT, places.STATE_PAUSED)]
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+    # An exact owner_bot place (the owner's own bot) never blocks an unattributable call of the connector's separate
+    # bot: a new Silent group of A is not a hold on B's omitted-account writes. A reached owner_bot place still holds
+    # its own writes above.
+    blocked = [place for place in call.siblings
+               if place.state in (places.STATE_SILENT, places.STATE_PAUSED) and not is_owner_bot_place(place)]
     if not call.attributable and blocked:
         labels = ", ".join(place.label or place.place_id for place in blocked)
         return (_PREFIX + f"The destination of {name!r} cannot be attributed while {labels} is Silent or Paused. "
@@ -631,7 +645,7 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
 
 def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[str, str], *,
                          binding: Mapping[str, Any] | None = None, require_place: bool = False,
-                         match: str = places.MATCH_SCOPE) -> dict[str, Any]:
+                         match: str = places.MATCH_SCOPE, contribution_id: str = "") -> dict[str, Any]:
     """Capture or recheck one connector's enqueue-time place binding, without writes.
 
     The snapshot records provenance, not a grant: delivery still checks current
@@ -641,13 +655,28 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
     places (``places.target_place``): ``scope``, or ``exact`` for an extra address
     constraint, which needs the conversation, has no opaque or unknown fallback and
     finds no place as a confirmed unbound one. The v1 snapshot never records it: the
-    caller keeps it beside the snapshot and checks with the same mode.
+    caller keeps it beside the snapshot and checks with the same mode. ``contribution_id="owner_bot"`` binds the
+    owner's own Telegram bot exactly (``telegram_owner_bot.owner_bot_binding``); that bot's account is never bound
+    through the connector's other places.
     """
+    from ouroboros.telegram_owner_bot import (
+        FEED_CONNECTOR,
+        OWNER_BOT_CONTRIBUTION,
+        owner_bot_binding,
+        owner_bridge_bot_id,
+    )
     if match not in places.MATCHES:
         raise ValueError(f"match is {' or '.join(places.MATCHES)}.")
     target = {key: destination.get(key, "") for key in _DELIVERY_TARGET_FIELDS}
     if any(not isinstance(value, str) for value in target.values()) or not target["provider"] or not target["account_id"]:
         raise ValueError("A canonical provider and account_id are required for an outbox binding.")
+    if contribution_id not in {"", OWNER_BOT_CONTRIBUTION}:
+        raise ValueError("contribution_id names no exact binding.")
+    if contribution_id:
+        return owner_bot_binding(drive_root, connector, target, binding, PLACE_BINDING_VERSION)
+    if connector == FEED_CONNECTOR and target["account_id"] == owner_bridge_bot_id(drive_root):
+        return {"allowed": False, "binding": dict(binding) if binding else None, "state": "unknown",
+                "code": "place_not_connected", "label": "", "place_id": ""}
     exact = match != places.MATCH_SCOPE  # ``exact`` or ``exact_casefold``
     if exact and not target["conversation_id"]:
         raise ValueError("An exact place binding needs its conversation_id.")

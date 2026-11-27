@@ -559,9 +559,10 @@ class PluginAPI(Protocol):
         """Strict form of ``get_settings`` (2.4): ``{"status", "values", "missing"}``.
 
         ``status`` is ``ok`` (``values`` holds the non-empty readable keys, ``missing`` the empty or absent
-        ones), ``unknown`` (the saved settings document exists but cannot be read; neither list says
-        anything) or ``access_closed`` (unloading, or no ``read_settings``). Keys the skill may not read
-        appear in neither list. With nothing readable asked (``[]``) no settings are read and only the access
+        ones; a value the host withholds, as ``get_settings`` and the environment do, is absent: a Telegram bot
+        token another local reader holds), ``unknown`` (the saved settings document exists but cannot be read;
+        neither list says anything) or ``access_closed`` (unloading, or no ``read_settings``). Keys the skill may
+        not read appear in neither list. With nothing readable asked (``[]``) no settings are read and only the access
         answers (``ok`` or ``access_closed``): cheap enough to check before each outbound request.
         """
         ...

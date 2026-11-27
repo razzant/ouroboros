@@ -100,9 +100,10 @@ def matching_declarations(place: Place, declarations) -> list[dict]:
     binding kept its transport's spelling (``Slack``) where a declared place stored the lowercase one. Another
     provider's declaration never vouches for a place; event origins and conversation keys keep the exact spelling."""
     provider = place.provider.lower()
+    # A projected declaration (telegram_owner_bot) speaks only for its own places, never for an unnamed legacy one.
     return [row for row in declarations if row.get("provides") == "place" and row.get("skill") == place.connector
             and row.get("destination", "").removeprefix("vendor:").lower() == provider
-            and (not place.contribution_id or row["id"] == place.contribution_id)]
+            and (row["id"] == place.contribution_id if place.contribution_id or row.get("projected_from") else True)]
 
 
 def _with_defaults(existing, declarations):

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    catalogWhoHtml, chipHtml, declaredPermissionWords, factsText, officialMarkHtml, officialPromise, permissionWords, popularityText, relativeAge,
+    catalogNeedsText, catalogWhoHtml, chipHtml, declaredPermissionWords, factsText, officialMarkHtml, officialPromise, permissionWords, popularityText, relativeAge,
     routeExternalLink, sourceAboutText, statusHtml, trayHtml, trustSentence, trustValueText, versionText,
 } from '../modules/skill_presentation.js';
 
@@ -39,8 +39,19 @@ test('popularity: one number with its noun; counted zero, uncounted and unknown 
     assert.equal(popularityText({ signals: null, registry_stats: { stars: 0, downloads: 887 } }), 'No stars yet · 887 downloads');
     assert.equal(popularityText({ signals: null, registry_stats: {} }), 'No data', 'a registry hit without counts is unknown');
     assert.equal(popularityText({ signals: { stars: 4 } }), 'Votes not counted yet', 'signals carry votes; stars there are not a vote count');
-    assert.equal(factsText({ signals: { votes: 20 }, needs_keys: ['A', 'B'] }), '▲ 20 votes · needs 2 keys');
-    assert.equal(factsText({ signals: { votes: 2 }, needs_keys: ['A'] }), '▲ 2 votes · needs a key');
+    assert.equal(factsText({ signals: { votes: 20 }, needs_keys: ['A', 'B'] }), '▲ 20 votes · 2 key fields');
+    assert.equal(factsText({ signals: { votes: 2 }, needs_keys: ['A'] }), '▲ 2 votes · 1 key field');
+});
+
+test('keys: the catalog\'s words say what a skill needs; only where it says nothing are the settings it reads counted, as fields', () => {
+    const reads = { signals: { votes: 2 }, needs_keys: ['A', 'B'] };
+    // `needs_keys` is what the skill reads, required or not: counted, never called a need.
+    for (const silent of [{}, { needs: null }, { needs: undefined }, { needs: 7 }]) assert.equal(factsText({ ...reads, ...silent }), '▲ 2 votes · 2 key fields');
+    // The catalog spoke (`""`, blank included, says none): no count, whatever the skill reads; its words are drawn beside the line.
+    for (const needs of ['', ' ', 'Needs a Gemini API key', 'Your own bot works; a second token is optional']) assert.equal(factsText({ ...reads, needs }), '▲ 2 votes');
+    assert.equal(catalogNeedsText({ needs: ' Needs a Gemini API key ' }), 'Needs a Gemini API key');
+    for (const none of [undefined, {}, { needs: null }, { needs: '' }, { needs: ' ' }, { needs: 7 }]) assert.equal(catalogNeedsText(none), '', JSON.stringify(none));
+    assert.equal(factsText({ source_id: 'builtin', needs_keys: ['A'] }), '1 key field', 'a built-in has no popularity to say first');
 });
 
 test('the who line names source, author, the author repository and the update age', () => {

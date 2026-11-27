@@ -149,7 +149,7 @@ def _skill_env(drive_root: pathlib.Path, skill: Any, *, start: bool) -> Tuple[Di
         raise ValueError(refusal)
     declared = {str(key).strip() for key in skill.manifest.env_from_settings or [] if str(key).strip()}
     env = _scrub_env(sorted(declared), (skill_state_dir if start else skill_state_dir_path)(drive_root, skill.name),
-                     skill.name, granted_keys=list(grants.get("granted_keys") or []))
+                     skill.name, granted_keys=list(grants.get("granted_keys") or []), drive_root=drive_root)
     named = {key.upper() for key in declared}
     secrets = tuple(value for key, value in env.items() if value and key.upper() in named and (
         key.upper() in MASKED_SECRET_SETTING_KEYS

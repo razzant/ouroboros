@@ -492,3 +492,100 @@ def test_model_route_is_shared_by_brief_full_and_inspect(tmp_path, monkeypatch, 
         "value": value, "layer": layer, "local": local}
     assert full["model"] == place_model
     assert places.places_path(tmp_path).read_bytes() == before  # a projection never freezes the inherited choice
+
+
+def test_owner_bot_place_does_not_inherit_separate_bot_green_readiness_when_bridge_is_off(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros import telegram_owner_bot as owner_bot
+    from ouroboros.extension_contributions import stage_contributions
+    from ouroboros.skill_loader import load_skill
+
+    folder = tmp_path / "skills" / "native" / "telegram-bot"
+    (folder / "ui").mkdir(parents=True)
+    (folder / "plugin.py").write_text("def register(api): pass\n", encoding="utf-8")
+    (folder / "skill.json").write_text(json.dumps({
+        "name": "telegram-bot", "type": "extension", "entry": "plugin.py", "permissions": ["presence"],
+        "icon": "ui/icon.svg",
+        "contributes": [{
+            **PLACE, "label": "Telegram", "destination": "vendor:telegram",
+            "wakes": ["mention", "signal.words"],
+            "facts": [{"id": "mention", "label": "Mentions you"},
+                      {"id": "signal.words", "label": "Words you chose appear"}],
+            "source": {"route": "status", "refresh_s": 15}, "settings": "connection",
+        }],
+        "tools": [{"name": "send", "effect": "message", "target": ["to", "cc", "bcc"]}],
+    }), encoding="utf-8")
+    (folder / "ui/icon.svg").write_text(SVG, encoding="utf-8")
+    skill = load_skill(folder, tmp_path)
+    api = SimpleNamespace(_staged=SimpleNamespace())
+    stage_contributions(api, skill, skill.content_hash)
+    staged = api._staged
+    expected_icon = icon_spec("ui/icon.svg", SVG)
+
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda _root: [skill])
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: staged.contributions)
+    monkeypatch.setattr(owner_bot, "_live_status_route", lambda: True)
+    monkeypatch.setattr(owner_bot, "official_connector", lambda _root: True)
+    monkeypatch.setattr(owner_bot, "owner_bridge_bot_id", lambda _root: "")  # personal telegram bridge off
+
+    circle = places.create_circle(tmp_path, name="Family", text="Be brief.", author="owner")
+    owner_place = places.connect_place(
+        tmp_path, connector="telegram-bot", provider="telegram", contribution_id="owner_bot",
+        account_id="101", conversation_id="-100101", label="Family group", scope="conversation",
+        first={"note": "Keep family chat private.", "description": "Family chat", "circle_id": circle["circle_id"]},
+        author="owner",
+    )
+    separate_place = places.connect_place(
+        tmp_path, connector="telegram-bot", provider="telegram", contribution_id="place",
+        account_id="202", conversation_id="-100202", label="Ops group", scope="conversation",
+        author="owner",
+    )
+    allowance = {"spend_by_cause": [{"cause": f"place:{owner_place.place_id}", "usd": 1.25}]}
+
+    # 1. Separate bot connector is live ("Connector on"), personal bridge is off -> owner_bot place must NOT look green,
+    # must NOT probe separate bot status, and must keep icon, notes, circle/group, spend and Signals.
+    view = projection.place_view(tmp_path, owner_place, allowance=allowance)
+    assert view["readiness"] == {"text": "Connector unavailable", "tone": "warn"}
+    assert "source" not in view
+    assert view["icon"] == expected_icon
+    assert view["label"] == "Family group"
+    assert view["notes"][0]["text"] == "Keep family chat private."
+    assert view["circle"]["circle_id"] == circle["circle_id"]
+    assert view["description"]["text"] == "Family chat"
+    assert view["spent_24h_usd"] == 1.25
+    assert view["wake_suggestions"] == ["mention", "signal.words"]
+    assert view["facts"] == staged.contributions[0]["facts"]
+    assert view["labels"] == {"mention": "Mentions you", "signal.words": "Words you chose appear"}
+    assert "unpublished_signals" not in view
+    assert view["settings"] == "connection"
+
+    # Separate bot's own group stays green and keeps its own status URL.
+    sep_view = projection.place_view(tmp_path, separate_place, allowance=allowance)
+    assert sep_view["readiness"] == {"text": "Connector on", "tone": "ok"}
+    assert sep_view["source"]["url"] == "/api/extensions/telegram-bot/status"
+
+    # 2. When telegram-bot itself is Off in Skills (non-ok readiness), owner_bot keeps that truthful warn readiness.
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: [])
+    skill.enabled = False
+    off_view = projection.place_view(tmp_path, owner_place, allowance=allowance)
+    assert off_view["readiness"] == {"text": "Off in Skills", "tone": "warn"}
+    assert "source" not in off_view
+    assert off_view["icon"] == expected_icon
+    assert off_view["notes"][0]["text"] == "Keep family chat private."
+    assert off_view["circle"]["circle_id"] == circle["circle_id"]
+    assert off_view["spent_24h_usd"] == 1.25
+    assert off_view["unpublished_signals"] == ["signal.words"]
+
+    # 3. When personal bridge is back on and owner_bot is projected, direct match restores owner_bot_status and readiness.
+    skill.enabled = True
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: staged.contributions)
+    monkeypatch.setattr(owner_bot, "owner_bridge_bot_id", lambda _root: "101")
+    monkeypatch.setattr("ouroboros.extension_companion.is_server_process", lambda: True)
+    monkeypatch.setattr(owner_bot, "current_bridge", lambda: None)
+    stopped_view = projection.place_view(tmp_path, owner_place, allowance=allowance)
+    assert stopped_view["readiness"] == {"text": "Bridge not running", "tone": "warn"}
+    assert stopped_view["source"]["url"] == "/api/extensions/telegram-bot/owner_bot_status"
+    monkeypatch.setattr(owner_bot, "current_bridge", lambda: object())
+    live_view = projection.place_view(tmp_path, owner_place, allowance=allowance)
+    assert live_view["readiness"] == {"text": "Connector on", "tone": "ok"}
+    assert live_view["source"]["url"] == "/api/extensions/telegram-bot/owner_bot_status"

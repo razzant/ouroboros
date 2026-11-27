@@ -853,7 +853,7 @@ __all__ = [
 def companion_spawn_env(
     spec: Dict[str, Any], token: str, *, env_allow: Any, granted_upper: Any,
     skill: str, skill_dir: Optional[pathlib.Path], state_dir: pathlib.Path,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[Dict[str, Any]] = None, drive_root: Optional[pathlib.Path] = None,
 ) -> Dict[str, str]:
     """The env one staged companion is spawned with (fix-round-6).
 
@@ -885,7 +885,7 @@ def companion_spawn_env(
     manifest_env = {str(key): str(value) for key, value in (spec.get("env") or {}).items()
                     if str(key).upper() not in reserved}
     env = overlay_env(_scrub_env(list(env_allow), state_dir, skill, granted_keys=list(granted_upper),
-                                 settings=settings), manifest_env)
+                                 settings=settings, drive_root=drive_root), manifest_env)
     from ouroboros.node_runtime import keep_explicit_driver_node
 
     keep_explicit_driver_node(env, manifest_env)  # the manifest's driver Node is its own, even one equal to ours

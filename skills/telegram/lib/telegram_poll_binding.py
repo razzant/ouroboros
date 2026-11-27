@@ -29,6 +29,7 @@ from ..scripts.telegram_settings import telegram_api_base, telegram_files_dir, v
 CLOUD_BASE = validate_telegram_api_base("")
 _RECENT_SERVERS = 4
 _PARK_CHECK_SEC = 5.0
+_MAX_GROUP_WRITES = 4  # bound group disk waits before the next Bot API poll
 
 
 class InjectNotAccepted(RuntimeError):
@@ -112,6 +113,7 @@ class PollCursor:
         self._handled: dict[str, list[str]] = {}
         self._early: dict[str, dict[str, int]] = {}
         self._held: dict[str, dict] = {}
+        self._group_periods: dict[str, dict[str, dict | None]] = {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.offset = int(data.get("offset") or 0)
@@ -124,6 +126,10 @@ class PollCursor:
                            for base, items in dict(data.get("early") or {}).items()}
             self._held = {base: item for base, item in dict(data.get("held") or {}).items()
                           if isinstance(item.get("target"), dict)}
+            self._group_periods = {base: {uid: period for uid, period in items.items()
+                                          if uid.isdecimal() and (period is None or isinstance(period, dict))}
+                                   for base, items in dict(data.get("group_periods") or {}).items()
+                                   if isinstance(items, dict)}
         except Exception:
             pass
         self.follow(base, bot)
@@ -132,7 +138,7 @@ class PollCursor:
         """Bind to ``base`` and ``bot``; a different server or bot starts from its own oldest update."""
         if bot and self.bot and bot != self.bot:
             self.base, self.offset, self._handled = base, 0, {}
-            self._early, self._held = {}, {}
+            self._early, self._held, self._group_periods = {}, {}, {}
         elif base != self.base:
             self.base, self.offset = base, 0
         self.bot = bot or self.bot
@@ -157,6 +163,19 @@ class PollCursor:
         if key:
             self._held = {base: held for base, held in self._held.items() if held.get("key") != key}
 
+    def defer_group(self, update: dict, period: dict | None) -> bool:
+        """Keep the original observation with an unconfirmed update, including None (no consent)."""
+        uid = update.get("update_id")
+        if type(uid) is int and uid > 0:
+            pending = self._group_periods.setdefault(self.base, {})
+            if str(uid) not in pending:
+                pending[str(uid)] = period
+                return True
+        return False
+
+    def group_period(self, update: dict, current: dict | None) -> dict | None:
+        return self._group_periods.get(self.base, {}).get(str(update.get("update_id")), current)
+
     def save(self, offset: int, handled: list[str]) -> None:
         self.offset = offset
         self._handled.pop(self.base, None)
@@ -168,27 +187,77 @@ class PollCursor:
         if self._held.get(self.base, {}).get("update_id", offset) < offset:
             self._held.pop(self.base, None)
         self._held = {base: item for base, item in self._held.items() if base in self._handled}
+        if self.base in self._group_periods:
+            self._group_periods[self.base] = {uid: period for uid, period in self._group_periods[self.base].items()
+                                              if int(uid) >= offset}
+        self._group_periods = {base: items for base, items in self._group_periods.items()
+                               if items and base in self._handled}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"offset": offset, "base": self.base, "bot": self.bot, "handled": self._handled,
                                    **({"early": self._early} if self._early else {}),
-                                   **({"held": self._held} if self._held else {})}), encoding="utf-8")
+                                   **({"held": self._held} if self._held else {}),
+                                   **({"group_periods": self._group_periods} if self._group_periods else {})}),
+                       encoding="utf-8")
         tmp.replace(self.path)
 
 
+async def _owner_panic_behind_groups(api, client, updates, cursor, pinned_chat, lang, *, authorize, is_panic,
+                                     on_group) -> bool:
+    """Whether a private Panic of the bound owner, not handled before, waits in this batch behind a group update.
+    The owner authorizer decides who sent it; with a bound owner it only compares ids (no binding, no reply), and
+    without one no group consent can exist, so group work delays nothing."""
+    from .telegram_group_feed import group_chat
+
+    if on_group is None or not pinned_chat:
+        return False
+    behind_group = False
+    for update in updates:
+        if group_chat(update) is not None:
+            behind_group = True
+        elif behind_group and is_panic(update) and not cursor.is_replay(update) and await authorize(
+                api, client, update, pinned_chat, lang):
+            return True
+    return False
+
+
 async def handle_poll_batch(api, client, updates, cursor, binding, generation, pinned_chat, max_updates, command_mode,
-                            lang, *, authorize, is_panic, on_message, on_callback) -> tuple[bool, str]:
-    """Confirm updates in order. An already received Panic alone may pass a limit or an acceptance gap."""
+                            lang, *, authorize, is_panic, on_message, on_callback, on_group=None,
+                            group_period=None) -> tuple[bool, str]:
+    """Confirm updates in order. An already received Panic alone may pass a limit or an acceptance gap.
+
+    ``on_group`` takes a group or supergroup update (lib/telegram_group_feed.py) before the owner authorizer, which
+    never sees it: it is never an owner control, Panic included, and in the early phase it waits like any other.
+
+    An owner's private Panic not handled before never waits behind group disk work in its batch: every group update
+    of that batch is left for its next delivery and the offset stops at the first one, so no later offset confirms
+    it; private updates keep their order and, once past that point, are remembered as early replays
+    (``remember_early``). The next delivery then gives the groups their turn and repeats no control: the handled
+    Panic is a replay there, which never holds a batch again. Groups held by the write limit, the ordinary limit or
+    that priority keep their first observed period in the normal cursor save, with no write ahead of Panic."""
     from .telegram_api import TelegramBindingChanged, _LOCALIZED_TEXTS
+    from .telegram_group_feed import group_chat
 
     offset, handled, deferred = cursor.offset, [], False
+    groups_wait = await _owner_panic_behind_groups(api, client, updates, cursor, pinned_chat, lang,
+                                                   authorize=authorize, is_panic=is_panic, on_group=on_group)
+    frozen = False  # a group update of this batch was left: no later item may confirm past it
+    group_writes, group_deferred = 0, False
     for index, update in enumerate(updates):
         if not binding.current(generation):
             break
-        early = deferred or index >= max_updates
+        group = on_group is not None and group_chat(update) is not None
         replay = cursor.is_replay(update)
         key = update_key(update)
-        if early and not is_panic(update):
+        if group and (groups_wait or group_writes >= _MAX_GROUP_WRITES):
+            group_deferred |= cursor.defer_group(update, group_period)
+            frozen = True
+            continue
+        held = deferred or index >= max_updates  # the existing early phase: only a received Panic passes it
+        early = held or frozen
+        if held and (group or not is_panic(update)):
+            if group:
+                group_deferred |= cursor.defer_group(update, group_period)
             if replay:
                 handled.append(key)
             continue
@@ -212,9 +281,16 @@ async def handle_poll_batch(api, client, updates, cursor, binding, generation, p
             if replay:
                 cursor.retire_target(key)
                 continue
+            if group:
+                group_writes += cursor.group_period(update, group_period) is not None
+                await on_group(update)  # kept or a counted gap: confirmed either way, the owner never waits
+                cursor.retire_target(key)
+                continue
             authorized_chat = await authorize(api, client, update, pinned_chat, lang)
             if not authorized_chat:
                 cursor.retire_target(key)
+                if early:
+                    cursor.remember_early(update)  # its refusal is not answered again at the next delivery
                 continue
             pinned_chat = authorized_chat
             if update.get("callback_query"):
@@ -233,7 +309,7 @@ async def handle_poll_batch(api, client, updates, cursor, binding, generation, p
             if confirmed is not None:
                 offset, handled = confirmed[0], handled[:confirmed[1]]
                 deferred = True
-                if not early and target is not None and update_id > 0:
+                if not held and target is not None and update_id > 0:  # a reply's found card, past a frozen group too
                     cursor.hold_target(update, target)
                 api.log("info", "The host did not record a Telegram update; it will be delivered again.")
                 continue
@@ -248,6 +324,6 @@ async def handle_poll_batch(api, client, updates, cursor, binding, generation, p
         cursor.retire_target(key)
         if early:
             cursor.remember_early(update)
-    if updates and (handled or deferred or offset != cursor.offset):
+    if updates and (handled or deferred or offset != cursor.offset or group_deferred):
         cursor.save(offset, handled)
     return deferred, lang

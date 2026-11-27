@@ -1,14 +1,26 @@
 // Add a place (owner 5 Nov: «сначала человеческое описание, источник и доступ раскрываются по необходимости»): first
 // what the place is and what Ouroboros is there for, with an optional short description; then the installed
-// connectors; Where only when a choice is needed; a connector's settings or Skills only when it is not ready. A new
-// place lands Silent with those words as its first note, its description and its circle in one write. A place that is
-// connected already shows its own notes, and only the changes ticked there are saved, under its revision.
+// connectors; Where only when a choice is needed; a connector's settings or Skills only when it is not ready.
+// Connectors declaring `connect_mode: 'exact'` never offer Whole account or implicit account-wide auto-connect.
+// A new place lands Silent with those words as its first note, its description and its circle in one write. A place
+// that is connected already shows its own notes, and only the changes ticked there are saved, under its revision.
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { withinRequestLifetime } from './api_client.js';
 import { tr, fmt } from './i18n.js';
 import { skillIconHtml } from './skill_presentation.js';
-import { connectPlace, failureText, normalizePlace, readPlaceConnector, readPlaces, updatePlace } from './consciousness_api.js';
+import { PLACES_CHANGED_EVENT, connectPlace, connectorKey, connectorMatchesPlace, isOwnerBotPair, normalizePlace, readPlaceConnector, readPlaces, updatePlace } from './consciousness_api.js';
 import { authorWord } from './consciousness_words.js';
 import { openPlaceSheet, openSkillsFor, sheetShell, showSheet, statusLine } from './place_sheet.js';
+import {
+    confirmedTelegramBot, createTelegramGroupsController, parseOwnerBotStatus, parseSeparateBotStatus,
+    parseTelegramGroupFeed, requestFailureText, telegramFacts, telegramGroupChoices, telegramGroupsEntryHtml, telegramGroupsHtml,
+    validatedTelegramInviteUrl,
+} from './telegram_groups_connect.js';
+
+export {
+    confirmedTelegramBot, parseOwnerBotStatus, parseSeparateBotStatus, parseTelegramGroupFeed,
+    telegramGroupChoices, validatedTelegramInviteUrl,
+};
 
 // Where a new place lands, in the host's words for the switch as it stands (consciousness_view.connect_note).
 const silentCopy = (view) => (view?.connectNote ? tr(view.connectNote, view.connectNote)
@@ -18,6 +30,7 @@ const wordsExample = () => tr('circles.words.example', 'A team chat: answer when
 export const ownerWordsFieldHtml = (attrs, value = '', rows = 3) => `<textarea class="ui-control consciousness-owner-words" rows="${rows}" ${attrs} data-i18n-authored spellcheck="false" placeholder="${escapeHtml(wordsExample())}">${escapeHtml(value)}</textarea>`;
 const button = (act, label, attrs = '', tone = 'btn-default') => `<button type="button" class="btn ${tone} btn-sm" data-connect-act="${act}" ${attrs}>${escapeHtml(label)}</button>`;
 const offline = (connector) => Boolean(connector.readiness && connector.readiness.tone !== 'ok');
+const isOwnerBot = isOwnerBotPair;
 
 /** Absent is different from a known empty list and from a failed or malformed read. Bad rows never become wildcards. */
 export function connectChoices(data) {
@@ -30,14 +43,56 @@ export function connectChoices(data) {
     return { state: rows.length ? 'known' : data.connect.length ? 'unavailable' : 'empty', rows };
 }
 
-const existingPlace = (places, connector, row) => places.find((place) => place.connector === connector.connector
+const existingPlace = (places, connector, row) => (Array.isArray(places) ? places : []).find((place) => connectorMatchesPlace(connector, place)
     && place.accountId === row.accountId && place.conversationId === row.conversationId);
+
+// Only codes raised strictly before connect_declared_place writes: places_api.py runs connect_declared_place and
+// post-write place_view under one except (ValueError, TypeError) -> 400 (code or "place_invalid"), so place_invalid
+// and place_records/validate errors cannot prove the group was not created.
+const PLACE_CONNECT_REFUSAL_CODES = new Set([
+    'place_connect_invalid', 'place_declaration_unavailable', 'place_author_invalid', 'place_description_invalid',
+]);
+const isTypedPlaceConnectRefusal = (error) => error?.status === 400
+    && error.body?.ok === false
+    && typeof error.body?.code === 'string'
+    && PLACE_CONNECT_REFUSAL_CODES.has(error.body.code);
+const pendingConsent = (pending) => {
+    const accountId = typeof pending?.accountId === 'string' ? pending.accountId.trim() : '';
+    return accountId && accountId !== '*' && typeof pending?.enabled === 'boolean'
+        ? { accountId, enabled: pending.enabled, legacy: pending.legacy === true }
+        : null;
+};
+
+const circleIsMissing = (view) => Boolean(view?.circle?.id
+    && (view.circleMissing || (Array.isArray(view.circles) && !view.circles.some((entry) => entry.id === view.circle.id))));
+
+function circlePickerHtml(view) {
+    const missing = circleIsMissing(view);
+    if (!missing && !view?.chooseCircle) return '';
+    const existing = (Array.isArray(view.circles) ? view.circles : [])
+        .filter((entry) => !(missing && entry.id === view.circle?.id));
+    const missingOpt = missing
+        ? `<option value="${escapeHtml(view.circle.id)}" selected disabled data-i18n-authored>${escapeHtml(fmt('{circle} (deleted)', { circle: view.circle.name }))}</option>`
+        : '';
+    const selectedId = missing ? '' : (view.circle?.id || '');
+    const options = [
+        missingOpt,
+        `<option value=""${!missing && !selectedId ? ' selected' : ''}>${escapeHtml(tr('circles.none', 'Not in a circle'))}</option>`,
+        ...existing.map((entry) => `<option value="${escapeHtml(entry.id)}"${entry.id === selectedId ? ' selected' : ''} data-i18n-authored>${escapeHtml(entry.name)}</option>`),
+    ].join('');
+    const note = missing
+        ? statusLine({ text: fmt('{circle} no longer exists. Choose another circle or Not in a circle.', { circle: view.circle.name }), tone: 'warn' })
+        : '';
+    return `<div class="place-connect-group" data-connect-circle-box>${note}
+        <div class="place-field-row place-circle-row"><select class="ui-control" data-connect-circle aria-label="${escapeHtml(tr('places.circle', 'Circle'))}"${view.busy ? ' disabled' : ''}>${options}</select></div></div>`;
+}
 
 /** Step one: what the place is and what Ouroboros is there for (its first note), and an optional short description. */
 export function wordsHtml(view) {
-    const where = view.circle ? fmt('{circle}’s words apply there too.', { circle: `<span data-i18n-authored>${escapeHtml(view.circle.name)}</span>` }) : '';
+    const where = view.circle && !circleIsMissing(view) ? fmt('{circle}’s words apply there too.', { circle: `<span data-i18n-authored>${escapeHtml(view.circle.name)}</span>` }) : '';
     return `<section class="place-sheet-section">
         <h3 id="place-add-question">${tr('places.add.question', 'What is this place, and what am I here for?')}</h3>
+        ${circlePickerHtml(view)}
         ${ownerWordsFieldHtml('data-connect-draft="words" aria-labelledby="place-add-question"', view.words || '', 4)}
         <p class="place-sheet-note">${tr('places.add.note', 'Your words become the place’s first note.')} ${where}</p>
         <label class="ui-field">${tr('places.description.optional', 'Description (optional)')}<input class="ui-control" data-connect-draft="description" data-i18n-authored maxlength="240" value="${escapeHtml(view.description || '')}" spellcheck="false" autocomplete="off" aria-describedby="place-add-description-help"></label>
@@ -47,62 +102,81 @@ export function wordsHtml(view) {
 }
 
 function whereHtml(view) {
-    const { selected: connector, places, choices, busy } = view;
+    const { selected: connector, places = [], choices, busy = false, tgOther = false } = view;
+    const connectDisabled = busy || circleIsMissing(view);
+    const exact = connector.connectMode === 'exact';
     const rowHtml = (row, index) => {
         const existing = existingPlace(places, connector, row);
         // One family with the connector list: the row's state under its name, its verb on the right.
         const state = existing ? `<div class="harness-account-meta"><span class="ui-status" data-tone="ok">${tr('places.connected', 'Connected')}</span></div>` : '';
         const action = existing
             ? button('adopt', tr('places.choose', 'Choose'), `data-place-id="${escapeHtml(existing.id)}"${busy ? ' disabled' : ''}`)
-            : button('connect', tr('places.connect.action', 'Connect'), `data-choice="${index}"${busy ? ' disabled' : ''}`);
+            : button('connect', tr('places.connect.action', 'Connect'), `data-choice="${index}"${connectDisabled ? ' disabled' : ''}`);
         return `<div class="harness-account-row place-connector-row">
             <div class="harness-account-main"><strong${index === 'whole' ? '' : ' data-i18n-authored'}>${escapeHtml(row.label)}</strong></div>
             ${state}<div class="harness-account-actions">${action}</div>
         </div>`;
     };
+    const effectiveState = exact && (!connector.source ? !offline(connector) : choices?.state === 'absent')
+        ? (!connector.source ? 'unavailable' : 'empty') : choices?.state || '';
     let note = '';
-    // No status route on a connector that is on means no list to choose from (Whole account alone), not «off».
-    if (!connector.source) note = offline(connector) ? tr('places.connector.off', 'Turn the connector on to choose where') : '';
-    else if (!choices) note = tr('places.choices.loading', 'Reading where you can connect…');
-    else if (choices.state === 'empty') note = tr('places.choices.empty', 'None offered yet.');
-    else if (choices.state === 'unavailable') note = tr('places.choices.unavailable', 'Could not read the connector’s list.');
+    // No status route on a generic connector that is on means no list to choose from (Whole account alone), not «off»;
+    // an `exact` connector never offers Whole account, so a missing route cannot list exact places.
+    if (!connector.source) {
+        note = offline(connector) ? tr('places.connector.off', 'Turn the connector on to choose where')
+            : exact ? tr('places.choices.unavailable', 'Could not read the connector’s list.') : '';
+    } else if (!choices) note = tr('places.choices.loading', 'Reading where you can connect…');
+    else if (effectiveState === 'empty') note = tr('places.choices.empty', 'None offered yet.');
+    else if (effectiveState === 'unavailable') note = tr('places.choices.unavailable', 'Could not read the connector’s list.');
     // The connector's settings only when it is not ready, or offers nowhere to connect.
-    const settings = choices?.state === 'empty' || offline(connector) ? button('settings', connector.settings
+    const settings = effectiveState === 'empty' || offline(connector) ? button('settings', connector.settings
         ? tr('places.connector.settings', 'Open connector settings') : tr('places.connector.page', 'Open connector page')) : '';
-    const retry = choices?.state === 'unavailable' ? button('retry-choices', tr('places.retry', 'Try again')) : '';
+    const retry = effectiveState === 'unavailable' && connector.source ? button('retry-choices', tr('places.retry', 'Try again')) : '';
     const readiness = view.connectorStatus?.text ? { ...view.connectorStatus, authored: true } : connector.readiness;
+    const wholeHtml = exact ? '' : rowHtml({ accountId: '', conversationId: '', label: tr('places.whole', 'Whole account') }, 'whole');
+    const instancesHtml = (choices?.rows || []).map((row, index) =>
+        tgOther && /^-\d+$/.test(row.conversationId) ? '' : rowHtml(row, index)).join('');
     return `<section class="place-sheet-section">
         <div class="place-sheet-actions">${button('back', tr('places.connect.back', 'Back'))}</div>
         <h3>${tr('places.where', 'Where')} · <span data-i18n-authored>${escapeHtml(connector.label)}</span></h3>
         ${readiness ? statusLine(readiness.authored ? readiness : { ...readiness, text: tr(`places.readiness.${readiness.text}`, readiness.text) }) : ''}
         <p class="place-sheet-note">${silentCopy(view)}</p>
+        ${circlePickerHtml(view)}
         ${note ? `<p class="place-sheet-note" role="status">${escapeHtml(note)}</p>` : ''}
         ${settings || retry ? `<div class="place-sheet-actions">${settings}${retry}</div>` : ''}
-        <div class="place-accounts">${rowHtml({ accountId: '', conversationId: '', label: tr('places.whole', 'Whole account') }, 'whole')}
-            ${(choices?.rows || []).map(rowHtml).join('')}</div>${statusLine(view.status)}
+        ${wholeHtml || instancesHtml ? `<div class="place-accounts">${wholeHtml}${instancesHtml}</div>` : ''}${statusLine(view.status)}
     </section>`;
 }
 
 /** The verb of a connector row: one that is off opens Skills to enable it; one with places lets Where offer them
  *  beside what can still be connected; a ready one connects. */
 function connectorAction(connector, count) {
-    if (offline(connector)) return button('skills', tr('places.connector.enable', 'Enable in Skills'), `data-connector="${escapeHtml(connector.connector)}"`);
-    return button('choose', count ? tr('places.choose.where', 'Choose where') : tr('places.connect.action', 'Connect'), `data-connector="${escapeHtml(connector.connector)}"`);
+    const attrs = `data-connector="${escapeHtml(connector.connector)}" data-connector-key="${escapeHtml(connectorKey(connector))}"`;
+    if (offline(connector)) return button('skills', tr('places.connector.enable', 'Enable in Skills'), attrs);
+    return button('choose', count ? tr('places.choose.where', 'Choose where') : tr('places.connect.action', 'Connect'), attrs);
 }
 
-export function connectListHtml({ connectors = null, places = [], error = '', selected = null, choices = null,
-    status = {}, busy = false, connectorStatus = null, connectNote = '' } = {}) {
+export function connectListHtml(view = {}) {
+    const { connectors = null, places = [], error = '', selected = null, choices = null,
+        status = {}, busy = false, connectorStatus = null, connectNote = '', tgOpen = false, tgOther = false } = view;
     if (error) return `<section class="place-sheet-section">${statusLine({ text: error, tone: 'error' })}${button('retry', tr('places.retry', 'Try again'))}</section>`;
     if (!connectors) return `<p class="place-sheet-section place-sheet-note" role="status">${tr('places.connect.loading', 'Reading the installed connectors…')}</p>`;
-    if (selected) return whereHtml({ selected, choices, places, status, busy, connectorStatus, connectNote });
+    if (tgOpen && !tgOther) return telegramGroupsHtml(view, silentCopy(view), circlePickerHtml(view), circleIsMissing(view));
+    if (selected) return whereHtml(view);
+
     const back = `<div class="place-sheet-actions">${button('back-words', tr('places.connect.back', 'Back'))}</div>`;
-    if (!connectors.length) return `<section class="place-sheet-section">${back}<p>${tr('places.connect.empty', 'No installed connector can connect a place yet.')}</p>
-        ${button('browse', tr('places.connect.browse', 'Find connectors in Extensions'))}</section>`;
+    const tgInfo = telegramFacts(view);
+    // One group door. The ordinary Telegram Bot still offers DMs and Whole account inside it; other connector rows stay.
+    const ordinaryConnectors = connectors.filter((connector) => !isOwnerBot(connector) && connector !== tgInfo.tgBotConnector);
+    if (!tgInfo.shown && !ordinaryConnectors.length) {
+        return `<section class="place-sheet-section">${back}<p>${tr('places.connect.empty', 'No installed connector can connect a place yet.')}</p>
+            ${button('browse', tr('places.connect.browse', 'Find connectors in Extensions'))}</section>`;
+    }
+    const tgGroupsRowHtml = telegramGroupsEntryHtml(tgInfo, places);
     return `<section class="place-sheet-section">${back}<h3>${tr('places.where_from', 'Where is it?')}</h3><p class="place-sheet-note">${silentCopy({ connectNote })}</p>
-        <div class="place-accounts">${connectors.map((connector) => {
-            const n = places.filter((place) => place.connector === connector.connector).length;
-            // Every row's meta line is its state, one family: connected (and how many places), not connected, or off,
-            // in the readiness's own words when it has them.
+        ${circlePickerHtml(view)}
+        <div class="place-accounts">${tgGroupsRowHtml}${ordinaryConnectors.map((connector) => {
+            const n = places.filter((place) => connectorMatchesPlace(connector, place)).length;
             const readiness = connector.readiness && connector.readiness.tone !== 'ok' ? tr(`places.readiness.${connector.readiness.text}`, connector.readiness.text) : '';
             const state = offline(connector) ? (readiness || tr('places.connector.state.off', 'Off'))
                 : n ? fmt(n === 1 ? 'Connected · {n} place' : 'Connected · {n} places', { n }) : tr('places.connector.state.none', 'Not connected');
@@ -116,9 +190,10 @@ export function connectListHtml({ connectors = null, places = [], error = '', se
 }
 
 /** What choosing a connected place would change, from what the Add said; each change only where it changes something. */
-export function adoptOffers({ adopt: place, circle, words = '', description = '' }) {
+export function adoptOffers(view) {
+    const { adopt: place, circle, words = '', description = '' } = view;
     const has = (text) => place.notes.some((note) => note.text.trim() === text.trim());
-    return [circle && place.circle?.id !== circle.id ? 'circle' : '', words.trim() && !has(words) ? 'note' : '',
+    return [circle && !circleIsMissing(view) && place.circle?.id !== circle.id ? 'circle' : '', words.trim() && !has(words) ? 'note' : '',
         description.trim() && description.trim() !== (place.description?.text || '') ? 'description' : ''].filter(Boolean);
 }
 
@@ -136,6 +211,7 @@ export function adoptHtml(view) {
     return `<section class="place-sheet-section">
         <div class="place-sheet-actions">${button('back-where', tr('places.connect.back', 'Back'))}</div>
         <h3><span data-i18n-authored>${escapeHtml(place.label)}</span></h3>
+        ${circlePickerHtml(view)}
         <p class="place-sheet-note">${tr('places.adopt.kept', 'It is connected already: its state, conversations and notes stay as they are.')}</p>
         ${notes ? `<ul class="place-note-list">${notes}</ul>` : `<p class="place-sheet-note">${tr('places.notes.none', 'No notes of its own yet.')}</p>`}
         ${options.length ? `<div class="place-wake-list">${options.join('')}</div>
@@ -157,48 +233,219 @@ export async function openConnectorSettings(connector, openSettings) {
 
 /** `circle` = {id, name}: Add a place to that circle; null adds it to no circle. */
 export function openConnectPlace({ returnFocus = document.activeElement, read = readPlaces, connect = connectPlace, update = updatePlace,
-    readStatus = readPlaceConnector, openPlace = openPlaceSheet, openSettings = null, circle = null } = {}) {
+    readStatus = readPlaceConnector, openPlace = openPlaceSheet, openSettings = null, circle = null, telegram = undefined,
+    resumeTelegram = null, onTelegramSetup = null } = {}) {
     const dialog = sheetShell(escapeHtml(tr('places.add', 'Add a place')),
         circle ? fmt('To {circle}', { circle: circle.name }) : tr('circles.none', 'Not in a circle'), 'place-connect');
     const abort = new AbortController();
     const sheet = showSheet(dialog, { returnFocus, onClose: () => abort.abort() });
-    const view = { connectors: null, places: [], error: '', status: {}, selected: null, choices: null, busy: false,
-        circle, words: '', description: '', step: 'words', adopt: null, picks: {} };
+    const view = {
+        connectors: null, places: [], circles: null, error: '', status: {}, selected: null, choices: null, busy: false,
+        circle: circle ? { id: circle.id, name: circle.name } : null, circleMissing: false, chooseCircle: false,
+        words: resumeTelegram?.words || '', description: resumeTelegram?.description || '',
+        step: resumeTelegram ? 'list' : 'words', adopt: null, picks: {}, connectorStatus: null, rawStatus: null,
+        tgOpen: Boolean(resumeTelegram), tgBranch: resumeTelegram?.branch === 'separate' ? 'separate' : 'personal',
+        tgOther: Boolean(resumeTelegram?.other),
+        tg: {
+            skills: null, groupFeed: null, ownerStatus: null, rawOwnerStatus: null, separateStatus: null, rawSeparateStatus: null,
+            consentPending: pendingConsent(resumeTelegram?.consentPending),
+        },
+    };
+    const syncDialogMeta = () => {
+        const meta = dialog.querySelector('[data-place-meta]');
+        if (!meta) return;
+        meta.textContent = view.circle
+            ? (circleIsMissing(view)
+                ? fmt('{circle} (deleted)', { circle: view.circle.name })
+                : fmt('To {circle}', { circle: view.circle.name }))
+            : tr('circles.none', 'Not in a circle');
+    };
+    const saveTelegramSetup = () => {
+        const consentPending = pendingConsent(view.tg.consentPending);
+        return onTelegramSetup?.(
+            {
+                words: view.words,
+                description: view.description,
+                branch: view.tgBranch,
+                ...(view.tgOther ? { other: true } : {}),
+                ...(consentPending ? { consentPending } : {}),
+            },
+            view.circle,
+        );
+    };
     let generation = 0;
+    let loadSeq = 0;
+    const captureFocus = (body) => {
+        const active = globalThis.document?.activeElement;
+        if (!active || active === body || !body.contains?.(active)) return null;
+        const keys = ['data-connect-act', 'data-connect-draft', 'data-connect-adopt', 'data-connect-circle', 'data-connect-invite',
+            'data-connector-key', 'data-connector', 'data-branch', 'data-choice', 'data-place-id'];
+        const sig = keys.filter((key) => active.hasAttribute?.(key)).map((key) => [key, active.getAttribute(key)]);
+        if (!sig.length) return null;
+        return () => {
+            const match = [...body.querySelectorAll(`[${sig[0][0]}]`)].find((el) =>
+                !el.disabled && sig.every(([key, value]) => el.hasAttribute(key) && el.getAttribute(key) === value));
+            if (match && globalThis.document?.activeElement !== match) match.focus?.();
+        };
+    };
     const paint = () => {
         if (sheet.closed) return;
+        const restoreFocus = captureFocus(sheet.body);
         sheet.body.innerHTML = view.step === 'words' ? wordsHtml(view) : view.step === 'adopt' ? adoptHtml(view) : connectListHtml(view);
+        restoreFocus?.();
     };
-    const load = async () => {
-        view.error = ''; view.connectors = null; paint();
-        try { Object.assign(view, await read({ signal: abort.signal })); }
-        catch (error) { view.error = fmt('Could not read the connectors: {reason}', { reason: failureText(error) }); }
-        paint();
+    const enrichTelegram = () => {
+        if (sheet.closed || abort.signal.aborted) return;
+        if (view.step !== 'list' || view.selected || view.busy || view.error || !Array.isArray(view.connectors)) return;
+        if (view.tgOpen) { paint(); return; }
+        const accounts = sheet.body.querySelector('.place-accounts');
+        const tgHtml = telegramGroupsEntryHtml(telegramFacts(view), view.places);
+        if (!accounts) {
+            if (tgHtml) paint();
+            return;
+        }
+        const existing = accounts.querySelector('[data-connector-entry="telegram-groups"]');
+        if (!tgHtml) {
+            existing?.remove();
+            if (!accounts.firstElementChild) paint();
+            return;
+        }
+        const wrap = globalThis.document.createElement('div');
+        wrap.innerHTML = tgHtml;
+        const fresh = wrap.firstElementChild;
+        if (!fresh) return;
+        if (existing) {
+            const restore = existing.contains?.(globalThis.document?.activeElement) ? captureFocus(sheet.body) : null;
+            accounts.insertBefore(fresh, existing);
+            existing.remove();
+            restore?.();
+        } else {
+            accounts.insertBefore(fresh, accounts.firstChild);
+        }
     };
-    const land = (place) => {
+    const land = (place, connectorOverride = null) => {
         // A single place's answer names only its provider; the flow holds the connector's declared name.
-        if (!sheet.closed) { sheet.close(); openPlace({ ...place, serviceLabel: view.selected?.label || place.serviceLabel }, { returnFocus }); }
+        if (!sheet.closed) {
+            const sourceConnector = connectorOverride || view.selected;
+            const raw = view.rawStatus;
+            const connectorStatus = raw && !(isOwnerBotPair(place) && place.accountId && raw.account_id !== place.accountId)
+                ? raw : null;
+            sheet.close();
+            openPlace({ ...place, serviceLabel: sourceConnector?.label || place.serviceLabel }, { returnFocus, connectorStatus });
+        }
     };
     const showAdopt = (place, status = {}) => { view.adopt = place; view.picks = {}; view.status = status; view.step = 'adopt'; paint(); };
-    const connectNow = async (choice) => {
+    const checkTelegramConnect = async () => {
+        const pending = view.tgConnectPending;
+        if (!pending) return;
+        view.busy = true; paint();
+        try {
+            const latest = await withinRequestLifetime((signal) => read({ signal }), { signal: abort.signal, lifetimeMs: 10000 });
+            if (sheet.closed) return;
+            Object.assign(view, latest);
+            const existing = existingPlace(view.places, pending.connector, pending.choice);
+            if (!existing) return;  // Absence from this read does not settle an in-flight write.
+            view.tgConnectPending = null;
+            view.rawStatus = null;
+            // Refresh Circles and other place listeners behind the sheet when read-only reconciliation confirms the write.
+            globalThis.window?.dispatchEvent?.(new CustomEvent(PLACES_CHANGED_EVENT, { detail: { place: existing } }));
+            if (adoptOffers({ ...view, adopt: existing }).length) showAdopt(existing);
+            else land(existing, pending.connector);
+        } catch { /* The outcome is still unknown; Check again only reads. */ }
+        finally { view.busy = false; paint(); }
+    };
+    const refreshCirclesForMissing = async (current) => {
+        try {
+            const latest = await withinRequestLifetime((signal) => read({ signal }), { signal: abort.signal, lifetimeMs: 10000 });
+            if (current === generation && !sheet.closed && Array.isArray(latest?.circles)) view.circles = latest.circles;
+        } catch { /* Keep the refusal reason; the owner can still choose Not in a circle or retry. */ }
+    };
+    const connectNow = async (choice, connectorOverride = null) => {
+        const targetConnector = connectorOverride || view.selected;
+        const teleGroup = view.tgOpen && !view.tgOther;
+        if (!targetConnector || (teleGroup && view.tgConnectPending)) return;
+        if (circleIsMissing(view)) {
+            view.chooseCircle = true;
+            view.status = {};
+            paint();
+            sheet.body.querySelector('[data-connect-circle]')?.focus();
+            return;
+        }
+        const current = generation;
         view.busy = true; view.status = { text: tr('places.connect.busy', 'Connecting…'), tone: 'muted' }; paint();
         try {
-            land(await connect({ connector: view.selected.connector, ...choice, note: view.words.trim(),
-                description: view.description.trim(), circleId: circle?.id || '' }));
+            const siblings = (view.connectors || []).filter((c) => c.connector === targetConnector.connector);
+            const contrib = targetConnector.contributionId && (targetConnector.contributionId !== 'place' || siblings.length > 1)
+                ? { contributionId: targetConnector.contributionId } : {};
+            const body = {
+                connector: targetConnector.connector, ...contrib, ...choice, note: view.words.trim(),
+                description: view.description.trim(), circleId: view.circle?.id || '',
+            };
+            const created = await (teleGroup
+                ? withinRequestLifetime((signal) => connect(body, { signal }), { signal: abort.signal, lifetimeMs: 10000 })
+                : connect(body));
+            if (current !== generation || sheet.closed) return;
+            land(created, targetConnector);
         } catch (error) {
+            if (current !== generation || sheet.closed) return;
             // Connected meanwhile: nothing was written; its own notes come first, the changes are chosen there.
-            if (error?.status === 409 && error.body?.code === 'place_exists' && error.body.place) {
+            if (error?.status === 409 && error.body?.ok === false && error.body?.code === 'place_exists' && error.body.place) {
                 showAdopt(normalizePlace(error.body.place), { text: tr('places.adopt.exists', 'It is connected already: choose what to change.'), tone: 'warn' });
                 return;
             }
-            view.status = { text: failureText(error), tone: 'error' };
+            if (error?.status === 400 && error.body?.ok === false && error.body?.code === 'circle_not_found') {
+                view.circleMissing = true;
+                view.chooseCircle = true;
+                syncDialogMeta();
+                view.status = {};
+                await refreshCirclesForMissing(current);
+                return;
+            }
+            if (teleGroup && !isTypedPlaceConnectRefusal(error)) {
+                view.tgConnectPending = { connector: targetConnector, choice };
+                view.status = {};
+                await checkTelegramConnect();
+                return;
+            }
+            view.status = { text: requestFailureText(error), tone: 'error' };
         } finally { view.busy = false; paint(); }
+    };
+    const tgController = createTelegramGroupsController({
+        view, sheet, signal: abort.signal, read, readStatus, openSettings, openConnectorSettings, paint,
+        enrich: enrichTelegram, nextGen: () => ++generation, getGen: () => generation, telegram, enabledByDefault: read === readPlaces,
+        onSetup: saveTelegramSetup,
+    });
+    const load = async () => {
+        const currentLoad = ++loadSeq;
+        view.error = ''; view.connectors = null; paint();
+        try {
+            const next = await read({ signal: abort.signal });
+            if (sheet.closed || abort.signal.aborted || currentLoad !== loadSeq) return;
+            Object.assign(view, next);
+            if (circleIsMissing(view)) {
+                view.chooseCircle = true;
+                syncDialogMeta();
+            }
+            if (view.tgOpen && view.tgOther) {
+                const bot = telegramFacts(view).tgBotConnector;
+                if (bot && !offline(bot)) view.selected = bot;
+                else view.tgOther = false;
+            }
+            paint();
+            void tgController.readPassive(view.connectors, { isCurrent: () => currentLoad === loadSeq });
+            if (view.tgOpen && view.tgOther && view.selected) await loadChoices();
+            else if (view.tgOpen && !view.tgOther) await tgController.refresh();
+        } catch (error) {
+            if (sheet.closed || abort.signal.aborted || currentLoad !== loadSeq) return;
+            view.error = fmt('Could not read the connectors: {reason}', { reason: requestFailureText(error) });
+            paint();
+        }
     };
     const saveAdopt = async () => {
         const place = view.adopt;
-        const offers = adoptOffers(view);  // offered changes stay ticked until the owner unticks one
+        const offers = adoptOffers(view);
         const ticked = (key) => offers.includes(key) && view.picks[key] !== false;
-        const change = { ...(ticked('circle') ? { circle_id: circle.id } : {}), ...(ticked('note') ? { add_note: view.words.trim() } : {}),
+        const change = { ...(ticked('circle') && view.circle ? { circle_id: view.circle.id } : {}), ...(ticked('note') ? { add_note: view.words.trim() } : {}),
             ...(ticked('description') ? { description: view.description.trim() } : {}) };
         if (!Object.keys(change).length) { view.status = { text: tr('places.adopt.none', 'Tick what to change, or go back.'), tone: 'muted' }; paint(); return; }
         view.busy = true; view.status = { text: tr('places.saving', 'Saving…'), tone: 'muted' }; paint();
@@ -207,29 +454,39 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
         } catch (error) {
             if (error?.status === 409 && Object.hasOwn(error.body || {}, 'place')) {
                 if (!error.body.place) { view.status = { text: tr('places.disconnected', 'This place is disconnected.'), tone: 'warn' }; return; }
-                view.adopt = normalizePlace(error.body.place);  // what it holds now; the ticks stay as they were
+                view.adopt = normalizePlace(error.body.place);
                 view.status = { text: tr('places.adopt.changed', 'Changed elsewhere; check it and save again.'), tone: 'warn' };
                 return;
             }
-            view.status = { text: failureText(error), tone: 'error' };
+            if (error?.status === 400 && error.body?.ok === false && error.body?.code === 'circle_not_found') {
+                view.circleMissing = true;
+                view.chooseCircle = true;
+                syncDialogMeta();
+                view.status = {};
+                await refreshCirclesForMissing(generation);
+                return;
+            }
+            view.status = { text: requestFailureText(error), tone: 'error' };
         } finally { view.busy = false; paint(); }
     };
     const loadChoices = async () => {
         const current = ++generation;
-        view.choices = null; view.connectorStatus = null; paint();
+        const target = view.selected;
+        const exact = target?.connectMode === 'exact';
+        view.choices = null; view.connectorStatus = null; view.rawStatus = null; paint();
         try {
-            // A status route is optional; without one there are no declared instances to choose among.
-            const data = view.selected.source ? await readStatus(view.selected, { signal: abort.signal }) : {};
+            const data = target.source ? await readStatus(target, { signal: abort.signal }) : {};
             if (current !== generation || sheet.closed) return;
+            view.rawStatus = data;
             view.choices = connectChoices(data);
             view.connectorStatus = typeof data.text === 'string' ? { text: data.text, tone: data.tone } : null;
         } catch { if (current === generation) view.choices = { state: 'unavailable', rows: [] }; }
         if (current !== generation || sheet.closed) return;
-        // Where only when a choice is needed: a ready connector with no instances and no place yet connects its whole
-        // account now. Once it has a place (one a tool or the migration made among them), «Choose where» keeps Where:
-        // its Whole account is then an explicit choice beside what is connected.
-        const placed = view.places.some((place) => place.connector === view.selected.connector);
-        if (current === generation && view.choices?.state === 'absent' && !offline(view.selected) && !placed) { await connectNow({}); return; }
+        const placed = view.places.some((place) => connectorMatchesPlace(target, place));
+        if (current === generation && !exact && !view.tgOther && view.choices?.state === 'absent' && !offline(target) && !placed) {
+            await connectNow({});
+            return;
+        }
         paint();
     };
     sheet.body.addEventListener('input', (event) => {
@@ -238,10 +495,31 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
     });
     sheet.body.addEventListener('change', (event) => {
         const pick = event.target.closest?.('[data-connect-adopt]');
-        if (pick) view.picks[pick.dataset.connectAdopt] = pick.checked;
+        if (pick) { view.picks[pick.dataset.connectAdopt] = pick.checked; return; }
+        const circleSelect = event.target.closest?.('[data-connect-circle]');
+        if (!circleSelect || view.busy) return;
+        const nextId = circleSelect.value;
+        if (!nextId) {
+            view.circle = null;
+            view.circleMissing = false;
+            view.chooseCircle = true;
+            view.status = {};
+            syncDialogMeta();
+            paint();
+            return;
+        }
+        const found = (view.circles || []).find((entry) => entry.id === nextId);
+        if (found) {
+            view.circle = { id: found.id, name: found.name };
+            view.circleMissing = false;
+            view.chooseCircle = true;
+            view.status = {};
+            syncDialogMeta();
+            paint();
+        }
     });
     sheet.body.addEventListener('click', async (event) => {
-        const control = event.target.closest('[data-connect-act]');
+        const control = event.target?.closest?.('[data-connect-act]');
         if (!control || control.disabled || view.busy) return;
         const act = control.dataset.connectAct;
         if (act === 'next') {
@@ -253,15 +531,39 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
             if (!view.connectors) await load();
             return;
         }
-        if (act === 'back-words') { ++generation; view.selected = null; view.status = {}; view.step = 'words'; paint(); sheet.body.querySelector('[data-connect-draft="words"]')?.focus(); return; }
+        if (act === 'back-words') {
+            ++generation; view.selected = null; view.choices = null; view.rawStatus = null; view.tgOpen = false;
+            tgController.cancelInFlight(); view.status = {}; view.step = 'words'; paint();
+            sheet.body.querySelector('[data-connect-draft="words"]')?.focus(); return;
+        }
         if (act === 'back-where') { view.adopt = null; view.status = {}; view.step = 'list'; paint(); return; }
         if (act === 'retry') { await load(); return; }
         if (act === 'browse') { sheet.close(); openSkillsFor({ category: 'connectors' }); return; }
         if (act === 'skills') { sheet.close(); openSkillsFor({ skill: control.dataset.connector }); return; }
-        if (act === 'back') { ++generation; view.selected = null; view.status = {}; paint(); return; }
-        if (act === 'settings') { sheet.close(); await openConnectorSettings(view.selected, openSettings); return; }
+        if (act === 'back') {
+            if (view.tgOther) {
+                view.tgOther = false; view.status = {};
+                await tgController.refresh(); return;
+            }
+            ++generation; view.selected = null; view.choices = null; view.rawStatus = null; view.tgOpen = false;
+            tgController.cancelInFlight(); view.status = {}; paint(); return;
+        }
+        if (act === 'settings') {
+            if (view.tgOther) saveTelegramSetup();
+            sheet.close();
+            await openConnectorSettings(view.selected, openSettings);
+            return;
+        }
+        if (act === 'tg-check-connect') { await checkTelegramConnect(); return; }
+        if (act === 'tg-other-chats') {
+            view.selected = telegramFacts(view).tgBotConnector;
+            if (view.selected && !offline(view.selected)) { view.tgOther = true; await loadChoices(); }
+            return;
+        }
+        if ((act === 'open-tg-groups' || act.startsWith('tg-')) && await tgController.handleAction(act, control)) return;
         if (act === 'choose') {
-            view.selected = view.connectors.find((item) => item.connector === control.dataset.connector);
+            const key = control.dataset.connectorKey;
+            view.selected = view.connectors.find((item) => (key ? connectorKey(item) === key : item.connector === control.dataset.connector) && !isOwnerBot(item));
             if (view.selected) await loadChoices();
             return;
         }
@@ -278,10 +580,13 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
             return;
         }
         if (act !== 'connect' || !view.selected) return;
+        if (control.dataset.choice === 'whole' && (view.selected.connectMode === 'exact' || (view.tgOpen && !view.tgOther))) return;
         const choice = control.dataset.choice === 'whole' ? {} : view.choices?.rows[Number(control.dataset.choice)];
+        if (view.tgOther && /^-\d+$/.test(choice?.conversationId)) return;
         if (choice) await connectNow(choice);
     });
     paint();
-    sheet.body.querySelector('[data-connect-draft="words"]')?.focus();
+    if (resumeTelegram) void load();
+    else sheet.body.querySelector('[data-connect-draft="words"]')?.focus();
     return sheet;
 }

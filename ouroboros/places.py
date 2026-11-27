@@ -67,8 +67,9 @@ def declared_fact_labels(place: Place) -> dict[str, str]:
     from ouroboros.extension_contributions import place_fact_labels
     from ouroboros.extension_registry_state import live_contribution_projection
     from ouroboros.places_migration import matching_declarations
+    from ouroboros.telegram_owner_bot import declaring_place
 
-    return place_fact_labels(matching_declarations(place, live_contribution_projection()))
+    return place_fact_labels(matching_declarations(declaring_place(place), live_contribution_projection()))
 
 
 class PlaceError(ValueError):
@@ -375,11 +376,15 @@ def get_place(drive_root: Any, place_id: str, *, persist_import: bool = True) ->
 
 def resolve_place(drive_root: Any, *, connector: str, provider: str = "", account_id: str = "",
                   conversation_id: str = "", binding_id: str = "", thread_id: str = "",
-                  places: Iterable[Place] | None = None) -> Place | None:
-    """``places``: an already read set (``place_records``), else the store is read now."""
+                  places: Iterable[Place] | None = None, owner_bot: str = "") -> Place | None:
+    """``places``: an already read set (``place_records``), else the store is read now. ``owner_bot``: the owner's own
+    Telegram bot A; with it, an ``owner_bot`` place serves only A and an ordinary place never serves A, so the two
+    contributions of one connector never borrow each other's account or state (``_owner_bot_eligible``)."""
     candidates = []
     for place in (places_of_connector(drive_root, connector) if places is None
                   else [place for place in places if place.connector == connector]):
+        if not _owner_bot_eligible(place, owner_bot, [account_id] if account_id else []):
+            continue
         if binding_id and binding_id not in (place.place_id, *place.legacy_binding_ids):
             continue
         if provider and provider != place.provider:
@@ -416,7 +421,8 @@ def account_in_place_scope(place: Place, account_id: str) -> bool:
 
 
 def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, list[str]], conversation: str = "",
-                     thread: str = "", provider: str = "", match: str = MATCH_SCOPE) -> tuple[Place | None, bool]:
+                     thread: str = "", provider: str = "", match: str = MATCH_SCOPE,
+                     owner_bot: str = "") -> tuple[Place | None, bool]:
     """Resolve declared target values against stored account/conversation ids.
 
     Multiple destinations must be checked separately by the dispatch caller. An unresolved value inside an account's
@@ -424,7 +430,17 @@ def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, l
     target. ``match`` selects the matcher (``target_place``).
     """
     places = [place for place in places_of_connector(drive_root, connector) if not provider or place.provider == provider]
-    return target_place(places, targets=targets, conversation=conversation, thread=thread, match=match)
+    return target_place(places, targets=targets, conversation=conversation, thread=thread, match=match, owner_bot=owner_bot)
+
+
+def _owner_bot_eligible(place: Place, owner_bot: str, accounts: Iterable[str]) -> bool:
+    """An ``owner_bot`` place, by its stored role whichever bot holds the bridge's token today, serves only a lookup
+    naming the owner's own bot A now (``owner_bot``), and an ordinary place never serves A: the two contributions of
+    one connector keep separate accounts, states and confirmations, and a lookup naming no A (none today, or a caller
+    that names none) never lands in a place of the personal bridge. Other connectors have no such place."""
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+    want_owner = bool(owner_bot) and owner_bot in {str(account) for account in accounts if account}
+    return is_owner_bot_place(place) == want_owner
 
 
 def _named_rank(place: Place, accounts: set, conversations: set, threads: set, fold: bool) -> tuple | None:
@@ -440,7 +456,8 @@ def _named_rank(place: Place, accounts: set, conversations: set, threads: set, f
 
 
 def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
-                 conversation: str = "", thread: str = "", match: str = MATCH_SCOPE) -> tuple[Place | None, bool]:
+                 conversation: str = "", thread: str = "", match: str = MATCH_SCOPE,
+                 owner_bot: str = "") -> tuple[Place | None, bool]:
     """Match outbound targets, including declared destinations, in the supplied scopes.
 
     Dispatch loads the connector's current places; a retained outbox also uses
@@ -451,6 +468,7 @@ def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
     """
     if match not in MATCHES:
         raise ValueError(f"match is {' or '.join(MATCHES)}, not {match!r}")
+    places = [place for place in places if _owner_bot_eligible(place, owner_bot, targets.get("account_id", []))]
     if match != MATCH_SCOPE:
         fold = match == MATCH_EXACT_CASEFOLD
         conversations = {key.casefold() if fold else key for key in map(str, targets.get(conversation) or []) if key}
@@ -495,16 +513,18 @@ def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
 
 
 def outbox_place(drive_root: Any, *, connector: str, provider: str, account_id: str,
-                 conversation_id: str, thread_id: str = "") -> Place | None:
-    """Current outbox scope; an opaque operation retains matching account holds."""
+                 conversation_id: str, thread_id: str = "", owner_bot: str = "") -> Place | None:
+    """Current outbox scope; an opaque operation retains matching account holds. ``owner_bot`` fences the owner's own
+    bot A from the connector's ordinary places (``_owner_bot_eligible``)."""
     if not conversation_id:
         restricted = next((p for p in places_of_connector(drive_root, connector)
                            if p.provider == provider and p.account_id in ("", "*", account_id)
+                           and _owner_bot_eligible(p, owner_bot, [account_id] if account_id else [])
                            and p.state in {STATE_SILENT, STATE_PAUSED}), None)
         if restricted is not None:
             return restricted
     return resolve_place(drive_root, connector=connector, provider=provider, account_id=account_id,
-                         conversation_id=conversation_id, thread_id=thread_id)
+                         conversation_id=conversation_id, thread_id=thread_id, owner_bot=owner_bot)
 
 
 def observed_facts(event: Any) -> tuple[str, ...]:
@@ -568,10 +588,22 @@ def counted_owner_accounts(places: Iterable[Place]) -> dict[str, tuple[OwnerAcco
 
 def confirmed_elsewhere(places: Iterable[Place], place: Place) -> list[tuple[Place, OwnerAccount]]:
     """``(other place, account)`` for each account another place of ``place``'s connector account confirms, scoped
-    to the account it was confirmed for (``counted_owner_accounts``); the sheet names where each was confirmed."""
-    return [(other, replace(account, account_id=account.account_id or other.account_id)) for other in places
-            if other.place_id != place.place_id and (other.connector, other.provider) == (place.connector, place.provider)
-            for account in other.owner_accounts]
+    to the account it was confirmed for (``counted_owner_accounts``); the sheet names where each was confirmed.
+    The owner's own bot (``owner_bot``) and the connector's ordinary bot never share confirmations across their
+    contributions: a legacy whole-account confirmation of the separate bot is not the personal bot's owner."""
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+    found = []
+    for other in places:
+        if other.place_id == place.place_id or (other.connector, other.provider) != (place.connector, place.provider):
+            continue
+        if is_owner_bot_place(other) != is_owner_bot_place(place):
+            continue  # A and B keep their own confirmations
+        for account in other.owner_accounts:
+            scoped = replace(account, account_id=account.account_id or other.account_id)
+            if is_owner_bot_place(place) and scoped.account_id not in ("", "*", place.account_id):
+                continue  # a personal-bot confirmation counts only for its own bot
+            found.append((other, scoped))
+    return found
 
 
 def place_rows(drive_root: Any) -> dict[str, Place]:

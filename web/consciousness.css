@@ -287,6 +287,11 @@ textarea.ui-control.consciousness-owner-words {
 .place-accounts { display: flex; flex-direction: column; gap: var(--space-2); }
 .place-account .harness-account-meta, .place-connector-row .harness-account-meta { color: var(--text-meta); }
 .place-connector-row .harness-account-main { align-items: center; }
+.place-connector-row .btn[data-connect-act="tg-branch"][aria-pressed="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.place-connect-group { display: flex; flex-direction: column; gap: var(--space-2); }
+.place-connect-subheading { margin: var(--space-1) 0 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
+.place-connect-steps { margin: 0; padding-inline-start: var(--space-5); display: flex; flex-direction: column; gap: var(--space-1); color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+a.btn.place-connect-link { display: inline-flex; align-items: center; text-decoration: none; }
 /* Fields top-aligned, each with its own help under its input (the Settings form grid's way). */
 .place-account-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--space-2) var(--space-3); align-items: start; }
 .place-account-form .place-sheet-actions { grid-column: 1 / -1; }

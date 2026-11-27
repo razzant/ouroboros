@@ -2397,6 +2397,15 @@ Names, status and labels are authored.
 with “Try again”. “Whole account” stays separate; missing instance accounts never
 imply it. An existing identity says “Connected” under its name, with “Choose”. Narrower places never relabel broad ones.
 
+Telegram Groups has one door: choose the paired bot or another with its own name. The choice stays put when facts
+change. The latter still offers its other chats and Whole account separately. Setup elsewhere in the app returns to the
+same circle, words, description and bot choice; the draft stays in this page’s memory and never copies keys. Groups turn
+on/off for the named personal bot; Off stops messages and new replies, not private chat. Only choosing one offered
+group and connecting it makes a Silent place. Saved groups count as connections, not live bots. A saved Active group
+keeps its choice and shows its own bot's Off state separately. Wait for the personal bot's group intake before asking
+for the first message. If a write cannot be confirmed, Check again reads the same consent or place; Back keeps the draft
+and never makes that Connect eligible to be sent again.
+
 ##### Place sheet
 
 Title: the row's name; meta: service and state. First the context: the circle as a choice (a
