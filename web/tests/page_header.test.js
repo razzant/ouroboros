@@ -45,8 +45,8 @@ test('a section band has the same inset without native chrome and one leading ed
     // (tests/test_launcher_window_chrome.py keeps that geometry under the attribute).
     assert.match(ui, /--page-header-row-h: calc\(var\(--control-h-float\) \+ 36px\);/);
     assert.doesNotMatch(ui.replace(/\/\*[\s\S]*?\*\//g, ''), /window-chrome/);
-    assert.match(css, /:root\[data-window-chrome="integrated"\] \{[^}]*--page-header-row-h: max\(var\(--control-h-float\), var\(--window-chrome-top\)\);/,
-        'a measured native band still follows Interface size; only an absent band needs the browser inset');
+    assert.match(css, /:root\[data-window-chrome="integrated"\] \{[^}]*--page-header-row-h: var\(--window-chrome-row\);/,
+        'the measured lights\' row still follows Interface size; only an absent band needs the browser inset');
     assert.match(css, /\.app-page-header\[data-lead\] \{[^}]*min-height: var\(--page-header-row-h\)/);
     assert.match(css, /\.app-page-header\[data-return="column"\] > \.app-page-title-block \{ display: block; \}/);
     assert.match(css, /\.app-page-header\[data-return\] > \.app-page-title-block \{ display: flex;/, 'an ordinary leading return keeps its actual sibling');

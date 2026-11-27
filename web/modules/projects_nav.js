@@ -210,6 +210,13 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
     status.setAttribute('aria-live', 'polite');
     status.dataset.i18nSkip = '';
     find.append(glyph, input, clear, status);
+    // The whole capsule is the field (style.css: a text cursor): a press on its glyph or padding focuses the words and
+    // is never the window's handle in the macOS title band (launcher_window_chrome.py takes no prevented press).
+    find.addEventListener('mousedown', (event) => {
+        if (event.button !== 0 || event.target === input || clear.contains(event.target)) return;
+        event.preventDefault();
+        input.focus();
+    });
     header.prepend(find);  // owner 13.11: the list starts with its search; "+" ends the same row
 
     // ---- the list's own commands: Project-row geometry in the meta ink, so none reads as one more Project --------
@@ -653,7 +660,12 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         Object.assign(state, { found: null, budget: PAGE, handoff: null });
         render();
         let restored = null;
-        if (now && !was) list.scrollTop = 0;  // the matches from their first (a column's scroll keeps the field)
+        if (now && !was) {
+            // The matches from their first, in whatever scrolls: the list, or a short window's whole column, where the
+            // first match comes into view under the pinned head (its scroll margin) and never stays above the view.
+            list.scrollTop = 0;
+            list.firstElementChild?.scrollIntoView?.({ block: 'nearest', behavior: 'instant' });
+        }
         else if (was && !now && state.resume) {
             restored = [...list.children].find((el) => el.dataset.navProjectId === state.resume.id) || null;
             if (restored) keepOnScreen(restored, state.resume.top);

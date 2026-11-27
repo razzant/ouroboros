@@ -132,6 +132,24 @@ export function mountNavRail(sidebar) {
     sidebar.querySelector('.nav-utilities')?.remove();
 }
 
+/** Find a project and + are the column's first row, before Ouroboros's card: in a macOS window the traffic lights'
+ * row, under a phone's drawer the ×'s. An older document keeps the row in the Projects section, and v7.7.0's has no
+ * head at all (its Main row stands alone in the old wrapper): the head is made around that Main row and the row moves
+ * into it, so reading, Tab and every surface follow one order. Returns the row. */
+export function leadHeadWithFind(sidebar) {
+    const header = sidebar?.querySelector('.nav-projects-header') || null;
+    let head = sidebar?.querySelector('.sidebar-head') || null;
+    const main = head ? null : sidebar?.querySelector('.nav-row-main');
+    if (main) {
+        head = sidebar.ownerDocument.createElement('div');
+        head.className = 'sidebar-head';
+        main.before(head);
+        head.append(main);
+    }
+    if (header) head?.prepend(header);
+    return header;
+}
+
 /** The head of the Projects list (owner 13.11: no "Projects" word, no collapse, the list starts with its search): the
  * row is Find a project (projects_nav.js puts the field first in it) and "+" (New project) at its end. The header's
  * toggle, its unread total and its one status mark are gone with the collapse they spoke for: every row carries its
