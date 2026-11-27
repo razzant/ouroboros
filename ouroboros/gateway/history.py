@@ -801,6 +801,8 @@ def _collect_chat_rows(
                 rec["attachments"] = attachment_views(entry["attachments"], chat_path.parent.parent)
             if role == "user" and entry.get("text_placeholder") is True:  # host-written text, not the owner's
                 rec["text_placeholder"] = True
+            if role == "user" and isinstance(entry.get("new_work"), dict):  # as its live echo said: taken as new work
+                rec["new_work"] = True
             if rec["system_type"] in {"project_started", "project_handoff", "project_completion_summary"}:
                 # Read-side plain normalization for lifecycle rows persisted
                 # before the producer stripped markdown; a no-op on new rows.

@@ -77,7 +77,13 @@ class Provider:
             return [body["model"] for body in self.received if body["model"] != "mock-light" and self.marker_of(body) == marker]
 
     def get(self, handler) -> None:
-        if handler.path.split("?")[0] != "/v1/models":
+        path = handler.path.split("?")[0]
+        if path == "/props":
+            # Names its program, as the stock double does (``fixtures_mock_llm._Handler.do_GET``): a private
+            # compatible server that names none is sent nothing without its connection's consent.
+            self._send(handler, 200, {"default_generation_settings": {"n_ctx": 2_000_000}, "total_slots": 1})
+            return
+        if path != "/v1/models":
             handler.send_error(404)
             return
         self._send(handler, 200, {"object": "list", "data": [{"id": name, "object": "model"} for name in self.models]})
@@ -312,16 +318,16 @@ def _held_focus(page, forward: str, backward: str, finger: bool = True, every_st
     return seen
 
 
-def _sheet_pick(page, capsule: str, route: str) -> None:
-    """The capsule's own way: a press opens its Model sheet, a press on the route's row picks it."""
-    _open_sheet(page, capsule)
+def _sheet_pick(page, capsule: str, route: str, *, finger: bool = False) -> None:
+    """The capsule's own way: a press opens its Model sheet, a press on the route's row picks it (`finger`: both taps)."""
+    _open_sheet(page, capsule, finger=finger)
     page.wait_for_selector(_row(route), timeout=20_000)
-    page.click(f"{_row(route)} .chat-model-cell")
+    (page.tap if finger else page.click)(f"{_row(route)} .chat-model-cell")
 
 
-def _send(page, prefix: str, marker: str) -> None:
+def _send(page, prefix: str, marker: str, *, finger: bool = False) -> None:
     page.fill(f"#{prefix}-input", marker)
-    page.click(f"#{prefix}-send")
+    (page.tap if finger else page.click)(f"#{prefix}-send")
     page.wait_for_function("(prefix) => document.querySelector('#' + prefix + '-input').value === ''", arg=prefix, timeout=20_000)
 
 

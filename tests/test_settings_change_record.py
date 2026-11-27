@@ -240,9 +240,36 @@ def test_the_mind_is_told_how_its_own_settings_write_declares_itself(tmp_path, m
     assert (drive / "settings.json").read_text(encoding="utf-8") == '{"TOTAL_BUDGET": 10}\n'
 
 
+def test_the_main_chats_own_choice_is_said_in_the_capsules_words_never_by_its_setting_name():
+    """A word to Ouroboros can change the model or tier new work in Main starts on; the row Main reads then says what
+    changed as the capsule says it, an empty value by what it means and Ultrafast without the word it is saved with."""
+    from ouroboros.gateway.owner_settings import settings_change_text
+
+    by_ouroboros = {"surface": "api", "actor": "ouroboros"}
+    model = settings_change_text({"OUROBOROS_MAIN_CHAT_MODEL": {"old": "", "new": "vendor/chosen"}}, by_ouroboros)
+    assert model == "Model for new work in Main: Main's model → vendor/chosen. Changed by Ouroboros."
+    back = settings_change_text({"OUROBOROS_MAIN_CHAT_MODEL": {"old": "vendor/chosen", "new": ""}}, by_ouroboros)
+    assert back == "Model for new work in Main: vendor/chosen → Main's model. Changed by Ouroboros."
+    tier = settings_change_text({"OUROBOROS_MAIN_CHAT_PROCESSING": {"new": "ultrafast@0123456789abcdef01234567"}},
+                                {"surface": "api", "actor": "owner"})
+    assert tier == "Processing tier for new work in Main: Default → Ultrafast. Changed by you."
+    flex = settings_change_text({"OUROBOROS_MAIN_CHAT_PROCESSING": {"old": "fast", "new": "economy"}}, by_ouroboros)
+    assert flex == "Processing tier for new work in Main: Fast → Flex (economy). Changed by Ouroboros."
+    for text in (model, back, tier):
+        assert "OUROBOROS_" not in text and "@" not in text and "empty" not in text and "not set" not in text
+    # A route that names a connection keeps its own "@": only the tier is said without its saved word.
+    named = settings_change_text({"OUROBOROS_MAIN_CHAT_MODEL": {"old": "", "new": "openai-compatible@lab::fictional"}},
+                                 by_ouroboros)
+    assert "Main's model → openai-compatible@lab::fictional." in named
+    # Every other key is said as before.
+    assert settings_change_text({"OUROBOROS_MODEL": {"old": "a/one", "new": "b/two"}}, by_ouroboros) == \
+        "Main model: a/one → b/two. Changed by Ouroboros."
+
+
 @pytest.mark.parametrize("endpoint,body,key", [
-    ("chat-model", {"kind": "model", "model": "openrouter/new-main", "use_local": False}, "OUROBOROS_MODEL"),
-    ("chat-processing", {"processing": "fast"}, "OUROBOROS_MODEL_PROCESSING_PREFERENCES"),
+    ("chat-model", {"kind": "model", "model": "openrouter/new-main", "use_local": False, "scope": "main_chat"},
+     "OUROBOROS_MAIN_CHAT_MODEL"),
+    ("chat-processing", {"processing": "fast", "scope": "main_chat"}, "OUROBOROS_MAIN_CHAT_PROCESSING"),
 ])
 @pytest.mark.parametrize("declared", [False, True])
 def test_composer_owner_endpoints_record_app_origin_without_echo(client, endpoint, body, key, declared):
@@ -250,7 +277,7 @@ def test_composer_owner_endpoints_record_app_origin_without_echo(client, endpoin
     response = test_client.post("/api/owner/" + endpoint, json=body, headers=APP if declared else {})
     assert response.status_code == 200, response.text
     [record] = records(install)
-    assert key in record["changes"]
+    assert set(record["changes"]) == {key}  # the Main chat's own setting: no role's key moves with it
     assert record["surface"] == ("app" if declared else "api")
     assert record["actor"] == ("owner" if declared else "not declared")
     assert len(rows) == (0 if declared else 1)

@@ -137,12 +137,54 @@ def test_cyber_start_names_the_minds_choice_without_overruling_a_room_owner(conf
     assert ctx.task_metadata == {"lead": {"source": "mind", "model": "vendor/fast-one", "use_local": False}}
     route_choice.bind_task_route(ctx, ctx.task_metadata, presence=False)
     assert ctx.task_model_override == "vendor/fast-one" and lead_fact.primary_basis(ctx) == "mind"
-    monkeypatch.setattr(control_models, "read_model_choice", lambda *a: {"kind": "model", "model": "owner/choice", "use_local": False})
+    owned = {"id": "room", "model_choice": {"kind": "model", "model": "owner/choice", "use_local": False}}
+    # A model the room only copied from the Main chat at its registration is not their choice for that room.
+    monkeypatch.setattr(control_models, "read_room", lambda *a: {**owned, "model_choice_copied": True})
+    events.clear()
+    control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two")
+    assert events[0]["metadata"]["lead"] == {"source": "mind", "model": "vendor/fast-two", "use_local": False}
+    events.clear()
+    control_routing._start_task(ctx, "Write", title="Report", model="owner/choice")
+    assert events[0]["metadata"]["lead"] == {"source": "room", "model": "owner/choice", "use_local": False, "copied": True}
+    monkeypatch.setattr(control_models, "read_room", lambda *a: owned)
     events.clear()
     text = control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two")
     assert not events and "choice for this room binds" in text
     control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two", owner_words="use the other one")
     assert events[0]["metadata"]["lead"]["source"] == "owner_words"
+
+
+def test_cyber_start_in_main_never_overrules_the_model_my_human_saved_for_the_main_chat(configured_model_start, monkeypatch):
+    """A start without a room lands in the Main chat. The model saved for that chat is my human's own choice there:
+    it binds like a room's, whatever Main the role's model is. A Main chat that follows Main binds nothing, an
+    unknown or inactive room still refuses the start, and cited words still change the model for one work."""
+    from ouroboros.tools import control_models, control_routing
+
+    ctx, events = configured_model_start
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    saved = {"model_choice": {"kind": "model", "model": "owner/main-chat", "use_local": False}, "processing_choice": ""}
+    monkeypatch.setattr(control_models, "main_chat_choice", lambda *a, **k: saved)
+    text = control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two")
+    assert not events and "choice for the Main chat binds" in text
+    control_routing._start_task(ctx, "Write", title="Report", model="owner/main-chat")
+    assert events[0]["metadata"]["lead"] == {"source": "room", "model": "owner/main-chat", "use_local": False}
+    events.clear()
+    control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two", owner_words="use the other one")
+    assert events[0]["metadata"]["lead"]["source"] == "owner_words"
+    events.clear()
+    # The Main chat follows Main the role: no choice of my human's is saved for it, so the mind may choose.
+    monkeypatch.setattr(control_models, "main_chat_choice",
+                        lambda *a, **k: {"model_choice": {"kind": "main"}, "processing_choice": ""})
+    control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two")
+    assert events[0]["metadata"]["lead"] == {"source": "mind", "model": "vendor/fast-two", "use_local": False}
+    events.clear()
+
+    def gone(*_args):
+        raise ValueError("Project 'gone' is unavailable")
+
+    monkeypatch.setattr(control_models, "read_room", gone)
+    text = control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two")
+    assert not events and "unavailable" in text
 
 
 @pytest.fixture(params=["start_task", "switch_model"])
@@ -194,9 +236,9 @@ def local_model_choices(model_start, monkeypatch, request):
     assert not transports
 
 
-@pytest.mark.parametrize("scope", ["room", "main"])
+@pytest.mark.parametrize("scope", ["room", "new", "main"])
 @pytest.mark.parametrize("actor", ["root", "presence", "child", "nanny", "reviewer"])
-def test_only_integrating_foci_may_carry_owner_choices_to_room_or_main(configured_model_start, focus, monkeypatch, scope, actor):
+def test_only_integrating_foci_may_carry_owner_choices_to_room_new_work_or_main(configured_model_start, focus, monkeypatch, scope, actor):
     from ouroboros.owner_words import PLACE_CONFIRMED
     from ouroboros.tools.control_runtime import _switch_model
     from ouroboros.tools.tool_result import _published_tool_result
@@ -222,6 +264,8 @@ def test_only_integrating_foci_may_carry_owner_choices_to_room_or_main(configure
                         lambda root, pid, choice: writes.append(choice) or ({"kind": "main"}, choice))
     monkeypatch.setattr("ouroboros.gateway.owner_effort._write_main_route",
                         lambda _request, choice, **kw: writes.append(choice) or {"ok": True, "main_route": choice})
+    monkeypatch.setattr("ouroboros.gateway.owner_effort.write_main_chat_model",
+                        lambda _request, choice, **kw: writes.append(choice) or ({"kind": "main"}, choice))
     monkeypatch.setattr("ouroboros.gateway.ui_preferences.record_model_recent", lambda *a: recents.append(a))
     text = _switch_model(ctx, model="vendor/fast-one", owner_words="use the other one", scope=scope,
                          project_id="alpha" if scope == "room" else "")
@@ -328,6 +372,41 @@ def test_main_role_cannot_be_saved_as_a_route_but_room_follow_main_remains(confi
     assert writes.pop()["model"] == "vendor/fast-one"
     _switch_model(ctx, model="main", scope="room", project_id="alpha", owner_words="use the other one")
     assert writes == [{"kind": "main"}]
+
+
+def test_words_about_everything_new_reach_the_main_chats_own_writer_and_never_mains_role(model_start, tmp_path, monkeypatch):
+    """``scope="new"`` is the capsule's own writer: the model new work starts on in Main, which a new room copies.
+    Asked to return the system model, it clears that choice, so Main's own binding (pin, window, tier) answers again."""
+    from ouroboros import config
+    from ouroboros.composer_cognition import main_chat_choice, new_room_choice
+    from ouroboros.tools.control_models import cited_switch
+
+    ctx, _ = model_start
+    path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    role = {"OUROBOROS_MODEL": "vendor/system", "OUROBOROS_MODEL_ACCOUNTS": '{"main":"acc-main"}',
+            "OUROBOROS_MODEL_CONTEXT_WINDOWS": '{"main":123456}', "OUROBOROS_MODEL_PROCESSING_PREFERENCES": '{"main":"fast"}'}
+    path.write_text(json.dumps(role), encoding="utf-8")
+    monkeypatch.setattr("ouroboros.gateway.ui_preferences.record_model_recent", lambda *_: None)
+    monkeypatch.setattr("ouroboros.gateway.owner_effort.record_settings_change", lambda *a, **kw: None)
+
+    def saved():
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    chosen = {"kind": "model", "model": "vendor/chosen", "use_local": False}
+    text = cited_switch(ctx, model="vendor/chosen", owner_words="Please use the other one", scope="new",
+                        project_id="", model_as_typed=True)
+    assert json.loads(text.splitlines()[0]) == {"ok": True, "scope": "new", "model_choice": chosen,
+                                                "previous_model_choice": {"kind": "main"}}
+    assert saved()["OUROBOROS_MAIN_CHAT_MODEL"] == "vendor/chosen"
+    assert {key: saved()[key] for key in role} == role  # Main the role: its model, pin, window and tier untouched
+    assert main_chat_choice()["model_choice"] == chosen
+    assert new_room_choice() == {"model_choice": chosen, "model_choice_copied": True}
+    # "Return the system model for new work": the same writer clears the choice; no role key is written either way.
+    text = cited_switch(ctx, model="main", owner_words="Please use the other one", scope="new", project_id="")
+    assert json.loads(text.splitlines()[0])["model_choice"] == {"kind": "main"}
+    assert saved()["OUROBOROS_MAIN_CHAT_MODEL"] == "" and {key: saved()[key] for key in role} == role
+    assert new_room_choice() == {}
 
 
 @pytest.mark.parametrize("connection,route", [

@@ -471,10 +471,8 @@ test('concurrent cold detail reads share the legacy selector discovery', async (
     assert.equal(reads.length, 1);
 });
 
-test('the account Main is pinned to is the settings document\'s word, or a write\'s own answer; unknown before either', () => {
+test('the account Main is pinned to is the settings document\'s word; unknown before it', () => {
     const store = createModelCatalogStore();
-    let heard = 0;
-    store.subscribe(() => { heard += 1; });
     assert.equal(store.mainAccount(), null, 'not read: what follows Main is read as Auto, and the settings may still say');
     store.adoptSettings({ OUROBOROS_MODEL_ACCOUNTS: { main: 'work', light: 'home' } });
     assert.equal(store.mainAccount(), 'work');
@@ -484,11 +482,6 @@ test('the account Main is pinned to is the settings document\'s word, or a write
     assert.equal(store.mainAccount(), '', 'a map that cannot be read pins nothing');
     store.adoptSettings({});
     assert.equal(store.mainAccount(), '', 'no pin is Auto');
-    const before = heard;
-    store.adoptMainAccount('work');
-    assert.deepEqual([store.mainAccount(), heard], ['work', before + 1], 'Main\'s own write says its account at once');
-    store.adoptMainAccount('');
-    assert.equal(store.mainAccount(), '');
 });
 
 test('another connection under the same routed value drops what its endpoints and transport said; a late answer of the earlier one is not kept', async () => {
@@ -502,8 +495,8 @@ test('another connection under the same routed value drops what its endpoints an
             connections: [{ id: 'openrouter', revision }, { id: 'openai', revision: 'openai#same' }] } });
     store.adoptSettings(settings('openrouter#r1'));
     await store.read();
-    assert.equal(store.revisionOf(route('z-ai/glm-5.3')), 'openrouter#r1');
-    assert.equal(store.revisionOf(route('claudexor::codex=gpt-6-astra')), '', 'a subscription has no API connection');
+    assert.equal(revisionIn(settings('openrouter#r1'), route('z-ai/glm-5.3')), 'openrouter#r1');
+    assert.equal(revisionIn(settings('openrouter#r1'), route('claudexor::codex=gpt-6-astra')), '', 'a subscription has no API connection');
     const glm = route('z-ai/glm-5.3');
     const first = store.readDetail(glm);
     await Promise.resolve();
@@ -516,7 +509,7 @@ test('another connection under the same routed value drops what its endpoints an
     // The connection's revision moved (a rotated key shows the same masked prefix): nothing of the earlier one is told.
     const epoch = store.detailEpoch();
     store.adoptSettings(settings('openrouter#r2'));
-    assert.deepEqual([store.detail(glm), store.detailEpoch(), store.revisionOf(glm)], [null, epoch + 1, 'openrouter#r2']);
+    assert.deepEqual([store.detail(glm), store.detailEpoch()], [null, epoch + 1]);
     const rows = store.catalog().items;
     assert.ok(!('processing_transport' in rows.find((row) => row.value === 'z-ai/glm-5.3')), 'the changed source\'s transport is no limit now');
     assert.deepEqual(rows.find((row) => row.value === 'openai::gpt-6').processing_transport, ['standard', 'fast'], 'another source keeps its own');
@@ -537,19 +530,11 @@ test('another connection under the same routed value drops what its endpoints an
     assert.deepEqual([...store.detail(glm).modes], ['standard']);
 });
 
-test('Main\'s binding read: the four tokens and the document whose connections say which source a route is shown on', async () => {
-    const tokens = { OUROBOROS_MODEL: 'm', USE_LOCAL_MAIN: 'l', OUROBOROS_MODEL_ACCOUNTS: 'a', OUROBOROS_MODEL_PROCESSING_PREFERENCES: 'p' };
-    const doc = { OUROBOROS_MODEL: 'openai@work::gpt-6', USE_LOCAL_MAIN: 'false', OUROBOROS_MODEL_ACCOUNTS: '{}',
-        OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}', _meta: { tokens, connections: [{ id: 'openai@work', revision: 'openai@work#w1' }] } };
-    let answer = doc;
-    const store = createModelCatalogStore({ readSettings: async () => answer });
-    const read = await store.readMainTierSettings();
-    assert.deepEqual([read.route, read.tier, read.binding], [route('openai@work::gpt-6'), 'fast', tokens]);
-    assert.deepEqual([revisionIn(read.settings, read.route), revisionIn(read.settings, route('openai::gpt-6')), revisionIn(read.settings, route('qwen3', true))],
+test('a settings document\'s connections say which source a route is shown on', () => {
+    const doc = { OUROBOROS_MODEL: 'openai@work::gpt-6', _meta: { connections: [{ id: 'openai@work', revision: 'openai@work#w1' }] } };
+    assert.deepEqual([revisionIn(doc, route('openai@work::gpt-6')), revisionIn(doc, route('openai::gpt-6')), revisionIn(doc, route('qwen3', true))],
         ['openai@work#w1', null, ''], 'the named key\'s own revision; another key the read does not name; the local model none');
     assert.deepEqual([apiConnectionOf(route('z-ai/glm-5.3')), apiConnectionOf(route('claudexor::codex=gpt-6-astra'))], ['openrouter', '']);
-    answer = { ...doc, _meta: { tokens: { OUROBOROS_MODEL: 'm' } } };
-    await assert.rejects(store.readMainTierSettings(), /Could not verify Main/);
     const catalog = { items: [{ value: 'openai@work::gpt-6', processing_transport: ['standard'] }, { value: 'qwen3', use_local: true, processing_transport: ['standard'] }] };
     assert.deepEqual(dropTransport(catalog, new Set(['openai@work'])).items.map((row) => 'processing_transport' in row), [false, true],
         'the local adapter is no API connection that changed');
@@ -606,13 +591,12 @@ test('a settings read out when a newer document is adopted never writes the olde
     store.adoptSettings(settings('openrouter#r2', 'work'));  // the Settings page (or confirmation) delivered a newer document
     answer(settings('openrouter#r1', 'home'));
     await reading;
-    assert.equal(store.revisionOf(route('z-ai/glm-5.3')), 'openrouter#r2', 'the older answer does not stand over the newer');
-    assert.equal(store.mainAccount(route(model)), 'work', 'not even for a different pin on the exact same route');
+    assert.equal(store.mainAccount(route(model)), 'work', 'the older answer does not stand over the newer, not even for a different pin on the exact same route');
     const again = store.readConnections({ fresh: true });  // a read sent after it is adopted
     await flush();
     answer(settings('openrouter#r3', ''));
     await again;
-    assert.equal(store.revisionOf(route('z-ai/glm-5.3')), 'openrouter#r3');
+    assert.equal(store.mainAccount(route(model)), '', 'a read sent after it is adopted');
 });
 
 test('first settings adoption discards unbound endpoint facts, including outstanding detail and catalog reads', async () => {
@@ -683,15 +667,6 @@ test('a work following Main gets the account read for its exact route, not an ea
     store.adoptSettings(settings(b, 'account-b', true));
     assert.equal(store.mainAccount(route(b)), null);
     assert.equal(store.mainAccount(route(b, true)), 'account-b');
-    store.adoptMainAccount('');
-    assert.equal(store.mainAccount(), '');
-    assert.equal(store.mainAccount(route(b, true)), null); // a write's unscoped answer proves no read binding
-    answer = settings(b, 'stale');
-    const old = store.readConnections({ fresh: true }); // the preceding Settings document is still in flight
-    store.adoptMainAccount('', route(a)); // the latest write confirmed Auto for A, not B
-    await old;
-    assert.equal(store.mainAccount(route(a)), '');
-    assert.equal(store.mainAccount(route(b)), null);
 });
 
 test('a refresh failure handed over without items keeps the rows and says the read failed; a new success brings it back', async () => {

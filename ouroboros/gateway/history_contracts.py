@@ -261,6 +261,7 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     # ChatAttachmentView on owner rows; QuizAnswerFile on project_question_pointer.
     attachments: List[Union[ChatAttachmentView, QuizAnswerFile]]
     text_placeholder: bool
+    new_work: Literal[True]  # an owner row accepted as new work of its own, as its live echo said (``ChatOutbound.new_work``)
     chat_annotation: Dict[str, Any]  # the routing outcome shown on an owner message
     origin_id: str
     source_row_address: str  # the physical original of a retained copy, even outside this store

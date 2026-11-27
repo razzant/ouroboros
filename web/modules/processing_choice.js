@@ -235,6 +235,52 @@ export async function confirmMainUltrafast({ model = '', source = '', explain = 
     }));
 }
 
+/** Work carries its destination from admission. Later chip choices only apply to future work. */
+export const CHAT_ULTRAFAST_SCOPE = 'New work in the Main chat requests Ultrafast on its own calls to this destination. A call that goes elsewhere and the work’s subagents take Default. Later picks in this chat change only future work. Other rooms keep their choices, and a new room does not copy Ultrafast.';
+/** The same on a pinned profile: that work carries the tier from its first call to its last, on that
+ *  model and profile alone, whatever is chosen here later. Another profile is said, never another account: a new
+ *  sign-in to the same profile is another account under the name that was confirmed. */
+export const CHAT_ULTRAFAST_PROFILE_SCOPE = 'New work started in the Main chat requests Ultrafast from its first call, only on its own calls to this model on this profile. A call that goes anywhere else (another model, another profile, a fallback) and the work’s subagents take Default. Another model or tier chosen here later changes only work started after it: work already started keeps Ultrafast on this model and profile until you change its tier on its card. Work running now and every room keep theirs, and a new room does not copy Ultrafast.';
+/** What a subscription route's Ultrafast follows, said before the owner agrees: a pinned profile by its name, whoever
+ *  is signed in to it; Auto, its source's pool of accounts and no one of them. */
+export const CHAT_ULTRAFAST_FOLLOWS = Object.freeze({
+    profile: 'Ultrafast follows the profile {account} by its name, not the subscription signed in to it. After a new sign-in to that profile, later calls, in work already started too, can spend the new subscription’s quota or money.',
+    auto: 'Auto is this source’s pool of accounts, not one account: whichever account the pool gives a call serves it and can spend its quota or money.',
+    api: 'Replacing this API connection sends already started work at its ordinary tier. Confirming Ultrafast on the new connection applies only to future work.',
+});
+
+/**
+ * Before the Main chat takes Ultrafast for its new work, the shared dialog names the route it is asked for, what the
+ * tier follows on a subscription route (`follows`: `profile` with its `account`, where the risk of another
+ * subscription paying is said, `auto`, or `api`), what that route says of Ultrafast (`explain`, its price in it when
+ * `priceSaid`; else that the cost is not known here) and what it reaches: a pinned profile's own rule, else the one
+ * every other route keeps. Resolves whether the owner confirmed; a cancel writes nothing. Main the role's own tier is
+ * asked for in Settings › Models (`confirmMainUltrafast`).
+ */
+export async function confirmChatUltrafast({ model = '', source = '', explain = '', priceSaid = false, follows = '', account = '',
+    dialog = openConfirmDialog, doc = globalThis.document } = {}) {
+    return Boolean(await dialog({
+        title: 'Ultrafast for new work',
+        body: follows === 'profile' ? CHAT_ULTRAFAST_PROFILE_SCOPE : CHAT_ULTRAFAST_SCOPE,
+        confirmLabel: 'Use Ultrafast',
+        content: { label: 'Ultrafast for new work', mount(container) {
+            const line = (text, literal = false) => {
+                const made = doc.createElement('p');
+                made.className = 'chat-model-sheet-fact';
+                made.textContent = text;
+                if (literal) made.dataset.i18nSkip = '';  // composed through tr()/fmt(): it names a model and its source
+                return made;
+            };
+            const followed = CHAT_ULTRAFAST_FOLLOWS[follows];
+            container.append(...[model ? line([model, source].filter(Boolean).join(' · '), true) : null,
+                // A profile's name is its owner's word, so that line is composed; Auto's is plain chrome.
+                !followed ? null : follows === 'profile' ? line(fmt(followed, { account }), true) : line(followed),
+                line(explain || tr(...MEANS.ultrafast), true),
+                priceSaid ? null : line('What Ultrafast costs on this route is not known here.')].filter(Boolean));
+        } },
+    }));
+}
+
 /**
  * What the newest call came to, beside what was chosen (the card's fact and its sheet); '' when nothing says, or when
  * it was sent and served as asked. `last` is the work's `processing.last` receipt (`_usage_response.processing_receipt`).

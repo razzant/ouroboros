@@ -223,10 +223,10 @@ test('in the composer list a priced model says its price where "paid by key" sto
     assert.equal(describeRoute(index, { model: OPUS.value }).price, '$4 in / $20 out');
     assert.equal(describeRoute(index, { model: 'openai::gpt-6' }).price, '', 'a direct key states no price');
     assert.equal(describeRoute(index, { model: 'z-ai/glm-5.3' }).facts, 'OpenRouter · paid by key');
-    const markup = (query, { mainRow = 'follow', open = false } = {}) => {
+    const markup = (query, { mainRow = 'follow', open = false, recents = [] } = {}) => {
         const [el, input] = [new ElementStub('div'), new ElementStub('input')];
         const list = createModelList({ el, input, id: 'models', store: { index: () => index, status: () => ({ read: true }), pins: () => [], isPinned: () => false },
-            main: () => ({ model: OPUS.value, use_local: false }), current: () => null, recents: () => [], mainRow, onRoute() {} });
+            main: () => ({ model: OPUS.value, use_local: false }), current: () => null, recents: () => recents, mainRow, onRoute() {} });
         list.paint();
         // A press on `All sources` opens the fold: each source is a row of its own.
         if (open) for (const listener of el.listeners.get('click') || []) listener({ target: { closest: (selector) => (selector === '.chat-model-row' ? { dataset: { row: 'sources' } } : null) } });
@@ -243,9 +243,10 @@ test('in the composer list a priced model says its price where "paid by key" sto
         'route|z-ai/glm-5.3': 'OpenRouter · paid by key',
         'route|openai::gpt-6': 'OpenAI · paid by key',
     });
-    // The price stands with a model (Main's own row in the Main chat); a room's Main row says what it follows; the sources
-    // fold under one row and, opened, each still says how it is paid.
-    assert.deepEqual(markup('', { mainRow: 'main' }), { main: 'OpenRouter · $4 in / $20 out', sources: 'OpenRouter, OpenAI' });
+    // The price stands with a model (a composer's list has no Main row: the model in force leads its recents); a work's
+    // Main row says what it follows; the sources fold under one row and, opened, each still says how it is paid.
+    assert.deepEqual(markup('', { mainRow: false, recents: [{ model: OPUS.value, use_local: false }] }),
+        { [`route|${OPUS.value}`]: 'OpenRouter · $4 in / $20 out', sources: 'OpenRouter, OpenAI' });
     assert.deepEqual(markup('', { open: true }), {
         main: 'Follows Main · claude-opus-5.5',
         sources: 'OpenRouter, OpenAI',

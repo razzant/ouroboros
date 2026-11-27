@@ -255,6 +255,16 @@ def _reads_subagents_settings(task: Dict[str, Any]) -> bool:
     return not (task.get("parent_task_id") or metadata.get("parent_task_id")) and "subagents_mode" not in metadata
 
 
+def _reads_main_chat(task: Dict[str, Any]) -> bool:
+    """A root still owed its model or tier stamp may read them from the Main chat's settings
+    (``route_choice.capture_lead``): its admission reads the settings before Q for it too."""
+    from ouroboros.route_choice import LEAD_KEY, PROCESSING_KEY
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    return (not (task.get("parent_task_id") or metadata.get("parent_task_id"))
+            and not (LEAD_KEY in metadata and PROCESSING_KEY in metadata))
+
+
 @contextlib.contextmanager
 def prepared_root_billing(task: Dict[str, Any], *, resolved: Any = _UNRESOLVED):
     """Resolve what a root's admission reads BEFORE the caller takes ``_queue_lock``: its billing (the money
@@ -266,7 +276,8 @@ def prepared_root_billing(task: Dict[str, Any], *, resolved: Any = _UNRESOLVED):
     from ouroboros.config import load_settings
 
     billing = prepare_root_billing(task) if resolved is _UNRESOLVED else resolved
-    prepared = {"billing": billing, "settings": load_settings() if _reads_subagents_settings(task) else None}
+    prepared = {"billing": billing,
+                "settings": load_settings() if _reads_subagents_settings(task) or _reads_main_chat(task) else None}
     token = _PREPARED_ROOT_BILLING.set((str(task.get("id") or "").strip(), prepared))
     try:
         yield
@@ -304,10 +315,12 @@ def enqueue_task(
             t["_consciousness_continuation"] = True
     prepared = _PREPARED_ROOT_BILLING.get()  # a caller holding Q read these off the lock (``prepared_root_billing``)
     prepared = prepared[1] if prepared is not None and prepared[0] == str(t.get("id") or "").strip() else None
-    subagents_settings = None
-    if not restoring_snapshot and _reads_subagents_settings(t):
+    subagents_settings = lead_settings = None
+    if not restoring_snapshot and (_reads_subagents_settings(t) or _reads_main_chat(t)):
         from ouroboros.config import load_settings
-        subagents_settings = prepared["settings"] if prepared is not None and prepared["settings"] else load_settings()
+        lead_settings = prepared["settings"] if prepared is not None and prepared["settings"] else load_settings()
+        if _reads_subagents_settings(t):
+            subagents_settings = lead_settings
     attach_task_contract(apply_consciousness_authority(t))
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(t)
@@ -498,7 +511,7 @@ def enqueue_task(
                         from ouroboros.settings_integrity import record_subagents_admission
                         record_subagents_admission(t, DRIVE_ROOT, settings=subagents_settings, project=project)
                     if not restoring_snapshot:
-                        capture_lead(t, DRIVE_ROOT, project=project, admitted=True)
+                        capture_lead(t, DRIVE_ROOT, project=project, admitted=True, settings=lead_settings)
                     PENDING.append(t)
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
             from supervisor.schedule_occurrence import contention

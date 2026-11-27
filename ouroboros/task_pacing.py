@@ -810,6 +810,7 @@ def prospective_wrapup_attempt_request(
     cache_affinity: Optional[str] = None,
     processing_preference: Optional[str] = None,
     task_id: str = "",
+    processing_connection: tuple[str, str] | None = None,
 ) -> Any:
     """Build the conservative request facts from the prospective wire payload.
 
@@ -826,7 +827,7 @@ def prospective_wrapup_attempt_request(
     from ouroboros.pricing import infer_provider_from_model
     from ouroboros.send_clock import stamp_clock_note
     from ouroboros.usage_accounting import AttemptRequest, _merge_scope
-    from ouroboros.model_slots import resolve_processing_preference
+    from ouroboros.model_slots import processing_on_target, resolve_processing_preference
 
     processing_preference = resolve_processing_preference(model_role, override=processing_preference)
     if use_local:
@@ -851,6 +852,7 @@ def prospective_wrapup_attempt_request(
             force_unknown_reservation=True,
         ))[0]
 
+    processing_preference = processing_on_target(resolved, processing_preference, processing_connection)
     target = {**resolved, "processing_preference": processing_preference,
               "chat_conversation_id": task_chat_conversation_id(task_id)}
     if target.get("provider") == "claudexor":
@@ -908,18 +910,19 @@ def prospective_wrapup_attempt_request(
 
 def wrapup_model_options(ctx: Any) -> Dict[str, Any]:
     """The acting turn's model options shared by the budget probes and forced send."""
-    from ouroboros.model_slots import acting_model_role, task_model_binding, task_processing_preference
+    from ouroboros.model_slots import acting_model_role, send_processing_options, task_model_binding
     from ouroboros.model_wait import current_model_wait
 
     owner = getattr(getattr(ctx, "tools", None), "_ctx", None)
     task = {"model_role": acting_model_role(owner, model_role=getattr(ctx, "model_role", "")),
             "task_metadata": getattr(owner, "task_metadata", {})}
     waiter = current_model_wait()
-    role, account = task_model_binding(task, context_fit_plan=getattr(owner, "context_fit_plan", None),
-                                       overrides=waiter.overrides if waiter else None)
+    overrides = waiter.overrides if waiter else None
+    role, account = task_model_binding(task, context_fit_plan=getattr(owner, "context_fit_plan", None), overrides=overrides)
     return {"model_role": role, "model_account_override": account,
             "model_turn_state": getattr(owner, "model_turn_state", None),
-            "processing_preference": task_processing_preference({"task_metadata": task["task_metadata"]}, model_role=role)}
+            **send_processing_options(task["task_metadata"], getattr(ctx, "active_model", ""),
+                                      getattr(ctx, "active_use_local", False), role, overrides=overrides)}
 
 
 def prepared_wrapup_candidate(

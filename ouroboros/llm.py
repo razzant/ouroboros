@@ -308,6 +308,7 @@ class LLMClient(
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
         chat_conversation_id: str = "",
+        processing_connection: tuple[str, str] | None = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
 
@@ -334,6 +335,7 @@ class LLMClient(
         caller-owned wire affinity, separate from cache, role and billing scope;
         no identity is inherited by other calls."""
         from ouroboros.llm_claudexor import turn_state_for_route
+        from ouroboros.model_slots import processing_on_target
 
         messages = self._normalize_system_message_placement(messages)
         with capture_attempt_ids() as attempt_ids:
@@ -351,7 +353,8 @@ class LLMClient(
                 # The spawner's transport policy (``utils.transport_no_proxy``): a forked child
                 # avoids OS proxy lookup; a spawned carrier keeps the server's policy.
                 no_proxy = no_proxy or transport_no_proxy()
-                target = {**self._resolve_remote_target(model), "processing_preference": processing_preference,
+                target = self._resolve_remote_target(model)
+                target = {**target, "processing_preference": processing_on_target(target, processing_preference, processing_connection),
                           "chat_conversation_id": chat_conversation_id}
                 temperature = resolve_temperature_hint(target, temperature, default_temperature)
                 message, usage = self._chat_remote(
@@ -402,6 +405,7 @@ class LLMClient(
         processing_preference: str | None = None,
         caller_dispatch_deadline_ts: Optional[float] = None,
         chat_conversation_id: str = "",
+        processing_connection: tuple[str, str] | None = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs.
@@ -409,6 +413,7 @@ class LLMClient(
         Temperature hints, resource waiting and caller conversation identity
         follow ``chat``'s effective-route contract."""
         from ouroboros.llm_claudexor import turn_state_for_route
+        from ouroboros.model_slots import processing_on_target
 
         messages = self._normalize_system_message_placement(messages)
         no_proxy = no_proxy or transport_no_proxy()
@@ -435,7 +440,8 @@ class LLMClient(
                 adopt_physical_attempt_capture(capture)
             result[1]["ledger_attempt_ids"] = list(attempt_ids)
             return result
-        target = {**self._resolve_remote_target(model), "processing_preference": processing_preference,
+        target = self._resolve_remote_target(model)
+        target = {**target, "processing_preference": processing_on_target(target, processing_preference, processing_connection),
                   "chat_conversation_id": chat_conversation_id}
         temperature = resolve_temperature_hint(target, temperature, default_temperature)
         carried_turn_state = turn_state_for_route(model_turn_state, target.get("provider"))

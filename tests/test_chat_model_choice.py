@@ -1,4 +1,4 @@
-"""Room choices, Main's writer and one-time canonical lead admission.
+"""Room choices, the Main chat's own choice, Main's role writer and one-time canonical lead admission.
 
 A chosen primary uses an option-less role from the first plan; a recorded follow
 tracks Main live. Every separately started owner root reads its own destination.
@@ -15,9 +15,9 @@ from starlette.testclient import TestClient
 
 from ouroboros import config, projects_registry as projects
 from ouroboros.composer_cognition import (
-    normalize_model_choice, read_model_choice,
+    main_chat_choice, model_choice_token, normalize_model_choice, read_model_choice, saved_choice,
 )
-from ouroboros.gateway.owner_effort import api_owner_chat_model
+from ouroboros.gateway.owner_effort import _write_main_route, api_owner_chat_model
 from ouroboros.model_slots import (
     MODEL_CONTEXT_WINDOWS_KEY, model_role_option, task_model_binding, task_processing_preference,
 )
@@ -37,6 +37,8 @@ OWNER = {
 }
 CHOSEN = {"kind": "model", "model": ASTRA, "use_local": False}
 LEAD = {"source": "room", "model": ASTRA, "use_local": False}
+MAIN_CHAT = {"scope": "main_chat"}  # how a composer write names the Main chat; a room is named by its project_id
+TOOL = {"surface": "tool", "actor": "ouroboros", "actor_task_id": "task"}
 
 
 @pytest.fixture
@@ -78,29 +80,89 @@ def test_the_choice_is_checked_by_the_route_grammar_never_by_a_catalog():
             normalize_model_choice(bad)
 
 
-def test_main_and_each_project_keep_their_own_choice(room):
+def test_the_main_chat_and_each_project_keep_their_own_choice(room):
     root, client = room
-    reply = client.post("/api/owner/chat-model", json={"kind": "model", "model": ASTRA})
+    reply = client.post("/api/owner/chat-model", json={"kind": "model", "model": ASTRA, **MAIN_CHAT})
     assert reply.status_code == 200, reply.text
-    assert reply.json() == {"ok": True, "project_id": "", "main_route": {"model": ASTRA, "use_local": False},
-                            "previous_main_route": {"model": SOL, "use_local": False},
-                            "account": "kept", "window_reset": True}
+    assert reply.json() == {"ok": True, "project_id": "", "model_choice": CHOSEN,
+                            "previous_model_choice": {"kind": "main"}, "choice_token": model_choice_token("", CHOSEN)}
     saved = _saved()
-    assert saved["OUROBOROS_MODEL"] == ASTRA
+    # The Main chat's own key: Main the role keeps its model, pin, tier and window, and so does every other role.
+    assert saved["OUROBOROS_MAIN_CHAT_MODEL"] == ASTRA
+    assert saved["OUROBOROS_MODEL"] == SOL
+    for key in ("OUROBOROS_MODEL_ACCOUNTS", "OUROBOROS_MODEL_PROCESSING_PREFERENCES", MODEL_CONTEXT_WINDOWS_KEY):
+        assert json.loads(saved[key]) == json.loads(OWNER[key])
     assert saved["OUROBOROS_MODEL_LIGHT"] == "openai::light-model"
     assert saved["OUROBOROS_MODEL_FALLBACKS"] == LUNA
     assert config.get_light_model() == "openai::light-model"
+    assert route_choice.configured_references() == {"main": {"model": SOL, "use_local": False}}
     reply = client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
     assert reply.status_code == 200 and reply.json()["model_choice"] == CHOSEN
+    assert reply.json()["choice_token"] == model_choice_token("alpha", CHOSEN) != model_choice_token("", CHOSEN)
     assert _registry_row(root, "alpha")["model_choice"] == CHOSEN
     assert "model_choice" not in _registry_row(root, "beta")
     assert read_model_choice(root) == {"kind": "main"}
     assert read_model_choice(root, "alpha") == CHOSEN
-    projects.create_project(root, "gamma", origin="owner_ui")
-    rows = {row["id"]: row["model_choice"] for row in projects.projects_summary(root, limit=10)}
-    assert rows == {"alpha": CHOSEN, "beta": {"kind": "main"}, "gamma": {"kind": "main"}}
     assert client.post("/api/owner/chat-model", json={"kind": "main", "project_id": "alpha"}).json()["previous_model_choice"] == CHOSEN
     assert "model_choice" not in _registry_row(root, "alpha")
+    # Following Main again is a choice of the Main chat too.
+    back = client.post("/api/owner/chat-model", json={"kind": "main", **MAIN_CHAT}).json()
+    assert (back["model_choice"], back["previous_model_choice"]) == ({"kind": "main"}, CHOSEN)
+    assert _saved()["OUROBOROS_MAIN_CHAT_MODEL"] == "" and _saved()["OUROBOROS_MODEL"] == SOL
+    # A local model reads back as it was saved, a name that fills the grammar's length included: its stored label
+    # is its locality, never part of the name the length rule counts.
+    for name in ("qwen3", "fictional-local/" + "m" * 384):
+        local = {"kind": "model", "model": name, "use_local": True}
+        reply = client.post("/api/owner/chat-model", json={**local, **MAIN_CHAT})
+        assert reply.status_code == 200 and reply.json()["model_choice"] == local, reply.text
+        assert _saved()["OUROBOROS_MAIN_CHAT_MODEL"] == f"{name} (local)"
+        assert main_chat_choice()["model_choice"] == local, len(name)
+        assert saved_choice(root)["choice_token"] == reply.json()["choice_token"]
+
+
+def test_a_new_room_copies_the_main_chats_choice_as_it_is(room):
+    root, client = room
+    # Nothing chosen: the new room follows Main as it always did, and no model name is written for it.
+    projects.create_project(root, "followed", origin="owner_ui")
+    assert not {"model_choice", "model_choice_copied", "processing_choice"} & set(_registry_row(root, "followed"))
+    # A tier alone is copied without materializing a model.
+    save_owner({**OWNER, "OUROBOROS_MAIN_CHAT_PROCESSING": "fast"})
+    projects.create_project(root, "tiered", origin="owner_ui")
+    row = _registry_row(root, "tiered")
+    assert row["processing_choice"] == "fast" and "model_choice" not in row and "model_choice_copied" not in row
+    # A chosen model is copied once and marked a copy; the rooms that exist keep what they had.
+    save_owner({**OWNER, "OUROBOROS_MAIN_CHAT_MODEL": "local-model (local)", "OUROBOROS_MAIN_CHAT_PROCESSING": "economy"})
+    projects.create_project(root, "copied", origin="owner_ui")
+    row = _registry_row(root, "copied")
+    assert row["model_choice"] == {"kind": "model", "model": "local-model", "use_local": True}
+    assert row["model_choice_copied"] is True and row["processing_choice"] == "economy"
+    assert "model_choice" not in _registry_row(root, "followed") and "model_choice" not in _registry_row(root, "tiered")
+    rows = {row["id"]: row["model_choice"] for row in projects.projects_summary(root, limit=10)}
+    assert rows == {"alpha": {"kind": "main"}, "beta": {"kind": "main"}, "followed": {"kind": "main"},
+                    "tiered": {"kind": "main"}, "copied": {"kind": "model", "model": "local-model", "use_local": True}}
+    # Work in that room runs on the copy and says so in its route, its card's fact and the words about it: nobody
+    # chose that model there. The Main chat's own choice, made on purpose, is told apart from it.
+    from ouroboros import lead_fact
+
+    copy = {"source": "room", "model": "local-model", "use_local": True, "copied": True}
+    work, in_main = {"id": "in-the-copy", "project_id": "copied"}, {"id": "in-main"}
+    for task in (work, in_main):
+        route_choice.capture_lead(task, root)
+    assert work["metadata"]["lead"] == copy == route_choice.lead_snapshot({**copy, "extra": 1})
+    assert in_main["metadata"]["lead"] == {"source": "room", "model": "local-model", "use_local": True}
+    assert lead_fact.project_lead(task=work, queued=True) == {"model": "local-model", "use_local": True, "basis": "room", "copied": True}
+    assert "copied" not in lead_fact.project_lead(task=in_main, queued=True)
+    assert lead_fact.chooser_words("room", copy) == "copied from the Main chat's model when this chat was made"
+    assert lead_fact.chooser_words("room", in_main["metadata"]["lead"]) == "set by my human for this chat"
+    assert "copied" not in route_choice.lead_snapshot({**copy, "source": "owner"}), "only a room's model is a copy"
+    # The Main chat's later choice reaches no room that exists; a pick in the room makes its model the owner's own.
+    client.post("/api/owner/chat-model", json={**CHOSEN, **MAIN_CHAT})
+    assert _registry_row(root, "copied")["model_choice"]["model"] == "local-model"
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "copied"})
+    assert "model_choice_copied" not in _registry_row(root, "copied")
+    chosen = {"id": "after-the-pick", "project_id": "copied"}
+    route_choice.capture_lead(chosen, root)
+    assert chosen["metadata"]["lead"] == LEAD and lead_fact.chooser_words("room", LEAD) == "set by my human for this chat"
 
 
 @pytest.mark.parametrize("model,local,account,pin,reset", [
@@ -110,12 +172,10 @@ def test_main_and_each_project_keep_their_own_choice(room):
     ("local-model", True, "none", "", True),
     (SOL, False, "kept", "acc-main", False),
 ])
-def test_main_write_keeps_only_same_subscription_source_pin_and_resets_only_changed_model(
+def test_mains_role_writer_keeps_only_same_subscription_source_pin_and_resets_only_changed_model(
         room, model, local, account, pin, reset):
-    _root, client = room
-    response = client.post("/api/owner/chat-model", json={"kind": "model", "model": model, "use_local": local})
-    assert response.status_code == 200, response.text
-    assert response.json()["account"] == account and response.json()["window_reset"] is reset
+    result = _write_main_route(None, {"kind": "model", "model": model, "use_local": local}, origin=TOOL)
+    assert result["account"] == account and result["window_reset"] is reset
     saved = _saved()
     assert saved["OUROBOROS_MODEL"] == model and saved["USE_LOCAL_MAIN"] is local
     assert json.loads(saved["OUROBOROS_MODEL_ACCOUNTS"])["main"] == pin
@@ -124,20 +184,31 @@ def test_main_write_keeps_only_same_subscription_source_pin_and_resets_only_chan
     assert windows["fallback"] == [654321]
     if not reset:
         assert windows["main"] == 123456
+    assert saved.get("OUROBOROS_MAIN_CHAT_MODEL", "") == ""  # the role's write names no chat's model
 
 
-def test_main_locality_only_keeps_the_manual_window_and_records_the_writers_receipt(room, monkeypatch):
-    root, client = room
+def test_mains_role_writer_keeps_the_manual_window_on_a_locality_change_and_records_its_receipt(room, monkeypatch):
     save_owner({**OWNER, "OUROBOROS_MODEL": "owner/model", "OUROBOROS_MODEL_ACCOUNTS": "{}"})
     changes = []
     monkeypatch.setattr("ouroboros.gateway.owner_effort.record_settings_change", lambda request, receipt, **kw: changes.append(receipt))
-    reply = client.post("/api/owner/chat-model", json={"kind": "model", "model": "owner/model", "use_local": True})
-    assert reply.status_code == 200 and reply.json()["window_reset"] is False
+    result = _write_main_route(None, {"kind": "model", "model": "owner/model", "use_local": True}, origin=TOOL)
+    assert result["window_reset"] is False
     assert json.loads(_saved()[MODEL_CONTEXT_WINDOWS_KEY])["main"] == 123456
     assert changes[0]["USE_LOCAL_MAIN"]["new"] is True
     assert "OUROBOROS_MODEL" not in changes[0]
+
+
+def test_a_main_chat_choice_records_the_writers_receipt_and_a_recent(room, monkeypatch):
+    root, client = room
+    changes = []
+    monkeypatch.setattr("ouroboros.gateway.owner_effort.record_settings_change", lambda request, receipt, **kw: changes.append(receipt))
+    assert client.post("/api/owner/chat-model", json={"kind": "model", "model": "owner/model", "use_local": True, **MAIN_CHAT}).status_code == 200
+    assert set(changes[0]) == {"OUROBOROS_MAIN_CHAT_MODEL"} and changes[0]["OUROBOROS_MAIN_CHAT_MODEL"]["new"] == "owner/model (local)"
     recents = json.loads((root / "state/ui_preferences.json").read_text(encoding="utf-8"))["model_recents"]
     assert recents == [{"model": "owner/model", "use_local": True}]
+    # The same choice again writes nothing.
+    assert client.post("/api/owner/chat-model", json={"kind": "model", "model": "owner/model", "use_local": True, **MAIN_CHAT}).status_code == 200
+    assert changes[1] == {}
 
 
 @pytest.mark.parametrize("refusal,status,code", [
@@ -153,9 +224,9 @@ def test_main_writer_refusals_pass_through_without_recording_a_recent(room, monk
     error = getattr(deployment_policy if refusal == "DeploymentPolicyRefusal" else owner_settings, refusal)
     before = _saved()
     def refuse(*args, **kwargs):
-        raise error("OUROBOROS_MODEL")
+        raise error("OUROBOROS_MAIN_CHAT_MODEL")
     monkeypatch.setattr("ouroboros.gateway.owner_effort._owner_update_settings", refuse)
-    response = client.post("/api/owner/chat-model", json=CHOSEN)
+    response = client.post("/api/owner/chat-model", json={**CHOSEN, **MAIN_CHAT})
     assert response.status_code == status and response.json()["code"] == code
     assert response.json()["saved"] is False and _saved() == before
     assert not (root / "state/ui_preferences.json").exists()
@@ -163,7 +234,8 @@ def test_main_writer_refusals_pass_through_without_recording_a_recent(room, monk
 
 @pytest.mark.parametrize("body,status,code", [
     ({"kind": "pinned"}, 400, "chat_model_invalid"),
-    ({"kind": "main"}, 400, "chat_model_invalid"),
+    # A page loaded before the Main chat kept its own model: its write of Main is refused, never saved as the chat's.
+    ({"kind": "model", "model": ASTRA, "if_unchanged": {"OUROBOROS_MODEL": "token"}}, 400, "chat_model_invalid"),
     ({"kind": "fallback", "project_id": "alpha"}, 400, "chat_model_invalid"),
     ({"kind": "model", "model": "claudexor::codex"}, 400, "chat_model_invalid"),
     ({"kind": "model", "model": ASTRA, "project_id": "../alpha"}, 400, "chat_model_invalid"),
@@ -203,6 +275,35 @@ def test_admission_snapshots_the_room_once_and_records_mains_reference(room, mon
     monkeypatch.setattr("ouroboros.composer_cognition.read_room", broken)  # the one room reader of admission
     with pytest.raises(TypeError):
         route_choice.capture_lead({"id": "new"}, root)
+
+
+def test_the_owners_work_in_main_takes_the_main_chats_choice_and_a_schedule_keeps_following_main(room):
+    root, client = room
+    client.post("/api/owner/chat-model", json={**CHOSEN, **MAIN_CHAT})
+    save_owner({**_saved(), "OUROBOROS_MAIN_CHAT_PROCESSING": "economy"})
+    turn = {"id": "turn"}
+    route_choice.capture_lead(turn, root)
+    assert turn["metadata"] == {"lead": LEAD, "processing": {"source": "room", "tier": "economy"}}
+    # The carried model runs as every room's own does: Auto, its own window, no tier of Main's.
+    assert task_model_binding({"task_metadata": turn["metadata"]}) == ("lead", "")
+    # A schedule born in Main, whoever wrote it, records its follow of Main as before.
+    for writer in ("owner", "consciousness"):
+        timed = {"id": f"timed-{writer}", "metadata": {"schedule_writer_kind": writer}}
+        route_choice.capture_lead(timed, root)
+        assert timed["metadata"]["lead"] == {"source": "main"} and timed["metadata"]["processing"] == {"source": "default"}
+        assert task_model_binding({"task_metadata": timed["metadata"]}) == ("main", None)
+    # Queue admission reads the same choice from the settings it read before Q, and none of it for a room's work.
+    queued = {"id": "queued"}
+    route_choice.capture_lead(queued, root, admitted=True, settings=config.load_settings())
+    assert queued["metadata"]["lead"] == LEAD
+    # Nothing chosen: the recorded follow, on Main's own binding (its pin, tier and window).
+    client.post("/api/owner/chat-model", json={"kind": "main", **MAIN_CHAT})
+    save_owner({**_saved(), "OUROBOROS_MAIN_CHAT_PROCESSING": ""})
+    plain = {"id": "plain"}
+    route_choice.capture_lead(plain, root)
+    assert plain["metadata"] == {"lead": {"source": "main"}, "processing": {"source": "default"}}
+    assert task_model_binding({"task_metadata": plain["metadata"]}) == ("main", None)
+    assert task_processing_preference({"task_metadata": plain["metadata"]}, model_role="main") == "fast"
 
 
 @pytest.mark.parametrize("extra,stamp", [

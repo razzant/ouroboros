@@ -78,7 +78,9 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
     assert not world.other.closed
     if shape == "fit":
         assert hosts == [task_id] and not world.hub.closed
-        assert not errors and not finished and not world.notices and events.empty()
+        assert not errors and not finished and not world.notices
+        # Nothing reached the bus but the turn's own first-step fact for its row (the tier it was admitted with).
+        assert {row["type"] for row in events.queue} <= {"direct_turn_bound"}
         return
     assert not hosts and len(errors) == 1
     stored = load_task_result(tmp_path, task_id)
