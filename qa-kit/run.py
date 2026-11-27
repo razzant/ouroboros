@@ -187,14 +187,22 @@ def contract(args: argparse.Namespace) -> dict:
 
 def pack(candidate: pathlib.Path, payload: pathlib.Path, out_dir: pathlib.Path, compiler: str) -> tuple[pathlib.Path, dict]:
     """The author's packer: ``scripts/pack_windows_setup.ps1 -PayloadRoot <Ouroboros folder> -OutputDir <empty folder> [-Compiler ISCC.exe]``."""
-    cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-File", str(candidate / "scripts" / "pack_windows_setup.ps1"),
+    # The public release jobs run this packer in PowerShell 7, not legacy Windows PowerShell.
+    cmd = ["pwsh.exe", "-NoProfile", "-NonInteractive", "-File", str(candidate / "scripts" / "pack_windows_setup.ps1"),
            "-PayloadRoot", str(payload), "-OutputDir", str(out_dir)] + (["-Compiler", compiler] if compiler else [])
     started = time.monotonic()
-    done = subprocess.run(cmd, cwd=candidate, capture_output=True, text=True, timeout=3600)
+    done = subprocess.run(cmd, cwd=candidate, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
     found = sorted(out_dir.glob("Ouroboros-Setup-*-windows-x64.exe")) if out_dir.is_dir() else []
     facts = {"packer_exit_code": done.returncode, "installers_found": len(found), "seconds": round(time.monotonic() - started, 1)}
     if done.returncode or len(found) != 1:
-        print(f"packer_failed exit={done.returncode} installers={len(found)}", file=sys.stderr)  # never the packer's own text
+        # Keep diagnostics from the public compiler on its synthetic build inputs; never publish its raw streams.
+        import shutil
+        from acceptance import strip_paths
+        diagnostics = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", done.stderr or "").splitlines()
+        messages = [pb._scrub_text(strip_paths(line), 220) for line in diagnostics[-12:] if line.strip()]
+        free_mb = shutil.disk_usage(payload).free // (1 << 20)
+        print(f"packer_failed exit={done.returncode} installers={len(found)} free_MiB={free_mb} "
+              f"diagnostics={json.dumps(messages)}", file=sys.stderr)
         raise Stop("packer_failed")
     return found[0], {**facts, "installer_name": found[0].name, "installer_bytes": found[0].stat().st_size}
 
