@@ -10,6 +10,7 @@ import * as accounts from '../modules/harness_accounts.js';
 import * as status from '../modules/subagent_status_primitives.js';
 import * as login from '../modules/harness_login_cards.js';
 import * as agentsStep from '../modules/onboarding_agents_step.js';
+import { providerRowFacts } from '../modules/settings_accounts.js';
 import { indexProfilesByHarness } from '../modules/route_editor_primitives.js';
 import { availableSubagentRowMarkup } from '../modules/subagents_settings.js';
 import { sessionRow } from './helpers/subagents_editor.js';
@@ -124,10 +125,21 @@ test('Accounts on an unsupported model lists nothing and offers no Connect or Ad
     const groups = accounts.accountGroups(snapshot, options);
     assert.deepEqual(groups.map((group) => [group.harness, group.rows.length, group.status.label]), [
         ['claude', 0, 'Not listed — needs a newer Claudexor'], ['codex', 0, 'Not listed — needs a newer Claudexor'],
-        ['cursor', 0, 'Not listed — needs a newer Claudexor']]);
+        ['cursor', 0, 'Not listed — needs a newer Claudexor'], ['agy', 0, 'Not listed — needs a newer Claudexor']]);
     const html = groups.map((group) => accounts.harnessFamilyMarkup(group, snapshot,
         { accountsRead: options.accountsRead, quotaRead: 'ok', store: instance, accountsUnsupported: true })).join('');
     assert.doesNotMatch(html, /data-family-add|data-harness-login|data-next-up/);
+    // The Settings list reads the same store, whose unsupported result is a failed accounts facet: a head for a program
+    // read absent installs the program alone, never promising a sign-in on a roster this engine cannot list. The same
+    // absence on the family page (or one it cannot install) leaves no Connect either.
+    const absent = { selection: { path: null, version: null }, updateAvailable: 'cannot_tell', newest: { status: 'not_read' }, operation: null,
+        actions: { install: { available: true, reason: null, commands: [] } } };
+    assert.equal(instance.accountsUnsupported, true);
+    for (const group of groups) {
+        assert.deepEqual(providerRowFacts(group, { accountsRead: options.accountsRead, program: absent }).action, { label: 'Install', connect: false }, group.harness);
+        assert.doesNotMatch(accounts.harnessFamilyMarkup(group, snapshot, { accountsRead: options.accountsRead, quotaRead: 'ok', store: instance,
+            accountsUnsupported: true, missing: { installable: true } }), /data-family-add/, group.harness);
+    }
     const line = accounts.serviceBannerLine(instance, {});
     assert.equal(line.tone, 'warn');
     assert.equal(line.text, instance.unavailableNote('accounts').text);
@@ -163,7 +175,8 @@ test('a current engine keeps its normal Accounts surface', async () => {
     }));
     const groups = accounts.accountGroups(instance.snapshot, { accountsRead: 'ok', catalogKnown: true });
     assert.deepEqual(groups.map((group) => [group.harness, group.rows.map((row) => row.profile_id), group.status.label]), [
-        ['claude', ['claude-default'], 'Signed in'], ['codex', ['codex-default'], 'Signed in'], ['cursor', [], 'No account connected']]);
+        ['claude', ['claude-default'], 'Signed in'], ['codex', ['codex-default'], 'Signed in'], ['cursor', [], 'No account connected'],
+        ['agy', [], 'No account connected']]);
     const html = accounts.harnessFamilyMarkup(groups[0], instance.snapshot, { accountsRead: 'ok', quotaRead: 'ok', store: instance });
     assert.match(html, /data-family-add>Add account</);
     assert.match(html, /data-harness-remove/);

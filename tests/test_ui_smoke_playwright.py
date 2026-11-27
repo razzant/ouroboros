@@ -3238,8 +3238,8 @@ def test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit(direct_
                                 await new Promise((r) => setTimeout(r, 20));
                             }
                         };
-                        const p1 = m.startLogin('codex', 'race-a');
-                        const p2 = m.startLogin('codex', 'race-a');
+                        const p1 = m.startLogin('codex', 'race-a', { add: true });
+                        const p2 = m.startLogin('codex', 'race-a', { add: true });
                         await Promise.all([p1, p2]);
                         loginHost()?.querySelector('[data-login-dismiss]')?.click();
                         (await wait('[data-login-reconcile]'))?.click();
@@ -3290,7 +3290,7 @@ def test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit(direct_
                             document.querySelector('[data-family-login="codex"]')
                             || document.getElementById('harness-login-card');
                         const m = await import('/static/modules/harness_accounts.js');
-                        await m.startLogin('codex', 'race-a');
+                        await m.startLogin('codex', 'race-a', { add: true });
                         loginHost()?.querySelector('[data-login-reconcile]')?.click();
                         for (let i = 0; i < 100
                             && !loginHost()?.querySelector('[data-login-retry]'); i++)
@@ -3357,12 +3357,12 @@ def test_ui_smoke_dismiss_overlapping_start_cannot_drop_a_live_job(direct_server
                             || document.getElementById('harness-login-card');
                         if (!loginHost()) return { error: 'NO-HOST' };
                         const m = await import('/static/modules/harness_accounts.js');
-                        await m.startLogin('codex', 'ov-a');
+                        await m.startLogin('codex', 'ov-a', { add: true });
                         loginHost()?.querySelector('[data-login-dismiss]')?.click();
-                        await m.startLogin('codex', 'ov-b');
+                        await m.startLogin('codex', 'ov-b', { add: true });
                         await new Promise((r) => setTimeout(r, 600));
                         const cardAfterQueuedStart = (loginHost()?.innerHTML || '').length > 0;
-                        await m.startLogin('codex', 'ov-c');
+                        await m.startLogin('codex', 'ov-c', { add: true });
                         return {
                             cardAfterQueuedStart,
                             finalHasCard: (loginHost()?.innerHTML || '').length > 0,
@@ -3464,7 +3464,7 @@ def test_ui_smoke_stale_get_cannot_overwrite_login_terminal_faces(
                             document.querySelector('[data-family-login="codex"]')
                             || document.getElementById('harness-login-card');
                         const m = await import('/static/modules/harness_accounts.js');
-                        await m.startLogin('codex', 'stale-' + face);
+                        await m.startLogin('codex', 'stale-' + face, { add: true });
                         await new Promise((r) => setTimeout(r, 3200));
                         loginHost()?.querySelector('[data-login-dismiss]')?.click();
                         await new Promise((r) => setTimeout(r, 100));
@@ -3630,7 +3630,7 @@ def test_ui_smoke_dismiss_overlapping_settle_never_freezes_the_card(direct_serve
                             document.querySelector('[data-family-login="codex"]')
                             || document.getElementById('harness-login-card');
                         const m = await import('/static/modules/harness_accounts.js');
-                        await m.startLogin('codex', 'os-a');
+                        await m.startLogin('codex', 'os-a', { add: true });
                         loginHost()?.querySelector('[data-login-dismiss]')?.click();
                         await new Promise((r) => setTimeout(r, 5200));
                         const host = loginHost();

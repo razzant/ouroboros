@@ -269,8 +269,16 @@ test('a family line shows what there is to act on and stays silent otherwise', a
     assert.equal(shown(familyEntry('f', {updateAvailable: 'no'})), false, 'up to date says nothing here');
     assert.equal(shown(familyEntry('f', {selection: {path: null, version: null}})), false, 'Connect installs a missing program');
     assert.equal(shown(familyEntry('f', {newest: {status: 'not_read', source: null}})), false, 'the line waits for the newest read');
-    assert.equal(shown(familyEntry('f'), {inspectionError: 'Program inspection unavailable: refused'}), false);
+    // W5 (rl-20261127T050408): a refused read of this family is its own applicable fact — reason + Check again;
+    // only the whole list's refusal stays out of the row (its one notice lives in `others()`).
+    assert.equal(shown(familyEntry('f'), {inspectionError: 'Program inspection unavailable: refused'}), true);
+    assert.equal(shown(familyEntry('f'), {inspectionError: 'x', inventoryError: 'y'}), false,
+        'the engine-wide notice is not repeated on the row');
     assert.equal(shown(familyEntry('f'), {inventoryError: 'Program inspection unavailable: refused'}), false);
+    const refusedLine = modelProgramMarkup({harness: 'f'}, {entry: familyEntry('f'), inspectionError: 'Program inspection unavailable: refused'}, 'Program 0.50.0');
+    assert.match(refusedLine, /data-tone="warn">Program inspection unavailable: refused/);
+    assert.match(refusedLine, /data-program-action="inspect">Check again</);
+    assert.doesNotMatch(refusedLine, /data-program-action="(install|latest|rejoin)"/, 'no press stands on the refused read');
     const refused = familyEntry('f', {actions: {update: {available: false, reason: 'Installed by another tool; update it there'}}});
     assert.equal(shown(refused), true);
     assert.match(modelProgramMarkup({harness: 'f'}, {entry: refused}, 'Program 0.50.0'), /Installed by another tool/);
@@ -300,6 +308,171 @@ test('a family line shows what there is to act on and stays silent otherwise', a
     const retry = modelProgramMarkup({harness: 'f'}, {entry: replaced, request: {key: 'k'}}, 'Not installed');
     assert.match(retry, /<span>Not installed\u00a0· <span class="harness-model-latest">0\.60\.0 available<\/span><\/span>/);
     assert.match(retry, /data-program-action="rejoin">Retry same request</);
+    // An absent program the engine cannot install here, or whose install failed, says why and offers Check again; the
+    // family row's own Install & connect is the one press that installs it.
+    const unable = familyEntry('f', {selection: {path: null, version: null},
+        actions: {install: {available: false, reason: 'f has no installer for linux.', commands: []}}});
+    assert.equal(shown(unable), true);
+    const unableHtml = modelProgramMarkup({harness: 'f'}, {entry: unable}, 'Not installed');
+    assert.match(unableHtml, /f has no installer for linux\./);
+    assert.match(unableHtml, /data-program-action="inspect">Check again</);
+    assert.doesNotMatch(unableHtml, /data-program-action="(latest|install)"|Install it yourself/);
+    assert.match(unableHtml, /If this system cannot run it, choose another program or run Ouroboros on a system that supports it\./,
+        'a refusal never calls to install what this system may not run');
+    const lost = familyEntry('f', {selection: {path: null, version: null}, releaseNotesUrl: 'https://vendor.invalid/f/releases',
+        operation: {id: 'op', state: 'failed', termination: 'confirmed', commands: [{binary: 'npm', args: ['install', '-g', 'vendor-f'], env: {X: '1'}, script: null}]}});
+    assert.equal(shown(lost), true);
+    // On a family row its own press installs; the line says the failure and reads it again, nothing to run by hand.
+    const lostHtml = modelProgramMarkup({harness: 'f'}, {entry: lost}, 'Not installed', {install: false});
+    assert.match(lostHtml, /Install failed/);
+    assert.doesNotMatch(lostHtml, /npm install|X=1|vendor\.invalid\/f\/releases/, 'neither what the engine ran nor a release-notes page');
+    assert.match(lostHtml, /data-program-action="inspect">Check again</);
+    assert.doesNotMatch(lostHtml, /data-program-action="(latest|install)"/);
+    // A model chooser has no family row: its line keeps the Install it always offered an absent producer.
+    const chooser = modelProgramMarkup({harness: 'f', programs: [{path: '/vendor/f', version: '0.50.0'}], label: 'F'}, {entry: lost});
+    assert.match(chooser, /data-program-action="install">Install<\/button>/);
+    assert.match(modelProgramMarkup({harness: 'f', programs: [{path: '/vendor/f', version: '0.50.0'}], label: 'F'},
+        {entry: familyEntry('f', {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'})}), /data-program-action="install">Install</);
+});
+
+test('an absent program offers Install only on a read that stands; a refused or stale one keeps its reason and Check again', () => {
+    const absent = familyEntry('f', {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    const program = {harness: 'f', programs: [{path: '/vendor/f', version: '0.50.0'}], label: 'F'};
+    const refusal = 'Program inspection unavailable: The engine is not running.';
+    const line = (view, options) => modelProgramMarkup(program, {entry: absent, ...view}, 'Not installed', options);
+    assert.match(line({}), /data-program-action="install">Install<\/button>/, 'a standing read offers it');
+    assert.doesNotMatch(line({}, {install: false}), /data-program-action="install"/, 'a family row\'s own press installs it instead');
+    for (const [why, view] of [['a refused read of the program', {inspectionError: refusal}], ['a refused read of the whole list', {inventoryError: refusal}],
+        ['a newer list that left it out', {listed: false}]]) {
+        for (const options of [undefined, {install: false}]) {
+            const html = line(view, options);
+            assert.doesNotMatch(html, /data-program-action="(install|latest)"/, `${why}: no Install on an observation that no longer stands`);
+            assert.match(html, /data-program-action="inspect">Check again</, `${why}: the way back is to read it again`);
+            assert.match(html, /Not installed/, `${why}: the program as last read`);
+        }
+        if (view.listed === undefined) assert.match(line(view), /data-tone="warn">Program inspection unavailable: The engine is not running\./, `${why}: its reason`);
+    }
+    // An unresolved press keeps its recovery through a refused read as before; an operation under way offers no second press.
+    assert.match(line({inspectionError: refusal, request: {key: 'k'}}), /data-program-action="rejoin"[^>]*>Retry same request</);
+    const running = line({operation: {id: 'op', state: 'running'}});
+    assert.match(running, /data-program-action="install" disabled>Install</, 'an operation under way: the press stands but disabled');
+    assert.doesNotMatch(running, /data-program-action="inspect"/);
+    // W5 (rl-20261127T050408): a cold read can be the whole story — `familyProgramShown` shows a family's refused
+    // targeted read with no earlier row (`entry` null, e.g. a login reply then a refused program read), and that row
+    // keeps its reason and its way back. A cold row with nothing to act on stays button-free, and a shorter list that
+    // merely left the program out earns no Check again.
+    const cold = (view) => modelProgramMarkup({harness: 'f'}, view, 'Program version not checked');
+    assert.doesNotMatch(cold({}), /Check again/, 'no earlier row and no refusal: no way back to offer');
+    assert.doesNotMatch(cold({listed: false}), /Check again/, 'a shorter list that left it out: a cold row says nothing');
+    const coldRefusal = cold({inspectionError: refusal});
+    assert.match(coldRefusal, /data-tone="warn">Program inspection unavailable: The engine is not running\./, 'the cold refusal keeps its reason');
+    assert.match(coldRefusal, /data-program-action="inspect">Check again</, 'and the row the read again');
+    assert.doesNotMatch(coldRefusal, /data-program-action="(install|latest|rejoin)"/, 'with no press on the refused read');
+    assert.match(cold({inspectionError: refusal, request: {key: 'k'}}), /data-program-action="rejoin"[^>]*>Retry same request</,
+        'an unresolved press keeps its own action even with no earlier row');
+});
+
+test('a wizard row whose Install press met a refused read keeps its line, sends nothing and offers Check again', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const calls = [], starts = [];
+    let refuse = false;
+    const absent = (harness) => familyEntry(harness, {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    const api = {
+        async harnessMaintenanceInventory(query) {
+            calls.push(query);
+            if (refuse && query.harness) throw Object.assign(new Error('The engine stopped answering.'), {status: 503});
+            return {harnesses: [absent('wiz-stale-family'), absent('wiz-stale-alone')]};
+        },
+        async startHarnessMaintenance(body, key) { starts.push([body, key]); return {id: 'op', harness: body.harness, state: 'running', phase: 'installing'}; },
+    };
+    const programs = bindFamilyPrograms({harnesses: ['wiz-stale-family'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    assert.match(programs.others(), /data-program="wiz-stale-alone"[\s\S]*data-program-action="install">Install</, 'read absent: its own Install');
+    let press;
+    const bind = () => programs.bind({querySelectorAll: () => [{dataset: {programAction: 'install'}, closest: () => ({dataset: {program: 'wiz-stale-alone'}}),
+        addEventListener: (_type, fn) => { press = fn; }}]});
+    bind();
+    refuse = true;
+    press(); await flush();
+    assert.deepEqual(starts, [], 'the read before the Install was refused: nothing was sent');
+    const others = programs.others();
+    assert.match(others, /data-program="wiz-stale-alone"/, 'the pressed program keeps its line');
+    assert.match(others, /Program inspection unavailable: The engine stopped answering\./, 'with its reason');
+    assert.match(others, /data-program-action="inspect">Check again</, 'and its recovery');
+    assert.doesNotMatch(others, /data-program-action="install"/, 'but no Install on the stale observation');
+    // Read again, it stands again: one Install, one request.
+    refuse = false;
+    bind();
+    await programs.read(); await flush();
+    assert.match(programs.others(), /data-program-action="install">Install</);
+    bind();
+    press(); await flush();
+    assert.deepEqual(starts.map(([body]) => body), [{harness: 'wiz-stale-alone', target: {kind: 'latest'}}]);
+    programs.dispose();
+});
+
+test('the wizard with Claudexor stopped says once that Connect installs, and its one press starts the daemon to list programs', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const calls = [];
+    let woke = {ok: false, error: 'claudexor_unavailable: The engine could not start.'};
+    const store = {snapshot: null, async wake() {
+        calls.push('wake');
+        if (woke.ok) store.snapshot = {daemon: {state: 'running', runtime: {state: 'ready'}}};
+        return woke;
+    }};
+    const absent = (harness) => familyEntry(harness, {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    const api = {async harnessMaintenanceInventory(query) { calls.push(query); return {harnesses: [absent('wiz-cold'), absent('wiz-alone')]}; }};
+    const programs = bindFamilyPrograms({harnesses: ['wiz-cold'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    assert.equal(programs.others(), '', 'nothing heard of the engine yet: nothing said');
+    store.snapshot = {daemon: {state: 'not_provisioned', runtime: {state: 'not_installed'}}};
+    programs.observe(); await flush();
+    const others = programs.others();
+    assert.match(others, /^<div class="agent-other-programs" data-programs-unknown><span>If a program is missing, Connect tries to install it first\.<\/span>/);
+    assert.match(others, /data-program-action="find">Show programs to install \(prepares and starts the agent daemon\)<\/button>/);
+    assert.equal(programs.missing('wiz-cold'), null, 'unread, no program is said absent: the row keeps Connect');
+    assert.deepEqual(calls, [], 'drawing and observing start nothing');
+
+    let press;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'find'}, addEventListener: (_type, fn) => { press = fn; }}]});
+    press();
+    assert.match(programs.others(), /data-program-action="find" disabled>Starting the agent daemon…</);
+    await flush();
+    assert.deepEqual(calls, ['wake']);
+    assert.match(programs.others(), /Could not start the agent daemon: claudexor_unavailable: The engine could not start\./);
+    assert.match(programs.others(), /data-program-action="find">Show programs to install/, 'a refused start leaves the press');
+
+    woke = {ok: true, error: ''};
+    press(); await flush();
+    assert.deepEqual(calls.slice(1), ['wake', {harness: '', fresh: true, checkLatest: false}], 'one start, then the programs as it reads them');
+    assert.deepEqual(programs.missing('wiz-cold'), {installable: true, failed: false, byHand: false}, 'the family row now says Install & connect');
+    assert.doesNotMatch(programs.others(), /data-programs-unknown/);
+    assert.match(programs.others(), /<span>More programs:<\/span>[\s\S]*data-program="wiz-alone"[\s\S]*data-program-action="install">Install</);
+    programs.dispose();
+});
+
+test('a sign-in answer reads its program again unless a current read shows it installed; a row that cannot install gives its line the Install', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const calls = [];
+    let rows = [];
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const api = {async harnessMaintenanceInventory(query) { calls.push(query); return {harnesses: rows.filter((row) => !query.harness || row.harness === query.harness)}; }};
+    const programs = bindFamilyPrograms({harnesses: ['wiz-ans'], store, api, onSettled: () => {}});
+    const answer = async () => { calls.length = 0; programs.loginHooks().onAnswer('wiz-ans'); await flush(); return calls; };
+    assert.deepEqual(await answer(), [{harness: 'wiz-ans', fresh: true, checkLatest: false}], 'never read: the sign-in may have installed it');
+    rows = [familyEntry('wiz-ans', {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'})];
+    await programs.read(); await flush();
+    assert.equal((await answer()).length, 1, 'read absent: read again');
+    assert.equal(programs.line('wiz-ans'), '', 'the row\'s own press installs it');
+    assert.match(programs.line('wiz-ans', {install: true}), /data-program-action="install">Install</, 'a row that cannot leaves it to the line');
+    rows = [familyEntry('wiz-ans')];
+    await programs.read(); await flush();
+    assert.deepEqual(await answer(), [], 'read installed now: nothing to read again');
+    programs.dispose();
 });
 
 // The engine could not be acquired for the press: the host answers that this attempt was not submitted.
@@ -440,6 +613,369 @@ test('a refused or failed inventory read paints nothing', async () => {
         fail = true;
         await programs.read(); await flush();
         assert.equal(programs.line(harness), '', `${harness}: a refused read clears the line`);
+        // A running engine that refused its inventory keeps its words where the other programs stand, and no start.
+        assert.match(programs.others(), /data-programs-unknown>[\s\S]*Connect tries to install it first\.[\s\S]*data-tone="warn"/);
+        assert.doesNotMatch(programs.others(), /data-program-action="find"/);
         programs.dispose();
     }
+});
+
+// W2 residual: the program row and the maintenance controller's completion boundary.
+
+test('a pending press outranks an old receipt: the row offers Retry same request, never Check operation', () => {
+    const program = {harness: 'f', programs: [{path: '/vendor/f', version: '0.50.0'}], label: 'F'};
+    const entry = familyEntry('f', {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    const html = modelProgramMarkup(program, {entry, request: {key: 'k'},
+        operation: {id: 'op', state: 'failed', termination: 'unconfirmed'}}, 'Not installed');
+    assert.match(html, /data-program-action="rejoin"[^>]*>Retry same request</, 'the unresolved press is the recovery');
+    assert.doesNotMatch(html, /Check operation/, 'an older receipt never labels the row');
+    assert.doesNotMatch(html, /data-program-action="(install|latest)"/, 'and it offers no second press');
+});
+
+test('facts that no longer stand offer no press and no advice by hand, only the way back', () => {
+    const program = {harness: 'f', programs: [{path: '/vendor/f', version: '0.50.0'}], label: 'F'};
+    // A newer list left this program out: its retained row is no current basis for an Update.
+    const present = familyEntry('f');
+    const stale = modelProgramMarkup(program, {entry: present, listed: false}, 'Program 0.50.0');
+    assert.doesNotMatch(stale, /data-program-action="(install|latest)"/, 'no new press on a fact that no longer stands');
+    assert.match(stale, /data-program-action="inspect">Check again</, 'the way back is the row\'s own read');
+    assert.match(stale, /Program 0\.50\.0/, 'the program as last read stays');
+    // An absent program the owner may install by hand: a stale list is no basis for that advice either.
+    const absent = familyEntry('f', {selection: {path: null, version: null},
+        actions: {install: {available: false, reason: 'f has no installer for linux.'}}});
+    const advice = modelProgramMarkup(program, {entry: absent, listed: false}, 'Not installed');
+    assert.doesNotMatch(advice, /data-program-action="(install|latest)"/);
+    assert.doesNotMatch(advice, /If this system cannot run it|To install it by hand/, 'no advice by hand from a retained fact');
+    assert.match(advice, /data-program-action="inspect">Check again</);
+});
+
+test('a failed operation keeps its own reason on the row', () => {
+    const program = {harness: 'f', programs: [{path: '/vendor/f', version: '0.50.0'}], label: 'F'};
+    const entry = familyEntry('f', {selection: {path: null, version: null},
+        operation: {id: 'op', state: 'failed', termination: 'confirmed', problem: {message: 'npm registry refused the package'}}});
+    const html = modelProgramMarkup(program, {entry}, 'Not installed');
+    assert.match(html, /Install failed/, 'the outcome stays');
+    assert.match(html, /npm registry refused the package/, 'and so does the engine\'s own reason');
+});
+
+test('a cold login answer reads its program even when the store has not polled the daemon again', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const calls = [];
+    // The store still says the daemon is not running: the answer itself may have started it.
+    const store = {snapshot: {daemon: {state: 'not_provisioned', runtime: {state: 'not_installed'}}}};
+    const api = {async harnessMaintenanceInventory(query) {
+        calls.push(query);
+        return {harnesses: [familyEntry('wiz-cold-answer')]};
+    }};
+    const programs = bindFamilyPrograms({harnesses: ['wiz-cold-answer'], store, api, onSettled: () => {}});
+    programs.loginHooks().onAnswer('wiz-cold-answer');
+    await flush();
+    assert.deepEqual(calls, [{harness: 'wiz-cold-answer', fresh: true, checkLatest: false}],
+        'the program\'s own targeted read is not skipped because the store has not polled');
+    programs.dispose();
+});
+
+test('a pressed program keeps its row after the wizard is remounted', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const absent = (harness) => familyEntry(harness, {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    let refuse = false;
+    const api = {async harnessMaintenanceInventory(query) {
+        if (refuse && query.harness) throw Object.assign(new Error('The engine stopped answering.'), {status: 503});
+        return {harnesses: [absent('wiz-fam'), absent('wiz-alone')]};
+    }};
+    const first = bindFamilyPrograms({harnesses: ['wiz-fam'], store, api, onSettled: () => {}});
+    first.observe({remount: true}); await flush();
+    let press;
+    first.bind({querySelectorAll: () => [{dataset: {programAction: 'install'}, closest: () => ({dataset: {program: 'wiz-alone'}}),
+        addEventListener: (_type, fn) => { press = fn; }}]});
+    refuse = true;
+    press(); await flush();
+    assert.match(first.others(), /data-program="wiz-alone"/, 'the pressed program keeps its line');
+    // The wizard is remounted: the press belongs with the shared record, so the row and its recovery stay.
+    const second = bindFamilyPrograms({harnesses: ['wiz-fam'], store, api, onSettled: () => {}});
+    assert.match(second.others(), /data-program="wiz-alone"/, 'the pressed program keeps its row after the remount');
+    assert.match(second.others(), /data-program-action="inspect">Check again</, 'with its recovery');
+    first.dispose(); second.dispose();
+});
+
+// ---- W3 (rl-20261126T203549-c634366eecb0): a refused or omitting read is no fact to show a family line by,
+// and the owner's pressed Install keeps its line, reason and recovery through it. ----
+
+test('familyProgramShown shows a targeted refusal and hides whole-list or omitting reads before any absent-program speech', async () => {
+    const {familyProgramShown} = await import('../modules/model_program.js');
+    const unable = familyEntry('f', {selection: {path: null, version: null},
+        actions: {install: {available: false, reason: 'f has no installer for linux.', commands: []}}});
+    assert.equal(familyProgramShown({entry: unable}), true, 'an unpressed by-hand row is unchanged');
+    // W5 (rl-20261127T050408): the refused targeted read is this family's own fact even with no program
+    // selected (a login answer read it and was refused); its read again carries no Install speech.
+    assert.equal(familyProgramShown({entry: unable, inspectionError: 'x'}), true,
+        'a targeted refusal speaks with its reason and Check again');
+    for (const view of [{inventoryError: 'x'}, {listed: false}])
+        assert.equal(familyProgramShown({entry: unable, ...view}), false,
+            `${JSON.stringify(view)}: no duplicate refusal beside the whole list's notice`);
+});
+
+test('a pressed family row keeps its line, reason and Check again when the read before its Install is refused', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const starts = [];
+    let refuse = false;
+    const absent = (h) => familyEntry(h, {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    const api = {
+        async harnessMaintenanceInventory(query) {
+            if (refuse && query.harness) throw Object.assign(new Error('The engine stopped answering.'), {status: 503});
+            return {harnesses: [absent('wiz-fam')]};
+        },
+        async startHarnessMaintenance(body, key) { starts.push([body, key]); return {id: 'op', harness: body.harness, state: 'running', phase: 'installing'}; },
+    };
+    const programs = bindFamilyPrograms({harnesses: ['wiz-fam'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    let press;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'install'}, closest: () => ({dataset: {program: 'wiz-fam'}}),
+        addEventListener: (_t, fn) => { press = fn; }}]});
+    refuse = true;
+    press(); await flush();
+    assert.deepEqual(starts, [], 'the refused pre-install read sent nothing');
+    const line = programs.line('wiz-fam');
+    assert.match(line, /data-program="wiz-fam"/, 'the pressed family row keeps its line');
+    assert.match(line, /Program inspection unavailable: The engine stopped answering\./, 'with its reason');
+    assert.match(line, /data-program-action="inspect">Check again</, 'and its recovery');
+    assert.doesNotMatch(line, /data-program-action="(install|latest)"/, 'no new press on the refused observation');
+    programs.dispose();
+});
+
+test('others() renders a pressed program beside the whole-inventory refusal', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const starts = [];
+    let failWhole = false;
+    const absent = (h) => familyEntry(h, {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    const api = {
+        async harnessMaintenanceInventory(query) {
+            if (failWhole && !query.harness) throw Object.assign(new Error('Inventory refused'), {status: 503});
+            return {harnesses: [absent('wiz-fam'), absent('wiz-alone')]};
+        },
+        async startHarnessMaintenance(body) { starts.push(body); return {id: 'op', harness: body.harness, state: 'running', phase: 'installing'}; },
+    };
+    const programs = bindFamilyPrograms({harnesses: ['wiz-fam'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    let press;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'install'}, closest: () => ({dataset: {program: 'wiz-alone'}}),
+        addEventListener: (_t, fn) => { press = fn; }}]});
+    press(); await flush();
+    assert.equal(starts.length, 1, 'the pre-install read answered absent: one Install sent');
+    failWhole = true;
+    await programs.read(); await flush();
+    const html = programs.others();
+    assert.match(html, /data-programs-unknown[\s\S]*Inventory refused/, 'the whole refusal keeps its one notice');
+    assert.match(html, /data-program="wiz-alone"/, 'the pressed program renders beside it');
+    programs.dispose();
+});
+
+// ---- W5: the recovery row of the setup wizard. A refused inventory offers its way back, a failed status read
+// retires what the old running said (and the press says the start it will make), and a stopped engine hides
+// nothing of the owner's own. ----
+
+test('a refused inventory on a running engine offers Check again: one fresh inventory, no wake, no press', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 80; n++) await Promise.resolve(); };
+    const calls = [];
+    let refuse = false;
+    const store = {snapshot: {daemon: {state: 'running'}}, error: '', async wake() { calls.push('wake'); return {ok: true}; }};
+    const api = {async harnessMaintenanceInventory(query) {
+        calls.push(query);
+        if (refuse) throw Object.assign(new Error('Inventory refused'), {status: 503});
+        return {harnesses: [familyEntry('wiz-inv')]};
+    }};
+    const programs = bindFamilyPrograms({harnesses: ['wiz-inv'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    assert.deepEqual(calls[0], {harness: '', fresh: true, checkLatest: false}, 'the engine is asked for its inventory once');
+    refuse = true;
+    await programs.read(); await flush();
+    const others = programs.others();
+    assert.match(others, /data-programs-unknown[\s\S]*Inventory refused/, 'the refusal keeps its explanation');
+    assert.match(others, /data-program-action="check-inventory">Check again</, 'and the way back beside it');
+    assert.doesNotMatch(others, /data-program-action="find"/, 'a running engine is never started by this row');
+    let press;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'check-inventory'},
+        addEventListener: (_t, fn) => { press = fn; }}]});
+    const before = calls.length;
+    press(); await flush();
+    assert.deepEqual(calls.slice(before), [{harness: '', fresh: true, checkLatest: false}],
+        'exactly one fresh inventory: no wake, no press, no second read');
+    programs.dispose();
+});
+
+test('a failed status read retires the old running: no program rows, and the press is the labelled start', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 80; n++) await Promise.resolve(); };
+    const calls = [];
+    const store = {snapshot: {daemon: {state: 'running'}}, error: 'unreachable',
+        // The real store clears its read error only when the engine answers this, and the row follows that answer.
+        async wake() { calls.push('wake'); this.error = ''; return {ok: true}; }};
+    const api = {async harnessMaintenanceInventory(query) {
+        calls.push(query);
+        return {harnesses: [familyEntry('wiz-stale')]};
+    }};
+    const programs = bindFamilyPrograms({harnesses: ['wiz-stale'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    assert.deepEqual(calls, [], 'a status read that failed asks nothing by itself');
+    const others = programs.others();
+    assert.doesNotMatch(others, /data-program="wiz-stale"/, 'no program row from the old running read');
+    assert.doesNotMatch(others, /data-program-action="install"/, 'and no new install from it');
+    assert.match(others, /data-program-action="find">Show programs to install \(prepares and starts the agent daemon\)/,
+        'the retained running row behind the failed read signs no mere read: the press says the start it will make');
+    let press;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'find'},
+        addEventListener: (_t, fn) => { press = fn; }}]});
+    press(); await flush();
+    assert.equal(calls[0], 'wake', 'one start, as the press promised');
+    assert.deepEqual(calls.slice(1, 2), [{harness: '', fresh: true, checkLatest: false}], 'and one fresh inventory behind it');
+    assert.equal(calls.filter((call) => call?.harness === '').length, 1, 'no second whole read');
+    assert.equal(programs.line('wiz-stale') !== '', true, 'the engine that answered again speaks its row');
+    programs.dispose();
+});
+
+test('a partial answer is an answering engine: its refused programs row gives the fresh Check, never a start', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 80; n++) await Promise.resolve(); };
+    const calls = [];
+    // The daemon calls itself unreachable while one facet landed: that IS an answer (`daemonAnswered`), and a start
+    // would be a second act the owner never asked for.
+    const store = {snapshot: {daemon: {state: 'unreachable'}, reads: {accounts: 'ok', catalog: 'not_read', quota: 'not_read'}},
+        error: '', async wake() { calls.push('wake'); return {ok: true}; }};
+    const api = {async harnessMaintenanceInventory(query) {
+        calls.push(query);
+        throw Object.assign(new Error('Inventory refused'), {status: 503});
+    }};
+    const programs = bindFamilyPrograms({harnesses: ['wiz-part'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    assert.deepEqual(calls[0], {harness: '', fresh: true, checkLatest: false}, 'the engine that answered is asked for its programs');
+    const others = programs.others();
+    assert.match(others, /data-program-action="check-inventory">Check again</, 'the way back is a fresh read');
+    assert.doesNotMatch(others, /data-program-action="find"/, 'and no start is offered to an engine that answers');
+    assert.equal(calls.includes('wake'), false, 'nothing started itself');
+    programs.dispose();
+});
+
+test('a stopped engine keeps the owner\'s unresolved press and its receipt, and offers no new install', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 80; n++) await Promise.resolve(); };
+    const starts = [];
+    const store = {snapshot: {daemon: {state: 'running'}}, error: ''};
+    const absent = (harness) => familyEntry(harness, {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    const api = {
+        async harnessMaintenanceInventory() { return {harnesses: [absent('wiz-fam'), absent('wiz-stray')]}; },
+        async startHarnessMaintenance(body) { starts.push(body); throw Object.assign(new Error('Bad gateway'), {status: 503}); },
+    };
+    const programs = bindFamilyPrograms({harnesses: ['wiz-fam'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    let press;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'install'}, closest: () => ({dataset: {program: 'wiz-stray'}}),
+        addEventListener: (_t, fn) => { press = fn; }}]});
+    press(); await flush();
+    assert.equal(starts.length, 1, 'the press was sent once');
+    assert.match(programs.others(), /data-program="wiz-stray"[\s\S]*Retry same request/, 'the unconfirmed press keeps its receipt');
+    // The engine stops.
+    store.snapshot = {daemon: {state: 'stale'}};
+    const others = programs.others();
+    assert.match(others, /data-program="wiz-stray"[\s\S]*Retry same request/, 'a stopped engine hides nothing of the owner\'s own');
+    assert.match(others, /acceptance unconfirmed: Bad gateway/, 'and keeps the reason of the uncertain receipt');
+    assert.doesNotMatch(others, /data-program-action="install"/, 'no new install is offered');
+    assert.match(others, /data-program-action="find">Show programs to install/, 'the deliberate start stays');
+    assert.equal(programs.line('wiz-fam'), '', 'a family with nothing of the owner\'s own stays quiet');
+    programs.dispose();
+});
+
+// ---- W5 final (rl-20261127T050408): the two UI-facing recovery cases of the setup wizard — a refused targeted
+// read after a login reply keeps its family line, and a durable receipt keeps its other-program row after a
+// reload — plus the controller's unsafe-resend projection and the wizard's one pending-intent predicate. ----
+
+test('a refused targeted read after a login reply keeps the family line with its reason, never silence', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 80; n++) await Promise.resolve(); };
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const calls = [];
+    let refuse = false;
+    const api = {async harnessMaintenanceInventory(query) {
+        calls.push(query);
+        if (refuse && query.harness) throw Object.assign(new Error('The engine stopped answering.'), {status: 503});
+        return {harnesses: [familyEntry('wiz-antigravity', {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'})]};
+    }};
+    const programs = bindFamilyPrograms({harnesses: ['wiz-antigravity'], store, api, onSettled: () => {}});
+    programs.observe({remount: true}); await flush();
+    assert.equal(programs.line('wiz-antigravity'), '', 'absent with nothing pending: the row\'s own press installs it');
+    refuse = true;
+    programs.loginHooks().onAnswer('wiz-antigravity'); await flush();
+    assert.deepEqual(calls.at(-1), {harness: 'wiz-antigravity', fresh: true, checkLatest: false}, 'the answer read that program itself');
+    const line = programs.line('wiz-antigravity');
+    assert.match(line, /data-program="wiz-antigravity"/, 'the refused targeted read is no longer silence');
+    assert.match(line, /data-tone="warn">Program inspection unavailable: The engine stopped answering\./);
+    assert.match(line, /data-program-action="inspect">Check again</);
+    assert.doesNotMatch(line, /data-program-action="(install|latest)"/, 'no installation speech from the refused read');
+    assert.doesNotMatch(programs.others(), /data-programs-unknown/, 'the whole list answered: no engine-wide banner is invented');
+    programs.dispose();
+});
+
+test('after a reload a durable receipt keeps its other-program row though pressed is false', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 80; n++) await Promise.resolve(); };
+    for (const receipt of [{id: 'wiz-open-op', harness: 'wiz-open', state: 'failed', termination: 'unconfirmed', phase: 'installing'},
+        {id: 'wiz-open-run', harness: 'wiz-open', state: 'running', termination: 'not_applicable', phase: 'updating'}]) {
+        const store = {snapshot: {daemon: {state: 'running'}}};
+        const api = {async harnessMaintenanceInventory() {
+            return {harnesses: [familyEntry('wiz-settled', {updateAvailable: 'no'}),
+                {...familyEntry('wiz-open', {updateAvailable: 'no'}), operation: receipt}]};
+        }};
+        const programs = bindFamilyPrograms({harnesses: [], store, api, onSettled: () => {}});
+        programs.observe({remount: true}); await flush();
+        const others = programs.others();
+        assert.match(others, /data-program="wiz-open"/, `${receipt.state}: the durable receipt keeps its row`);
+        assert.doesNotMatch(others, /data-program="wiz-settled"/, 'a settled program with nothing of the owner\'s own stays out');
+        assert.doesNotMatch(others, /data-program-action="install"/, `${receipt.state}: no new install from a receipt`);
+        assert.match(others, receipt.termination === 'unconfirmed' ? /data-program-action="rejoin">Check operation</ : /data-program-action="latest"[^>]*disabled>Update</);
+        programs.dispose();
+    }
+});
+
+test('an unsafe resend keeps the owner\'s press, shows the reason and offers the read-only Check again', () => {
+    const program = {harness: 'f', programs: [{path: '/vendor/f', version: '0.50.0'}], label: 'F'};
+    const entry = familyEntry('f', {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'});
+    const blocked = 'Install outcome unknown; resending could duplicate it.';
+    for (const value of [blocked, {reason: blocked}, true]) {
+        const html = modelProgramMarkup(program, {entry, request: {key: 'k'}, retryBlocked: value}, 'Not installed');
+        assert.match(html, /data-program-action="inspect">Check again</, 'the way on is a read');
+        assert.doesNotMatch(html, /Retry same request|Sending…/, 'nothing offers the resend');
+        assert.doesNotMatch(html, /data-program-action="(install|latest)"/);
+    }
+    assert.match(modelProgramMarkup(program, {entry, request: {key: 'k'}, retryBlocked: blocked}, 'Not installed'),
+        /data-tone="warn">Install outcome unknown; resending could duplicate it\./);
+    const plain = modelProgramMarkup(program, {entry, request: {key: 'k'}}, 'Not installed');
+    assert.match(plain, /data-program-action="rejoin">Retry same request</, 'without the controller\'s block the replay stands');
+});
+
+test('the wizard exposes one pending-intent predicate for a family, from the standing view', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const api = {
+        async harnessMaintenanceInventory() { return {harnesses: [familyEntry('wiz-pend')]}; },
+        async startHarnessMaintenance(body) { return {id: 'wiz-pend-op', harness: body.harness, state: 'queued'}; },
+    };
+    const programs = bindFamilyPrograms({harnesses: ['wiz-pend'], store, api, onSettled: () => {}});
+    assert.equal(programs.pending('wiz-pend'), false, 'nothing of the owner\'s own, nothing pending');
+    programs.observe({remount: true}); await flush();
+    assert.equal(programs.pending('wiz-pend'), false, 'an answered read with no operation is not pending intent');
+    let click;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'latest'}, closest: () => ({dataset: {program: 'wiz-pend'}}),
+        addEventListener: (_t, fn) => { click = fn; }}]});
+    click(); await flush();
+    assert.equal(programs.pending('wiz-pend'), true, 'an operation under way is the family\'s true pending intent');
+    assert.match(programs.line('wiz-pend'), /data-program="wiz-pend"/, 'the row keeps the family the predicate names');
+    programs.dispose();
 });
