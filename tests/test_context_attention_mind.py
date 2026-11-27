@@ -435,6 +435,24 @@ def test_size_facts_count_each_producer_kind_as_one_part_from_typed_metadata_onl
     assert "review decisions" not in spoofed and "other delivered rows" in spoofed
 
 
+def test_size_facts_name_a_compact_review_row_as_review_decisions():
+    """A resident review row written in the compact envelope (meta ``checkout`` with ``display: 1``: a subject its record
+    repeats and a remark its reason already holds are left out) is still counted as review decisions, through the review
+    producer's own writer (Fable REV3F C-F5, owed by the second of the two PRs to merge)."""
+    from ouroboros.context_view_facts import largest_parts
+    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, _index_message
+
+    rows = [{"decision_kind": "review_part", "review_record_id": "rec-1", "finding_id": f"f{n}",
+             "subject": {"root": "/copy", "tree": "t1"}, "remark": [f"finding {n} " * 400],
+             "reason": {"findings": [f"finding {n} " * 400]}} for n in range(2)]
+    row = _index_message({"decision_rows": rows}, "commit", "/copy")
+    assert row[REVIEW_CONTEXT_INDEX_KEY].get("display") == 1 and "repo_root" not in row[REVIEW_CONTEXT_INDEX_KEY]
+    messages = [{"role": "system", "content": "Core."}, {"role": "user", "content": "The assignment."}, row]
+    ctx = SimpleNamespace(messages=messages, accumulated_usage={}, tool_schemas=[], context_fit_plan=None, active_effort="")
+    label = largest_parts(ctx, measured=False)[0][0]
+    assert label.startswith("review decisions") and "other delivered rows" not in label
+
+
 def test_facts_line_counts_each_kind_in_rows_and_names_the_largest_part_once(tmp_path):
     """×N counts what it says, transcript rows: two batches of one call and two results are six rows of tool calls
     and results (Astra rev1 C3, 27.11: the line said ×2). The largest single part is named once: after the kinds
