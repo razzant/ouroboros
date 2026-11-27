@@ -7746,9 +7746,10 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
        not meet, so a tap on that line stays a press on the words. */
     .toast > .toast-action { margin-top: var(--space-4); }
 }
-/* Its close is the quiet icon control (as a card's ⋮): no body, the meta ink, the primary ink on hover. */
+/* Its close is a small plain × in the top corner: the quiet icon control (as a card's ⋮) without a body even on hover,
+   the meta ink, the primary ink on hover. */
 .toast > .toast-dismiss { --control-pad-x: 0; grid-column: 2; grid-row: 1 / span 2; width: var(--control-h); color: var(--text-meta); }
-.toast > .toast-dismiss:not(:disabled):hover { color: var(--text-primary); }
+.toast > .toast-dismiss:not(:disabled):hover { background: transparent; color: var(--text-primary); }
 .toast > .toast-dismiss > svg { width: 16px; height: 16px; }
 /* The page's stack ends 18 px above the screen's bottom, as it keeps from its right, and the notices it keeps scroll
    there as one column: every word and close button is reached by wheel, touch or keyboard (toast.js names it a region
