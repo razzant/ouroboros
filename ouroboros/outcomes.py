@@ -60,6 +60,7 @@ from ouroboros.outcome_receipt_store import (  # noqa: F401 - public compatibili
     read_verification_receipts_from_roots,
     verification_receipts_path,
 )
+from ouroboros.shell_parse import verify_run_kind
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
     STATUS_REJECTED_DUPLICATE,
@@ -224,8 +225,6 @@ WARN_VERIFICATION_RED = "verification_red_unreconciled"
 WARN_CHILDREN_UNDECIDED = "children_undecided"
 # Facts for the owner's details that ask nothing of the owner: the headline stays Done (9 Nov 2026).
 DETAIL_ONLY_WARNINGS = frozenset({WARN_RECEIPT_ABSENT, WARN_VERIFICATION_RED, WARN_CHILDREN_UNDECIDED})
-# The verify_and_record kinds that RUN a check whose outcome the author then sees.
-_EXAMINING_VERIFY_KINDS = frozenset({"explicit_command", "explicit_metric", "visible_verifier"})
 # Receipt statuses that are not ledger failures: a pass, an observed artifact, an honest declaration.
 _RECEIPT_GROUNDING_STATUSES = frozenset({"pass", "observed", "declared"})
 
@@ -305,7 +304,7 @@ def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
             continue
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         tool = str(call.get("tool") or "")
-        if tool == "verify_and_record" and str(args.get("contract_kind") or "") in _EXAMINING_VERIFY_KINDS:
+        if tool == "verify_and_record" and verify_run_kind(args):
             return False
         if tool == "review_change" and str(args.get("subject") or "") == "result":
             meta = call.get("tool_result_meta") if isinstance(call.get("tool_result_meta"), dict) else {}

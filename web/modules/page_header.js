@@ -28,6 +28,46 @@ export function renderMobileNavToggle({ inComposer = false } = {}) {
 export const ROOM_EDGE_HTML = ['soft', 'deep', 'tint']
     .map((step) => `<i class="room-edge" data-edge="${step}" aria-hidden="true"></i>`).join('');
 
+// A room bar's capsules (style.css "Telegram's shared row" names the same set): what a room's top edge ends at.
+const CAPSULES = '.chat-header-btn, .cx-chip, .rw-trigger, .shell-icon-control, .chat-budget-pill';
+
+/** Where a room's edges end (style.css "A room's edges"): the lower side of the bar's capsules and the upper side of the
+ * composer's capsule row, wherever they stand (a safe area, Telegram's row, a staged attachment or reply above the
+ * row), in the room's own pixels (a phone's drawer scales the room). Called with the room's other measurements. */
+export function placeRoomEdges(bar, area) {
+    const own = (host, length) => (host.offsetHeight && host.getBoundingClientRect().height
+        ? host.offsetHeight / host.getBoundingClientRect().height : 1) * length;
+    const shown = (node) => node?.getClientRects?.().length && !node.closest?.('.rw-surface, .cx-shade');
+    // Written only when it changes; an empty value hands the edge back to the stylesheet's estimate.
+    const write = (node, prop, value, set) => {
+        if (!node.style?.setProperty || node.style.getPropertyValue?.(prop) === value) return;
+        if (value) set(value);
+        else node.style.removeProperty?.(prop);
+    };
+    if (bar) {
+        const capsules = [...(bar.querySelectorAll?.(CAPSULES) || [])].filter(shown);
+        const end = Math.max(...capsules.map((node) => node.getBoundingClientRect().bottom));
+        write(bar, '--edge-chips-measured', capsules.length ? `${own(bar, end - bar.getBoundingClientRect().top).toFixed(2)}px` : '',
+            (value) => bar.style.setProperty('--edge-chips-measured', value));
+    }
+    const row = area?.querySelector?.('.chat-toolbar-row');
+    if (area) {
+        write(area, '--edge-row-measured', shown(row)
+            ? `${own(area, row.getBoundingClientRect().top - area.getBoundingClientRect().top).toFixed(2)}px` : '',
+            (value) => area.style.setProperty('--edge-row-measured', value));
+    }
+}
+
+/** The page's layout facts move a bar's capsules without resizing it (the window's band, the layout, Telegram's row):
+ * `place` runs again when one changes. Returns the disposer. */
+export function watchRoomEdges(win, place) {
+    if (typeof win?.MutationObserver !== 'function') return () => {};
+    const watch = new win.MutationObserver(place);
+    watch.observe(win.document.documentElement, { attributes: true,
+        attributeFilter: ['data-window-chrome', 'data-layout', 'data-telegram-fullscreen', 'data-telegram-back', 'dir'] });
+    return () => watch.disconnect();
+}
+
 /**
  * The one header of every page AND the Project panel (docs/DESIGN.md "Shell", plan P5): one row, one height,
  * one title style, one close control. `☰ · title · status … actions · ×`: the leading slot holds ☰ (the stack
