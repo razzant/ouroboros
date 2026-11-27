@@ -564,16 +564,18 @@ def runtime_host_section(data: dict, coordination: str = "") -> HostSection:
     Grants, constraints, task contracts, origin words, review obligations, the filesystem
     affordances and the coordination ledger remain exact. Lists of past runs and their results,
     recent dialogue, routing rows, schedules and body candidates become ``{"count": n}``; the
-    update letter's prose its character count. Unknown/new fields stay whole until their
-    producer gives them a form.
+    update letter's prose its character count; each running work is one line of every fact of its row after the
+    object (``live_works.work_line``). Unknown/new fields stay whole until their producer gives them a form.
     """
     projected = copy.deepcopy(data)
-    from ouroboros.live_works import compact_other_live_work
+    from ouroboros.live_works import compact_other_live_work, works_lines
     from ouroboros.update_qualification import compact_qualification
 
-    live = projected.get('live_works_present')
+    live, lines = projected.get('live_works_present'), ""
     if isinstance(live, dict) and 'other_live_work' in live:
         live['other_live_work'] = compact_other_live_work(live['other_live_work'])
+    if isinstance(live, dict) and isinstance(live.get('works'), list) and (lines := works_lines(live['works'])):
+        live['works'] = "one line per work, after this object"  # every fact of each row: live_works.work_line
     update = projected.get('official_update')
     letter = update.get('letter') if isinstance(update, dict) else None
     if isinstance(letter, dict) and 'qualification' in letter:
@@ -587,7 +589,7 @@ def runtime_host_section(data: dict, coordination: str = "") -> HostSection:
                 node[path[-1]] = {fact: len(node[path[-1]]), "details": "retained full runtime section"}
     heading = "## Runtime context\n\n"
     return HostSection("runtime", heading + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + coordination,
-                       heading + json.dumps(projected, ensure_ascii=False, separators=(",", ":")) + coordination)
+                       heading + json.dumps(projected, ensure_ascii=False, separators=(",", ":")) + lines + coordination)
 
 
 # The review-continuity host section (moved from review_state, which keeps its extraction bound).

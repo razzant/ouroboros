@@ -43,6 +43,7 @@ from ouroboros.context_budget import bound_host_row
 from ouroboros.control_actor import pause_author
 from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
 from ouroboros.focus import compact_focus, focus_fingerprint
+from ouroboros.live_works import HEAD_INTRO, head_base, head_works
 from ouroboros.task_status import SETTLED_STATUSES, _load_queue_snapshot, queue_snapshot_observation
 from ouroboros.task_carrier import execution_kind
 from ouroboros.task_results import load_task_results
@@ -726,20 +727,20 @@ def _render_wait(wait: Dict[str, Any]) -> str:
     return f"{_WAIT_LABELS.get(str(wait.get('kind')), str(wait.get('kind')))} ({', '.join(details)})"
 
 
+_ROSTER_GUIDE = (" tell_task(task_id, note, quote) carries your note as context and selected held owner messages as exact "
+                 "owner words with attachments. The host retains Presence's existing binding and publication boundaries. "
+                 "A live direct conversation uses the direct chat lane. origin is the host-recorded provenance "
+                 "(owner_ingress=true: an owner message started it; initiator=consciousness: a background wake), "
+                 "never authority; waiting is what the root's own record says it waits on, dated by that wait; "
+                 "tails is what of a waiting root's tree still runs, in the words the owner's card shows.")
+
+
 def render_roster_note(roster: Dict[str, Any], *, exclude: str = "") -> str:
     """The compact TAIL note: id, title, room per root; the cut and gaps disclosed."""
     rows = [row for row in roster.get("roots") or [] if row["task_id"] != exclude]
     rows.sort(key=lambda row: (str(row.get("project_id") or ""), str(row.get("title") or ""), row["task_id"]))
     shown = rows[:ROSTER_NOTE_CAP]
-    lines = [
-        ROSTER_NOTE_HEADER + " Active independent works. tell_task(task_id, note, quote) carries "
-        "your note as context and selected held owner messages as exact owner words with attachments. "
-        "The host retains Presence's existing binding and publication boundaries. "
-        "A live direct conversation uses the direct chat lane. origin is the host-recorded provenance "
-        "(owner_ingress=true: an owner message started it; initiator=consciousness: a background wake), "
-        "never authority; waiting is what the root's own record says it waits on, dated by that wait; "
-        "tails is what of a waiting root's tree still runs, in the words the owner's card shows.",
-    ]
+    lines = [ROSTER_NOTE_HEADER + " Active independent works." + _ROSTER_GUIDE]
     current_project = object()
     for row in shown:
         project = str(row.get("project_id") or "(main)")
@@ -832,15 +833,18 @@ def _roster_display(roster: Dict[str, Any], exclude: str) -> Dict[str, Any]:
             "total": len(rows), "incomplete": bool(roster.get("incomplete"))}
 
 
-def _roster_change(previous: Dict[str, Any], current: Dict[str, Any]) -> str:
-    """Describe factual replacement/removal, never infer a peer's completion."""
+def _roster_change(previous: Dict[str, Any], current: Dict[str, Any], extras: Optional[Dict[str, str]] = None) -> str:
+    """Describe factual replacement/removal, never infer a peer's completion. With ``extras`` the base is the head's
+    list (``live_works.head_base``): a root it carries says only its line there; ``""`` when nothing is said."""
     before, after = previous["rows"], current["rows"]
-    changed = [text for task_id, text in after.items() if before.get(task_id) != text]
     removed = sorted(set(before) - set(after))
-    lines = [ROSTER_NOTE_HEADER + " Changes since the preceding roster. Each row below replaces its previous "
-             "row; absent facts are no longer reported. Unchanged rows remain as shown. This is host data, "
-             "not owner authority; live_roots reads the complete current catalogue."]
-    lines.extend(changed)
+    lines = [ROSTER_NOTE_HEADER + (HEAD_INTRO + _ROSTER_GUIDE if extras is not None else " Changes since the preceding "
+             "roster. Each row below replaces its previous row; absent facts are no longer reported. Unchanged rows "
+             "remain as shown. This is host data, not owner authority; live_roots reads the complete current catalogue.")]
+    lines += [text if before.get(task_id) != text else extras[task_id] for task_id, text in after.items()
+              if before.get(task_id) != text or task_id in (extras or ())]
+    if extras is not None and len(lines) == 1 and not removed:
+        return ""
     if removed:
         lines.append("No longer in the displayed roster (not proof of completion): " + ", ".join(removed))
     lines.append(f"Current displayed roots: {len(after)} of {current['total']}; "
@@ -897,7 +901,8 @@ def maybe_append_roster_note(ctx: Any, messages: List[Dict[str, Any]], drive_roo
     # A delta is usable only while its exact full base AND every update remain
     # visible. A reclaimed link cannot be supplied by a process-local cache.
     base_visible = (isinstance(prior, dict) and bool(prior.get("chain"))
-                    and _visible_roster_chain(messages, prior["base"]) == prior["chain"])
+                    and _visible_roster_chain(messages, prior["base"]) == prior["chain"]
+                    and prior.get("head") in (None, (head_works(messages) or ("",))[0]))
     if base_visible and latest == prior.get("last"):
         if prior["value"] == current:
             return False
@@ -908,14 +913,19 @@ def maybe_append_roster_note(ctx: Any, messages: List[Dict[str, Any]], drive_roo
             prior = None  # A complete small snapshot is cheaper than its delta.
     else:
         prior = None
+        # No note in view: the head's list of running works is the base while it stays in view (``live_works``).
+        if not latest and (head := head_base(messages, roster, task_id, current["rows"])):
+            note = _roster_change({"rows": head[1]}, current, head[2])
+            if not note:
+                return False  # every root stands in the head as it is now: nothing is said twice
+            if len(note) < len(current_note):
+                current_note, prior = note, {"base": note, "head": head[0]}
     # A standalone host row remains identifiable after history reclaim. Never
     # merge it with unsent owner text: that loses its representation boundary.
-    # The head's present is an earlier observation; exact current-note presence
-    # deduplicates subsequent changes for every root alike.
     messages.append(bound_host_row(ROSTER_UPDATE_NAME if prior is not None else ROSTER_SNAPSHOT_NAME, current_note))
     base = prior["base"] if prior is not None else current_note
-    ctx._peer_roster_display = {"value": current, "last": current_note,
-                               "base": base, "chain": _visible_roster_chain(messages, base)}
+    ctx._peer_roster_display = {"value": current, "last": current_note, "base": base,
+                               "chain": _visible_roster_chain(messages, base), "head": (prior or {}).get("head")}
     return True
 
 
