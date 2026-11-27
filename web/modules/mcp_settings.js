@@ -460,12 +460,14 @@ function editorHtml(server) {
         `<option value="${escapeHtml(opt.value)}"${opt.value === transport ? ' selected' : ''}>${escapeHtml(opt.label)}</option>`).join('');
     const field = (name, label, control, help = '') => `<div class="form-field ui-field"><label for="mcp-${index}-${name}">${label}</label>${control}${help ? `<span class="ui-field-help">${help}</span>` : ''}</div>`;
     const input = (name, value, placeholder, id = name, attrs = '') => `<input type="text" class="ui-control" id="mcp-${index}-${id}" data-mcp-field="${name}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false"${attrs}>`;
-    const area = (name, value, rows, placeholder) => `<textarea class="ui-control" id="mcp-${index}-${name}" data-mcp-field="${name}" rows="${rows}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false">${escapeHtml(value)}</textarea>`;
+    const area = (name, value, rows, placeholder, attrs = '') => `<textarea class="ui-control" id="mcp-${index}-${name}" data-mcp-field="${name}" rows="${rows}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false"${attrs}>${escapeHtml(value)}</textarea>`;
     const tick = (name, label, on, attrs = '') => `<label class="mcp-server-enabled"><input class="ui-checkbox" type="checkbox" data-mcp-field="${name}" ${on ? 'checked' : ''} ${attrs}><span>${label}</span></label>`;
     const use = live ? switchHtml(`data-entry-switch aria-label="Use this server"${wanted.has(server) ? ' disabled aria-busy="true"' : ''}`, wanted.has(server) ? wanted.get(server) : enabled)
         : switchHtml('data-mcp-field="enabled" aria-label="Use this server"', enabled);
+    // Arguments are one per line, so the field never wraps a line into what reads as two (and its three-line example
+    // stands in its three rows at any width and Interface size).
     const stdioFields = () => `
-        ${field('args', 'Arguments, one per line', area('args', (Array.isArray(server.args) ? server.args.map(String) : []).join('\n'), 3, '-y\n@modelcontextprotocol/server-filesystem\n/path/to/folder'),
+        ${field('args', 'Arguments, one per line', area('args', (Array.isArray(server.args) ? server.args.map(String) : []).join('\n'), 3, '-y\n@modelcontextprotocol/server-filesystem\n/path/to/folder', ' wrap="off"'),
             'Each line is passed as one argument. Ouroboros does not use a shell.')}
         ${field('cwd', 'Working folder', input('cwd', String(server.cwd ?? ''), '/path/to/project'), 'Used for both discovering and calling tools. Empty uses the default folder.')}
         ${field('env_from_settings', 'Environment from your saved keys (JSON)', area('env_from_settings', json(server.env_from_settings), 4, '{"API_TOKEN": "MY_MCP_KEY"}'),
