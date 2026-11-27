@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from ouroboros import store, store_import, store_switch, usage_store
+from ouroboros import store, store_checkpoint, store_import, store_switch, usage_store
 from tests.test_store import publish
 
 
@@ -143,13 +143,15 @@ def test_wal_is_full_and_export_checkpoints_to_standalone_delete(tmp_path, monke
         usage_store.migrate_from_journal(tmp_path)
     else:
         publish(tmp_path)
+    retained = "x" * (4096 * (store_checkpoint.inline_frames() + 100))  # more frames than SQLite's own threshold
     with usage_store.hold(tmp_path) if money else store.open_store(tmp_path, write=True) as txn:
-        txn.set_meta("retained", 42)
+        txn.set_meta("retained", retained)
         assert txn.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert txn.conn.execute("PRAGMA synchronous").fetchone()[0] == 2
         held = txn.conn
     path = tmp_path / (usage_store.STORE_REL if money else store.STORE_REL)
     assert path.with_name(path.name + "-wal").exists()
+    assert store.log_identity(path)[1] > store_checkpoint.inline_frames(), "below the ceiling the log stays for the seam"
     if money:
         result = usage_store.export_journal(tmp_path)
         retired = path.with_name(result["store_retired_as"])
@@ -163,8 +165,55 @@ def test_wal_is_full_and_export_checkpoints_to_standalone_delete(tmp_path, monke
     assert all(not path.with_name(path.name + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))
     with contextlib.closing(sqlite3.connect(retired)) as conn:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
-        assert conn.execute("SELECT value FROM meta WHERE key='retained'").fetchone()[0] == "42"
+        assert json.loads(conn.execute("SELECT value FROM meta WHERE key='retained'").fetchone()[0]) == retained
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def _commit_frames(conn, frames, key="filler"):
+    """One commit whose value takes about FRAMES pages (overflow pages each), so as many frames of the log."""
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, "x" * (4096 * frames)))
+    conn.execute("COMMIT")
+
+
+def test_a_wal_writer_copies_its_log_inline_only_once_the_log_reaches_the_ceiling(tmp_path, monkeypatch):
+    """Every WAL connection ``store.connect`` opens checkpoints inline only at ``store_checkpoint.ceiling`` frames,
+    the log size the store keeps after a reset (16,288 frames of 4 KiB pages), never at SQLite's own 1,000: commits
+    past 1,000 frames leave the database file as it was. The same connection set back to SQLite's own threshold
+    copies that log at its next commit, and under a smaller kept size the commit that reaches the ceiling copies the
+    log inline (no checkpoint job ran: the worse worst case store_checkpoint discloses)."""
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: "WAL")
+    path = publish(tmp_path / "kept")
+    store.close_connections()
+    held = sqlite3.connect(path, isolation_level=None)  # another open connection: no last close copies the log
+    held.execute("SELECT 1 FROM meta").fetchone()
+    conn = store.connect(path, store.TIER_ENFORCED)
+    try:
+        page, threshold = conn.execute("PRAGMA page_size").fetchone()[0], store_checkpoint.inline_frames()
+        assert store_checkpoint.ceiling(4096) == 16288
+        assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == store_checkpoint.ceiling(page) > threshold
+        size = path.stat().st_size
+        _commit_frames(conn, threshold + 100)
+        assert path.stat().st_size == size and store.log_identity(path)[1] > threshold, "nothing was copied inline"
+        conn.execute(f"PRAGMA wal_autocheckpoint = {threshold}")
+        _commit_frames(conn, 1, key="next")
+        assert path.stat().st_size > size, "at SQLite's own threshold the same log is copied inline"
+    finally:
+        conn.close()
+        held.close()
+    monkeypatch.setattr(store_checkpoint, "JOURNAL_SIZE_LIMIT", (threshold + 300) * (page + 24) + 32)
+    small = publish(tmp_path / "small")
+    conn = store.connect(small, store.TIER_ENFORCED)
+    try:
+        assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == threshold + 300
+        assert conn.execute("PRAGMA journal_size_limit").fetchone()[0] == store_checkpoint.JOURNAL_SIZE_LIMIT
+        size = small.stat().st_size
+        _commit_frames(conn, threshold + 100)
+        assert small.stat().st_size == size, "past SQLite's threshold, below the ceiling: still in the log"
+        _commit_frames(conn, 300, key="more")
+        assert small.stat().st_size > size, "the commit that reached the ceiling copied the log inline"
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize(("mode", "money"), [("PERSIST", False), ("WAL", True)])

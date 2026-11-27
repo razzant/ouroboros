@@ -416,6 +416,13 @@ def _setup_job(name, data, monkeypatch):
             pytest.skip("the postings job rests on a SQLite without FTS5: it has no work to show")
 
         dialogue_store.append(data, "chat", {"chat_id": 1, "direction": "in", "text": "words to post"})
+    elif name == "wal_checkpoint":
+        from ouroboros import store, store_checkpoint
+
+        with store.open_store(data, write=True) as txn:  # more committed frames than SQLite's own threshold
+            txn.set_meta("filler", "x" * (4096 * store_checkpoint.inline_frames()))
+        if not store.wal_file(store.store_path(data)):
+            pytest.skip("a rollback-journal store keeps no WAL log: the checkpoint job has no work to show")
     elif name == "hot_facts":
         from ouroboros import store
 
@@ -799,9 +806,10 @@ def test_the_arrival_publication_never_waits_for_a_busy_store_and_lands_on_a_fre
 
 
 def test_the_lanes_partition_the_jobs_and_a_lane_child_runs_only_its_own(data, monkeypatch):
-    assert maintenance.lane_jobs("trash") == maintenance.TRASH_JOBS == ("custody_trash",)
-    assert "custody_trash" not in maintenance.lane_jobs("ordinary")
-    assert sorted((*maintenance.lane_jobs("ordinary"), *maintenance.lane_jobs("trash"))) == sorted(maintenance.JOB_NAMES)
+    assert maintenance.OWN_LANES == {"trash": ("custody_trash",), "checkpoint": ("wal_checkpoint",)}
+    assert [maintenance.lane_jobs(lane) for lane in maintenance.OWN_LANES] == list(maintenance.OWN_LANES.values())
+    assert not {"custody_trash", "wal_checkpoint"} & set(maintenance.lane_jobs("ordinary"))
+    assert sorted(job for lane in maintenance.LANES for job in maintenance.lane_jobs(lane)) == sorted(maintenance.JOB_NAMES)
     assert maintenance.lane_jobs() == maintenance.JOB_NAMES
     with pytest.raises(ValueError):
         maintenance.lane_jobs("other")
@@ -816,16 +824,20 @@ def test_the_lanes_partition_the_jobs_and_a_lane_child_runs_only_its_own(data, m
     facts_reads = []
     real_facts = maintenance._store_facts
     monkeypatch.setattr(maintenance, "_store_facts", lambda root: facts_reads.append(root) or real_facts(root))
-    assert set(maintenance.run(data, lane="trash")["jobs"]) == {"custody_trash"} and ran == ["custody_trash"]
-    assert facts_reads == [], "a trash-only pass read the store facts and would replay ordinary producers"
+    for lane, (job,) in maintenance.OWN_LANES.items():
+        ran.clear()
+        assert set(maintenance.run(data, lane=lane)["jobs"]) == {job} and ran == [job]
+        assert facts_reads == [], f"a {lane}-only pass read the store facts and would replay ordinary producers"
     ran.clear()
-    assert "custody_trash" not in maintenance.run(data, lane="ordinary")["jobs"] and "custody_trash" not in ran
+    assert not {"custody_trash", "wal_checkpoint"} & {*maintenance.run(data, lane="ordinary")["jobs"], *ran}
     ran.clear()
     maintenance.run(data)
     assert ran == list(maintenance.JOB_NAMES)
 
 
-def test_a_busy_ordinary_lane_never_holds_the_trash_lane_and_each_lane_is_one_child(data, monkeypatch):
+def test_a_busy_ordinary_lane_never_holds_a_lane_of_its_own_and_each_lane_is_one_child(data, monkeypatch):
+    """Packing or an import keeps the ordinary child busy for many minutes on a large install: a moved drive's
+    deletion and the WAL checkpoint (a log backlog stands in for its due fact) spawn meanwhile, one child per lane."""
     import threading
 
     from tests.test_evidence_packs import REPO, _FakeChild
@@ -834,6 +846,7 @@ def test_a_busy_ordinary_lane_never_holds_the_trash_lane_and_each_lane_is_one_ch
     (data / "state" / "custody_trash" / "moved-0123456789ab").mkdir(parents=True)
     (data / "logs").mkdir(exist_ok=True)
     maintenance_jobs.record(data, "legacy_reconcile", state="pending")  # an ordinary job is due
+    monkeypatch.setitem(maintenance.JOBS, "wal_checkpoint", (lambda *_a: True, maintenance.JOBS["wal_checkpoint"][1]))
     release, entered, spawns = threading.Event(), threading.Event(), []
 
     def spawn(root, repo, purpose, **kw):
@@ -847,12 +860,13 @@ def test_a_busy_ordinary_lane_never_holds_the_trash_lane_and_each_lane_is_one_ch
     monkeypatch.setattr(maintenance, "spawn_maintenance_job", spawn)
     unit = maintenance.MaintenanceChildren()
     assert unit.tick(data, REPO) and entered.wait(10)
-    unit.trash._thread.join(10)
-    assert not unit.trash._thread.is_alive() and "trash" in spawns, "the busy ordinary lane held the deletion"
+    for lane in (unit.trash, unit.checkpoint):
+        lane._thread.join(10)
+        assert not lane._thread.is_alive() and lane._lane in spawns, f"the busy ordinary lane held the {lane._lane} lane"
     assert not unit.ordinary.tick(data, REPO), "one child per lane"
     release.set()
     unit.ordinary._thread.join(10)
-    assert sorted(spawns) == ["ordinary", "trash"] and unit.live_children() == []
+    assert sorted(spawns) == ["checkpoint", "ordinary", "trash"] and unit.live_children() == []
 
 
 def test_an_unchanged_hold_is_retried_only_on_the_reconcile_cadence_then_removed(data, monkeypatch):
@@ -880,7 +894,7 @@ def test_an_unchanged_hold_is_retried_only_on_the_reconcile_cadence_then_removed
 
     def look(**kw):
         unit.tick(data, REPO, **kw)
-        for lane in (unit.ordinary, unit.trash):
+        for lane in unit._lanes:
             if lane._thread is not None:
                 lane._thread.join(10)
 

@@ -193,7 +193,7 @@ ouroboros/ — agent core and shared runtime (§6)
   usage_origin.py — usage scopes, immutable billing/cause attribution (USAGE_STORE.md) (§6 Budget tracking; USAGE_STORE.md)
   cost_projection.py — sole task-cost projection (`accounted_upper_bound_usd`, null ≠ $0.00) (§6 Budget tracking)
   synthesis_cost_text.py — task_summary cost fields
-  store.py, store_capture.py, store_empty.py, store_journal.py, store_task_cards.py, store_timing.py, store_import.py, store_switch.py, install_identity.py — `state/current.sqlite` core (atomic `meta.commit_seq`), import/export/cutover (§2; §9; PERSISTENCE.md; USAGE_STORE.md)
+  store.py, store_capture.py, store_checkpoint.py, store_empty.py, store_journal.py, store_task_cards.py, store_timing.py, store_import.py, store_switch.py, install_identity.py — `state/current.sqlite` core (atomic `meta.commit_seq`), import/export/cutover (§2; §9; PERSISTENCE.md; USAGE_STORE.md)
   dialogue_store.py, dialogue_history_evidence.py, dialogue_retry.py, dialogue_import.py, dialogue_positions.py — `state/dialog.sqlite` `append`, ordinals, cutover/export, first-Project evidence (§3; PERSISTENCE.md)
   storage.py, storage_deleted.py, storage_free.py, storage_free_view.py, storage_removers.py, payload_release.py, payload_release_state.py — Storage counts, owner Free, release receipts (§3; PERSISTENCE)
   llm.py — multi-provider LLM facade (function-shaped conversations; exact-route adaptation in request-wire leaves; §7)

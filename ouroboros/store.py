@@ -1,7 +1,8 @@
 """Current facts in ``state/current.sqlite`` and the SQLite protocol shared with ``usage_store``.
 SQLite 3.24 floor; lazy connections per file/thread, short ``BEGIN IMMEDIATE`` writes and name-tier locks.
 ``store_journal`` owns PERSIST/WAL: only a private build or lifecycle owner chooses; WAL requires fixed
-SQLite and a proven local filesystem. Ordinary opens keep that choice and ``synchronous=FULL``.
+SQLite and a proven local filesystem. Ordinary opens keep that choice and ``synchronous=FULL``;
+``store_checkpoint`` owns the journal's kept size and when a WAL writer checkpoints inline (its ceiling).
 ``probe``/``open_store`` import at boot within the import window; first writes import absent stores.
 Reads never import: present facts give ``StoreMigrating`` until publication, no facts give empty.
 Writes require a closed import window and PUBLISHED phase; ``service`` serves importer/exporter/seam."""
@@ -26,7 +27,7 @@ import weakref
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, machine_json, utc_now_iso  # one compact JSON text: key order kept, facts round-trip
-from ouroboros import store_empty, store_hot_facts, store_task_cards, store_timing
+from ouroboros import store_checkpoint, store_empty, store_hot_facts, store_task_cards, store_timing
 from ouroboros.swarm_rollup import retain_swarm_basis
 
 STORE_REL = pathlib.Path("state/current.sqlite")
@@ -36,7 +37,6 @@ GENERATION = 8  # the lifecycle generation that owns the store
 GENERATION_KEY = "current_store_generation"  # in state/migrations.json
 SCHEMA_VERSION = 13  # 6–11: hot facts, cards, root windows, list selection, origin, chat; 12: payload offers; 13: workspace lookup
 STORE_WAIT_SEC = 10.0
-JOURNAL_SIZE_LIMIT = 64 << 20  # retain at most 64 MiB of an idle rollback journal (PERSISTENCE.md: what it bounds)
 TIER_ENFORCED, TIER_NAME = "enforced", "name"
 PUBLISHED, EXPORTING, RETIRED = "published", "exporting", "retired"
 # The header's application id names the lock protocol before the file is opened ('OUCE'/'OUCN').
@@ -659,7 +659,7 @@ def connect(path: pathlib.Path, tier: str, *, create: bool = False, wait_sec: fl
             actual = _set_journal_mode(conn, journal_mode, wait_sec if tier == TIER_ENFORCED else 0.0)
             if actual != journal_mode.lower():
                 raise sqlite3.OperationalError(f"store journal mode {actual}, expected {journal_mode}")
-        conn.execute(f"PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}")
+        store_checkpoint.limit(conn)  # the kept journal size; on WAL, the inline-checkpoint ceiling
     except BaseException as exc:
         exc.rollback_confirmed = not conn.in_transaction
         conn.close()

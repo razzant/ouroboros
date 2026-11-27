@@ -173,6 +173,18 @@ def name_owed(where: str, *reports: Any) -> None:
         warnings.warn(f"{where}: owed work left pending {owed}", stacklevel=2)
 
 
+# What the WAL backlog companion answers on a stand whose stores keep a rollback journal (no log to back up).
+NO_WAL_LOG = "a rollback-journal stand keeps no WAL log"
+
+
+def settle_logs(root: pathlib.Path) -> None:
+    """The checkpoint job's pass over the root's WAL logs (``store_checkpoint.run``), as the install's checkpoint child
+    keeps them: the passes measured after it start from no backlog, never from the k-sized writes of earlier passes."""
+    from ouroboros import store_checkpoint
+
+    store_checkpoint.run(root, lambda: False)
+
+
 def schedule_child_job(root: pathlib.Path) -> str:
     """The maintenance child's addressed input change: the job its boot schedules (``legacy_reconcile``) is pending
     again, its cursor kept, so its run resumes past every drive and records it done. Returns the job's name."""
@@ -966,6 +978,18 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
             txn.put_row(OWED_SET, "late-review-naming-nothing", {"after_end": True})
         return "an owed late-review row that names nothing it can owe"
 
+    def wal_backlog() -> str:
+        """One commit leaves more frames in the current store's log than SQLite's own threshold (the row then goes)."""
+        from ouroboros.store_checkpoint import inline_frames
+
+        if not store.wal_file(store.store_path(root)):
+            return NO_WAL_LOG
+        with store.open_store(root, write=True) as txn:
+            txn.set_meta("cost-contract-backlog", "x" * (4096 * inline_frames()))
+        with store.open_store(root, write=True) as txn:
+            txn.conn.execute("DELETE FROM meta WHERE key='cost-contract-backlog'")
+        return "a log holding more committed frames than SQLite's own threshold"
+
     def child_job() -> str:
         schedule_child_job(root)
         srv_child = __import__("ouroboros.maintenance", fromlist=["child"]).child
@@ -1011,7 +1035,7 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
     return {"delegated-body": body, "abandoned_usage_reconciliation": late_body, "custody-maintenance": owed_projection,
             "reconcile-maintenance": owed_mark, "maintenance-child": child_job, "question_delivery_replay": question,
             "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel, "subscription-census": census_file,
-            **live_set_companions(root)}
+            "wal_checkpoint_look": wal_backlog, **live_set_companions(root)}
 
 
 def _completion(root: pathlib.Path, who: str, _k: int) -> None:
@@ -1125,6 +1149,8 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
     meter.join_spawned("D:maintenance-child:boot", timeout=180.0)
     passes("delegated-body", lambda: _body_pass(runtime, park.tick), advance_body_clock)
     for duty in _duty_rows(sm):
+        if duty.name == "wal_checkpoint_look":
+            settle_logs(root)
         passes(duty.name, lambda duty=duty: _one_pass(sm, duty, root, stop),
                child.request if duty.name == "maintenance-child" else (lambda: None))
 

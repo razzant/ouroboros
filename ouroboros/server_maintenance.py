@@ -44,6 +44,7 @@ _QUESTION_SWEEP_LOCK = threading.Lock()
 _PAUSE_NOTICE_SWEEP_LOCK = threading.Lock()
 _USAGE_SWEEP_LOCK = threading.Lock()
 _SYNTHESIS_SWEEP_LOCK = threading.Lock()
+_WAL_CHECKPOINT_LOOK_LOCK = threading.Lock()  # the checkpoint lane's look (``store_checkpoint``)
 _OWNER_PAUSE_SWEEP_LOCK = threading.Lock()
 _CONTINUATION_SWEEP_LOCK = threading.Lock()
 _COLD_CUSTODY_SWEEP_LOCK = threading.Lock()
@@ -212,6 +213,9 @@ def _run_terminal_duty(drive_root: pathlib.Path, step: str, latch: Any,
                 drive_root, REPO_DIR, startup=False, owner_liveness=queue.task_settlement_liveness,
                 claim_guard=queue.task_settlement_interlock, stop_requested=lambda: _stop_requested(stop_event),
                 event_queue=workers.get_event_q(create=False))
+        elif step == "wal_checkpoint_look":  # the lane's own look reads the WAL logs' backlog (store_checkpoint)
+            from ouroboros.maintenance import child
+            child.request(lane="checkpoint")
         else:
             raise ValueError(f"unknown terminal duty: {step}")
         _step_recovered(step)
@@ -347,9 +351,9 @@ def _periodic_supervisor_maintenance(
 ) -> None:
     """Throttled upkeep on the supervisor tick, nothing history-sized inline (INV-24).
     A tick starts the schedule duty when a pass is due (``schedule_time.pass_due``)
-    and its previous pass ended;
-    the 20 s cadence independently starts cancel, delivery, question, notice, usage and synthesis duties,
-    plus the held-Continue re-check while a pending Continue waits under its writer hold, and owes the
+    and its previous pass ended; the 20 s cadence independently starts cancel, delivery,
+    question, notice, usage and synthesis duties and the WAL checkpoint lane's look, plus the
+    held-Continue re-check while a pending Continue waits under its writer hold, and owes the
     owner-Pause look (started by the tick that finds it owed, or that a member transition marked); every 600 s
     the custody block (reaping, delegated runs, the engine's route-health facts, then the working copies'
     retirers); every 300 s the reconcile
@@ -1187,6 +1191,7 @@ HOST_DUTIES: Tuple[HostDuty, ...] = (
     HostDuty("pause_notice_replay", _PAUSE_NOTICE_SWEEP_LOCK, _run_terminal_duty),
     HostDuty("abandoned_usage_reconciliation", _USAGE_SWEEP_LOCK, _run_terminal_duty),
     HostDuty("post_task_synthesis_recovery", _SYNTHESIS_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("wal_checkpoint_look", _WAL_CHECKPOINT_LOOK_LOCK, _run_terminal_duty),
     HostDuty("held_continuation_recheck", _CONTINUATION_SWEEP_LOCK, _run_terminal_duty),
     HostDuty("owner_pause_settlement", _OWNER_PAUSE_SWEEP_LOCK, _run_terminal_duty),
     HostDuty("cold-custody", _COLD_CUSTODY_SWEEP_LOCK, _run_cold_custody),
@@ -1196,7 +1201,7 @@ HOST_DUTIES: Tuple[HostDuty, ...] = (
     HostDuty("schedule-admission", _SCHEDULE_SWEEP_LOCK, _run_schedule_duty),
     HostDuty("subscription-census", _CENSUS_SWEEP_LOCK, _run_census_duty),
 )
-TWENTY_SECOND_DUTIES = HOST_DUTIES[:6]  # the one cadence stamped by _LAST_CANCEL_INTENT_SWEEP
+TWENTY_SECOND_DUTIES = HOST_DUTIES[:7]  # the one cadence stamped by _LAST_CANCEL_INTENT_SWEEP
 
 
 def host_duty(name: str) -> HostDuty:

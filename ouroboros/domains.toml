@@ -853,6 +853,7 @@ D20 = "Presence"
 "ouroboros/task_activity_facts.py" = "D01"
 "ouroboros/store.py" = "D17"
 "ouroboros/store_capture.py" = "D17"
+"ouroboros/store_checkpoint.py" = "D17"  # the WAL's kept size, its inline-checkpoint ceiling and the checkpoint job
 "ouroboros/store_empty.py" = "D17"
 "ouroboros/store_journal.py" = "D17"
 "ouroboros/store_hot_facts.py" = "D17"

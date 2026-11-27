@@ -1,0 +1,167 @@
+"""The WAL checkpoint job (``store_checkpoint``): a log's backlog of committed frames wakes it, its PASSIVE pass
+copies the log off the interactive path and records SQLite's numbers, and its look reads only the logs' headers and
+rests while nothing new was committed. The connection ceiling itself is held in tests/test_store_journal.py."""
+from __future__ import annotations
+
+import builtins
+import io
+import json
+import os
+import sqlite3
+import threading
+import time
+
+import pytest
+
+from ouroboros import dialogue_store, maintenance, maintenance_jobs, store, store_checkpoint, store_journal, usage_store
+from tests._store_journal_shared import use_journal
+from tests.test_store import publish
+
+
+@pytest.fixture(autouse=True)
+def release_connections():
+    store.close_connections()
+    yield
+    store.close_connections()
+
+
+def _root(tmp_path, monkeypatch, mode):
+    """A data root whose three stores were built in MODE, as a fresh install builds them."""
+    use_journal(monkeypatch, mode)
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
+    publish(data)
+    dialogue_store.create(data)
+    usage_store.migrate_from_journal(data)
+    return data
+
+
+@pytest.fixture
+def root(tmp_path, monkeypatch):
+    return _root(tmp_path, monkeypatch, "WAL")
+
+
+def _backlog(root, frames=None, key="filler"):
+    """One commit leaving at least FRAMES (SQLite's own threshold) committed frames in the current store's log."""
+    with store.open_store(root, write=True) as txn:
+        txn.set_meta(key, "x" * (4096 * (frames or store_checkpoint.inline_frames())))
+
+
+def _job(root):
+    return maintenance_jobs.job(root, store_checkpoint.NAME) or {}
+
+
+def test_a_backlog_past_sqlite_s_own_threshold_wakes_the_job_and_its_pass_copies_the_log(root):
+    """The look is due once a log holds SQLite's own threshold of committed frames no pass saw. The pass copies
+    them (``checkpointed`` reaches ``log``; the database file takes the pages), records SQLite's numbers and the log
+    it saw per store kind, and one supervisor row; the job then rests (its own row write is no backlog) until the
+    log grows by the threshold again, in the log the next writer reset."""
+    path = store.store_path(root)
+    assert store_checkpoint.inline_frames() == 1000  # SQLite's own default on this build
+    assert not store_checkpoint.due(root, {}, {}, False), "building the stores left no backlog"
+    _backlog(root)
+    assert store_checkpoint.due(root, {}, {}, False)
+    seen, size = store.log_identity(path)[:2], path.stat().st_size
+    report = maintenance.run_job(root, store_checkpoint.NAME)
+    current = _job(root)["stores"]["current"]
+    assert report["state"] == "done" and report["items"] >= 1
+    assert current["busy"] == 0 and current["checkpointed"] == current["log"] == seen[1] >= 1000
+    assert current["wal"] == seen and current["seconds"] >= 0 and current["at"]
+    assert path.stat().st_size > size, "the pass moved the log's pages into the database file"
+    rows = [json.loads(line) for line in (root / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["stores"]["current"] for row in rows if row["type"] == store_checkpoint.NAME] == [
+        {key: current[key] for key in ("busy", "log", "checkpointed", "seconds")}]
+    assert maintenance.run_job(root, store_checkpoint.NAME) is None
+    assert store.log_identity(path)[0] != seen[0], "the job's own row write began a reset log"
+    _backlog(root)
+    assert store_checkpoint.due(root, _job(root), {}, False), "a reset log holding the threshold is due again"
+
+
+def test_a_reader_s_snapshot_leaves_the_pass_partial_and_the_pass_waits_for_no_writer(root):
+    """PASSIVE copies up to the oldest snapshot a reader holds and waits for nobody: with a reader on an older
+    snapshot and another connection holding the write lock, the pass copies what it may while that writer still
+    holds the lock (the database file grows), and the writer then commits without waiting (busy timeout 0); the
+    pass records ``checkpointed`` below ``log``."""
+    path = store.store_path(root)
+    _backlog(root, 8, key="before")  # pages the reader's snapshot holds whose newest copy it saw: the pass may copy them
+    reader = sqlite3.connect(path, isolation_level=None)
+    writer = sqlite3.connect(path, isolation_level=None, timeout=0, check_same_thread=False)
+    worker = threading.Thread(target=maintenance.run_job, args=(root, store_checkpoint.NAME), daemon=True)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM meta").fetchone()
+        _backlog(root)
+        size = path.stat().st_size
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('during', '1')")
+        worker.start()
+        deadline = time.monotonic() + 30
+        while path.stat().st_size == size and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert path.stat().st_size > size, "the pass waited for the writer instead of copying what it may"
+        writer.execute("COMMIT")  # timeout 0: nothing the pass holds keeps a writer waiting
+    finally:
+        worker.join(30)
+        reader.execute("ROLLBACK")
+        for conn in (reader, writer):
+            conn.close()
+    assert not worker.is_alive()
+    current = _job(root)["stores"]["current"]
+    assert current["busy"] == 0 and 0 < current["checkpointed"] < current["log"], current
+
+
+def test_the_look_reads_the_logs_headers_and_opens_neither_a_store_nor_its_index(root, monkeypatch):
+    """The due check runs on the server's lane thread beside live transactions: it reads each log's header and
+    frame headers and a database header beside a log, and never opens a SQLite connection or the ``-shm`` index,
+    whose descriptor's close would drop this process's locks on it (tests/test_store_wal_index.py)."""
+    _backlog(root)
+    store_checkpoint.inline_frames()  # read once per process from a memory database
+    connects, opened = [], []
+
+    def spy(real, seen):
+        def call(target, *args, **kwargs):
+            seen.append(target if isinstance(target, int) else os.fspath(target))
+            return real(target, *args, **kwargs)
+        return call
+
+    monkeypatch.setattr(sqlite3, "connect", spy(sqlite3.connect, connects))
+    for module, name in ((builtins, "open"), (io, "open"), (os, "open")):
+        monkeypatch.setattr(module, name, spy(getattr(module, name), opened))
+    assert store_checkpoint.due(root, {}, {}, False)
+    assert connects == [] and not [name for name in opened if str(name).endswith("-shm")], (connects, opened)
+    assert str(store.store_path(root)) + "-wal" in opened
+
+
+def test_a_store_that_fails_its_pass_keeps_its_error_at_the_log_it_met_and_waits_for_the_log_to_move(root, monkeypatch):
+    """A store whose open or checkpoint fails records its error class at the log it met, beside the stores that
+    passed: no look is due again (no spawn on every look) until that log grows by the threshold."""
+    real = store_journal.root_stores
+
+    def unreadable_tier():
+        raise store.StoreLost("current store unreadable")
+
+    def stores(drive):
+        (path, _tier, lock), *rest = real(drive)
+        return ((path, unreadable_tier, lock), *rest)
+
+    monkeypatch.setattr(store_journal, "root_stores", stores)
+    _backlog(root)
+    seen = store.log_identity(store.store_path(root))[:2]
+    assert maintenance.run_job(root, store_checkpoint.NAME)["items"] >= 1
+    current = _job(root)["stores"]["current"]
+    assert current == {"error": "StoreLost", "wal": seen, "at": current["at"]}
+    assert not store_checkpoint.due(root, _job(root), {}, False)
+    _backlog(root)
+    assert store_checkpoint.due(root, _job(root), {}, False)
+
+
+def test_a_rollback_journal_store_has_no_log_and_the_job_leaves_it_alone(tmp_path, monkeypatch):
+    """PERSIST (and the name tier) keep no WAL log: whatever is committed, the look is never due and a pass opens
+    nothing and records nothing."""
+    data = _root(tmp_path, monkeypatch, "PERSIST")
+    _backlog(data)
+    _backlog(data)
+    assert not store.wal_file(store.store_path(data)) and not store_checkpoint.due(data, {}, {}, False)
+    assert store_checkpoint.run(data, lambda: False) == {"state": "done", "items": 0}
+    assert maintenance_jobs.job(data, store_checkpoint.NAME) is None

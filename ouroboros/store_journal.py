@@ -76,6 +76,16 @@ def configure_journal(path: pathlib.Path, tier: str, *, wait_sec: float = store.
     return True
 
 
+def root_stores(root: pathlib.Path) -> tuple:
+    """A root's three stores, each as (database path, its header's tier read when called, its name-tier lock)."""
+    from ouroboros import dialogue_store, usage_store
+
+    usage = root / usage_store.STORE_REL
+    return ((store.store_path(root), lambda: store.probe(root)[1], store.LOCK_NAME),
+            (dialogue_store.path(root), lambda: dialogue_store.header_tier(root), dialogue_store.LOCK_NAME),
+            (usage, lambda: usage_store._header_tier(usage), usage_store.LOCK_REL.name))
+
+
 def prepare_children(root: pathlib.Path) -> None:
     """Boot compatibility for existing child stores; no SQL or import for compatible/absent files.
 
@@ -83,14 +93,10 @@ def prepare_children(root: pathlib.Path) -> None:
     is handed off; a lazy first build owns its journal, and ordinary opens gain no lifecycle authority.
     """
     import contextlib
-    from ouroboros import dialogue_store, store_import, usage_store
+    from ouroboros import store_import
 
     for drive in store_import.descendant_drives(root, scan_results=False):
-        stores = ((store.store_path(drive), lambda: store.probe(drive)[1], store.LOCK_NAME),
-                  (dialogue_store.path(drive), lambda: dialogue_store.header_tier(drive), dialogue_store.LOCK_NAME),
-                  (drive / usage_store.STORE_REL, lambda: usage_store._header_tier(drive / usage_store.STORE_REL),
-                   usage_store.LOCK_REL.name))
-        for path, read_tier, lock in stores:
+        for path, read_tier, lock in root_stores(drive):
             if not store.wal_file(path):
                 continue
             tier = read_tier()
