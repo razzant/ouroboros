@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import socket
 import sys
@@ -10,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 
@@ -507,16 +509,22 @@ def test_is_dns_resolution_error_reads_the_installed_client_pair(
             assert resolved, "the real client never consulted the substitute resolver"
             assert gateway._is_dns_resolution_error(dns_error.value)
 
-            # Keep the port reserved but never listen; no other test can claim it between bind and connect.
-            with socket.socket() as reserved:
-                reserved.bind(("127.0.0.1", 0))
-                with pytest.raises(httpx.ConnectError) as tcp_error:
-                    await gateway._probe_gateway_normally(
-                        client, f"http://127.0.0.1:{reserved.getsockname()[1]}/", timeout_sec=2.0
-                    )
+            # TCP control: a refused connect, raised where httpcore's anyio backend connects and mapped by its real
+            # OSError -> ConnectError table. A closed local port is not deterministic: Windows retries the SYN until
+            # the probe times out (ConnectTimeout) instead of refusing.
+            with pytest.raises(httpx.ConnectError) as tcp_error:
+                await gateway._probe_gateway_normally(client, "http://127.0.0.1:9/", timeout_sec=2.0)
             assert not gateway._is_dns_resolution_error(tcp_error.value)
 
+    real_connect = anyio.connect_tcp
+
+    async def connect(remote_host: Any, remote_port: int, *args: Any, **kwargs: Any) -> Any:
+        if remote_host == "127.0.0.1":
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "synthetic TCP refusal")
+        return await real_connect(remote_host, remote_port, *args, **kwargs)
+
     monkeypatch.setattr(socket, "getaddrinfo", dns)
+    monkeypatch.setattr(anyio, "connect_tcp", connect)
     asyncio.run(scenario())
 
 
