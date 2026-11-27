@@ -264,6 +264,7 @@ def test_what_a_helper_tells_the_owner_still_arrives(bridge, monkeypatch):
     bridge.delivery._handle_send_message({"type": "send_message", "chat_id": 1, "task_id": "kid-3",
                                           "text": "Stopped the helper.", "role": "system",
                                           "system_type": "cancel_receipt"}, bridge.host)
+    assert bridge.outbound[-1]["delegation_role"] == "subagent"  # it reached the bridge as the helper's row
     assert _sent_texts(bridge)[-1] == "Stopped the helper."
     # A child's typed incident waits for its root, then goes, as before.
     incident = {"type": "send_message", "chat_id": 1, "task_id": "kid-3", "role": "system",
