@@ -173,16 +173,19 @@ def _resident_text(snapshot, level):
 def resident_marks(root, plan) -> Dict[str, Any]:
     """The ``memory_mark`` receipt's total: the marks block this focus's view draws (its captured spec, over the acting
     marks as they stand after the change), the same text and price ``resident_fact`` reads at the next capture. A
-    focus without a captured view that keeps marks gets the fact that it was not measured, never a number."""
+    focus without a captured view that keeps marks gets the fact that it was not measured, never a number; so does a
+    failed read of the store or of the captured view: the change is saved, only this total is unread."""
+    import sqlite3
     from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.store import StoreError
 
-    snapshot = memory_snapshot(plan) if plan is not None else None
-    if snapshot is None or snapshot.spec.marks == "none":
-        return {"measured": False, "why": "this focus holds no captured view that keeps marks"}
     try:
+        snapshot = memory_snapshot(plan) if plan is not None else None
+        if snapshot is None or snapshot.spec.marks == "none":
+            return {"measured": False, "why": "this focus holds no captured view that keeps marks"}
         marks = [mark for mark in mv._capture_marks(ChronicleStore(root), snapshot.spec, mv.room_labeler(root))
                  if not mark.get("late_review")]
-    except (OSError, TimeoutError, ValueError) as exc:  # the change is saved; only this total is unread
+    except (OSError, TimeoutError, ValueError, KeyError, TypeError, sqlite3.Error, StoreError) as exc:
         return {"measured": False, "why": f"the marks could not be read: {type(exc).__name__}"}
     chars = mv.json_chars(mv._marks_text(marks)) if marks else 0
     return {"marks": len(marks), "tokens": floor.tokens_of(chars), "basis": RESIDENT_BASIS + ", read after this change"}

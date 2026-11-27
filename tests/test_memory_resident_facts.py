@@ -110,3 +110,36 @@ def test_the_mark_receipt_states_the_marks_total_the_next_view_renders(tmp_path)
     count, tokens = marks_now()
     assert released["ok"] and (released["resident_marks"]["marks"], released["resident_marks"]["tokens"]) == (count, tokens)
     assert count == 1 and resident_marks(tmp_path, None)["measured"] is False
+
+
+@pytest.mark.parametrize("failure", ["DatabaseError", "OperationalError", "undecodable view"])
+def test_a_failed_read_after_a_saved_mark_keeps_its_receipt(tmp_path, monkeypatch, failure):
+    """pr2rev1 G16: the receipt's total is read after the mark is committed, so a failed read of the store (any sqlite
+    error, not only a busy lock) or of the captured view never turns the saved mark into a failed call: exactly one
+    mark is added and the receipt says the size was not measured. A clean read gives the total (the other direction)."""
+    import json
+    import sqlite3
+
+    from ouroboros import context_view_facts
+    from ouroboros.tools.chronicle import _memory_mark
+    from tests.test_common_story import _ctx, _rooms
+
+    _world, _alpha, _beta, a1, _b1, _h1 = _rooms(tmp_path)
+    task = {"id": "turn0001", "chat_id": 1}
+    spec = mv.view_spec_for_task(task, tmp_path)
+    ctx = _ctx(tmp_path)
+    ctx.context_fit_plan = SimpleNamespace(core=SimpleNamespace(memory_view_json=mv.snapshot_json(
+        mv.capture_memory_view(tmp_path, task, spec))))
+    before = len(mv.capture_memory_view(tmp_path, task, spec).marks)
+
+    def failed(*_a, **_k):
+        raise getattr(sqlite3, failure, ValueError)("disk I/O error")
+    with monkeypatch.context() as patch:
+        patch.setattr(context_view_facts if failure == "undecodable view" else mv,
+                      "memory_snapshot" if failure == "undecodable view" else "_capture_marks", failed)
+        outcome = json.loads(_memory_mark(ctx, text="Receipt probe", node_id=a1, scope="global"))
+    assert len(mv.capture_memory_view(tmp_path, task, spec).marks) == before + 1
+    assert outcome["ok"] and outcome["mark_id"] and outcome["resident_marks"]["measured"] is False
+    assert outcome["resident_marks"]["why"].startswith("the marks could not be read: ")
+    clean = json.loads(_memory_mark(ctx, text="Second probe", node_id=a1, scope="global"))
+    assert clean["resident_marks"]["marks"] == before + 2 and clean["resident_marks"]["tokens"] > 0
