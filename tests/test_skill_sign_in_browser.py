@@ -147,6 +147,92 @@ def test_add_account_waits_at_the_provider_then_shows_the_row_on_return_and_by_p
             browser.close()
 
 
+def test_a_conversations_sign_in_button_opens_that_services_sign_in_editor(skills_browser):
+    """The chat's sign-in button (chat_media.js: a links row's place ``skill-sign-in/calendar/google``) opens the
+    skill's sheet at that service with the sign-in editor shown; the provider is asked only when the owner says so."""
+    from playwright.sync_api import expect
+
+    browser = skills_browser.chromium.launch(headless=True)
+    try:
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        skills = open_skills(page, extensions=[CALENDAR])
+        skills.answers[STATUS] = status()
+        page.goto(URL, wait_until="networkidle")
+        page.evaluate("window.dispatchEvent(new CustomEvent('ouro:open-skills', "
+                      "{ detail: { skill: 'calendar', service: 'google' } }))")
+        group = page.locator('dialog.skills-detail-sheet [data-sign-in-group="google"]')
+        expect(group.locator('[data-sign-in-editor="sign_in"]')).to_be_visible()
+        expect(group.locator('[data-sign-in-editor="sign_in"]').get_by_role("button", name="Open the sign-in page")).to_be_visible()
+        assert not [body for body in skills.posted(SIGN_IN) if body.get("action") == "begin"], "the owner starts it"
+        capture(page, "chromium", 1280, "sign-in-from-chat")
+    finally:
+        browser.close()
+
+
+def test_a_conversations_button_for_more_access_opens_that_accounts_editor_with_the_access_asked(skills_browser):
+    """A skill asked for more access on a signed-in account (insufficient_scope): the chat's button opens that account's
+    editor with the asked access ticked, as the card's own Sign in again does, never a blank new sign-in."""
+    from playwright.sync_api import expect
+
+    acls = "https://www.googleapis.com/auth/calendar.acls"
+    browser = skills_browser.chromium.launch(headless=True)
+    try:
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        skills = open_skills(page, extensions=[CALENDAR])
+        needing = account("a-1", "owner@example.test", "2026-11-22T10:01:00+00:00", reason="insufficient_scope",
+                          missing_step_up=[acls], required_scope=acls)
+        answer = status([needing])
+        answer["services"][0]["optional_scopes"] = [{"scope": acls, "label": "Calendar sharing", "default": False}]
+        skills.answers[STATUS] = answer
+        page.goto(URL, wait_until="networkidle")
+        page.evaluate("window.dispatchEvent(new CustomEvent('ouro:open-skills', "
+                      "{ detail: { skill: 'calendar', service: 'google' } }))")
+        editor = page.locator('dialog.skills-detail-sheet [data-sign-in-group="google"] [data-sign-in-editor="sign_in"]')
+        expect(editor).to_be_visible()
+        expect(editor.locator('[data-sign-in-field="hint"]')).to_have_value("owner@example.test")
+        expect(editor.locator(f'[data-sign-in-optional][value="{acls}"]')).to_be_checked()
+        assert not [body for body in skills.posted(SIGN_IN) if body.get("action") == "begin"], "the owner starts it"
+    finally:
+        browser.close()
+
+
+def test_a_conversations_button_reads_the_sign_in_afresh_before_choosing_the_account(skills_browser):
+    """A tab that showed Extensions before keeps an older sign-in status; the skill then asked more access. The chat's
+    button chooses the account and the asked access on a fresh read, not on that older snapshot."""
+    from playwright.sync_api import expect
+
+    acls = "https://www.googleapis.com/auth/calendar.acls"
+    browser = skills_browser.chromium.launch(headless=True)
+    try:
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        skills = open_skills(page, extensions=[CALENDAR])
+        plain = account("a-1", "owner@example.test", "2026-11-22T10:01:00+00:00")
+        before = status([plain])
+        before["services"][0]["optional_scopes"] = [{"scope": acls, "label": "Calendar sharing", "default": False}]
+        skills.answers[STATUS] = before
+        page.goto(URL, wait_until="networkidle")  # the page now holds the older status
+        needing = account("a-1", "owner@example.test", "2026-11-22T10:01:00+00:00", reason="insufficient_scope",
+                          missing_step_up=[acls], required_scope=acls)
+        after = status([needing])
+        after["services"][0]["optional_scopes"] = before["services"][0]["optional_scopes"]
+        skills.answers[STATUS] = after
+        skills.hold.add(STATUS)  # the listing answers first, the fresh status after it
+        page.evaluate("window.dispatchEvent(new CustomEvent('ouro:open-skills', "
+                      "{ detail: { skill: 'calendar', service: 'google' } }))")
+        skills.wait_for_request(STATUS)
+        page.locator('.skills-card[data-skill="calendar"]').wait_for(state="visible")
+        page.wait_for_timeout(250)
+        skills.hold.discard(STATUS)
+        while any(path == STATUS for path, _ in skills.pending):
+            skills.release(STATUS)
+        editor = page.locator('dialog.skills-detail-sheet [data-sign-in-group="google"] [data-sign-in-editor="sign_in"]')
+        expect(editor).to_be_visible()
+        expect(editor.locator('[data-sign-in-field="hint"]')).to_have_value("owner@example.test")
+        expect(editor.locator(f'[data-sign-in-optional][value="{acls}"]')).to_be_checked()
+    finally:
+        browser.close()
+
+
 def test_sign_in_uses_the_selected_it_client_for_the_work_account(skills_browser):
     from playwright.sync_api import expect
 

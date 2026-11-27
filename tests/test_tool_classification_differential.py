@@ -651,6 +651,38 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # retired text chain keyed on, so it is the generic ok the retired chain gave FOCUS_STALE and CHERRY_PICK_CONFLICT.
     "RELAY_RETURN_NOT_OWED": (False, "ok"),
     "native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED": (True, "unavailable"),
+    # #3759 control_runtime `_relay_answered`: whether the relay already has its first answer cannot be read (the outbox
+    # forgot it, history is inconclusive), so nothing is sent and the relay stays open: publish_no_effect with native
+    # CAPABILITY_UNAVAILABLE, as RELAY_RETURN_NOT_OWED above. The bare `_UNKNOWN` warning is the retired chain's ok.
+    "RELAY_RETURN_UNKNOWN": (False, "ok"),
+    "native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_UNKNOWN": (True, "unavailable"),
+    # #4261 linked installations. tools/peer_letter.py `_ask_sender` records no question and does not wait on any of its
+    # refusals: outside a letter's root, or when peer_letters `_speech_check` holds the words (PEER_WORDS_HELD leads
+    # the text: the place's own state keeps them, nothing was sent), native ACCESS_BLOCKED; a terminal letter, a reserved
+    # answer and another open question, native OWNER_OPERATION_REFUSED. Work a letter began starts no separately billed
+    # work (peer_letters.separate_work_refusal, for start_task, schedule_followup, deep review and evolution) and changes
+    # only its own schedules (followup.py `_manage_schedules`): native ACCESS_BLOCKED before any effect. The bare
+    # `_UNAVAILABLE` already reads unavailable; the other bare markers name no suffix the retired chain keyed on, so
+    # they read its generic ok and only the typed result carries each refusal.
+    "ASK_SENDER_UNAVAILABLE": (True, "unavailable"),
+    "native:ACCESS_BLOCKED:ASK_SENDER_UNAVAILABLE": (True, "blocked"),
+    "PEER_WORDS_HELD": (False, "ok"),
+    "native:ACCESS_BLOCKED:PEER_WORDS_HELD": (True, "blocked"),
+    "ASK_SENDER_SETTLED": (False, "ok"),
+    "native:OWNER_OPERATION_REFUSED:ASK_SENDER_SETTLED": (True, "blocked"),
+    "ASK_SENDER_ANSWER_RESERVED": (False, "ok"),
+    "native:OWNER_OPERATION_REFUSED:ASK_SENDER_ANSWER_RESERVED": (True, "blocked"),
+    "ASK_SENDER_QUESTION_OPEN": (False, "ok"),
+    "native:OWNER_OPERATION_REFUSED:ASK_SENDER_QUESTION_OPEN": (True, "blocked"),
+    "LETTER_WORK_STARTS_NO_SEPARATE_WORK": (False, "ok"),
+    "native:ACCESS_BLOCKED:LETTER_WORK_STARTS_NO_SEPARATE_WORK": (True, "blocked"),
+    "LETTER_WORK_CHANGES_ONLY_ITS_SCHEDULES": (False, "ok"),
+    "native:ACCESS_BLOCKED:LETTER_WORK_CHANGES_ONLY_ITS_SCHEDULES": (True, "blocked"),
+    # #4213 control_routing `_start_refusal`: start_task(mine=true) while my human's consciousness switch is off (or a
+    # Panic holds) stages and queues nothing: native RESOURCE_CONSTRAINT_BLOCKED, the bucket of the same tool family's
+    # delegated-schedule refusal. The bare `_OFF` warning names no suffix the retired chain keyed on: generic ok.
+    "OWN_TIME_OFF": (False, "ok"),
+    "native:RESOURCE_CONSTRAINT_BLOCKED:OWN_TIME_OFF": (True, "resource_constraint_blocked"),
     # #2751 send family (owner_delivery.py `publish_delivery_receipt`, cards.py `_show_card`): a local-room frame an
     # inline turn has no consumer for, and a non-text frame for an unbound peer, queue nothing and publish native
     # CAPABILITY_UNAVAILABLE. The bare `_UNAVAILABLE` warning already reads unavailable; the bare `_UNSUPPORTED` one

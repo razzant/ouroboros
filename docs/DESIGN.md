@@ -1171,7 +1171,8 @@ words the owner typed into the control (an Evolution objective) stay theirs, exa
 
 A host fact has a subject, and the subject names its carrier: a task's fact is a
 row of its card, a fact about the owner's message is the typed annotation on that
-message, and a landed act publishes no row (its receipt or card already says it).
+message, and a landed act publishes no row (its receipt or card already says it). One exception: a skill's
+sign-in offered as a button in a conversation is said there once (`sign_in_connected`), since its card is elsewhere.
 The mind's Storage → Free request is reported in Main as a typed System row (`storage_free_notice`).
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the
@@ -2301,6 +2302,10 @@ on a loopback host and the client returns to loopback, by its rule or by an exac
 back. Disconnect and Revoke ask in place first and answer for the consent shown (a token refresh keeps it, a new sign-in changes it). Disconnect forgets the sign-in here and says the provider keeps its permission until it is removed in the provider's account. Revoke names the sibling sign-ins it may end and forgets the sign-in only once the provider confirmed; when it did not, or was not asked, the sign-in stays and the result sends the owner to the provider's account settings and then to Disconnect, with no retry offered. A refusal the provider returns is worded as the provider's; an answer that never arrived never says nothing changed, names the one next step and sends its one-time code only once (a saved answer is read again by Finish sign-in, on the return page only by the owner's press). A result stays on the
 line of its control (the group head's once its row is gone), and the skill's own words (service label, permission
 labels, notes) stay as written.
+
+In a conversation the mind offers this card as a button of its links row (a place, never an address); once a sign-in
+offered there completes, one System row in that conversation says the skill is signed in, naming no account. Telegram,
+where a sign-in that returns to the computer cannot finish, says instead where to finish it (owner, 2026-11-27).
 
 ### Dashboard › Consciousness
 

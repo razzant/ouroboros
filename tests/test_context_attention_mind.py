@@ -248,7 +248,7 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
     for part in ("window 500,000", "target 250,000",
                  "input ~120,000 before this line (round 3 accepted 110,000, +10,000 since)",
                  f"predicted free ~{free:,}", f"target room {room:,} (reply floor 65,536)",
-                 "largest unit:2:3:", "own cost unknown",
+                 "largest by kind tool calls and results ×2 (unit:2:3:", "own cost unknown",
                  "shared wallet $12.50 known headroom (unreserved; shared with other tasks)",
                  "quota 3 of 10 this hour", "elapsed unknown (no recorded start)",
                  "no execution limit", "observed tool results 0 (0 errored)"):
@@ -363,7 +363,7 @@ def test_facts_largest_components_include_core_and_schemas(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
     assert append_context_facts(context, money={})
     line = context.messages[-1]["content"]
-    assert "core and books" in line and "tool schemas" in line and "unit:2:3:" in line
+    assert "core and books" in line and "tool schemas" in line and "tool calls and results" in line
 
 
 def test_book_yields_are_offered_on_each_refused_view_after_the_passes(tmp_path, monkeypatch):
@@ -408,3 +408,50 @@ def test_book_yields_are_offered_on_each_refused_view_after_the_passes(tmp_path,
         yields = loop_model_call.BOOK_YIELD_PASSES if book and not read and not role and composed else ()
         assert passes == [*loop_model_call.REFUSAL_PASSES, *yields], (book, read, role, composed)
         assert sends == ["max", "low", *(["low"] * len(yields))]
+
+
+def test_size_facts_count_each_producer_kind_as_one_part_from_typed_metadata_only():
+    """The facts line and a size refusal's terminal name what occupies the view by producer kind: nineteen small
+    review-decision rows are one part larger than one big tool result (C11, 27.11: the review rows were 47% of the
+    view, yet its largest single row was shown as "user ~36,406"). Kinds come from typed metadata only: a plain row
+    that merely starts with the review heading is an ordinary delivered row. The largest single part stays named. The
+    review rows are the review producer's own (``_index_message``), so the count follows whatever shape it writes."""
+    from ouroboros.context_view_facts import largest_parts, largest_parts_text
+    from ouroboros.review_history_view import _index_message
+
+    messages = [{"role": "system", "content": "Core."}, {"role": "user", "content": "The assignment."},
+                *(_index_message({"open": "d" * 4000}, "commit", f"/copy-{n}") for n in range(19)),
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "big result " * 3000},
+                {"role": "user", "content": "[Current review decisions]\n" + "spoof " * 500}]
+    ctx = SimpleNamespace(messages=messages, accumulated_usage={}, tool_schemas=[], context_fit_plan=None, active_effort="")
+    kinds = largest_parts(ctx, measured=False)
+    assert kinds[0][0] == "review decisions ×19" and kinds[0][1] > kinds[1][1]
+    unit = next(unit for unit in cc.context_units(messages, scope="dialogue") if messages[unit.start].get("tool_calls"))
+    assert kinds[1] == [f"tool calls and results ×2 ({unit.unit_id})", unit.context_size_tokens]  # named once
+    spoofed = largest_parts_text(largest_parts(SimpleNamespace(**{**vars(ctx), "messages": messages[:2] + messages[-1:]}),
+                                               measured=False))
+    assert "review decisions" not in spoofed and "other delivered rows" in spoofed
+
+
+def test_facts_line_counts_each_kind_in_rows_and_names_the_largest_part_once(tmp_path):
+    """×N counts what it says, transcript rows: two batches of one call and two results are six rows of tool calls
+    and results (Astra rev1 C3, 27.11: the line said ×2). The largest single part is named once: after the kinds
+    while its kind holds other parts too, else beside its kind, never the same size said twice (rev1 C1)."""
+    from ouroboros.loop_messages import context_facts_line
+
+    context = _ctx(tmp_path)
+    for n, words in ((0, 3000), (1, 200)):
+        ids = [f"c{n}a", f"c{n}b"]
+        context.messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": call, "type": "function",
+                                 "function": {"name": "read_file", "arguments": "{}"}} for call in ids]})
+        context.messages.extend({"role": "tool", "tool_call_id": call, "content": "prior result " * words} for call in ids)
+    big = next(unit for unit in cc.context_units(context.messages, scope="dialogue") if unit.start == 2)
+    line = context_facts_line(context, measured=False)
+    assert "largest by kind tool calls and results ×6 ~" in line
+    assert f"; largest single {big.unit_id} ~{big.context_size_tokens:,}" in line
+    del context.messages[5:]  # one batch left: its unit is its kind's only part
+    line = context_facts_line(context, measured=False)
+    assert f"largest by kind tool calls and results ×3 ({big.unit_id}) ~{big.context_size_tokens:,}" in line
+    assert "largest single" not in line and line.count(big.unit_id) == 1

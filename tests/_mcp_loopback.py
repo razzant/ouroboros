@@ -118,6 +118,9 @@ def start_asgi(app, running, name="mcp-loopback", port=0, **options):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
+    # A bound on the graceful stop: a connection a client abandoned mid-handshake (a refused certificate) can stay
+    # registered on Windows, and uvicorn would wait for it forever, leaving this thread alive after the test.
+    options.setdefault("timeout_graceful_shutdown", 2)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", **options))
     thread = threading.Thread(target=server.run, name=name, daemon=True)
     thread.start()

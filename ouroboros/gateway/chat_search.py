@@ -215,7 +215,8 @@ def _candidate(entry, data_dir, answers=None) -> Dict[str, Any]:
             found["filename"] = delivery["filename"]  # its card shows the name; the file itself is never read
     elif delivery.get("msg_type") == "links":
         found.update(msg_type="links", title=delivery["title"], actions=[
-            {"label": str(item.get("label") or ""), "url": str(item.get("url") or "")}
+            {"label": str(item.get("label") or ""),  # a place (a skill's sign-in card) is drawn as history draws it
+             **({"place": str(item["place"])} if item.get("place") else {"url": str(item.get("url") or "")})}
             for item in delivery["actions"] if isinstance(item, dict)])
     elif kind == "quiz" and isinstance(entry.get("quiz"), dict):
         found.update(msg_type="quiz", quiz=_question_words(entry["quiz"], (answers or {}).get(_question_key(entry))))

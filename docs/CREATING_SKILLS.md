@@ -1062,7 +1062,8 @@ Transport/control skills are first-class local-UI replacements: every owner comm
 polling and justified owner-event mirroring. Their review and runtime obligations belong to [CHECKLISTS](CHECKLISTS.md#transport-and-control-skills-are-first-class-binding-for-all-reviewers).
 
 `POST /chat/inject` treats text beginning with `/panic` (case-insensitive, surrounding whitespace ignored,
-trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop.
+trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop, or, while no
+pair is bound yet (a slot read as positively free), a positive private sender: the bridge decides who that is.
 Unavailable or unauthorized Panic returns `503 {ok:false,error}` and never falls through to ordinary
 chat; this refusal of command-looking text is intentional. Accepted Panic returns `202 {ok:true,status:"accepted"}`,
 without a correlated operation or delivery replay, even with `client_message_id`. Telegram exposes owner
