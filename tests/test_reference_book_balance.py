@@ -23,6 +23,7 @@ from ouroboros.reference_books import (
     CHAPTER_BAND_RULE,
     CHAPTER_READ_LINES,
     STANDALONE_DOCS,
+    UnmeasuredText,
     book_balance_note,
     book_balances,
     book_source_sizes,
@@ -45,8 +46,8 @@ OPENING = ("The first chapter.", "The first chapter, grown.")  # the chapter ope
 
 
 def _mapped_repo(root: pathlib.Path, *, official: bool = True) -> pathlib.Path:
-    """``_book_repo`` whose entry carries its Reference Atlas, committed: a tree the resident Body Map renders from,
-    so its balance is measured (a tree without the Atlas predates the Map: ``reference_books.body_map_sizes``)."""
+    """``_book_repo`` whose entry carries its Reference Atlas, committed: the Body Map renders it beside the
+    chapter openings (a tree without the Atlas renders a Map too, without those rows)."""
     repo = _book_repo(root, official=official)
     (repo / BOOK_ENTRYPOINTS["architecture"]).write_text(ENTRY + ATLAS, encoding="utf-8", newline="\n")
     _git(repo, "commit", "-qam", "the reference atlas")
@@ -117,7 +118,7 @@ def test_linked_body_candidate_without_upstream_keeps_committed_growth(tmp_path)
     _git(serving, "worktree", "add", "-qb", "candidate/task", str(candidate), "HEAD")
     assert (candidate / ".git").is_file()
     assert subprocess.run(["git", "rev-parse", "@{upstream}"], cwd=candidate, capture_output=True).returncode
-    (balance,) = book_balances(candidate, [CHAPTER])
+    balance = _by_id(book_balances(candidate, [CHAPTER]))["architecture"]
     assert balance.vs_head == 0 and balance.vs_upstream == len("Inherited growth.\n")
     assert balance.merge_base == base and balance.upstream == "refs/remotes/canonical/ouroboros"
 
@@ -142,7 +143,7 @@ def test_unknown_contribution_never_means_paid_even_with_measured_head(tmp_path,
             _git(repo, "update-ref", "refs/remotes/managed/ouroboros", base)
     for text in (BODY, BODY.replace(" and long enough to shorten", ""), BODY + "Added.\n"):
         (repo / CHAPTER).write_text(text, encoding="utf-8", newline="\n")
-        (balance,) = book_balances(repo, [CHAPTER])
+        balance = _by_id(book_balances(repo, [CHAPTER]))["architecture"]
         assert balance.vs_head == len(text.encode()) - len(BODY.encode())
         assert balance.vs_upstream is None
         note = book_balance_note(repo, [CHAPTER])
@@ -176,7 +177,7 @@ def test_the_first_official_remote_by_name_is_the_base_whatever_git_shows_beside
     shown = " [blob:none]" if (major, minor) >= (2, 37) else ""  # Git writes the filter there since 2.37
     assert f"a.partial\thttps://github.com/razzant/ouroboros (fetch){shown}" in _git(repo, "remote", "-v").splitlines()
     assert contribution_base(repo) == ("refs/remotes/a.partial/ouroboros", base)
-    (balance,) = book_balances(repo, [CHAPTER])
+    balance = _by_id(book_balances(repo, [CHAPTER]))["architecture"]
     assert balance.upstream == "refs/remotes/a.partial/ouroboros" and balance.vs_upstream == 0
     real_run = subprocess.run
 
@@ -236,13 +237,19 @@ def test_a_filtered_clone_is_measured_offline_and_what_it_lacks_stays_unknown(tm
         listed = _git(clone, "rev-list", "--objects", "--missing=print", base).splitlines()
         return {line[1:] for line in listed if line.startswith("?")}
 
+    def known(measure, *args):  # an object this clone does not hold is unknown: the measure says so, it never fetches
+        try:
+            return measure(*args)
+        except UnmeasuredText as exc:
+            return exc
+
     def measured(trace: pathlib.Path):
         """Every measurement, asserting it opened no transport and wrote no object."""
         store = clone / ".git" / "objects"
         before = sorted((str(path), path.stat().st_size) for path in store.rglob("*") if path.is_file())
         monkeypatch.setenv("GIT_TRACE2_EVENT", str(trace))
-        facts = (contribution_base(clone), book_source_sizes(clone, "architecture", base),
-                 ruled_text_sizes(clone, "constitution", base), book_balances(clone, [CHAPTER, "BIBLE.md"]),
+        facts = (contribution_base(clone), known(book_source_sizes, clone, "architecture", base),
+                 known(ruled_text_sizes, clone, "constitution", base), book_balances(clone, [CHAPTER, "BIBLE.md"]),
                  review.diff_pulse(clone, [CHAPTER, module]), review.diff_pulse(clone, staged=True),
                  review._blob_texts(clone, [f"{base}:{module}"]))
         monkeypatch.delenv("GIT_TRACE2_EVENT")
@@ -261,7 +268,8 @@ def test_a_filtered_clone_is_measured_offline_and_what_it_lacks_stays_unknown(tm
         assert shown.startswith(f"{head_only}: files 2, ") and "tests: items +1/-0, new modules 0," in shown, shown
     shown = {b.book_id: (b.vs_head, b.vs_upstream) for b in balances}
     if lacking == "books":
-        assert entry_at_base is bible_at_base is None and "contribution unknown" in pulse
+        assert isinstance(entry_at_base, UnmeasuredText) and isinstance(bible_at_base, UnmeasuredText)
+        assert "contribution unknown" in pulse
         assert shown == {"architecture": (len("Worktree.\n"), None), "constitution": (0, None),
                          BODY_MAP_TEXT: (0, None)}  # the Map's base side is absent too: unknown, never paid
     else:  # the books' base side is here: their contribution is measured
@@ -297,7 +305,7 @@ def test_remote_host_and_exact_repository_matter_even_with_an_official_push_url(
     _git(repo, "remote", "add", "managed", url)
     _git(repo, "remote", "set-url", "--push", "managed", "https://github.com/razzant/ouroboros.git")
     _git(repo, "update-ref", "refs/remotes/managed/ouroboros", "HEAD")
-    (balance,) = book_balances(repo, [CHAPTER])
+    balance = _by_id(book_balances(repo, [CHAPTER]))["architecture"]
     assert balance.vs_head == 0 and balance.vs_upstream is None and balance.upstream == ""
     assert "contribution unknown" in book_balance_note(repo, [CHAPTER])
 
@@ -311,7 +319,7 @@ def test_membership_and_utf8_bytes_include_composition_separators(tmp_path):
     (repo / CHAPTER).write_text(BODY.replace(" and long enough to shorten", ""), encoding="utf-8")
     (repo / second).write_text(body, encoding="utf-8")
     expected = len(compose_book(load_reference_book(repo, "architecture")).encode("utf-8"))
-    (balance,) = book_balances(repo, [second])
+    balance = _by_id(book_balances(repo, [second]))["architecture"]
     base_size = len(ENTRY.encode()) + len(BODY.encode()) + 2
     assert balance.size == expected
     assert balance.vs_head == balance.vs_upstream == expected - base_size
@@ -414,9 +422,37 @@ def test_note_never_calls_an_unmeasured_book_paid(tmp_path):
     assert "Architecture book balance unavailable" in unavailable and "Body Map balance unavailable" in unavailable
     measured = _mapped_repo(tmp_path / "measured")
     assert "nothing owed" in book_balance_note(measured, [CHAPTER])
-    # A tree from before the Map's sources (no Reference Atlas) offers no Map to compare: named, never paid.
-    pre_map = _book_repo(tmp_path / "pre-map")
-    assert "Body Map balance unavailable" in (note := book_balance_note(pre_map, [CHAPTER])) and "nothing owed" not in note
+    # A tree without the Reference Atlas still renders the Map every request carries: it is measured, not absent.
+    pre_atlas = _book_repo(tmp_path / "pre-atlas")
+    assert "Body Map " in (note := book_balance_note(pre_atlas, [CHAPTER])) and "nothing owed" in note
+    assert "unavailable" not in note and "absent" not in note
+
+
+def test_a_text_absent_here_is_named_and_one_there_but_unreadable_is_never_paid(tmp_path, monkeypatch):
+    """Absent, unreadable and measured are three states. A touched document that is not there is named as absent (a
+    fact; nothing owed). A book that is there but denied is named with why, beside the Map rendered from it, on the
+    edit's note and in codebase health, and is never called paid."""
+    from types import SimpleNamespace
+
+    from ouroboros.tools import health
+
+    repo = _mapped_repo(tmp_path)
+    assert book_balance_note(repo, ["docs/DESIGN.md"]) == "ℹ️ Text growth: docs/DESIGN.md is absent here; nothing owed."
+    readable = book_balance_note(repo, [CHAPTER])
+    assert "unavailable" not in readable and "nothing owed" in readable
+    assert "balance unavailable" not in health._codebase_health(SimpleNamespace(repo_dir=repo))
+    chapter, real_read = repo / CHAPTER, pathlib.Path.read_bytes
+
+    def denied(self):
+        if self == chapter:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", denied)
+    unreadable = book_balance_note(repo, [CHAPTER])
+    assert "Architecture book balance unavailable: " in unreadable and "Body Map balance unavailable: " in unreadable
+    assert "Permission denied" in unreadable and "nothing owed" not in unreadable
+    assert "Architecture book balance unavailable: " in health._codebase_health(SimpleNamespace(repo_dir=repo))
 
 
 @pytest.mark.parametrize(("growth", "missing_book"), [("", "architecture"), ("Added.\n", "development")])

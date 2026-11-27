@@ -1,11 +1,13 @@
 """A change does not make what every mind carries larger, and a book chapter stays within one read (the official line's rule).
 
 What rides every request is measured at this change's tip and at its event base: BIBLE.md and the prompt
-files together as their UTF-8 bytes (``reference_books.RULED_TEXTS``), and the Body Map as the bytes this
-code renders from the books there (``reference_books.body_map_sizes``). The rule is pairwise: there is no
-stored number and no reserve, so text a change adds is paid in the same text in the same change (DEVELOPMENT
-"Paying down a size cap"). A base from before the Map existed renders none: that change has no earlier Map
-to compare with, and none is invented. A text that cannot be measured at the tip is a failure, never a zero.
+files together as their UTF-8 bytes (``reference_books.RULED_TEXTS``), and the Body Map as the bytes each
+revision's OWN code renders from its own books (the tip by this code, the base by the base's code:
+``reference_books.revision_body_map_sizes``), so growth of the renderer's own text is growth. The rule is
+pairwise: there is no stored number and no reserve, so text a change adds is paid in the same text in the same
+change (DEVELOPMENT "Paying down a size cap"). A base with no renderer had no Map: that change has no earlier Map
+to compare with, and none is invented. A text there but unmeasurable, at the tip or at the base, is a failure,
+never a zero and never "absent".
 
 A book chapter is read on demand, so its limit is physical and needs no base: one default ``read_file``
 (``reference_books.chapters_over_one_read``). The large standalone documents are under no rule here.
@@ -21,12 +23,16 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import subprocess
+import sys
+from dataclasses import replace
 
 import pytest
 
 from ouroboros.reference_books import (
-    BODY_MAP_TEXT, BOOK_ENTRYPOINTS, RULED_TEXTS, body_map_sizes, chapters_over_one_read, ruled_text_sizes, text_name,
+    BODY_MAP_TEXT, BOOK_ENTRYPOINTS, RULED_TEXTS, UnmeasuredText, body_map_sizes, chapters_over_one_read,
+    revision_body_map_sizes, ruled_text_sizes, text_name,
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -58,23 +64,37 @@ def growth_base(repo: pathlib.Path, ref: str | None) -> str:
 
 
 def ruled_text_bytes(repo: pathlib.Path, text_id: str, ref: str = "") -> int | None:
-    """The ruled text's UTF-8 bytes in the checkout, or at ``ref``; ``None`` when absent there."""
+    """The ruled text's UTF-8 bytes in the checkout, or at ``ref``; ``None`` when absent there, ``UnmeasuredText``
+    when there but unreadable."""
     sizes = ruled_text_sizes(repo, text_id, ref)
     return None if sizes is None else sum(sizes.values())
 
 
 def body_map_bytes(repo: pathlib.Path, ref: str = "") -> int | None:
-    """The rendered Body Map's UTF-8 bytes in the checkout, or at ``ref``; ``None`` where no Map renders."""
-    sizes = body_map_sizes(repo, BODY_MAP_TEXT, ref)
+    """The rendered Body Map's UTF-8 bytes: in the checkout by this code, at ``ref`` by that revision's own code.
+    ``None`` where no Map renders there (no Architecture book, or a revision without a renderer); ``UnmeasuredText``
+    where it is there but cannot be measured."""
+    sizes = revision_body_map_sizes(repo, ref) if ref else body_map_sizes(repo, BODY_MAP_TEXT)
     return None if sizes is None else sum(sizes.values())
 
 
-def book_growth_verdict(book_id: str, base: int | None, tip: int | None, mode: str) -> tuple[bool, str]:
-    """``(passes, message)`` for one ruled text; the message is empty when it did not grow. A tip that could
-    not be measured fails in every mode: an unknown size is never a size that fits."""
+def _measured(measure, ref: str) -> int | None | UnmeasuredText:
+    try:
+        return measure(ref)
+    except UnmeasuredText as exc:  # there but unreadable: unknown, never absent
+        return exc
+
+
+def book_growth_verdict(book_id: str, base, tip, mode: str) -> tuple[bool, str]:
+    """``(passes, message)`` for one ruled text; the message is empty when it did not grow. ``base`` and ``tip`` are
+    bytes, ``None`` (absent there) or the ``UnmeasuredText`` that stopped the measure. A tip that could not be
+    measured, and a base there but unreadable, fail in every mode: an unknown size is never a size that fits, and
+    an unreadable base is never a base without the text."""
     name = f"the {text_name(book_id)}" if book_id in (*BOOK_ENTRYPOINTS, BODY_MAP_TEXT) else text_name(book_id)
-    if tip is None:
-        return False, f"{name} could not be measured at this change's tip, so its growth is unknown."
+    for side, value in (("tip", tip), ("base", base)):
+        if isinstance(value, UnmeasuredText) or (side == "tip" and value is None):
+            why = f" ({value})" if isinstance(value, UnmeasuredText) else ""
+            return False, f"{name} could not be measured at this change's {side}{why}, so its growth is unknown."
     if base is None or tip <= base:
         return True, ""
     if mode == "approved":
@@ -98,7 +118,7 @@ def _assert_no_unapproved_growth(capsys, measured) -> None:
     mode = (os.environ.get(MODE_ENV) or "block").strip()
     faults: list[str] = []
     for text_id, path, measure in measured:
-        passes, message = book_growth_verdict(text_id, measure(base), measure(""), mode)
+        passes, message = book_growth_verdict(text_id, _measured(measure, base), _measured(measure, ""), mode)
         if message and passes:  # an annotation in the job log; a captured print would never reach it
             with capsys.disabled():
                 print(f"::{'notice' if mode == 'approved' else 'warning'} file={path}::{message}")
@@ -140,6 +160,8 @@ def test_a_change_does_not_grow_bible_or_the_prompts(capsys):
     (None, 5000, "block", True, ""),  # the change that creates the Map has no earlier Map to grow from
     (1000, None, "block", False, "could not be measured"),  # an unmeasured tip is unknown, never zero
     (1000, None, "approved", False, "could not be measured"),
+    (UnmeasuredText("unreadable"), 5000, "approved", False, "at this change's base (unreadable)"),  # never "absent"
+    (1000, UnmeasuredText("denied"), "approved", False, "at this change's tip (denied)"),
 ])
 def test_book_growth_verdict(base, tip, mode, passes, said):
     verdict = book_growth_verdict(BODY_MAP_TEXT, base, tip, mode)
@@ -158,29 +180,127 @@ def _book_tree(root, chapter="# One\n\nWhat this part gives me.\n", atlas=True):
     return entry
 
 
-def test_the_body_map_is_measured_as_rendered_and_a_tree_before_it_offers_no_base(tmp_path):
-    _book_tree(tmp_path, atlas=False)
+def _commit(root, message: str) -> str:
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message)
+    return _git(root, "rev-parse", "HEAD").stdout.decode("ascii").strip()
+
+
+def test_the_body_map_is_measured_as_rendered_in_three_states(tmp_path, monkeypatch):
+    """Absent (no Architecture book): no Map, a fact. Measured: what the renderer makes of the sources, with or
+    without a Reference Atlas, and without a handbook the tree does not hold. There but unreadable (a denied
+    handbook, a listed chapter that is gone, a revision whose objects cannot be read): ``UnmeasuredText``, never a
+    smaller Map and never "no earlier Map"."""
     _git(tmp_path, "init", "-q")
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "before the Map")
-    assert body_map_bytes(tmp_path, "HEAD") is None and body_map_bytes(tmp_path) is None  # no Atlas: no Map, no baseline
+    assert body_map_sizes(tmp_path) is None  # no Architecture book: no Map
+    _book_tree(tmp_path, atlas=False)
+    unmapped = body_map_bytes(tmp_path)  # no Atlas is still a Map the runtime sends
     _book_tree(tmp_path)
     created = body_map_bytes(tmp_path)
-    assert created and book_growth_verdict(BODY_MAP_TEXT, body_map_bytes(tmp_path, "HEAD"), created, "block") == (True, "")
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "the Map")
+    assert unmapped and created > unmapped
+    _commit(tmp_path, "the Map")
+    assert body_map_sizes(tmp_path, ref="HEAD") == {BODY_MAP_TEXT: created}
     # A chapter's body is not in the Map: an edit below its opening moves no resident byte; its opening does.
     chapter = tmp_path / "docs/architecture/01-one.md"
     chapter.write_text(chapter.read_text(encoding="utf-8") + "\n## Detail\n\nMechanism.\n", encoding="utf-8", newline="\n")
-    assert body_map_bytes(tmp_path) == created == body_map_bytes(tmp_path, "HEAD")
+    assert body_map_bytes(tmp_path) == created
     _book_tree(tmp_path, chapter="# One\n\nWhat this part gives me, and more.\n")
     grown = body_map_bytes(tmp_path)
     assert grown == created + len(", and more")
-    assert book_growth_verdict(BODY_MAP_TEXT, body_map_bytes(tmp_path, "HEAD"), grown, "block")[0] is False
-    # The Map names the handbook's chapters: with that book there but unreadable the Map is unmeasured, never smaller.
-    (tmp_path / "docs/development/01-rules.md").unlink()
-    assert body_map_bytes(tmp_path) is None
-    assert book_growth_verdict(BODY_MAP_TEXT, created, body_map_bytes(tmp_path), "approved")[0] is False
+    assert book_growth_verdict(BODY_MAP_TEXT, created, grown, "block")[0] is False
+    handbook = tmp_path / BOOK_ENTRYPOINTS["development"]
+    real_read = pathlib.Path.read_bytes
+    with monkeypatch.context() as patched:  # the handbook is there but denied: unknown, never a Map without its list
+        patched.setattr(pathlib.Path, "read_bytes", lambda self: (_ for _ in ()).throw(PermissionError(str(self)))
+                        if self == handbook else real_read(self))
+        with pytest.raises(UnmeasuredText, match="DEVELOPMENT.md"):
+            body_map_bytes(tmp_path)
+        assert not book_growth_verdict(BODY_MAP_TEXT, created, _measured(lambda ref: body_map_bytes(tmp_path, ref), ""),
+                                       "approved")[0]
+    (tmp_path / "docs/development/01-rules.md").unlink()  # a listed chapter that is gone: the book is broken
+    with pytest.raises(UnmeasuredText):
+        body_map_bytes(tmp_path)
+    for path in (handbook, tmp_path / "docs/development"):
+        shutil.rmtree(path) if path.is_dir() else path.unlink()
+    without_handbook = body_map_bytes(tmp_path)  # no handbook in this tree: a fact, its list is not there
+    assert without_handbook and without_handbook < grown
+    # A revision that resolves but whose objects cannot be read is unknown, never a revision without the Map.
+    from ouroboros import reference_books
+
+    native = reference_books._git_bytes
+    for failing in ("cat-file", "ls-tree"):
+        with monkeypatch.context() as patched:
+            patched.setattr(reference_books, "_git_bytes",
+                            lambda root, *args, failing=failing, **kw: None if args[0] == failing else native(root, *args, **kw))
+            with pytest.raises(UnmeasuredText):
+                body_map_sizes(tmp_path, ref="HEAD")
+    with monkeypatch.context() as patched:  # BIBLE.md's revision cannot even be listed: unknown, never absent
+        patched.setattr(reference_books, "_git_bytes",
+                        lambda root, *args, **kw: None if args[0] == "ls-tree" else native(root, *args, **kw))
+        with pytest.raises(UnmeasuredText):
+            ruled_text_sizes(tmp_path, "constitution", "HEAD")
+    assert ruled_text_sizes(tmp_path, "constitution", "HEAD") is None  # listed, and BIBLE.md is not there: absent
+
+
+# The modules the Body Map renderer imports, copied into a scratch repository's revisions.
+_RENDERER = ("reference_books", "markdown_source", "repo_remotes", "update_channels")
+
+
+def _renderer_tree(root, reader_suffix: str = "") -> None:
+    for name in _RENDERER:
+        source = (REPO / "ouroboros" / f"{name}.py").read_text(encoding="utf-8")
+        if name == "reference_books" and reader_suffix:
+            source = source.replace("BODY_MAP_READER = '", f"BODY_MAP_READER = {reader_suffix!r} + '", 1)
+        (root / "ouroboros").mkdir(exist_ok=True)
+        (root / "ouroboros" / f"{name}.py").write_text(source, encoding="utf-8", newline="\n")
+
+
+def test_the_base_map_is_rendered_by_the_base_revisions_own_code(tmp_path, monkeypatch, capsys):
+    """A change to the renderer that grows every request trips the rule: the base's Map is the one the base's own
+    code rendered. A base without a renderer had no Map (nothing compared); a base whose renderer is there but fails
+    is unknown and fails the lane."""
+    from ouroboros import reference_books
+
+    _git(tmp_path, "init", "-q")
+    _book_tree(tmp_path)
+    (tmp_path / "ouroboros").mkdir()
+    (tmp_path / "ouroboros/reference_books.py").write_text('"""Books, before the Map."""\n', encoding="utf-8")
+    before_map = _commit(tmp_path, "books without a renderer")
+    _renderer_tree(tmp_path)
+    rendered = _commit(tmp_path, "the renderer")
+    _renderer_tree(tmp_path, "X" * 512)
+    grown_renderer = _commit(tmp_path, "a renderer that adds 512 bytes")
+    (tmp_path / "ouroboros/reference_books.py").write_text("def body_map(:\n", encoding="utf-8")
+    broken = _commit(tmp_path, "a renderer that cannot run")
+    _renderer_tree(tmp_path)
+    _commit(tmp_path, "the renderer again")
+    here = body_map_bytes(tmp_path)
+    assert body_map_bytes(tmp_path, rendered) == here  # the same code and sources render the same Map
+    assert body_map_bytes(tmp_path, grown_renderer) == here + 512  # that revision's OWN renderer, not this one
+    assert body_map_bytes(tmp_path, before_map) is None  # no renderer there: no earlier Map
+    with pytest.raises(UnmeasuredText, match="renderer failed"):
+        body_map_bytes(tmp_path, broken)
+
+    consumer = sys.modules[__name__]
+    monkeypatch.setattr(consumer, "REPO", tmp_path)
+    monkeypatch.setenv(MODE_ENV, "block")
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.setenv(BASE_REF_ENV, rendered)
+    test_a_change_does_not_grow_the_body_map(capsys)  # the real tree's renderer and books: +0
+    native = reference_books.body_map
+
+    def grown(*args, **kwargs):  # this change's renderer adds 512 resident bytes to every request
+        view, parts = native(*args, **kwargs)
+        return replace(view, text=view.text + "X" * 512), parts
+
+    monkeypatch.setattr(reference_books, "body_map", grown)
+    with pytest.raises(AssertionError, match="grew by 512 bytes"):
+        test_a_change_does_not_grow_the_body_map(capsys)
+    monkeypatch.setenv(BASE_REF_ENV, before_map)
+    test_a_change_does_not_grow_the_body_map(capsys)  # the change that creates the Map has no earlier Map
+    monkeypatch.setenv(BASE_REF_ENV, broken)
+    with pytest.raises(AssertionError, match="could not be measured at this change's base"):
+        test_a_change_does_not_grow_the_body_map(capsys)
 
 
 def test_a_chapter_past_one_read_is_named_and_an_unreadable_book_is_an_error(tmp_path):
