@@ -140,8 +140,8 @@ html[data-layout="stack"] .shell-icon-control {
    it leads is its tooltip and accessible name. It stands first in a header's row, 8px before the place's name, tabs
    or capsules, and never shrinks. A return to another place says where it leads on a desk: the same capsule holds the
    chevron and the destination's words (`‹ Settings`), 12px before the page's name. The page's own name and controls
-   win: the return takes at most a share of the header's row, yields first (its words end in an ellipsis) and stays the
-   circle where that row is narrow. The row is the header's own: the page column of a section, the title block of any
+   win: the return takes at most a share of the header's row (its words end in an ellipsis) and is the round arrow where
+   that row is narrow, never a pill without words. The row is the header's own: the page column of a section, the title block of any
    other page, the whole bar of a room (whose title block is as wide as its words); the stack layout keeps the circle,
    its words in its name. The queries only lend the capsule its values (--return-*). */
 .shell-back { flex: none; --back-nudge: 0.75px 0; }
@@ -177,17 +177,17 @@ html[data-layout="docked"]:not([data-telegram-fullscreen="active"]) :is(:not(.se
 html[data-layout="docked"]:not([data-telegram-fullscreen="active"]) :is(.chat-page-header, .project-panel-bar) {
     container: roomreturn / inline-size;
 }
-/* A page row from 20rem holds the capsule (at most 40 % of it) beside the page's name and controls; a room's bar from
-   40rem holds it (at most a quarter) beside the room's name, its status, Panic and ×. The slot yields first. */
-@container pagereturn (min-width: 20rem) {
+/* A page row from 24rem holds the capsule (at most 35 % of it) beside the page's name and up to two controls, each on
+   one line; a room's bar from 40rem holds it (at most a quarter) beside the room's name, its status, Panic and ×. Below
+   that the return is the round arrow; it never shrinks below it, and the name after it is what yields. */
+@container pagereturn (min-width: 24rem) {
     html[data-layout="docked"] .app-page-header[data-return-named] .app-page-return {
         --return-words: block;
         --return-width: auto;
         --return-pad: var(--space-1) var(--space-3);
         --return-nudge: none;
-        --return-cap: min(16rem, 40cqi);
-        flex: 0 1000 auto;
-        min-width: var(--control-h-float);  /* never narrower than the round Back it holds: its centre stays its own */
+        --return-cap: min(16rem, 35cqi);
+        flex: none;  /* the capsule is capped, never squeezed: a legible word or, in a narrower row, the round arrow */
         margin-inline-end: var(--space-1);
     }
 }
@@ -198,8 +198,7 @@ html[data-layout="docked"]:not([data-telegram-fullscreen="active"]) :is(.chat-pa
         --return-pad: var(--space-1) var(--space-3);
         --return-nudge: none;
         --return-cap: min(16rem, 25cqi);
-        flex: 0 1000 auto;
-        min-width: var(--control-h-float);  /* never narrower than the round Back it holds: its centre stays its own */
+        flex: none;  /* the capsule is capped, never squeezed: a legible word or, in a narrower row, the round arrow */
         margin-inline-end: var(--space-1);
     }
 }

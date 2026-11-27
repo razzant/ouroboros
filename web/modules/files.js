@@ -491,8 +491,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         if (!layers) return;
         if (open) layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null,
             back: { label: state.path === '.' ? 'Files' : state.path.split('/').filter(Boolean).at(-1) || 'Files',
-                title: state.path === '.' ? 'Files' : `Files › ${state.path}`,
-                literal: state.path === '.' ? [] : [state.path] }, onClose: closeFile });  // a path is the owner's, never translated
+                title: state.path === '.' ? 'Files' : `Files › ${state.path}`, literal: [state.path] }, onClose: closeFile });
         else layers.remove(FILE_LAYER);
     }
 
