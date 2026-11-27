@@ -6,7 +6,7 @@ import { rowsOf } from './settings_rows.js';
 import { statusMarkHtml } from './status_mark.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
-import { allowanceHold, allowanceText, heldWake, modelRouteWords, wakeResumeRoomWords } from './consciousness_words.js';
+import { allowanceHold, allowanceText, heldWake, modelRouteWords, totalBudgetNow, wakeResumeRoomWords } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
 import { mountCostProjectDays } from './cost_project_days.js';
@@ -212,13 +212,20 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
 
 /** The Total budget card's line about its own wake held by that budget (its proven cause, consciousness_hold.hold_cause),
  *  with its card's door, or null: raising the budget alone does not resume a paused wake, so the line says what does.
- *  Read-only: Resume and Stop now stay on its card and its block (consciousness_held_wake.js). */
-export function totalBudgetHoldLine(snapshot) {
+ *  With this page's `accounting` (/api/cost-breakdown) it says whether the budget has room now, by the rule and words of
+ *  the block and Main's card (`totalBudgetNow`); without it, only the past stop. Read-only: Resume and Stop now stay on
+ *  its card and its block (consciousness_held_wake.js). */
+export function totalBudgetHoldLine(snapshot, accounting = null) {
     const wake = snapshot ? heldWake(snapshot) : '';
-    return wake && snapshot.holdCause === 'total_budget' ? { wake, tone: 'warn',
-        text: 'The consciousness wake-up stopped when the total budget was spent.',
-        note: 'Raising Total budget alone does not resume it; Resume or Stop now on its card.' } : null;
+    if (!wake || snapshot.holdCause !== 'total_budget') return null;
+    return { wake, tone: 'warn', text: 'The consciousness wake-up stopped when the total budget was spent.',
+        note: totalBudgetNow(accounting).words || 'Raising Total budget alone does not resume it; Resume or Stop now on its card.' };
 }
+
+/** One line of the allowance's or the total budget's facts: its sentence, its quieter note, its wake's card door. */
+const allowanceLineHtml = (line) => `<p class="ui-status costs-allowance-line" data-tone="${line.tone}">${escapeHtmlAttr(line.text)}`
+    + `${line.note ? ` <span class="costs-allowance-note">${escapeHtmlAttr(line.note)}</span>` : ''}`
+    + `${line.wake ? ` ${taskReferenceHtml(line.wake)}` : ''}</p>`;
 
 /** The consciousness limit as a meter: its spend of the 24-hour limit in the limit's money, the share, what is left,
  *  and what the number leaves out. Empty where the snapshot does not say; the sentence of allowancePresentation then says why. */
@@ -378,6 +385,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     const limits = bindSettingRows(budgetCard);
     const expanded = new Set();
     let lastBreakdown = null;
+    let lastAllowance = null;  // the newest consciousness snapshot the allowance painted
     let allowanceExpiry = null;
     // The sheets decide whether the page is drawn: one column's list holds it undrawn, also while its arrow keys select the
     // row, until a press opens the page. Every read of the page starts here, at its ingress, and only while it is drawn.
@@ -479,13 +487,15 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         const note = page.querySelector('#costs-allowance-spend');
         note.textContent = meter.spent ? meter.note : view.spend;  // unreadable or unknown: the sentence that says so
         note.hidden = !note.textContent;
-        const lineHtml = (line) => `<p class="ui-status costs-allowance-line" data-tone="${line.tone}">${escapeHtmlAttr(line.text)}`
-            + `${line.note ? ` <span class="costs-allowance-note">${escapeHtmlAttr(line.note)}</span>` : ''}`
-            + `${line.wake ? ` ${taskReferenceHtml(line.wake)}` : ''}</p>`;
-        page.querySelector('#costs-allowance-state').innerHTML = view.lines.map(lineHtml).join('');
-        // Its own wake held by the total budget is said under that budget's card, from this same snapshot.
-        const total = totalBudgetHoldLine(snapshot);
-        page.querySelector('#cost-total-state').innerHTML = total ? lineHtml(total) : '';
+        page.querySelector('#costs-allowance-state').innerHTML = view.lines.map(allowanceLineHtml).join('');
+        lastAllowance = snapshot;
+        renderTotalHold();
+    }
+    // Its own wake held by the total budget is said under that budget's card, from the newest snapshot and this page's
+    // newest accounting read (each read repaints it).
+    function renderTotalHold() {
+        const total = totalBudgetHoldLine(lastAllowance, lastBreakdown?.accounting);
+        page.querySelector('#cost-total-state').innerHTML = total ? allowanceLineHtml(total) : '';
     }
 
     async function loadAllowance() {
@@ -512,11 +522,13 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             lastBreakdown = d;
             renderLead(presentation);
             renderTables(d);
+            renderTotalHold();
         } catch {
             if (!read.current()) return;
             lastBreakdown = null;
             renderLead({ state: 'unavailable' });
             renderTables(null, 'Unavailable');
+            renderTotalHold();
         } finally { read.end(); }
     }
 
