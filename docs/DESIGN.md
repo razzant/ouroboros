@@ -3816,8 +3816,7 @@ edge. Blur and darkening each follow the shared edge curve to clear, the deep bl
 soft into sharp text, so the blurred zone ends with no line. It is full from the
 window's top, behind the phone clock and the window's lights, down to the capsules, and clears through their band,
 ending at their lower side on every layout: nothing of it shows below the capsules. The composer's edge mirrors it from
-the capsule row's upper side, whatever the composer holds above that row (a staged attachment or reply). It keeps scrolling card
-actions distinct from the floating controls. The first row and every landing clear the bar; a row under it is not
+the capsule row's upper side, whatever the composer holds above that row (a staged attachment or reply). It hides what scrolls behind the bar above the capsules; inside their band the feed comes clear toward their lower side. The first row and every landing clear the bar; a row under it is not
 read yet. The top edge is separate from the desktop
 title-band strip. A note or the search sheet floats above it as the capsules do (a Project's status note, in its flow,
 stands below it). The blur belongs to the edge, not to a chip, so it applies in both themes; without backdrop blur,
