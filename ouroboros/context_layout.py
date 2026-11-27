@@ -311,9 +311,11 @@ def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
     ).text
 
 
-PACKET_BOOK_INDEX = ("This overview contains introductions, not complete chapters. Each chapter below gives its title "
-                     "and physical source path once, its introduction, then every heading with its inclusive line range "
-                     "in that file (a parent's range includes its descendants).")
+PACKET_BOOK_INDEX = ("The book overviews below contain introductions, not complete chapters. Each chapter gives its title "
+                     "and file once (its book's `## Chapters` line names their folder), its introduction, then every "
+                     "heading with its inclusive line range in that file (a parent's range includes its descendants).")
+PACKET_CHAPTERS = "## Chapters (files in `{folder}/`)"
+PACKET_ATLAS = "## Reference Atlas\n\nNot delivered in this packet: a seat without tools opens none of its documents."
 
 
 def _packet_book_index(book: ReferenceBook) -> str:
@@ -321,22 +323,36 @@ def _packet_book_index(book: ReferenceBook) -> str:
 
     The overview repeats each chapter's title and address (the contents list, the chapter heading, its source
     line, its map's heading) and spells the range convention on every heading. Here the contents list gives way
-    to one line per chapter (title, the list's own wording where it differs, physical path); the entrypoint's
-    other text, each authored introduction and every heading with its range stay verbatim. The membership
-    loader already proved the list and the chapters correspond one to one, in order."""
-    from ouroboros.reference_books import _preamble
+    to one line per chapter (title, the list's own wording where it differs, its file) under the `## Chapters`
+    line, which names the chapters' shared folder once and stands directly above them, and a heading is indented
+    from its chapter's shallowest listed one. The entrypoint's other text, each authored introduction and every heading with its range stay
+    verbatim, except the Reference Atlas: the resident Body Map carries it for a mind that can open its
+    documents, and a seat without tools gets one line saying it is not here. The range convention
+    (``PACKET_BOOK_INDEX``) is the caller's to state once above the books it delivers. The membership loader
+    already proved the list and the chapters correspond one to one, in order."""
+    import posixpath
+
+    from ouroboros.reference_books import BODY_MAP_ATLAS, _preamble
 
     entry = book.entrypoint
     section = next(h for h in entry.headings if h.level == 2 and h.title == "Chapters")
     listed = next(s for s in entry.lists if section.span.end_byte <= s.start_byte < section.section.end_byte)
     labels = [link.label for link in entry.links if listed.start_byte <= link.span.start_byte < listed.end_byte]
-    rows = [(entry.raw[:listed.start_byte] + entry.raw[listed.end_byte:]).decode("utf-8").rstrip(), PACKET_BOOK_INDEX]
+    folder = posixpath.commonpath([posixpath.dirname(chapter.source_path) for chapter in book.chapters] or [""])
+    cuts = [(section.span.start_byte, listed.end_byte, b""),  # the heading returns below, directly above its rows
+            *((h.span.start_byte, h.section.end_byte, PACKET_ATLAS.encode() + b"\n\n")
+              for h in entry.headings if h.level == 2 and h.title == BODY_MAP_ATLAS)]
+    raw = entry.raw
+    for first, last, said in sorted(cuts, reverse=True):
+        raw = raw[:first] + said + raw[last:]
+    rows = [raw.decode("utf-8").rstrip(), PACKET_CHAPTERS.format(folder=folder) if folder else "## Chapters"]
     for chapter, label in zip(book.chapters, labels):
-        title = chapter.headings[0].title
+        title, entries = chapter.headings[0].title, _nav_entries(chapter.text)
         listed_as = "" if label == title else f" (listed as {label})"
-        rows.append("\n".join([f"# {title}{listed_as} — `{chapter.source_path}`", chapter.text_at(_preamble(chapter)),
-                               *(f"{'  ' * (level - 2)}- {first}-{last} {name}"
-                                 for level, name, first, last in _nav_entries(chapter.text))]))
+        top = min((level for level, *_ in entries), default=0)
+        rows.append("\n".join([f"# {title}{listed_as} — `{posixpath.relpath(chapter.source_path, folder or '.')}`",
+                               chapter.text_at(_preamble(chapter)).strip(),
+                               *(f"{'  ' * (level - top)}- {first}-{last} {name}" for level, name, first, last in entries)]))
     return "\n\n".join(rows)
 
 

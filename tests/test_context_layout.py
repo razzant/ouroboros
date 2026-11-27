@@ -163,6 +163,34 @@ def test_the_real_architecture_book_navigation_exposes_all_h4_groups():
     assert end <= len(lines)
 
 
+def test_the_packet_index_writes_each_fact_once_and_says_the_atlas_is_not_there():
+    """A seat without tools: the chapters' folder once on the `## Chapters` line standing directly above them, each
+    chapter's file, its introduction and every heading with its range (indented from the chapter's shallowest
+    listed heading), the entrypoint's other text verbatim, and one line where the Reference Atlas stood. The range
+    convention is not repeated per book (the governance navigation states it once). The overview a reader WITH
+    tools gets keeps full paths and the Atlas rows."""
+    from ouroboros.reference_books import load_reference_book
+
+    files = {
+        "docs/ARCHITECTURE.md": (b"# Body\n\nThe map; the Reference Atlas below lists the rest.\n\n## Chapters\n\n"
+                                 b"- [Core](architecture/01-core.md)\n- [The web](architecture/02-web.md)\n\n"
+                                 b"## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) \xe2\x80\x94 how the screens look.\n\n"
+                                 b"## See also\n\nA closing word.\n"),
+        "docs/architecture/01-core.md": b"# Core\n\nWhat the core gives me.\n\n### Loop\n\nA.\n\n#### Rounds\n\nB.\n",
+        "docs/architecture/02-web.md": b"# Web\n\nWhat the web gives me.\n\n## Pages\n\nC.\n",
+    }
+    book = load_reference_book(Path("unused"), "architecture", lambda path: files[path])
+    assert cl.book_navigation(book, instructions=False) == (
+        "# Body\n\nThe map; the Reference Atlas below lists the rest.\n\n"
+        f"{cl.PACKET_ATLAS}\n\n## See also\n\nA closing word.\n\n"
+        "## Chapters (files in `docs/architecture/`)\n\n"
+        "# Core — `01-core.md`\nWhat the core gives me.\n- 5-11 Loop\n  - 9-11 Rounds\n\n"
+        "# Web (listed as The web) — `02-web.md`\nWhat the web gives me.\n- 5-7 Pages")
+    with_tools = cl.book_navigation(book)
+    assert "docs/architecture/02-web.md" in with_tools and cl.PACKET_ATLAS not in with_tools
+    assert cl.PACKET_BOOK_INDEX not in cl.book_navigation(book, instructions=False)
+
+
 def test_a_legacy_revision_navigates_as_the_single_source_it_is():
     from ouroboros.reference_books import load_reference_book
 

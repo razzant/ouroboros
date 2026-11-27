@@ -322,6 +322,13 @@ def _opening_units(source) -> list:
     return [(offset, text.strip(), is_code) for offset, text, is_code in units if text.strip()]
 
 
+def _packet_index_words(packet: bool, *books) -> str:
+    """The packet book index's convention, said once above the chaptered books a packet seat is handed."""
+    from ouroboros.context_layout import PACKET_BOOK_INDEX
+
+    return PACKET_BOOK_INDEX if packet and any(book is not None and not book.legacy for book in books) else ""
+
+
 def _book_navigation(repo_dir: Path, book_id: str, book, load_doc, *, instructions: bool = True) -> str:
     from ouroboros.context_layout import book_navigation, generate_doc_nav_map
     from ouroboros.reference_books import BOOK_ENTRYPOINTS
@@ -376,7 +383,7 @@ def navigation_material(layer: str, delivery: str) -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a layer's governance navigation
     as its renderer composes it for ``delivery``, over placeholders (the subject's documents, the sources a skill
     owes). The documents it names, their headings and the guides' own text are not here."""
-    from ouroboros.context_layout import PACKET_BOOK_INDEX, design_navigation
+    from ouroboros.context_layout import PACKET_ATLAS, PACKET_BOOK_INDEX, PACKET_CHAPTERS, design_navigation
     from ouroboros.tools.review_helpers import GOVERNANCE_OMISSION
 
     words = NAVIGATION_WORDS.get(layer, {})
@@ -391,7 +398,8 @@ def navigation_material(layer: str, delivery: str) -> list:
                 blocks, notices = gmr.contract_material()
                 pointers.extend([*(_render(gmr.MODULE_ROWS_PATH, block) for block in blocks), *notices])
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
-                *(pointers if layer == BODY_LAYER else ()), *([PACKET_BOOK_INDEX] if delivery == PACKET_DELIVERY else ())]
+                *(pointers if layer == BODY_LAYER else ()), *([PACKET_BOOK_INDEX, PACKET_CHAPTERS.format(folder="⟨folder⟩"), PACKET_ATLAS]
+                  if delivery == PACKET_DELIVERY else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
     (tail,) = words[delivery]
     return [heading, *(rules + subject_words + tail for rules in (with_rules, without_rules)),
@@ -546,6 +554,7 @@ def _skill_layer_context(repo_dir: Any, *, surface: str, delivery: str, checklis
         else:
             rows.append(_row(path, 2, "required", len(text), f"tier 2 by manifest facts: {reason}; read it in full"))
     maps: list[str] = []
+    books: list = []
     for book_id, entrypoint in ((DEVELOPMENT_BOOK_ID, "docs/DEVELOPMENT.md"), (ARCHITECTURE_BOOK_ID, "docs/ARCHITECTURE.md")):
         book, problem = _load_book(root, book_id)
         rows.append(_row(entrypoint, 3, "navigation", 0,
@@ -554,7 +563,9 @@ def _skill_layer_context(repo_dir: Any, *, surface: str, delivery: str, checklis
         for chapter in _book_sources(book):
             if chapter.source_path not in SKILL_REQUIRED_CHAPTERS:
                 rows.append(_row(chapter.source_path, 3, "navigation", len(chapter.text), "the map is never inlined whole"))
+        books.append(book)
         maps.append(_book_navigation(root, book_id, book, load_governance_doc, instructions=not packet))
+    maps.insert(0, _packet_index_words(packet, *books))
     creating = load_governance_doc(root, CREATING_SKILLS_PATH, on_missing="explicit")
     rows.append(_row(CREATING_SKILLS_PATH, 3, "navigation", len(creating), "the skill author's guide: its heading map"))
     maps.append(generate_doc_nav_map(creating, title=CREATING_SKILLS_PATH.rsplit("/", 1)[-1], rel_path=CREATING_SKILLS_PATH,
@@ -832,6 +843,7 @@ def governance_context(
         nav_heading, nav_words,
         "\n".join(pointer for pointer in pointers if pointer),
         design_map,
+        _packet_index_words(packet, dev_book, arch_book),
         _book_navigation(root, DEVELOPMENT_BOOK_ID, dev_book, load_governance_doc, instructions=not packet),
         _book_navigation(root, ARCHITECTURE_BOOK_ID, arch_book, load_governance_doc, instructions=not packet),
     ])

@@ -324,7 +324,15 @@ def test_the_architecture_map_is_never_inlined_whole(repo):
                   if path.startswith("docs/architecture/") and "#" not in path]
     assert whole_arch == []
     assert "docs/ARCHITECTURE.md" in _paths(context, "navigation", tier=3)
-    assert "docs/architecture/02-web.md" in context.navigation
+    # A packet seat's index names the chapters' folder once and each file under it; the range convention is said
+    # once for both books. A retrieving seat keeps full paths and is told to read, so it gets neither line.
+    from ouroboros.context_layout import PACKET_BOOK_INDEX
+
+    assert "## Chapters (files in `docs/architecture/`)" in context.navigation and "— `02-web.md`" in context.navigation
+    assert "## Chapters (files in `docs/development/`)" in context.navigation
+    assert context.navigation.count(PACKET_BOOK_INDEX) == 1
+    retrieving = _context(repo, touched_paths=["web/modules/chat.js"], delivery="retrieving").navigation
+    assert PACKET_BOOK_INDEX not in retrieving and "(files in `" not in retrieving
 
 
 def test_a_packet_row_receives_the_sections_that_name_a_touched_file(repo):
