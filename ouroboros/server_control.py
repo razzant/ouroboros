@@ -166,7 +166,8 @@ def request_panic(bridge, text: str, *, startup_owner_command=None, evidence=Non
     """Accept an emergency through its owner, never ordinary command admission.
 
     Only authenticated web ingress may use the startup callback. External
-    senders need the bridge's positively bound owner pair even during startup.
+    senders need the bridge's positively bound owner pair even during startup,
+    or a slot the door observed positively free (``PanicIngress``).
     """
     panic = getattr(bridge, "panic", None)
     identity = {"source": source, "user_id": user_id, "chat_id": chat_id}
