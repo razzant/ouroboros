@@ -84,7 +84,8 @@ FIT = """id => {
     const barControls = [...bar.querySelectorAll('button')].filter(shown);
     const controls = [...barControls, ...area.querySelectorAll(
         '.chat-toolbar-row button:not(.chat-capsule-body *), .chat-text-row button')].filter(shown);
-    const edge = Math.round(parseFloat(getComputedStyle(bar.querySelector(':scope > .room-edge[data-edge="tint"]')).height) - box(bar).height);
+    // How far the room's edge reaches below the bar (style.css "A room's edges": it ends at the capsules, inside it).
+    const edge = Math.max(0, Math.round(parseFloat(getComputedStyle(bar.querySelector(':scope > .room-edge[data-edge="tint"]')).height) - box(bar).height));
     const clearTop = Math.max(box(feed).top, box(bar).bottom + edge);
     const clearBottom = Math.min(box(feed).bottom, box(area).top, visualViewport.height);
     const clear = r => r && r.width > 0 && r.height > 0 && r.top >= clearTop - 0.5 && r.bottom <= clearBottom + 0.5;
@@ -993,7 +994,7 @@ def test_a_short_keyboard_under_telegrams_fullscreen_band_keeps_history_the_comp
         fit = measured[state]
         assert fit['lastLine'] and fit['foot'] and fit['unreached'] == [] and fit['composer'] <= 508, (state, fit)
         assert fit['underBar'] and fit['underComposer'] and abs(fit['bottomSeam']) <= 2, (state, fit)
-        assert fit['edge'] == 32 and fit['scrollY'] == 0, (state, fit)
+        assert fit['edge'] == 0 and fit['scrollY'] == 0, (state, fit)
         assert fit['keyboard'] and fit['focused'] and not fit['folded'] and fit['capsules'] == 4, (state, fit)
     menu = measured['plus']
     assert menu['top'] >= band + 8 - 0.5 and menu['bottom'] <= menu['plusTop'] - 4 + 0.5, f'"+" clears the band: {menu}'
@@ -1013,7 +1014,7 @@ def test_a_short_keyboard_under_telegrams_fullscreen_band_keeps_history_the_comp
     assert measured['pinched'] == measured['shrunk']
     rested = measured['rested']
     assert not rested['keyboard'] and rested['cap'] == 140 and rested['field'] == 140, rested
-    assert not rested['folded'] and rested['capsules'] == 4 and rested['edge'] == 32, rested
+    assert not rested['folded'] and rested['capsules'] == 4 and rested['edge'] == 0, rested
     assert field.input_value() == draft + ' and more'
     if not fullscreen:
         assert measured['keyboard']['cap'] == 62 and measured['keyboard']['clearHeight'] == pytest.approx(60, abs=0.5)
@@ -1440,8 +1441,9 @@ def test_the_typing_read_band_keeps_the_bars_edge_where_the_reach_reads_back_unr
         } finally { window.getComputedStyle = real; }
     }""")
     facts(f'typing-read-band-unresolved-{shell_ui["engine"]}', band)
-    assert band['resolved'] == 32 and band['unresolved'].startswith('clamp('), band
-    assert abs(band['top'] - (band['bar'] + 32)) <= 0.5, band
+    # The edge ends inside the bar, at its capsules: whatever the reach reads back as, the band starts at the bar.
+    assert band['resolved'] == 0 and band['unresolved'].startswith('clamp('), band
+    assert abs(band['top'] - band['bar']) <= 0.5, band
 
 
 @pytest.mark.parametrize('project_room', [False, True], ids=['main', 'project'])

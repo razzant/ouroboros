@@ -457,3 +457,27 @@ def test_a_rooms_edge_is_two_shared_blur_planes_under_its_tint_clearing_toward_t
             rows = [layer.split()[-1] for layer in piece["position"].split(",")]
             ends = [1 if row == "100%" else 0 if row in ("0px", "0%") else None for row in rows]
             assert ends == ([1, 0] if name == "top" else [0, 1]), (name, 'ramp and solid layers in place', piece)
+
+
+# The owner's criterion for a room's edge (27.11): it does not reach past the capsules. At the top nothing of it lies
+# lower than the bar's capsules' lower side plus the bar's own padding; at the bottom nothing higher than the capsule
+# row's upper side less that padding. The edge that reached one edge length below the bar fails it.
+EDGE_EXTENT = """() => {
+    const bar = document.querySelector('#page-chat > .chat-page-header'), area = document.querySelector('#chat-input-area');
+    const shown = n => n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden';
+    const capsules = [...bar.querySelectorAll('.app-page-actions button, .cx-chip, .rw-trigger')].filter(shown);
+    const chips = [...area.querySelectorAll('.chat-toolbar-row > *')].filter(shown);
+    const nodes = host => [...host.querySelectorAll(':scope > .room-edge')].map(n => n.getBoundingClientRect());
+    return {pad: parseFloat(getComputedStyle(bar).paddingBottom),
+        capsulesEnd: Math.max(...capsules.map(n => n.getBoundingClientRect().bottom)),
+        chipsStart: Math.min(...chips.map(n => n.getBoundingClientRect().top)),
+        topEnd: Math.max(...nodes(bar).map(r => r.bottom)), bottomStart: Math.min(...nodes(area).map(r => r.top))};
+}"""
+
+
+@pytest.mark.parametrize("project_chat", [("chromium", "light", 1100), ("webkit", "dark", 390)], indirect=True)
+def test_a_rooms_edge_ends_at_its_capsules_top_and_bottom(project_chat):
+    found = project_chat["page"].evaluate(EDGE_EXTENT)
+    assert found["capsulesEnd"] > 0 and found["chipsStart"] > found["capsulesEnd"], found
+    assert found["topEnd"] <= found["capsulesEnd"] + found["pad"] + 0.5, ('the top edge ends at the capsules', found)
+    assert found["bottomStart"] >= found["chipsStart"] - found["pad"] - 0.5, ('the bottom edge starts at the capsule row', found)

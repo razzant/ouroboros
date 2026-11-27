@@ -103,16 +103,16 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         return pieces
 
     pieces = two_steps_under_a_tint(paint)
-    # The edge reaches one edge length below the bar on every layout, the desk included; the deep step stops short of
-    # it by the part of the taper the soft step finishes alone. This history read left Main's note under the bar: a
-    # later sibling at the bar's own level, it paints over the edge as the capsules do, so its words stay sharp.
-    reach = 32
-    assert pieces["tint"]["height"] == pytest.approx(paint["bar"] + reach, abs=1), paint
-    assert pieces["soft"]["height"] == pytest.approx(paint["bar"] + reach, abs=1), paint
-    assert pieces["deep"]["height"] == pytest.approx(paint["bar"] + reach - (reach + 24) / 2, abs=1), paint
-    # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
+    # The edge ends at the capsules' lower side, inside the bar, on every layout, the desk included; the deep step
+    # clears halfway down, where the soft one starts to. This history read left Main's note under the bar: a later
+    # sibling at the bar's own level, it paints over the bar as the capsules do, so its words stay sharp.
+    capsules = header.evaluate("el => Math.max(...[...el.querySelectorAll('.app-page-actions button')].filter(b => b.getClientRects().length).map(b => b.getBoundingClientRect().bottom))")
+    assert pieces["tint"]["height"] == pytest.approx(capsules, abs=1) and pieces["tint"]["height"] <= paint["bar"], (capsules, paint)
+    assert pieces["soft"]["height"] == pytest.approx(capsules, abs=1), paint
+    assert pieces["deep"]["height"] == pytest.approx(capsules / 2, abs=1), paint
+    # The transcript's first row clears the bar (style.css --chat-top-reserve), the edge taking no more of it.
     feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
-    assert feed_top >= paint["bar"] + reach - 1, (feed_top, paint)
+    assert feed_top >= paint["bar"] - 1, (feed_top, paint)
     assert page.locator("#page-chat > .chat-page-note > *").count() and page.locator("#page-chat > .chat-page-note").is_visible()
     order = page.evaluate("""() => { const bar = document.querySelector('#page-chat > .chat-page-header');
         const note = document.querySelector('#page-chat > .chat-page-note');
@@ -124,20 +124,20 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
     chrome = header.evaluate(edge)
     page.evaluate("delete document.documentElement.dataset.windowChrome")
-    assert two_steps_under_a_tint(chrome)["tint"]["height"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
+    assert two_steps_under_a_tint(chrome)["tint"]["height"] <= chrome["bar"], chrome
     assert chrome["strip"] == "auto", chrome
     # The composer's edge mirrors the bar's inside its area: the same nodes, the same steps, no press taken.
     area = page.locator("#chat-input-area")
     composer = area.evaluate(edge)
     assert composer["own"] == "none" and composer["background"] == "rgba(0, 0, 0, 0)", composer
     assert all(piece["shown"] for piece in two_steps_under_a_tint(composer).values()), composer
-    assert composer["pieces"]["tint"]["height"] == pytest.approx(composer["bar"], abs=1), composer
+    assert composer["pieces"]["tint"]["height"] == pytest.approx(composer["bar"] - 24, abs=1), ('from the capsule row down', composer)
     # With the keyboard up the top edge ends with the bar and the composer draws no edge at all (style.css).
     page.evaluate("document.body.classList.add('keyboard-open')")
     keyboard = header.evaluate(edge)
     composer_gone = area.evaluate(edge)
     page.evaluate("document.body.classList.remove('keyboard-open')")
-    assert keyboard["pieces"]["tint"]["height"] == pytest.approx(keyboard["bar"], abs=1), keyboard
+    assert keyboard["pieces"]["tint"]["height"] <= keyboard["bar"], keyboard
     assert not any(piece["shown"] for piece in composer_gone["pieces"].values()), composer_gone
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
