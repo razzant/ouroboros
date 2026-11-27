@@ -650,7 +650,8 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
             # Later Main reading below the questions, so a removal can happen above the reader.
             rows += [{'role': 'assistant', 'text': f'Later Main note {i}. ' + 'Reading continues below the questions. ' * 4,
                       'ts': f'2026-09-16T00:1{i}:00Z'} for i in range(8)]
-        route.fulfill(json={'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': rows, 'progress': []})
+        route.fulfill(json={'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': rows, 'progress': [],
+                            'has_more': False, 'page_cursor': 'recent'})
     page.route('**/api/chat/history*', history)
     open_app(ui)
     mirrors = page.locator('#chat-messages .chat-bubble.project-question')
