@@ -1065,9 +1065,9 @@ def test_a_new_find_starts_at_its_first_match_in_view_and_enter_opens_that_one(p
 
 
 def test_escape_with_the_field_scrolled_away_in_a_crowded_column_returns_to_the_browse_row(pins_ui):
-    """In a window so short that the head scrolls away with the list (data-bars-crowd), the field can leave the view
-    while the owner reads the matches: Escape still empties it and puts the row first in view back at its place; the
-    keyboard stays in the field if that place shows it, else goes to the row."""
+    """In a window so short that the head scrolls away with the list (data-bars-crowd), the owner can keep the
+    keyboard in the field while reading far down: Escape empties it, puts the row first in view back at its place, and
+    gives the keyboard to that row, because the field is out of view there."""
     ui, page = pins_ui, pins_ui["page"]
     page.set_viewport_size({"width": ui["width"], "height": 170})
     seed_archive(ui["root"])
@@ -1079,21 +1079,21 @@ def test_escape_with_the_field_scrolled_away_in_a_crowded_column_returns_to_the_
     expect()(items).to_have_count(499)
     sidebar = page.locator('#primary-sidebar')
     assert sidebar.evaluate("el => el.hasAttribute('data-bars-crowd')"), "the head scrolls with the list here"
-    row(page, "archive-250").scroll_into_view_if_needed()
     find.click()
+    row(page, "archive-250").evaluate("el => el.scrollIntoView({block: 'start'})")  # the keyboard stays in the field
+    expect()(find).to_be_focused()
+    assert not find.evaluate(SHOWS), "the unpinned head left the view with the field"
     saved = page.evaluate(FIRST_IN_VIEW)
     page.keyboard.type("archive")
     expect()(items).to_have_count(51)
-    sidebar.evaluate("el => { el.scrollTop += 600; }")
-    assert not find.evaluate(SHOWS), "the unpinned head left the view with the field"
     page.keyboard.press("Escape")
     expect()(find).to_have_value("")
     expect()(items).to_have_count(499)
     current, top = page.evaluate(FIRST_IN_VIEW)
     assert current == saved[0] and top == pytest.approx(saved[1], abs=1), (saved, current, top)
-    # The keyboard stays in the field where the restored column shows it again, else it goes to that row.
+    assert not find.evaluate(SHOWS)
     focused = page.evaluate("document.activeElement?.closest('.nav-project-item')?.dataset.navProjectId || null")
-    assert (find.evaluate("el => el === document.activeElement") and find.evaluate(SHOWS)) or focused == saved[0], focused
+    assert focused == saved[0], focused
 
 
 @pytest.mark.parametrize("how", ["escape", "clear-button", "clear-command"])
