@@ -16,7 +16,8 @@ current behaviour — a disclosed residual.
 The same module owns the trust bundle: ``extra_ca_bundle`` merges the owner's
 ``OUROBOROS_EXTRA_CA_BUNDLE`` PEM over certifi once and every first-party
 client (httpx transports here, the Anthropic ``requests`` lane, the GigaChat
-SDK, catalog and probe clients) verifies against that one path.
+SDK, catalog and probe clients) verifies against that one path; remote MCP and
+its sign-in keep httpx's own trust and add the file to it (``extra_ca_context``).
 
 It also owns how an openai SDK client takes its target: ``openai_client_class`` gives a route
 the routing leaf declared keyless the SDK's keyless form, and a private compatible base URL with
@@ -33,8 +34,81 @@ class ExtraCaBundleError(RuntimeError):
 
 
 _EXTRA_CA_BUNDLE_KEY = "OUROBOROS_EXTRA_CA_BUNDLE"
-_merged_bundle_cache: Dict[Tuple[str, str, int, int], str] = {}
+_merged_bundle_cache: Dict[Tuple[Any, ...], str] = {}
 _ssl_context_cache: Dict[str, Any] = {}
+
+
+def _extra_ca_path():
+    """The owner's file as a path, or None while the setting is empty."""
+    import pathlib
+
+    from ouroboros.settings_integrity import runtime_setting
+
+    raw = str(runtime_setting(_EXTRA_CA_BUNDLE_KEY, "") or "").strip()
+    try:
+        return pathlib.Path(raw).expanduser() if raw else None
+    except RuntimeError as exc:  # a ``~user`` that names no account on this computer
+        raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} is not readable: {raw} ({exc})") from exc
+
+
+def _ca_file_identity(extra) -> Tuple[int, int, int, int, int]:
+    """Identity and metadata for the loader and the merged-bundle cache; a read need not preserve atime."""
+    try:
+        stat = extra.stat()
+    except (OSError, ValueError) as exc:  # ValueError: a path with a NUL byte
+        raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} is not readable: {extra} ({exc})") from exc
+    return (stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size)
+
+
+def _load_extra_ca(extra, context=None, *, identity=None) -> bytes:
+    """Validate the file's own certificates and add them to ``context`` when supplied, both with OpenSSL's
+    ``cafile`` semantics. A bare revocation list loads but adds no certificate. Count in an unseeded context:
+    a root already in the client's trust is also a valid file. This keeps ``TRUSTED CERTIFICATE`` auxiliary
+    trust and permits comments and a UTF-8 BOM. The returned bytes omit a leading BOM for the merged bundle."""
+    import os
+    import re
+    import ssl
+
+    before = _ca_file_identity(extra) if identity is None else identity
+    try:
+        extra_bytes = extra.read_bytes()
+        cafile = os.fspath(extra)
+        counted = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        counted.load_verify_locations(cafile=cafile)
+        if not counted.cert_store_stats()["x509"]:
+            raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} holds no certificate to trust: {extra}")
+        if context is not None:
+            context.load_verify_locations(cafile=cafile)
+    except ssl.SSLError as exc:
+        der = re.match(rb"\x30[\x81-\x84]", extra_bytes) is not None  # a long ASN.1 SEQUENCE: DER, never PEM text
+        binary = ", a binary (DER) certificate: convert it to PEM" if der else ""
+        raise ExtraCaBundleError(
+            f"{_EXTRA_CA_BUNDLE_KEY} holds no loadable PEM certificate: {extra}{binary} ({exc})") from exc
+    except (OSError, ValueError) as exc:  # ValueError: a path with a NUL byte
+        raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} is not readable: {extra} ({exc})") from exc
+    # Both OpenSSL reads and the bytes for a merged bundle must belong to the same ordinary file revision.
+    if _ca_file_identity(extra) != before:
+        raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} changed while it was read: {extra}; try again")
+    return extra_bytes.removeprefix(b"\xef\xbb\xbf")
+
+
+def extra_ca_context():
+    """httpx's own verifying context with the owner's file added, or None without the setting.
+
+    For clients that keep httpx's trust, remote MCP and its sign-in: the base is what an unconfigured httpx
+    client builds in this environment (``SSL_CERT_FILE`` or ``SSL_CERT_DIR`` when set, else certifi), with
+    certificate and hostname checks on, and the owner's certificates are loaded on top; proxies stay the
+    client's. Built from the file as it is at each call, never cached, so the next client trusts a replaced
+    file. Raises ``ExtraCaBundleError`` like ``extra_ca_bundle``.
+    """
+    extra = _extra_ca_path()
+    if extra is None:
+        return None
+    import httpx
+
+    context = httpx.create_ssl_context()
+    _load_extra_ca(extra, context)
+    return context
 
 
 def extra_ca_bundle() -> Optional[str]:
@@ -49,45 +123,31 @@ def extra_ca_bundle() -> Optional[str]:
     changed owner file yields a new path, so every cache keyed on the path — the
     SSL context below and the provider clients — rotates with it; siblings older
     than a day are pruned (a task still holding an earlier setting keeps its file).
+    The file is read again when its identity (device, inode), change time,
+    modification time or size differs, so a replacement under the same path is
+    seen even when it keeps size and modification time.
     Unset returns None and every client is built exactly as before the setting
     existed. An unreadable or non-PEM file raises ``ExtraCaBundleError``: a
     silent fall-back to certifi would reproduce the very TLS failure the owner
     set the key to cure.
     """
-    from ouroboros.settings_integrity import runtime_setting
-
-    raw = str(runtime_setting(_EXTRA_CA_BUNDLE_KEY, "") or "").strip()
-    if not raw:
+    extra = _extra_ca_path()
+    if extra is None:
         return None
     import os
     import pathlib
 
     from ouroboros.config import DATA_DIR
 
-    extra = pathlib.Path(raw).expanduser()
     bundle_dir = pathlib.Path(DATA_DIR) / "state" / "extra-ca-bundle"
-    try:
-        stat = extra.stat()
-    except OSError as exc:
-        raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} is not readable: {extra} ({exc})") from exc
-    key = (str(extra), str(bundle_dir), stat.st_mtime_ns, stat.st_size)
+    identity = _ca_file_identity(extra)
+    key = (str(extra), str(bundle_dir), *identity)
     cached = _merged_bundle_cache.get(key)
     if cached and os.path.isfile(cached):
         return cached
-    import ssl
-
     import certifi
 
-    try:
-        extra_bytes = extra.read_bytes()
-    except OSError as exc:
-        raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} is not readable: {extra} ({exc})") from exc
-    try:
-        # Load the owner's file on its own first: a malformed PEM must surface as
-        # this typed error at the setting, not as an SSLError inside some client.
-        ssl.create_default_context().load_verify_locations(cadata=extra_bytes.decode("ascii", "replace"))
-    except (ssl.SSLError, ValueError) as exc:
-        raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} holds no loadable PEM certificate: {extra} ({exc})") from exc
+    extra_bytes = _load_extra_ca(extra, identity=identity)
 
     import hashlib
     import time

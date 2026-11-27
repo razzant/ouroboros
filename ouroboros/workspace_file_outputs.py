@@ -485,7 +485,7 @@ def _directory_direct_artifacts(
     return [*outputs, *copies, artifact_record(path, kind="workspace_patch_manifest")], manifest
 
 
-def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, include_preamble=True):
+def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, include_preamble=True, versions=None):
     """Retain known native file postimages in an ordinary folder, without inventorying it.
 
     Called only after successful writes. Capture cannot undo those effects, so a
@@ -493,7 +493,11 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
     A Git workspace keeps its existing patch capture for what Git tracks; of the
     written paths, only those Git ignores (no status row, no patch) are retained
     here. Child artifacts use the child's own store and its existing result
-    promotion to the canonical owner.
+    promotion to the canonical owner. A dict passed as ``versions`` receives,
+    per path this call retained (ordinary folder, Git-ignored workspace file, or
+    folderless scratch alike), the witness of the exact copy it registered
+    (``sha256:<hex64>``, already measured during the copy; #4314). A failed
+    capture records no version for that path without erasing its neighbors.
     """
     from ouroboros.artifacts import copy_file_to_task_artifacts, task_id_for_artifacts
     from ouroboros.tools.tool_resolution import active_repo_dir_for, system_repo_dir_for
@@ -520,6 +524,8 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
             if not record:
                 raise OSError("written file has no captured artifact")
             captured.append(f"{relative} (artifact_store:{record['name']}, {record['size']} bytes, sha256={record['sha256']})")
+            if versions is not None and record.get("sha256"):
+                versions[relative] = f"sha256:{record['sha256']}"
         except Exception as exc:
             unavailable.append(f"{relative}: {type(exc).__name__}: {exc}")
     notes = ([f"{source_tool}: Git ignores these written paths, so no workspace patch carries them; their bytes are "

@@ -235,7 +235,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     page.id = 'page-circles';
     page.className = 'page app-page-glass';
     page.innerHTML = `
-        ${renderPageHeader({ page: 'circles', actionsHtml: actButton('new', tr('circles.new', 'New circle')) })}
+        ${renderPageHeader({ page: 'circles', named: false, actionsHtml: actButton('new', tr('circles.new', 'New circle')) })}
         <div class="dashboard-shell">
             <div class="dashboard-body scroll-fade-y circles-body" data-circles-body></div>
         </div>

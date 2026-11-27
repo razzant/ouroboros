@@ -221,7 +221,7 @@ test('the facade shows a glyph icon as given and falls back to the page glyph fo
     const emoji = fakeMount();
     renderWidgetFacade(emoji, tab(framed, { icon: '🎮', title: 'Game' }));
     assert.match(emoji.innerHTML, /widgets-facade-icon" aria-hidden="true">🎮</);
-    assert.match(emoji.innerHTML, /widgets-facade-title">Game</);
+    assert.match(emoji.innerHTML, /widgets-facade-title" data-i18n-authored>Game</);
     // `register_ui_tab` stamps the NAME `extension` when the author gives none;
     // any identifier-like name (a named-icon set the host does not have) is not
     // a glyph either — never render the word.

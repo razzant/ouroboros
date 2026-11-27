@@ -20,17 +20,18 @@ test('answer folds in a feed whose width still moves wait until the width holds'
         first.append(Object.assign(new ElementStub('div', globalThis.document), { className: 'message' }));
         mount.append(first);
         decorateProjectRow(first, { role: 'assistant', projectId: 'project-1', projectName: 'Build' });
-        frames.splice(0).forEach((fn) => fn());
+        frame();
+        frame();  // a decorated answer is measured with the others two frames after it is laid out
         // Two answers on the page: one in a feed at rest, one in a feed whose width is moving.
         const measured = [];
         const answer = (id, moving, asleep = () => false) => {
             const classes = new Set(['chat-bubble', 'project-answer']);
-            const message = { style: { setProperty() {} }, clientHeight: 100, get scrollHeight() { measured.push(id); return 300; }, querySelectorAll: () => [] };
+            const message = { style: { setProperty() {} }, clipped: false, toggleAttribute(name, on) { if (name === 'data-fold-clipped') this.clipped = on; }, clientHeight: 100, get scrollHeight() { measured.push(id); return 300; }, querySelectorAll: () => [] };
             const holds = { '[data-resizing]': moving, '[data-laid]': asleep };
             return { classList: { contains: (name) => classes.has(name),
                 toggle: (name, on) => { measured.push(`mark ${id}`); return on ? classes.add(name) : classes.delete(name); } },
                 querySelector: (selector) => (selector === '.message' ? message : null),
-                closest: (selector) => (selector.split(',').some((part) => holds[part.trim()]?.()) ? {} : null), classes };
+                closest: (selector) => (selector.split(',').some((part) => holds[part.trim()]?.()) ? {} : null), classes, message };
         };
         let moving = true;
         const rows = [answer('at rest', () => false), answer('moving', () => moving)];
@@ -42,6 +43,7 @@ test('answer folds in a feed whose width still moves wait until the width holds'
         frame();
         assert.deepEqual(measured, ['at rest', 'mark at rest'], 'a resize measures only the answers in a feed at rest');
         assert.equal(rows[1].classes.has('is-folded'), false);
+        assert.equal(rows[1].message.clipped, false, 'an unmeasured body is not marked');
 
         moving = false;
         measured.length = 0;
@@ -49,13 +51,45 @@ test('answer folds in a feed whose width still moves wait until the width holds'
         assert.deepEqual(measured, ['at rest', 'moving', 'mark at rest', 'mark moving'],
             'once the width holds every answer is measured, all of them before any is marked');
         assert.equal(rows[1].classes.has('is-folded'), true, 'and the one whose text overflows is folded');
+        assert.equal(rows[1].message.clipped, true, 'its body wears the shared clipped-fold mark: the one edge fades it');
 
         // A row asleep (chat_row_sleep.js) keeps the fold it was measured with at this width: measuring it would lay
-        // it out alone. Main shown again measures only the rows awake.
-        rows.push(answer('asleep', () => false, () => true));
+        // it out alone. One that fell asleep before it was ever measured has no fold yet: it is measured once (without
+        // that, a long answer stayed cut through its letters with no fade), and then sleeps with it.
+        let asleep = false;
+        rows.push(answer('asleep', () => false, () => asleep));
         measured.length = 0;
         fire('ouro:page-shown');
+        assert.deepEqual(measured, ['at rest', 'moving', 'asleep', 'mark at rest', 'mark moving', 'mark asleep']);
+        asleep = true;
+        rows.push(answer('never measured', () => false, () => true));
+        measured.length = 0;
+        fire('ouro:page-shown');
+        assert.deepEqual(measured, ['at rest', 'moving', 'never measured', 'mark at rest', 'mark moving', 'mark never measured'],
+            'Main shown again measures the rows awake and the one that slept before its first measure, not the one measured');
+        assert.equal(rows.at(-1).message.clipped, true);
+        measured.length = 0;
+        fire('ouro:page-shown');
+        assert.deepEqual(measured, ['at rest', 'moving', 'mark at rest', 'mark moving'], 'once measured, a sleeping row is left alone');
+
+        // A new answer is measured with the others once it is laid out, with no resize or page change: an answer whose
+        // markdown writes nothing late was otherwise never measured and stayed cut through its letters with no fade.
+        const late = new ElementStub('div', globalThis.document);
+        late.className = 'chat-bubble';
+        const body = Object.assign(new ElementStub('div', globalThis.document), { className: 'message', clientHeight: 168,
+            scrollHeight: 400, style: { setProperty() {} } });
+        body.toggleAttribute = (name, on) => (on ? body.setAttribute(name, '') : body.removeAttribute(name));
+        late.append(body);
+        rows.push(late);  // the document's query finds it, as it finds every answer on the page
+        measured.length = 0;
+        decorateProjectRow(late, { role: 'assistant', projectId: 'project-1', projectName: 'Build' });
+        frame();
+        assert.deepEqual(measured, [], 'not in the frame it is added');
+        assert.equal(body.hasAttribute('data-fold-clipped'), false);
+        frame();
         assert.deepEqual(measured, ['at rest', 'moving', 'mark at rest', 'mark moving']);
+        assert.equal(body.hasAttribute('data-fold-clipped'), true, 'the new answer itself is measured and marked');
+        assert.equal(late.classList.contains('is-folded'), true);
     } finally {
         restoreDom(prior);
     }

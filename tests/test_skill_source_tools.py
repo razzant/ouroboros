@@ -139,6 +139,28 @@ def test_skill_search_lists_a_named_registrys_popular_page(ctx, monkeypatch):
     assert not [note for note in words["notes"] if note.startswith("ClawHub")]
 
 
+def test_a_registry_query_strips_the_exact_local_id_prefix_and_keeps_the_namespace(ctx, monkeypatch):
+    context, _drive, _reviews, hub = ctx
+    asked = []
+
+    def search(query, **kwargs):
+        asked.append(query)
+        return {"results": [clawhub._summary_from_record({"name": "ns/weather-kit", "displayName": "Forecast Desk"})]}
+
+    clawhub = _with_clawhub(hub, monkeypatch, search)
+    found = json.loads(_call("skill_search", context, source="clawhub", query="clawhub/ns/weather-kit"))
+    assert asked == ["ns/weather-kit"], "only the exact local <source_id>/ prefix is stripped; the namespace stays"
+    item = found["items"][0]
+    assert item["id"] == "clawhub/ns/weather-kit" and item["registry_slug"] == "ns/weather-kit"
+    assert item["title"] == "Forecast Desk" and item.get("source_key"), "the registry's name and the key ride along"
+    asked.clear()
+    json.loads(_call("skill_search", context, source="clawhub", query="clawhub/plain"))
+    assert asked == ["plain"]
+    asked.clear()
+    json.loads(_call("skill_search", context, query="weather"))
+    assert asked == ["weather"], "a plain word is asked as it is"
+
+
 def test_skill_search_says_when_a_named_registry_cannot_be_listed(ctx, monkeypatch):
     context, _drive, _reviews, hub = ctx
     asked = []
@@ -200,6 +222,90 @@ def test_search_reads_a_new_source_once_and_returns_catalog_ids(ctx):
     assert result["items"][0]["trust"] == "trusted" and result["items"][0]["official"] is True
     everything = json.loads(_call("skill_search", context, category="writing"))
     assert [item["id"] for item in everything["items"]] == ["ouroboros-community/notes"]
+
+
+@pytest.mark.parametrize("title", ["Account limits", "Claudexor Quotas"])
+def test_search_finds_an_entry_by_the_titles_its_card_and_widget_show_and_names_them(ctx, title):
+    context, _drive, _reviews, hub = ctx
+    hub.add_hosted("claudexor_quotas", official=True, extra="ui_tab:\n  tab_id: quotas\n  title: Quota Board\n")
+    hub.entries["claudexor_quotas"].update(title=title, description="Shows what is left of each subscription.")
+    hub.commit("titled entry")
+    for query in (title, title.upper(), "claudexor_quotas", "Claudexor Quotas", "claudexor-quotas", "Quota Board"):
+        found = json.loads(_call("skill_search", context, query=query))
+        assert [item["id"] for item in found["items"]] == ["ouroboros/claudexor_quotas"], query
+        row = found["items"][0]
+        assert (row["name"], row["title"], row["widget_title"]) == ("claudexor_quotas", title, "Quota Board")
+    # Filters and neighbours keep their meaning; a row without titles of its own adds none.
+    assert json.loads(_call("skill_search", context, query=title, category="writing"))["items"] == []
+    assert json.loads(_call("skill_search", context, query=title, source="ouroboros-community"))["items"] == []
+    weather = json.loads(_call("skill_search", context, query="weather"))["items"]
+    assert [item["id"] for item in weather] == ["ouroboros/weather"] and not {"title", "widget_title"} & set(weather[0])
+
+
+def test_a_whole_title_or_id_is_listed_before_partial_matches_so_the_result_cap_never_hides_it(ctx):
+    context, _drive, _reviews, hub = ctx
+    for index in range(45):  # more partial matches than one answer lists, ahead of the exact one in catalog order
+        hub.add_hosted(f"aaa_kit_{index:02d}")
+        hub.entries[f"aaa_kit_{index:02d}"]["description"] = "Keeps notes of a meeting."
+    hub.add_hosted("zz_notebook")
+    hub.entries["zz_notebook"].update(title="Notes", description="A notebook.")
+    hub.commit("crowded catalog")
+    found = json.loads(_call("skill_search", context, query="Notes"))
+    assert found["count"] == 47 and found["omitted"] == 47 - 40  # the 45 kits, the titled one and the «notes» skill
+    ids = [item["id"] for item in found["items"]]
+    assert ids[:2] == ["ouroboros-community/notes", "ouroboros-community/zz_notebook"], "whole names first, in catalog order"
+    assert ids[2:] == [f"ouroboros-community/aaa_kit_{index:02d}" for index in range(38)], "the rest keep their order"
+    by_id = json.loads(_call("skill_search", context, query="zz_notebook"))
+    assert [item["id"] for item in by_id["items"]] == ["ouroboros-community/zz_notebook"]
+
+
+def test_the_exact_id_comes_before_more_cards_than_one_answer_lists_that_print_it_as_their_title(ctx):
+    context, _drive, _reviews, hub = ctx
+    for index in range(41):  # each prints the id spelled out, ahead of it in catalog order
+        hub.add_hosted(f"aa_quota_{index:02d}")
+        hub.entries[f"aa_quota_{index:02d}"]["title"] = "Claudexor Quotas"
+    hub.add_hosted("claudexor_quotas", extra="ui_tab:\n  tab_id: quotas\n  title: Claudexor Quotas\n")
+    hub.entries["claudexor_quotas"]["title"] = "Account limits"
+    hub.commit("crowded catalog")
+    found = json.loads(_call("skill_search", context, query="claudexor_quotas"))
+    assert (found["count"], found["omitted"]) == (42, 2)
+    ids = [item["id"].partition("/")[2] for item in found["items"]]
+    assert ids == ["claudexor_quotas", *[f"aa_quota_{index:02d}" for index in range(39)]]
+    by_id = json.loads(_call("skill_search", context, query="ouroboros-community/claudexor_quotas"))
+    assert [item["id"] for item in by_id["items"]] == ["ouroboros-community/claudexor_quotas"], "its catalog id"
+    # A dash between words is no word, so the spaced spelling finds all 42; a dash alone finds only what holds one.
+    assert json.loads(_call("skill_search", context, query="Claudexor - Quotas"))["count"] == 42
+    assert json.loads(_call("skill_search", context, query="-"))["count"] == 0
+
+
+def test_a_registry_searched_alone_keeps_its_own_order_and_joins_the_ranking_among_all_sources(ctx, monkeypatch):
+    from ouroboros.marketplace import clawhub
+
+    context, _drive, _reviews, hub = ctx
+    _with_clawhub(hub, monkeypatch, lambda query, **_k: {"results": [
+        clawhub._summary_from_record({"name": "weather-kit", "displayName": "Forecast Desk", "summary": "More."}),
+        clawhub._summary_from_record({"name": "weather", "summary": "Forecasts."})]})
+    alone = json.loads(_call("skill_search", context, source="clawhub", query="weather"))
+    assert [item["id"] for item in alone["items"]] == ["clawhub/weather-kit", "clawhub/weather"], "its relevance"
+    # The registry's name for people titles its card; the id and name install takes stay the slug's, and a hit
+    # without a display name of its own looks as before.
+    kit, plain = alone["items"]
+    assert (kit["title"], kit["name"], plain["name"]) == ("Forecast Desk", "weather-kit", "weather")
+    assert "title" not in plain
+    joined = json.loads(_call("skill_search", context, query="weather"))
+    assert [item["id"] for item in joined["items"]] == ["ouroboros/weather", "clawhub/weather", "clawhub/weather-kit"]
+
+
+def test_search_returns_the_names_whole_and_says_where_a_long_description_was_cut(ctx):
+    context, _drive, _reviews, hub = ctx
+    title = " ".join(["Account limits"] + ["and resets"] * 20)  # longer than any one-line cut
+    hub.add_hosted("claudexor_quotas", extra="title: Quota board\n")
+    hub.entries["claudexor_quotas"].update(title=title, description="Shows what is left. " * 20)
+    hub.commit("titled entry")
+    row = json.loads(_call("skill_search", context, query="Quota board"))["items"][0]
+    assert (row["id"], row["title"], row["search_names"]) == ("ouroboros-community/claudexor_quotas", title,
+                                                              ["Quota board"])
+    assert row["description"].startswith("Shows what is left.") and "original length 400" in row["description"]
 
 
 def test_install_from_a_review_row_starts_the_review_and_records_the_reason(ctx):

@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 from ouroboros.reviewer_slot_config import PanelCompositionError
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.utils import truncate_review_artifact
 
 _OWNER_SOURCE = {
     "type": "object",
@@ -112,10 +113,12 @@ def _handle_skill_sources(ctx: ToolContext, action: str = "list", url: str = "",
 
 
 def _compact(item: Dict[str, Any], drive: pathlib.Path) -> Dict[str, Any]:
-    keep = ("id", "name", "source_name", "trust", "official", "recommended", "category", "version", "withdrawn",
-            "installed", "needs_keys", "type")
+    # The names people see it by (its card's title, its widget's, the others it is known by) come whole; actions
+    # take the id.
+    keep = ("id", "name", "title", "widget_title", "search_names", "source_name", "source_key", "registry_slug",
+            "trust", "official", "recommended", "category", "version", "withdrawn", "installed", "needs_keys", "type")
     out = {key: item.get(key) for key in keep if item.get(key) not in (None, "", [], False)}
-    out["description"] = str(item.get("description") or "")[:240]
+    out["description"] = truncate_review_artifact(str(item.get("description") or ""), 240)
     out.update(digest=item.get("digest", ""), needs_keys=list(item.get("needs_keys") or []),
                permissions=list(item.get("permissions") or []), type=item.get("type", ""))
     if (item.get("installed") or {}).get("state") == "installed":
@@ -129,7 +132,15 @@ def _compact(item: Dict[str, Any], drive: pathlib.Path) -> Dict[str, Any]:
 
 
 def _handle_skill_search(ctx: ToolContext, query: str = "", source: str = "", category: str = "", **_kw: Any) -> str:
-    from ouroboros.skill_source_catalog import catalog_view, read_snapshot, refresh_source, registry_browse, registry_items
+    from ouroboros.skill_source_catalog import (
+        catalog_view,
+        matches_words,
+        name_rank,
+        read_snapshot,
+        refresh_source,
+        registry_browse,
+        registry_items,
+    )
     from ouroboros.skill_sources import load_sources
 
     drive = _drive(ctx)
@@ -141,7 +152,7 @@ def _handle_skill_search(ctx: ToolContext, query: str = "", source: str = "", ca
     words = [word for word in str(query or "").lower().split() if word]
     items = [item for item in view["items"]
              if (not source or item["source_id"] == source) and (not category or category in item.get("category", []))
-             and all(word in f"{item['name']} {item.get('description', '')}".lower() for word in words)]
+             and matches_words(item, query)]
     notes = [f"{s['name']}: {s.get('error') or s.get('state')}" for s in view["sources"]
              if s.get("state") not in {"ready", "search"}]
     if words:
@@ -163,6 +174,10 @@ def _handle_skill_search(ctx: ToolContext, query: str = "", source: str = "", ca
                                       "query words search all of it."}
             except Exception as exc:
                 notes.append(f"{registry['name']}: {exc}")
+    if registry is None:  # a registry named alone keeps its own relevance and page order
+        # Its exact id first, then a whole name it is shown by, then the rest, each in source order: the cap never
+        # hides what was named.
+        items.sort(key=lambda item: name_rank(item, str(query or "")))
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=_dump({
         "count": len(items), **listing, "items": [_compact(item, drive) for item in items[:_MAX_RESULTS]],
         "omitted": max(0, len(items) - _MAX_RESULTS), "notes": notes, "categories": view["categories"],
@@ -299,7 +314,7 @@ _SCHEMAS = {
             "load with enable_tools."
         ),
         "properties": {
-            "query": {"type": "string", "description": "Words to match in names and descriptions; empty lists the local catalogs."},
+            "query": {"type": "string", "description": "Words to match in titles, names and descriptions; empty lists the local catalogs."},
             "source": {"type": "string", "description": "Optional source id."},
             "category": {"type": "string", "description": "Optional category id."},
         },

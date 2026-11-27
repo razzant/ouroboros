@@ -1299,7 +1299,12 @@ test('a saved local-model setting says it applies when the local model is restar
         'LOCAL_MODEL_N_GPU_LAYERS', 'LOCAL_MODEL_PORT', 'LOCAL_MODEL_CHAT_FORMAT']);
     for (const row of rows) {
         const line = outcomeLine(row, { state: 'saved', effect: 'local_model', withheld: '', old: 'before', new: 'after', token: 't', message: '', code: '' });
-        assert.match(line.text, /^Saved · applies when the local model is restarted · was before$/, row.id);
+        if (row.control.kind === 'text') {
+            assert.equal(line.text, 'Saved · applies when the local model is restarted', row.id);
+            assert.equal(line.details, 'before', 'the free-text value belongs in raw Details');
+        } else {
+            assert.match(line.text, /^Saved · applies when the local model is restarted · was before$/, row.id);
+        }
         assert.doesNotMatch(line.text, /Ouroboros|after restart/i, row.id);
         // The guard fires on the wording a restart of Ouroboros would take.
         assert.match(outcomeLine(row, { state: 'saved', effect: 'restart', withheld: '', old: 'before', token: 't', message: '', code: '' }).text, /after restart/);
@@ -1401,4 +1406,74 @@ test('two windows: Main\'s Ultrafast stands on its key as this page showed it; a
     const sent = [...other.server.checker, ...other.server.posts].find((post) => 'OUROBOROS_MODEL' in post.settings);
     assert.equal(sent.precondition.connection, 'openai@work#r1', 'the revision shown, sent as shown');
     assert.equal(other.server.values.OUROBOROS_MODEL, 'openai@work::gpt-b');
+});
+
+test('an MCP no-send, a failed Test and a listing error keep their path, host and OpenSSL words under Details, never for translation, on the server page and the list, through a redraw', async (t) => {
+    const { EXCLUDE_SELECTOR, SKIP_ROOTS } = await import('../modules/i18n.js');
+    const PRIVATE = ['/Users/synthetic-owner/bank-root.pem', 'broker.synthetic.test', 'unable to get local issuer'];
+    // Every text the overlay would walk (and report as a miss for the translation model) holds none of them.
+    const exposed = (root) => {
+        const found = [];
+        const walk = (node) => {
+            if (typeof node?.closest !== 'function') return;
+            if (PRIVATE.some((value) => String(node._text || '').includes(value)) && !node.closest(EXCLUDE_SELECTOR) && !node.closest(SKIP_ROOTS)) found.push(node._text);
+            node.children.forEach(walk);
+        };
+        walk(root);
+        return found;
+    };
+    const words = 'Sign-in stopped before anything changed at the provider: the certificate presented for the provider comes from an authority this computer doesn’t trust. If you trust that authority, add its certificate under Extra certificate bundle in Settings → This computer → Advanced, then try again.';
+    const detail = 'connecting to broker.synthetic.test: certificate verify failed: unable to get local issuer certificate';
+    const unusable = 'OUROBOROS_EXTRA_CA_BUNDLE is not readable: /Users/synthetic-owner/bank-root.pem ([Errno 2] No such file or directory)';
+    const path = 'tools/slack';
+    const page = await open(t, path, { onScreen: (candidate) => candidate === path });
+    page.routes.set('/api/mcp/sign-in', async () => response({ ok: false, server: 'slack', code: 'MCP_UNAVAILABLE', reason: 'not_sent', error: words, detail }));
+    page.routes.set('/api/mcp/test', async () => response({ ok: false, error: unusable }));
+    const message = () => page.container.querySelector('[data-mcp-message]');
+    const raw = (node) => node.querySelector('.ui-result-details')?.textContent;
+
+    const card = page.container.querySelector('[data-mcp-card]');
+    const begin = card.querySelectorAll('[data-mcp-sign-in-action]').find((node) => node.dataset.mcpSignInAction === 'begin');
+    await card.querySelector('[data-mcp-sign-in]').fire('click', { target: begin });
+    await settle();
+    assert.deepEqual([message()._text, message().dataset.tone, raw(message())], [words, 'warn', detail]);
+    assert.deepEqual(exposed(page.container), []);
+
+    const transport = page.container.querySelector('[data-mcp-field="transport"]');
+    transport.value = 'sse';
+    await transport.fire('input');  // the form is drawn again
+    await settle();
+    assert.ok(page.container.querySelector('[data-mcp-card]') !== card, 'a real redraw');
+    assert.deepEqual([message()._text, raw(message())], [words, detail], 'the redraw keeps the words and their Details');
+    assert.deepEqual(exposed(page.container), []);
+
+    await page.container.querySelector('[data-mcp-test]').fire('click');
+    await settle();
+    assert.deepEqual([message()._text, message().dataset.tone, raw(message())], ['Test failed.', 'danger', unusable]);
+    assert.deepEqual(exposed(page.container), []);
+
+    page.routes.set('/api/mcp/status', () => response({ enabled: true, sdk_available: true, servers: [{ id: 'slack', enabled: true, tool_count: 0,
+        listed_at: '', last_error: unusable, latest_attempt: { ok: false, at: '2026-11-26T00:00:00Z', error: unusable },
+        sign_in: { state: 'not_signed_in', reason: 'expired' } }] }));
+    await refreshStatus();
+    const facts = page.container.querySelector('[data-mcp-facts]');
+    const listingDetails = facts.querySelector('details');
+    assert.ok(listingDetails.classList.contains('ui-disclosure'));
+    assert.equal(listingDetails.querySelector('summary')._text, 'Details');
+    assert.equal(listingDetails.querySelector('pre[data-i18n-skip]')._text, unusable, 'the listing error remains literal under Details');
+    assert.ok(!listingDetails.hasAttribute('open'), 'the diagnosis starts collapsed');
+    assert.deepEqual(exposed(page.container), []);
+
+    const list = new NodeStub();
+    const handle = settingsPageFor('tools').mount(list, { path: 'tools', ctx: page.ctx });
+    t.after(() => handle.unmount());
+    await settle();
+    await list.fire('click', { target: head(list, 'slack').querySelector('[data-entry-sign-in]') });
+    await settle();
+    const result = list.querySelector('[data-entry-result]');
+    assert.deepEqual([result._text, raw(result)], [words, detail]);
+    assert.deepEqual(exposed(list), []);
+    await refreshStatus();  // the list paints its heads again
+    assert.deepEqual(exposed(list), []);
+    assert.ok(!page.calls.includes('/api/ui/i18n/missing'));
 });

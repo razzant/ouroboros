@@ -250,7 +250,7 @@ test('app startup binds the column fade to hidden rows, and clears it at settled
     vm.runInNewContext(source.slice(start, end), {
         document: { getElementById: id => id === 'primary-sidebar' ? sidebar : null },
         createShellMotion: () => ({}), isStackLayout: () => false,
-        renderNavRows: () => '', measurePinnedBars: () => {}, bindScrollFade,
+        renderNavRows: () => '', leadHeadWithFind: () => null, measurePinnedBars: () => {}, bindScrollFade,
     });
     const check = (top, height, expected) => {
         sidebar.scrollTop = top; sidebar.clientHeight = height;

@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { createMySkillsDestination } from '../modules/skill_dialogs.js';
 import { opensDetail, publicationDisclosure } from '../modules/skill_presentation.js';
 import { browseCardState } from '../modules/skill_browse.js';
-import { installedSkillModel, installedSkillRowKey, renderInstalledSkillCard } from '../modules/skill_card_renderer.js';
+import { installedSkillModel, installedSkillRowKey, patchInstalledSkillEnrichment, renderInstalledSkillCard } from '../modules/skill_card_renderer.js';
 import { ResizeObserverStub } from './helpers/resize_observer.js';
 import { settle, Stub, world } from './helpers/settings_dom.js';
 
@@ -621,6 +621,57 @@ test('Sources Publish one filters the retained Installed cards even while the re
     }
 });
 
+test('Find an installed skill finds a card by every name it is shown by: its own, its connector\'s, its source entry\'s, its widget\'s and its id', async (t) => {
+    const { env, state, layers, showPage } = world(t);
+    const reply = (body) => ({ ok: true, status: 200, json: async () => body });
+    // The listing names a skill as its manifest does (title or place label); `catalog_title` is its own source's
+    // entry title and `widget_title` the title its widget declares (skill_source_catalog.install_listing).
+    env.routes.set('/api/extensions', reply({ skills: [
+        { name: 'claudexor_quotas', catalog_title: 'Account limits', widget_title: 'Claudexor Quotas',
+            description: 'Shows what is left of each subscription.', source: 'external' },
+        { name: 'mail_bridge', description: 'Reads and sends mail.', source: 'external', catalog_title: 'Email inbox',
+            contributes: [{ provides: 'place', label: 'Team inbox' }] },
+        { name: 'relay_post', title: 'Messages for others', widget_title: 'Courier Desk', description: 'Hands notes on.', source: 'external' },
+        { name: 'weather', description: 'Forecasts for your city.', source: 'external' },
+    ] }));
+    env.routes.set('/api/state', reply({ github_token_configured: false }));
+    env.routes.set('/api/skills/lifecycle-queue', reply({ events: [] }));
+    env.routes.set('/api/skill-sources', reply({ sources: [] }));
+    env.routes.set('/api/skill-catalog', reply({ items: [], sources: [] }));
+    const controls = initSkills({ state, layers, showPage });
+    try {
+        const { document } = env;
+        const search = document.getElementById('skills-installed-search');
+        search.value = '';
+        const list = document.getElementById('skills-list');
+        const query = list.querySelectorAll.bind(list);
+        list.querySelectorAll = (selector) => selector === ':scope > .skills-card'
+            ? list.children.filter((node) => node.matches('.skills-card')) : query(selector);
+        await controls.open('installed');
+        await settle();
+        const names = ['claudexor_quotas', 'mail_bridge', 'relay_post', 'weather'];
+        const card = (name) => list.querySelector(`[data-skill="${name}"]`);
+        const shown = async (words) => {
+            search.value = words;
+            await search.fire('input');
+            return names.filter((name) => !card(name).hidden);
+        };
+        // What each card prints: its own name first, its source entry's only when it has none, else its id.
+        const printed = (name) => card(name).querySelector('.skills-card-name').textContent.replace('›', '').trim();
+        assert.deepEqual(names.map(printed), ['Account limits', 'Team inbox', 'Messages for others', 'weather']);
+        for (const words of ['Account limits', 'account LIMITS', 'Claudexor Quotas', 'claudexor_quotas', 'claudexor-quotas', 'subscription']) {
+            assert.deepEqual(await shown(words), ['claudexor_quotas'], words);
+        }
+        for (const words of ['Team inbox', 'Email inbox', 'mail bridge']) assert.deepEqual(await shown(words), ['mail_bridge'], words);
+        for (const words of ['Messages for others', 'Courier Desk', 'relay-post']) assert.deepEqual(await shown(words), ['relay_post'], words);
+        assert.deepEqual(await shown('weather'), ['weather'], 'a neighbour finds only itself');
+        assert.deepEqual(await shown('Desk Courier'), [], 'a name is matched as typed, in order');
+        assert.deepEqual(await shown(''), names);
+    } finally {
+        controls.destroy();
+    }
+});
+
 test('Sources arrival and Refresh use one authoritative list for both the rail and page', async (t) => {
     const { env, state, layers, showPage } = world(t);
     const reply = (body, status = 200) => ({ ok: status === 200, status, json: async () => body });
@@ -768,6 +819,261 @@ function browsePage(t) {
         entry: (source, name, extra = {}) => ({ id: `${source.id}/${name}`, name, description: `About ${name}.`, version: '1.0.0',
             source_id: source.id, source_name: source.name, trust: source.trust, repo_url: source.url, ...extra }) };
 }
+
+test('Browse Update uses the card provenance and digest, including a cold listing without a detail link', async (t) => {
+    const { env, state, layers, showPage, document, reply, card, press, entry } = browsePage(t);
+    const hub = { id: 'hub', name: 'Example hub', kind: 'hub', url: 'https://example.test/hub', trust: 'trusted' };
+    const name = 'weather';
+    const digest = 'a'.repeat(64);
+    const candidate = entry(hub, name, { source_key: 'git-a', digest, title: 'Local weather' });
+    const listing = { name, version: '0.9.0', enabled: true, review_status: 'clean', source: 'ouroboroshub',
+        source_key: 'git-a', catalog_id: null, content_hash: 'b'.repeat(64),
+        install: { source: { id: 'hub', kind: 'hub' }, release: { version: '0.9.0' }, update_available: { digest, version: '1.0.0' } } };
+    let row = listing;
+    env.routes.set('/api/skill-catalog', reply({ items: [candidate], sources: [hub], categories: [] }));
+    env.routes.set('/api/skill-sources', reply({ sources: [hub] }));
+    env.routes.set('/api/extensions', () => reply({ skills: [row] }));
+    env.routes.set('/api/skill-catalog/item/hub/weather', () => new Promise(() => {}));
+    env.routes.set('/api/skills/weather/update', reply({ ok: true }));
+    const controls = initSkills({ state, layers, showPage });
+    const updates = () => env.calls.filter((path) => path === '/api/skills/weather/update').length;
+    const action = (verb) => card(candidate.id).querySelector(`[data-browse-action="${verb}"]`);
+    try {
+        document.getElementById('skills-installed-search').value = '';
+        await controls.open('browse');
+        await settle();
+        // A fresh GET /extensions inside the real action must not substitute a newer release than Browse advertised.
+        const first = action('update');
+        assert.ok(first, 'null detail link is independent of an exact source/name match');
+        row = { ...listing, install: { ...listing.install, update_available: { digest: 'c'.repeat(64), version: '2.0.0' } } };
+        await press(first);
+        assert.equal(updates(), 0);
+        row = { ...listing, catalog_id: candidate.id };
+        await controls.open('browse');
+        await settle();
+        await press(action('update'));
+        assert.equal(updates(), 1, 'an exact warm listing advertises and dispatches its actual digest');
+        await press(action('open'));
+        const sheet = document.body.querySelector('.skills-detail-sheet');
+        const shown = sheet.querySelector('[data-sheet-action="update"]');
+        assert.ok(shown);
+        row = { ...row, source_key: 'git-b' };
+        await press(shown);
+        assert.equal(updates(), 1, 'a reused detail id cannot redirect an action');
+    } finally { controls.destroy(); }
+});
+
+test('an installed skill\'s sheet is named as its card, before and after Browse read the catalog; only the name is authored', async (t) => {
+    const { env, state, layers, showPage, document, reply, press, entry } = browsePage(t);
+    const hub = { id: 'hub', name: 'Example hub', kind: 'hub', part: 'official', url: 'https://example.test/hub', trust: 'trusted', confirmed: true };
+    // The catalog's entry is titled otherwise than the card, which prints the skill's own manifest title.
+    env.routes.set('/api/skill-catalog', reply({ categories: [], sources: [{ ...hub, state: 'ready' }], items: [
+        entry(hub, 'provider_keys', { title: 'Provider balances', official: true })] }));
+    env.routes.set('/api/skill-sources', reply({ sources: [hub] }));
+    env.routes.set('/api/extensions', reply({ skills: [{ name: 'provider_keys', title: 'Provider keys', catalog_title: 'Provider balances',
+        description: 'Balances of provider keys.', version: '1.0.0', source: 'ouroboroshub', enabled: true,
+        install: { source: { id: 'hub', name: 'Example hub', kind: 'hub' }, official: true, release: { version: '1.0.0' } } }] }));
+    env.routes.set('/api/skill-catalog/item/hub/provider_keys', () => new Promise(() => {}));
+    const controls = initSkills({ state, layers, showPage });
+    const sheetTitle = async () => {
+        await press(document.getElementById('skills-list').querySelector('[data-skill="provider_keys"]').querySelector('.skills-card-name'));
+        const sheet = document.body.querySelectorAll('.skills-detail-sheet').at(-1);
+        const title = sheet.querySelector('.document-reader-title');
+        const name = title.querySelector('[data-i18n-authored]');
+        const mark = title.querySelector('[data-mark="official"]');
+        const words = [name?.textContent, mark ? Boolean(mark.closest('[data-i18n-authored]')) : 'no mark'];
+        await press(sheet.querySelector('[data-sheet-close]'));
+        return words;
+    };
+    try {
+        document.getElementById('skills-installed-search').value = '';
+        const list = document.getElementById('skills-list');
+        const query = list.querySelectorAll.bind(list);  // the one direct-child selector this DOM double lacks
+        list.querySelectorAll = (selector) => selector === ':scope > .skills-card'
+            ? list.children.filter((node) => node.matches('.skills-card')) : query(selector);
+        await controls.open('installed');
+        await settle();
+        assert.deepEqual(await sheetTitle(), ['Provider keys', false], 'named as the card; the Official mark stays chrome');
+        // Browse reads the catalog; the same card opens its sheet again (this DOM double repaints no second listing).
+        await controls.open('browse');
+        await settle();
+        assert.ok(env.calls.includes('/api/skill-catalog'), 'Browse read the catalog the sheet could borrow from');
+        assert.deepEqual(await sheetTitle(), ['Provider keys', false], 'the catalog Browse read lends the card no other name');
+    } finally {
+        controls.destroy();
+    }
+});
+
+test('Installed keeps its own version, Official state and access when the catalog offers another release', async (t) => {
+    const { env, state, layers, showPage, document, reply, press, entry } = browsePage(t);
+    const hub = { id: 'hub', name: 'Example hub', kind: 'hub', trust: 'review' };
+    const installed = { name: 'weather', title: 'My Weather', description: 'Installed description.', version: '1.0.0',
+        source: 'ouroboroshub', source_key: 'git-a', content_hash: 'a'.repeat(64), catalog_id: 'hub/weather',
+        manifest_file: 'SKILL.md', grants: { requested_keys: ['OWN_KEY'] },
+        install: { source: hub, official: false, release: { version: '1.0.0', digest: 'a'.repeat(64) } } };
+    const other = entry(hub, 'weather', { title: 'Weather from the catalog', version: '2.0.0', digest: 'b'.repeat(64),
+        source_key: installed.source_key, official: true, author_repo: 'https://github.com/example/different' });
+    let detail = { item: other, about: 'Other release description.', uses: [{ kind: 'key', id: 'OTHER_KEY' }],
+        versions: [{ version: other.version, current: true }] };
+    env.routes.set('/api/extensions', reply({ skills: [installed] }));
+    env.routes.set('/api/skill-sources', reply({ sources: [hub] }));
+    env.routes.set('/api/skill-catalog', reply({ categories: [], sources: [hub], items: [other] }));
+    env.routes.set('/api/skill-catalog/item/hub/weather', () => reply(detail));
+    const controls = initSkills({ state, layers, showPage });
+    try {
+        document.getElementById('skills-installed-search').value = '';
+        const list = document.getElementById('skills-list');
+        const query = list.querySelectorAll.bind(list);
+        list.querySelectorAll = (selector) => selector === ':scope > .skills-card'
+            ? list.children.filter((node) => node.matches('.skills-card')) : query(selector);
+        await controls.open('installed');
+        await controls.open('browse');
+        await settle();
+        const open = async () => {
+            await press(list.querySelector('[data-skill="weather"]').querySelector('.skills-card-name'));
+            return document.body.querySelector('.skills-detail-sheet');
+        };
+        let sheet = await open();
+        assert.equal(sheet.querySelector('.document-reader-title').textContent, installed.title);
+        assert.match(sheet.querySelector('.document-reader-meta').textContent, /v1\.0\.0/);
+        assert.equal(sheet.querySelector('[data-mark="official"]'), null);
+        assert.match(sheet.textContent, /could not confirm details for these installed files/);
+        assert.match(sheet.textContent, /Installed description/);
+        assert.match(sheet.textContent, /OWN_KEY/);
+        assert.doesNotMatch(sheet.textContent, /Other release description|OTHER_KEY|v2\.0\.0|example\/different/);
+        await press(sheet.querySelector('[data-sheet-close]'));
+        detail = { item: { ...other, version: installed.version, digest: installed.content_hash }, about: 'Exact installed release details.', uses: detail.uses };
+        sheet = await open();
+        assert.match(sheet.textContent, /Exact installed release details/);
+        assert.match(sheet.textContent, /OWN_KEY/);
+        assert.doesNotMatch(sheet.textContent, /OTHER_KEY/);
+        assert.equal(sheet.querySelector('[data-mark="official"]'), null, 'even an exact catalog detail does not set installed Official');
+    } finally { controls.destroy(); }
+});
+
+test('an installed skill\'s sheet reads and borrows the entry its catalog_id confirms: none for null, the source-and-name entry for a listing without the field', async (t) => {
+    const { env, state, layers, showPage, document, reply, press, entry } = browsePage(t);
+    const source = (id, kind = 'hub') => ({ id, name: id, kind, url: `https://example.test/${id}`, trust: 'review', confirmed: true });
+    const by = (id, name) => entry(source(id), name, { author_repo: `https://github.com/example/${id}-${name}` });
+    const catalog = [by('hub', 'moved'), by('mirror', 'field_notes'), by('hub', 'unconfirmed'), by('hub', 'older'), by('shop', 'listed'), by('builtin', 'bundled')];
+    const from = (id, kind = 'hub') => ({ source: 'ouroboroshub', install: { source: { id, name: id, kind } } });
+    const skills = [
+        { name: 'moved', ...from('hub'), catalog_id: 'mirror/field_notes' },  // confirmed under another source and name
+        { name: 'unconfirmed', ...from('hub'), catalog_id: null },
+        { name: 'older', ...from('hub') },  // an older host sends no field
+        { name: 'listed', ...from('shop', 'registry') },
+        { name: 'bundled', source: 'native', install: null, catalog_id: 'builtin/bundled' },
+    ].map((skill) => ({ description: `About ${skill.name}.`, version: '1.0.0', ...skill }));
+    env.routes.set('/api/extensions', reply({ skills }));
+    env.routes.set('/api/skill-sources', reply({ sources: [] }));
+    env.routes.set('/api/skill-catalog', reply({ categories: [], sources: [], items: catalog }));
+    for (const { id } of catalog) env.routes.set(`/api/skill-catalog/item/${id}`, () => new Promise(() => {}));
+    const controls = initSkills({ state, layers, showPage });
+    try {
+        document.getElementById('skills-installed-search').value = '';
+        const list = document.getElementById('skills-list');
+        const query = list.querySelectorAll.bind(list);
+        list.querySelectorAll = (selector) => selector === ':scope > .skills-card'
+            ? list.children.filter((node) => node.matches('.skills-card')) : query(selector);
+        await controls.open('installed');
+        await settle();
+        await controls.open('browse');  // the cached catalog every sheet could borrow from, other entries included
+        await settle();
+        const opened = async (name) => {
+            const before = env.calls.length;
+            await press(list.querySelector(`[data-skill="${name}"]`).querySelector('.skills-card-name'));
+            const sheet = document.body.querySelectorAll('.skills-detail-sheet').at(-1);
+            const authors = [...sheet.textContent.matchAll(/example\/[a-z]+-[a-z_]+/g)].map(([found]) => found);
+            await press(sheet.querySelector('[data-sheet-close]'));
+            return { reads: env.calls.slice(before).filter((url) => url.startsWith('/api/skill-catalog/item/')), borrows: [...new Set(authors)] };
+        };
+        assert.deepEqual(await opened('moved'), { reads: ['/api/skill-catalog/item/mirror/field_notes'], borrows: ['example/mirror-field_notes'] });
+        assert.deepEqual(await opened('unconfirmed'), { reads: [], borrows: [] }, 'a null id takes nothing of the same name');
+        assert.deepEqual(await opened('older'), { reads: ['/api/skill-catalog/item/hub/older'], borrows: ['example/hub-older'] });
+        assert.deepEqual((await opened('listed')).reads, [], 'a registry install reads nothing back');
+        assert.deepEqual(await opened('bundled'), { reads: ['/api/skill-catalog/item/builtin/bundled'], borrows: ['example/builtin-bundled'] },
+            'a confirmed id needs no install record');
+    } finally {
+        controls.destroy();
+    }
+});
+
+test('a refreshed listing\'s new title rewrites the shown heading, which stays the same focused control', (t) => {
+    const { env } = world(t);
+    const create = env.document.createElement;  // this DOM double parses a template's markup into the node itself
+    env.document.createElement = (tag) => {
+        const node = create(tag);
+        if (tag === 'template') node.content = node;
+        return node;
+    };
+    const Element = Object.getPrototypeOf(env.document.createElement('div'));
+    Object.defineProperty(Element, 'attributes', { configurable: true,
+        get() { return Object.entries(this.attrs).map(([name, value]) => ({ name, value })); } });
+    t.after(() => delete Element.attributes);
+    const skill = (title) => ({ name: 'claudexor_quotas', description: 'Quotas.', source: 'external', catalog_title: title });
+    const template = env.document.createElement('template');
+    template.innerHTML = renderInstalledSkillCard(skill('Account limits'));
+    const card = template.content.firstElementChild;
+    const heading = card.querySelector('.skills-card-name');
+    heading.focus();
+    patchInstalledSkillEnrichment(card, skill('Claudexor Quotas'), new Set(), new Set(), {}, {});
+    assert.equal(card.querySelector('.skills-card-name'), heading);
+    assert.equal(env.document.activeElement, heading);
+    assert.equal(heading.textContent.replace('›', '').trim(), 'Claudexor Quotas');
+});
+
+test('Find an installed skill uses its listing aliases and qualified identifiers, never an unbound live tab', async (t) => {
+    const { env, state, layers, showPage } = world(t);
+    const reply = (body) => ({ ok: true, status: 200, json: async () => body });
+    // Only the listing binds widget names to the exact folder. A raw tab names a skill, not a folder.
+    const twin = (folder) => ({ name: 'twin', description: 'One of two folders.', source: 'external', identity_collision: true, collision_row_id: folder });
+    const tab = (skill, title) => ({ key: `${skill}:now`, skill, tab_id: 'now', title });
+    env.routes.set('/api/extensions', reply({ skills: [
+        { name: 'provider_keys', description: 'Balances of provider keys.', source: 'external', search_names: ['Account limits'] },
+        { name: 'weather', description: 'Forecasts for your city.', source: 'external', catalog_id: 'mirror/weather',
+            search_names: ['Right now outside'] },
+        { name: 'acme__notes', description: 'Write notes.', source: 'clawhub', provenance: { slug: 'acme/notes' } },
+        twin('first'), twin('second'),
+    ], live: { ui_tabs: [tab('weather', 'Other Weather'), tab('twin', 'Shared board'), tab('calendar', 'Agenda board')] } }));
+    env.routes.set('/api/state', reply({ github_token_configured: false }));
+    env.routes.set('/api/skills/lifecycle-queue', reply({ events: [
+        { id: 'j', target: 'calendar', kind: 'install', status: 'running', source: 'skills', message: 'Installing calendar' }] }));
+    env.routes.set('/api/skill-sources', reply({ sources: [] }));
+    env.routes.set('/api/skill-catalog', reply({ items: [], sources: [] }));
+    const controls = initSkills({ state, layers, showPage });
+    try {
+        const { document } = env;
+        const search = document.getElementById('skills-installed-search');
+        search.value = '';
+        const list = document.getElementById('skills-list');
+        const query = list.querySelectorAll.bind(list);
+        list.querySelectorAll = (selector) => selector === ':scope > .skills-card'
+            ? list.children.filter((node) => node.matches('.skills-card')) : query(selector);
+        await controls.open('installed');
+        await settle();
+        const shown = async (words) => {
+            search.value = words;
+            await search.fire('input');
+            return list.querySelectorAll(':scope > .skills-card').filter((card) => !card.hidden)
+                .map((card) => card.dataset.skillRow || card.dataset.skill).sort();
+        };
+        const rows = ['acme__notes', 'calendar', 'collision:first', 'collision:second', 'provider_keys', 'weather'];
+        assert.deepEqual(await shown(''), rows);
+        assert.deepEqual(await shown('Account limits'), ['provider_keys'], 'a name the listing already knows it by');
+        assert.deepEqual(await shown('Right now outside'), ['weather'], 'the listing confirms its published header');
+        assert.deepEqual(await shown('mirror/weather'), ['weather']);
+        assert.deepEqual(await shown('acme/notes'), ['acme__notes']);
+        assert.deepEqual(await shown('Other Weather'), [], 'even a unique local name does not bind a live tab');
+        assert.deepEqual(await shown('account limits'), ['provider_keys'], 'typed either way');
+        assert.deepEqual(await shown('Right now'), ['weather']);
+        assert.deepEqual(await shown('Shared board'), [], 'a tab of a shared name is given to neither folder');
+        assert.deepEqual(await shown('Agenda board'), [], 'nor to a queue record');
+        assert.deepEqual(await shown('twin'), ['collision:first', 'collision:second'], 'both stay found by their own name');
+        assert.deepEqual(await shown('calendar'), ['calendar']);
+    } finally {
+        controls.destroy();
+    }
+});
 
 test('Browse says how an entry installs only while its source’s setting holds: a later source list changes no card or open detail, a saved choice re-reads the catalog', async (t) => {
     const { env, state, layers, showPage, document, reply, card, says, press, entry } = browsePage(t);

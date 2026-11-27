@@ -1,4 +1,4 @@
-import { renderPageHeader } from './page_header.js';
+import { bindPageHeader, renderPageHeader } from './page_header.js';
 import {
     classifyWidgetJobStatus,
     isRetryableWidgetError,
@@ -61,9 +61,7 @@ export {
 function pageTemplate() {
     return `
         <section class="page app-page-glass" id="page-widgets">
-            ${renderPageHeader({
-                page: 'widgets',
-            })}
+            ${renderPageHeader({ page: 'widgets', named: false })}
             <div class="widgets-scroll">
                 <div id="widgets-list-error" class="skills-load-error" hidden><span data-widget-list-error></span> <button type="button" class="btn btn-default btn-sm" data-widget-list-retry>Retry</button></div>
                 <div id="widgets-list" class="widgets-list"></div>
@@ -89,7 +87,7 @@ function renderCardHtml(tab, contributionVisibility = null) {
         <article class="ui-card widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}"${framed}>
             <div class="widgets-card-head">
                 <div class="widgets-card-title">
-                    <strong>${escapeHtml(title)}</strong>
+                    <strong data-i18n-authored>${escapeHtml(title)}</strong>
                     ${subtitle}
                 </div>
                 <div class="widgets-card-controls">
@@ -906,6 +904,7 @@ export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
+    const disposeBar = bindPageHeader(document.querySelector('#page-widgets > .app-page-header'));  // its name on the desk's band
     const list = document.getElementById('widgets-list');
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
@@ -1394,6 +1393,7 @@ export function initWidgets(ctx = {}) {
         if (event.persisted) return;
         cardMenus.destroy();
         widths.dispose();
+        disposeBar();
         stopContributionFacts?.();
         stopLifecycleFacts?.();
         for (const tab of lastTabs || []) if (!isBoardFrame(tab)) disposeWidgetByKey(widgetKey(tab));

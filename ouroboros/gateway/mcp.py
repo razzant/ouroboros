@@ -19,6 +19,8 @@ from ouroboros.mcp_client import (
     reconfigure_from_settings,
 )
 from ouroboros.mcp_headers import MCPHeaderPlaceholderUnmatched
+from ouroboros.net_transport import ExtraCaBundleError
+from ouroboros.oauth_engine import CertificateRefused
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +116,10 @@ async def api_mcp_sign_in(request: Request) -> JSONResponse:
     except mcp_oauth.MCPAuthRequired as exc:
         return JSONResponse({"ok": False, "server": cfg.id, "code": exc.code, "reason": exc.reason,
                              "error": exc.detail or exc.reason})
+    except (ExtraCaBundleError, CertificateRefused) as exc:  # stopped here before anything changed at the provider
+        words, detail = mcp_oauth.not_sent(exc)  # fixed words; the path, host and OpenSSL's text stay in ``detail``
+        return JSONResponse({"ok": False, "server": cfg.id, "code": "MCP_UNAVAILABLE", "reason": mcp_oauth.NOT_SENT,
+                             "error": words, "detail": detail})
     except Exception as exc:
         log.exception("api_mcp_sign_in failed")
         return json_error(f"{type(exc).__name__}: MCP sign-in failed")

@@ -164,7 +164,7 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
             <span class="section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><h2 class="app-page-lead-title" data-dashboard-lead-name></h2></span>
         </div>`;
     page.innerHTML = `
-        ${renderPageHeader({ page: 'dashboard', leadHtml })}
+        ${renderPageHeader({ page: 'dashboard', named: false, leadHtml })}
         <div class="dashboard-shell section-shell" data-section-view="auto">
             <nav class="dashboard-rail section-rail scroll-fade-y" aria-label="Dashboard">
                 <div class="section-list"><section class="section-group">

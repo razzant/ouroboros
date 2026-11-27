@@ -7,10 +7,12 @@ stays the one tests monkeypatch.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import pathlib
 import stat
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tool_access import ResolvedResourceBinding, canonical_data_root
@@ -80,10 +82,15 @@ def _bounded_paths(key: str, paths: List[str], budget: int) -> tuple:
 
 
 def _with_path_facts(ctx: ToolContext, tool_name: str, text: str, base: pathlib.Path,
-                     changed: List[str], unchanged: List[str] = ()) -> str:
+                     changed: List[str], unchanged: List[str] = (), created: List[str] = (),
+                     logical_root: str = "", versions: Optional[Dict[str, str]] = None) -> str:
     """The editor's typed receipt of what its call did to its targets: ``changed_paths``, the files it wrote or deleted
     exactly as its binding resolved them at write time, and ``unchanged_paths``, those it found already holding their
-    exact bytes, both relative to ``resolved_root`` (the binding's resolved base). A reader takes production from this
+    exact bytes, both relative to ``resolved_root`` (the binding's resolved base). A writer that knows more says it:
+    ``logical_root``, the root it wrote through; ``changed_paths_created``, the indexes of kept changed names where no
+    entry stood before the write; ``changed_versions``, aligned with the kept names, a cheap witness of the version it
+    left (``version_witness`` on the shelf, ``"deleted"`` on explicit delete, or the already-measured digest of the copy
+    automatic capture retained across workspace and ``user_files``; "" where none was recorded). A reader takes production from this
     receipt, never from the call's arguments resolved again later: a link retargeted since the write would name a
     file the call never touched (Astra, 10 Nov 2026). Beyond the typed-result byte budget a list says it is
     incomplete; an omitted path is never inferred. The text keeps its own classification."""
@@ -93,14 +100,175 @@ def _with_path_facts(ctx: ToolContext, tool_name: str, text: str, base: pathlib.
 
     root = str(base)
     budget = _RECEIPT_BYTES - len(json.dumps(root, ensure_ascii=True)) - 128  # keys and counts
+    budget -= len(json.dumps(logical_root, ensure_ascii=True)) + 64 if logical_root else 0  # its own and the facts' keys
     if budget <= 0:  # no room even to name the base: no receipt, so its reader names the gap
         return text
     changed_meta, used = _bounded_paths("changed_paths", list(changed), min(_PATH_LIST_BYTES, budget))
-    unchanged_meta = _bounded_paths("unchanged_paths", list(unchanged), min(_PATH_LIST_BYTES, budget - used))[0] \
-        if unchanged else {}
+    unchanged_meta, more = _bounded_paths("unchanged_paths", list(unchanged), min(_PATH_LIST_BYTES, budget - used)) \
+        if unchanged else ({}, 0)
+    left, kept = max(0, budget - used - more), changed_meta["changed_paths"]
+    facts: Dict[str, object] = {"logical_root": logical_root} if logical_root else {}
+    new = set(created)
+    if made := [index for index, rel in enumerate(kept) if rel in new]:
+        left = max(0, left - 32)  # "changed_paths_created" key overhead
+        while made and len(json.dumps(made)) > left:  # a cut fact is no creation: its reader names a gap
+            made.pop()
+        if made:
+            facts["changed_paths_created"], left = made, max(0, left - len(json.dumps(made)))
+    if versions is not None and kept:
+        vbudget = max(0, left - 48)  # "changed_versions" + optional omitted-count key overhead
+        facts.update(_bounded_paths("changed_versions", [versions.get(rel, "") for rel in kept], vbudget)[0])
     return _publish_tool_result(ctx, _replace_tool_result(LegacyTextResultAdapter.from_text(tool_name, text),
                                                           meta_updates={"resolved_root": root, **changed_meta,
-                                                                        **unchanged_meta}))
+                                                                        **unchanged_meta, **facts}))
+
+
+def version_witness(content: Optional[str] = None, target: Optional[pathlib.Path] = None,
+                    *, stat_info: Optional[os.stat_result] = None) -> str:
+    """A witness of the version a write left, from what its writer already holds: the exact 64-hex SHA-256 digest
+    of the full UTF-8 text it wrote (``sha256:<hex64>``), else, for an append whose whole file it never held, the
+    written regular file's identity and modification metadata (``stat:<dev>:<ino>:<size>:<mtime_ns>``); "" when
+    neither is reliably known."""
+    if content is not None:
+        return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+    info = stat_info
+    if info is None and target is not None:
+        try:
+            info = os.lstat(target)
+        except OSError:
+            return ""
+    if info is None or not stat.S_ISREG(info.st_mode) or (info.st_dev == 0 and info.st_ino == 0):
+        return ""
+    return f"stat:{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+
+
+def _land_root_bytes(target: pathlib.Path, content: str, *, append: bool = False,
+                     write_atomic: object = None) -> Optional[os.stat_result]:
+    """Land a non-repository root's file: a work path AS THE WORK DOMAIN (``work_domain.write_text``: made, written
+    and resolved in its container), any other path as before (its folder made, an atomic overwrite or a non-atomic
+    append). On append returns the written regular file's stat result when observable (from the open handle on
+    POSIX, else after close on Windows where NTFS finalizes mtime on close)."""
+    from ouroboros import work_domain
+    from ouroboros.utils import write_text_atomic
+
+    if work_domain.is_work(target):
+        work_domain.write_text(target, content, append=append)
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if append:
+        with target.open("a", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+            fh.flush()
+            info = os.fstat(fh.fileno()) if os.name != "nt" else None
+        if info is not None:
+            return info
+        try:
+            return os.lstat(target)
+        except OSError:
+            return None
+    (write_atomic or write_text_atomic)(target, content)
+    return None
+
+
+class NonRepoWriteReceipt:
+    """Shared landing, version witness, ``user_files`` capture and typed receipt publication for non-repo writes
+    (``artifact_store``, ``task_drive``, ``user_files``; #4314)."""
+
+    def __init__(self, ctx: ToolContext, normalized: str, binding_items: Tuple[ResolvedResourceBinding, ...],
+                 *, write_atomic: object = None) -> None:
+        self.ctx = ctx
+        self.normalized = normalized
+        self.receipted = normalized in {"artifact_store", "task_drive", "user_files"}
+        self.shelf = normalized == "artifact_store"
+        self.write_atomic = write_atomic
+        logicals = [item.logical_base_path for item in binding_items if item.logical_base_path is not None]
+        chosen = next((cand for cand in (*logicals, *(item.base_path for item in binding_items))
+                       if all(item.target_path.is_relative_to(cand) for item in binding_items)), None)
+        self.base = chosen if chosen is not None else binding_items[0].base_path
+        self.landed: List[Tuple[str, bool, str]] = []
+        self.unchanged: List[str] = []
+        self._captured: Dict[str, str] = {}
+
+    def _entry_key(self, target: pathlib.Path) -> Optional[str]:
+        """Receipt spelling for one resolved target: relative to ``self.base`` when inside it, else the concrete
+        resolved path for mixed valid ``user_files`` bindings so no written target is ever dropped."""
+        if not self.receipted:
+            return None
+        if target.is_relative_to(self.base):
+            return target.relative_to(self.base).as_posix()
+        return str(target) if self.normalized == "user_files" else None
+
+    @staticmethod
+    def _stamp(target: pathlib.Path) -> object:
+        try:
+            info = os.lstat(target)
+            return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return False  # unobservable: proves neither absence nor a change
+
+    def land(self, target: pathlib.Path, body: str, *, append: bool = False) -> bool:
+        """Write one target; False when the shelf already held these exact bytes (nothing is written). A write that
+        fails after changing its target records that target without a version beside its error."""
+        rel = self._entry_key(target)
+        if rel is None:
+            _land_root_bytes(target, body, append=append, write_atomic=self.write_atomic)
+            return True
+        if self.shelf and ((body == "" and target.is_file() and not target.is_symlink()) if append
+                           else _holds_exactly(target, body)):
+            self.unchanged.append(rel)
+            return False
+        before = self._stamp(target)
+        try:
+            stat_info = _land_root_bytes(target, body, append=append, write_atomic=self.write_atomic)
+        except BaseException:
+            after = self._stamp(target) if self.receipted else False
+            if False not in (before, after) and after is not None and after != before:
+                self.landed.append((rel, self.shelf and before is None, ""))
+            raise
+        witness = (version_witness(target=target, stat_info=stat_info) if append else version_witness(body)) \
+            if self.shelf else ""
+        self.landed.append((rel, self.shelf and before is None, witness))
+        return True
+
+    def capture_user_file(self, target: pathlib.Path, rel_path: str, ok_text: str,
+                          *, copy_artifact: object = None) -> Tuple[str, bool]:
+        """Register a landed ``user_files`` write in the task store; returns ``(result_text, ok)``."""
+        from ouroboros.artifacts import copy_file_to_task_artifacts
+
+        key = self._entry_key(target)
+        copy_fn = copy_artifact or copy_file_to_task_artifacts
+        try:
+            record = copy_fn(self.ctx, target, kind="user_file")
+            if not record:
+                raise OSError("user file recovery copy was not registered")
+        except Exception as exc:
+            if key is not None:
+                self._captured.pop(key, None)
+            return (f"⚠️ ARTIFACT_OUTPUT_ERROR: {rel_path} WAS written but its user artifact registration failed: {exc}",
+                    False)
+        if key is not None and isinstance(record, dict) and record.get("sha256"):
+            self._captured[key] = f"sha256:{record['sha256']}"
+        return f"{ok_text}\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}", True
+
+    def publish(self, text: str, *, failed: bool = False) -> str:
+        """Attach typed path/root/version facts to TEXT (or typed no-op when every target was unchanged)."""
+        if not (self.landed or self.unchanged):
+            return text
+        if not self.landed and not failed:
+            return _unchanged_result(self.ctx, [f"{self.normalized}:{rel}" for rel in self.unchanged], self.base)
+        if self.unchanged:
+            text += "\nUnchanged, not rewritten (already held exactly this content): " + ", ".join(self.unchanged)
+        versions = ({rel: version for rel, _new, version in self.landed} if self.shelf
+                    else (dict(self._captured) if self.normalized == "user_files" and self._captured else None))
+        return _with_path_facts(
+            self.ctx, "write_file", text, self.base,
+            [rel for rel, _new, _version in self.landed], self.unchanged,
+            created=[rel for rel, new, _version in self.landed if new],
+            logical_root=self.normalized,
+            versions=versions,
+        )
 
 
 def _land_repo_bytes(target: pathlib.Path, content: str, *, append: bool = False) -> None:
@@ -267,6 +435,14 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     capture_notes: List[str] = []
     from ouroboros.workspace_file_outputs import capture_known_workspace_outputs
 
+    root_fact = binding_items[0].root if binding_items[0].root != "active_workspace" else ""
+    # The version each automatic capture of a workspace write retained, said by the capture itself (#4314).
+    captured: Optional[Dict[str, str]] = None if root_fact else {}
+
+    def receipt(text: str) -> str:
+        return _with_path_facts(ctx, "write_file", text, binding_items[0].base_path, written_paths, unchanged,
+                                logical_root=root_fact, versions=captured or None)
+
     for e, binding in zip(write_list, binding_items):
         rel_path = _git()._binding_repo_rel(binding)
         # Append can only grow a file, so the truncation shrink-guard does not apply.
@@ -281,9 +457,8 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                     mutation_root=binding_items[0].base_path,
                     source_tool="write_file",
                 )
-            return _with_path_facts(ctx, "write_file", "\n".join([
-                shrink_warning, *([f"Successfully written: {', '.join(written)}"] if written else []), *capture_notes]),
-                binding_items[0].base_path, written_paths, unchanged)
+            return receipt("\n".join([
+                shrink_warning, *([f"Successfully written: {', '.join(written)}"] if written else []), *capture_notes]))
         try:
             target = binding.target_path
             if mode == "append":
@@ -292,6 +467,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 written_paths.append(rel_path)
                 note = capture_known_workspace_outputs(
                     ctx, binding.base_path, [rel_path], source_tool="write_file", include_preamble=not capture_notes,
+                    versions=captured,
                 )
                 if note:
                     capture_notes.append(note)
@@ -312,6 +488,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
             written_paths.append(rel_path)
             note = capture_known_workspace_outputs(
                 ctx, binding.base_path, [rel_path], source_tool="write_file", include_preamble=not capture_notes,
+                versions=captured,
             )
             if note:
                 capture_notes.append(note)
@@ -328,11 +505,11 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                     source_tool="write_file",
                 )
             already = ", ".join(written) if written else "(none)"
-            return _with_path_facts(ctx, "write_file", (
+            return receipt(
                 f"⚠️ FILE_WRITE_ERROR on '{e['path']}': {exc}\n"
                 f"Successfully written before error: {already}"
                 + ("\n" + "\n".join(capture_notes) if capture_notes else "")
-            ), binding_items[0].base_path, written_paths, unchanged)
+            )
 
     if unchanged and not written:
         return _unchanged_result(ctx, [f"{display_root}:{rel}" for rel in unchanged], binding_items[0].base_path)
@@ -388,7 +565,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     protected_written = _git().protected_paths_in(written_paths) if system_target else []
     if protected_written and _git().mode_allows_protected_write(_git()._current_runtime_mode()):
         result += "\n\n" + _git().core_patch_notice(protected_written)
-    return _with_path_facts(ctx, "write_file", result, binding_items[0].base_path, written_paths, unchanged)
+    return receipt(result)
 
 
 def _str_replace_editor(
@@ -554,8 +731,10 @@ def _str_replace_editor(
         return f"⚠️ EDIT_TEXT_ERROR: write failed for {path}: {e}"
     from ouroboros.workspace_file_outputs import capture_known_workspace_outputs
 
+    root_fact = binding.root if binding is not None and binding.root != "active_workspace" else ""
+    captured: Optional[Dict[str, str]] = None if root_fact else {}  # as ``_repo_write``: the capture's own version
     capture_note = capture_known_workspace_outputs(
-        ctx, binding.base_path, [rel_path], source_tool="edit_text",
+        ctx, binding.base_path, [rel_path], source_tool="edit_text", versions=captured,
     ) if binding is not None else ""
     if _repair_cas_constraint is not None:
         from ouroboros.skill_repair_admission import advance_repair_expected_hash
@@ -610,4 +789,5 @@ def _str_replace_editor(
         result += f"\n{syntax_note}"
     if system_target and _git().is_protected_runtime_path(norm) and _git().mode_allows_protected_write(_git()._current_runtime_mode()):
         result += "\n\n" + _git().core_patch_notice([norm])
-    return _with_path_facts(ctx, "edit_text", result, binding.base_path, [rel_path]) if binding is not None else result
+    return _with_path_facts(ctx, "edit_text", result, binding.base_path, [rel_path], logical_root=root_fact,
+                            versions=captured or None) if binding is not None else result
