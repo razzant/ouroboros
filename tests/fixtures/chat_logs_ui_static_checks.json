@@ -1083,7 +1083,7 @@
     "id": "test_inflight_history_annotation_retires_pending",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (msg.chat_annotation && localOwnerRow(msg) && msg.client_message_id &&\n                            (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {"
+    "value": "if (msg.chat_annotation && ownerSends.local(msg) && msg.client_message_id &&\n                            (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {"
   },
   {
     "id": "test_inflight_history_annotation_retires_pending",
