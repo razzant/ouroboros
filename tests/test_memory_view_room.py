@@ -1184,3 +1184,29 @@ def test_a_telling_another_room_holds_reads_there_by_the_reader_its_gist_line_pr
     assert _returned(registry, *_READER.search(line).groups())[0] == [gist["address"]]
     found, text = _returned(registry, "777", gist["address"], gist["address"])
     assert found == [] and "this reading of room 777 did not return that row" in text.split("\n")[0]
+
+
+def test_the_release_call_is_stated_once_and_every_mark_fact_is_recoverable():
+    marks = ({"id": "mark-global-0001", "scope": "global", "room": "Main", "text": "Keep my human's words whole.",
+              "by": "main", "date": "2026-11-20", "target": "node page-001", "quote": "never shorten them",
+              "anchor": "run_command matching git push"},
+             {"id": "mark-room-0002", "scope": "room", "room": "Alpha", "text": "Check the release notes first.",
+              "by": "root", "date": "2026-11-21", "target": "row row:7@2026-11-21T10:00:00+00:00#0a1b", "quote": ""},
+             {"id": "mark-room-0003", "scope": "room", "room": "Alpha", "text": "Check the release notes first.",
+              "by": "root", "date": "2026-11-22", "target": "task t42", "quote": ""})
+    spec = dataclasses.replace(mv.ROLE_DEFAULTS["consciousness"], room_id="1", other_conversations=False)
+    text = mv.render_room(mv.MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={}, marks=marks))
+    section = text.split("## Marks I keep in view", 1)[1].split("\n## ", 1)[0]
+    assert text.count("memory_mark(release_ids=") == 1 and "memory_mark(release_ids=" in section
+    lines = section.splitlines()
+    for mark in marks:
+        [at] = [n for n, line in enumerate(lines) if line.endswith(f"id {mark['id']}")]
+        line = lines[at]
+        assert line.startswith(f"- [{mark['scope']}; {mark['room']}] {mark['text']} — marked by {mark['by']} on "
+                               f"{mark['date']}; target {mark['target']}; ")
+        anchor = mark.get("anchor")
+        assert (f"also shown after a task's first call matching {anchor}; " in line) is bool(anchor)
+        following = lines[at + 1] if at + 1 < len(lines) else ""
+        assert (following == f"{mv.INDENT}quote: {mark['quote']}") is bool(mark["quote"])
+    same = [line for line in lines if "Check the release notes first." in line]
+    assert len(same) == 2 and same[0] != same[1]

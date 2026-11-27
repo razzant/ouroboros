@@ -356,14 +356,18 @@ def list_elements(snapshot):
         return []
     room = snapshot.room or {}
     lane1, lane2 = room.get("lane1") or [], room.get("lane2") or []
-    mine = sorted((r for r in lane1 if r["kind"] == "ouroboros" and not r.get("gist")), key=lambda r: r["pos"])
     block = conversations.floor_steps(snapshot.conversations, index=conversations.source_index(snapshot))
-    work = []
+    work, covered = [], set()
     for key, rows in works(room):
         partial = [r for r in rows[:-1] if not r.get("protected_reply")]
-        if partial:
-            work.append(("work:" + key + ":progress", "\n".join(r["line"] for r in partial), work_line(partial)))
-        work.append(("work:" + key + ":final", "\n".join(r["line"] for r in rows), work_line(rows)))
+        for suffix, taken in ((":progress", partial), (":final", rows)):
+            if taken:
+                whole, short = "\n".join(r["line"] for r in taken), work_line(taken)
+                work.append(("work:" + key + suffix, whole, short))
+                # A reply of a finished work keeps its work line only where that line is listed (shorter than the
+                # replies it replaces, as below); every other reply of mine takes the plain reply forms.
+                covered |= {r["address"] for r in taken} if len(short) < len(whole) else set()
+    mine = sorted((r for r in lane1 if r["kind"] == "ouroboros" and r["address"] not in covered), key=lambda r: r["pos"])
     story = sorted(snapshot.story, key=lambda r: tuple(r.get("floor_order", (0, 0))))
     work_keys = {key for key, _rows in works(room)}
     steps = {

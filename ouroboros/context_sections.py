@@ -534,6 +534,9 @@ def _drive_state_section(env: Any) -> str:
                 "read_file(root='runtime_data', path='state/state.json').") if omitted else ""))
     values = json.dumps(projected, ensure_ascii=False, indent=1, sort_keys=True, default=str)
     body = "## Drive state\n\n" + values + _switch_fact(root, observed, authority)
+    from supervisor.panic_choice import wake_fact
+    if choice := wake_fact(root, getattr(env, "task", None)):  # an own wake's right after my human's Turn on, while it holds
+        body += "\n\n" + choice
     if comparison := _openrouter_comparison(raw):
         body += "\n\n" + comparison
     operative = (body + f"\n\nState authority: {observed.quality}; {observed.reason}. "

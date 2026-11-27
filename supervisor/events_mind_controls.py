@@ -33,6 +33,13 @@ def _apply(evt: dict) -> dict:
     if evt.get("list_call") and (stopped := _sender_stopped(actor)):
         return stopped  # one row of a list call whose sender was stopped meanwhile: nothing is done for it
     listed = str(evt.get("list_call") or "") or ("general" if evt.get("general") else "")
+    if action == "resume_task" and "chosen_hold" in evt:  # a wake's return on my human's Turn on, never an ordinary one
+        from supervisor.panic_choice import resume_chosen
+
+        if listed or named:
+            return {"ok": False, "error": "invalid_panic_selection"}
+        with mind_control(actor, reason):
+            return resume_chosen(task_id, actor, str(evt.get("chosen_hold") or ""))
     with mind_control(actor, reason), accepting_unknown(named, reason), list_row(listed):
         if action == "resume_task" and evt.get("general") and (kept := _kept_pause(task_id)):
             from ouroboros.work_stop import resume_outcome
@@ -127,6 +134,7 @@ def handle_mind_task_control(evt: dict, ctx) -> None:
               **{key: evt.get(key) for key in ("task_id", "action", "actor_task_id", "action_nonce", "reason")},
               **{key: evt[key] for key in ("list_call", "general") if evt.get(key)},  # a list call's row
               **({"accept_unknown": evt["accept_unknown"]} if evt.get("accept_unknown") else {}),
+              **({"chosen_hold": evt["chosen_hold"]} if "chosen_hold" in evt else {}),
               "actor": "mind", "outcome": outcome}
     append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", record)
     write_task_message(ctx.DRIVE_ROOT, json.dumps(record, ensure_ascii=False), str(evt["actor_task_id"]),

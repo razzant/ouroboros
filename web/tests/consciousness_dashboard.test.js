@@ -674,3 +674,22 @@ test('the headline names the switch by meaning: the gloss over the position, the
     assert.match(plain, /consciousness-headline">Sleeping until 13:00\.</);
     assert.doesNotMatch(plain, /consciousness-headline-state/);
 });
+
+test('already-on consciousness offers Allow Panic resume only when unchosen Panic-stopped tasks wait', () => {
+    const waiting = normalizeConsciousness({
+        enabled: true, status: 'sleeping', detail: 'Sleeping until 13:00.', panic_choice_available: true,
+    });
+    assert.equal(waiting.panicChoiceAvailable, true);
+    const html = summaryHtml(waiting);
+    assert.match(html, /data-cx-act="panic-choice">Allow Panic resume</);
+    assert.match(html, /data-cx-act="toggle" data-enabled="1">Turn off</);
+    assert.match(summaryHtml(waiting, { toggling: 'read-panic' }), /data-cx-act="panic-choice" disabled>Reading…</);
+    assert.match(summaryHtml(waiting, { toggling: 'read-panic' }), /data-cx-act="toggle" data-enabled="1" disabled>Turn off</);
+
+    const off = normalizeConsciousness({
+        enabled: false, status: 'disabled', detail: 'Off.', panic_choice_available: true,
+    });
+    assert.equal(off.panicChoiceAvailable, false);
+    assert.doesNotMatch(summaryHtml(off), /data-cx-act="panic-choice"/);
+    assert.doesNotMatch(summaryHtml(fromState()), /data-cx-act="panic-choice"/);
+});

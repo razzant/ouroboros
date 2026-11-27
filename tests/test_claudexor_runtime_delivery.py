@@ -155,7 +155,8 @@ def test_tracked_pin_names_a_cli_capable_release():
     of this proposal converged on while the pin was still pre-CLI 3.6.0)."""
     pin = runtime.load_runtime_pin()
     assert pin is not None
-    assert pin.version == "6.4.0"
+    assert pin.version == "6.4.2"
+    assert pin.build_sha == "3b8b87982a9362a27d4731f3e411437c0e63041a"
     assert pin.cli_entrypoint == "claudexor.bundle.cjs"
     # The pinned engine must also be a proven pre-admission continuation producer:
     # advancing the pin without re-verifying that property would silently drop the

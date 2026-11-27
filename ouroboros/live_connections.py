@@ -322,6 +322,10 @@ class PreparedConnection:
                     if not admit(self.request):
                         raise PhysicalAttemptPreconditionFailed('context_capacity')
                     await host.check()
+                if host.hub.ended_by_owner and not host._session_opened:  # the owner's End came during the first fit
+                    self.ready.set_result(None)
+                    self.result.set_result(None)
+                    return
                 view = self.view
                 view._connection_quote = copy.deepcopy(host.quote)
                 view._connection_accounting = True
@@ -356,6 +360,7 @@ class PreparedConnection:
         except BaseException as exc:
             if isinstance(exc, RealtimeSetupError) and exc.code == 'context_capacity':
                 exc.source_revision = getattr(self, 'source_revision', None)
+                exc.proposed_schemas = getattr(self, 'source_schemas', None)  # the refused proposal, compared by value
             for future in (self.ready, self.result):
                 if not future.done():
                     future.set_exception(exc)

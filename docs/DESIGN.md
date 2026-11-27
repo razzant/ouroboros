@@ -2312,7 +2312,11 @@ there in the last 7 days, what it asks to stop and what keeps working, every pla
 button says “Reading…” (on a large install the first read takes seconds). With no place to name the turn goes at once;
 a preview or a place list that cannot be read, or a preview not answered within 15 seconds, does not hold the switch
 (the dialog says so and still offers the turn). Turning on says where it may answer and that at its first wake it sees what is unread there
-and decides what to read and answer. The words are the host's (`consciousness_view`): the app shows them from the
+and decides what to read and answer. After Panic turning on (or, once consciousness is already on in a new run with Panic-stopped work waiting, “Allow Panic resume”)
+uses one native OS confirmation dialog in the desktop app, places or none: nothing starts right now, and in this run wakes may
+choose which shown Panic-stopped tasks to resume (even one Panic was pressed for) until Off or restart, while separate Stops/Pauses
+and limits hold; browsers and older shells explain this (never promising restart updates an old shell) and keep manual Resume
+(ARCHITECTURE §9). The words are the host's (`consciousness_view`): the app shows them from the
 server's answers, and the /bg replies (every surface, headless included) and the mind's own fact come from there too.
 
 The headline reports server state apart from wakes, with the host sentence as its only clock. A past next attempt says
@@ -2504,7 +2508,16 @@ tests release capture on leaving Settings and never take it from a live call.
 
 Calls retain microphone, playback and socket when the room or document is hidden,
 where the platform allows; dictation still stops on hide. End, Stop, Panic,
-pagehide, device loss, unload and a successful Calls-off read end them. Failed
+pagehide, device loss, unload and a successful Calls-off read end them. A call
+the room's context cannot fit into the selected engine's window leaves one System
+line and nothing else: the engine, what the room needs (or at least needs, when
+memory was not measured) and what the engine takes; the stage, window and
+reserve behind Details, with the parts when the room's own context was refused,
+and the request measured whole with the call's instructions and tools when the
+call's setup was; the Calls (beta) settings as its step. Its sheet says so
+calmly with Open Calls. An End pressed while the call prepared stays the
+owner's End: before the call opened it reads "Call ended before it started." on
+the room's row and on every connected sheet. Failed
 configuration reads keep the last good value; mount, focus, visible return and
 successful Settings saves refresh it. There is no call time cap or separate
 per-call reserve; the ordinary shared spending limit applies. The feature's

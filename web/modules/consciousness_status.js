@@ -123,9 +123,14 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     const stateNote = element('p', 'cx-state-note');
     const money = element('p', 'cx-money');
     headWords.append(kicker, stateLine, stateNote, money);
+    const headActions = element('div', 'cx-head-actions');
+    const panicChoice = element('button', 'btn btn-default btn-sm cx-panic-choice');
+    panicChoice.type = 'button';
+    panicChoice.hidden = true;
     const toggle = element('button', 'btn btn-default btn-sm cx-toggle');
     toggle.type = 'button';
-    head.append(headWords, toggle);
+    headActions.append(panicChoice, toggle);
+    head.append(headWords, headActions);
     const coverageNote = element('p', 'cx-wakes-coverage');
     const groups = [
         ['own', tr('consciousness.own_wakes', 'Its own wakes'),
@@ -191,6 +196,13 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         money.textContent = allowance;
         money.hidden = !allowance;
         const on = snapshot.enabled === true;
+        const offerPanic = on && snapshot.panicChoiceAvailable === true;
+        panicChoice.hidden = !offerPanic;
+        if (offerPanic) {
+            panicChoice.textContent = pending === 'read-panic' ? switchReadingWords()
+                : tr('consciousness.switch.allow_panic_resume', 'Allow Panic resume');
+            panicChoice.disabled = Boolean(pending) || !ws?.send || !connected();
+        }
         toggle.hidden = snapshot.enabled === null;
         toggle.textContent = pending === 'read' ? switchReadingWords() : switchActionWords(on);
         toggle.disabled = Boolean(pending) || !ws?.send || !connected();
@@ -293,7 +305,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         void readWakes();
         // A pointer open lands on the (ring-less) inner scrollport so PageDown scrolls it at once;
         // a keyboard open enters its first enabled control.
-        const first = viaKeyboard ? [toggle, dashboardDoor].find((node) => !node.hidden && !node.disabled) : null;
+        const first = viaKeyboard ? [panicChoice, toggle, dashboardDoor].find((node) => !node.hidden && !node.disabled) : null;
         (first || scroll).focus({ preventScroll: true });
     }
 
@@ -327,6 +339,17 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     listen(chip, 'click', (event) => (open ? close() : openShade(event.detail === 0)));
     listen(chip, 'keydown', (event) => {
         if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !open) { event.preventDefault(); openShade(true); }
+    });
+    listen(panicChoice, 'click', async () => {
+        if (panicChoice.disabled || !view || pending) return;
+        pending = 'read-panic';
+        pendingAt = Number.POSITIVE_INFINITY;
+        paintShade();
+        const onRead = () => { pending = 'panic'; if (!destroyed) paintShade(); };
+        if (!(await turn('on', { ws, onRead }))) { pending = ''; if (!destroyed) paintShade(); return; }
+        pendingAt = Date.now();
+        paintShade();
+        setTimeout(() => { if (!destroyed) refreshState(true); }, COMMAND_SETTLE_MS);
     });
     listen(toggle, 'click', async () => {
         if (toggle.disabled || !view || pending) return;
