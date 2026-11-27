@@ -732,9 +732,10 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     if task_evidence or words_section:
         _assemble_prompt.compact_optional_evidence = _compact_task_evidence
 
-    def _fallback():
-        nonlocal governance
-        governance = governance.fallback
+    def _fallback():  # the older selection, with evidence compaction undone: it may fit beside it whole
+        nonlocal governance, task_evidence_compact, words_section
+        governance, task_evidence_compact, words_section = governance.fallback, False, full_words
+    full_words = words_section
     _assemble_prompt.fallback = _fallback if getattr(governance, "fallback", None) else None
 
     # P3 stays one-pass. The api pack, its fit ladder and the fixed_overflow

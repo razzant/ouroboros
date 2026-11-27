@@ -511,7 +511,7 @@ def test_missing_invariants_are_disclosed_and_a_broken_sibling_does_not_hide_the
     assert row["disposition"] == "inline" and "UNAVAILABLE" not in context.navigation
 
 
-def test_a_chapter_opening_is_selectable_and_a_listing_gives_only_its_matching_lines(repo):
+def test_a_later_opening_block_is_selectable_and_a_listing_gives_only_its_matching_lines(repo):
     """Text before a chapter's first subheading was beyond selection; each opening block now is a unit, and a
     code listing (the module tree) gives only its lines that name a touched file, not all of itself."""
     (repo / "docs" / "architecture" / "01-core.md").write_text(
@@ -548,3 +548,17 @@ def test_the_real_tree_gives_a_packet_body_reviewer_every_key_invariant():
                                  usable_window_tokens=200_000, delivery="packet")
     assert context.inline_whole_documents[BODY_INVARIANTS_CHAPTER] == text
     assert all(line in context.stable_inline for line in numbered)
+
+
+def test_a_skipped_resident_opening_keeps_the_older_selection_as_the_fallback(repo):
+    """When the packet's selection skips a chapter's first paragraph (the navigation carries it), the context keeps the
+    selection that sends it as ``fallback``, the fit ladder's last step before refusing; nothing skipped, no fallback."""
+    (repo / "docs" / "architecture" / "01-core.md").write_text(
+        "# 1. Core\n\nThe opening names ouroboros/project_dialogue.py.\n\n## Loop\n\nNothing touched here.\n",
+        encoding="utf-8", newline="\n")
+    context = _context(repo, touched_paths=["ouroboros/project_dialogue.py"])
+    assert "The opening names" not in context.selected_inline and context.fallback is not None
+    assert "The opening names ouroboros/project_dialogue.py." in context.fallback.selected_inline
+    assert context.fallback.fallback is None
+    assert _context(repo, touched_paths=["ouroboros/other.py"]).fallback is None
+

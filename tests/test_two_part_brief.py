@@ -275,9 +275,9 @@ def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(t
         omitted = "Full post-change snapshots were omitted" in text
         got = "diff" if omitted else "full"
         assert RANK[got] >= RANK[delivered], where  # strictly better than the target is not a failure
-        changed = [line for line in frozen.diff_text.splitlines()
-                   if line[:1] in "+-" and not line.startswith(("+++", "---"))]
-        assert frozen.diff_text in text or all(line in text for line in changed), where  # every changed line
+        staged = text.split("## Staged diff\n\n", 1)[1].split("\n\n## Changed files", 1)[0].strip()
+        # the delivered diff section is exactly the frozen full or -U0 rendering: headers, order and context included
+        assert staged in (frozen.diff_text.strip(), frozen.render_prompt_diff(0).strip()), where
         assert (FIXTURE_SENTINEL in text) == (not omitted), where  # the whole source is really there, or not
         if not omitted:  # a full-source rung carries every promised file body whole
             bodies = [(subject / "web" / "modules" / "fixture.js").read_text(encoding="utf-8")]
@@ -415,8 +415,8 @@ def test_the_frozen_builder_reviews_a_conflict_anchor_outside_the_delta(tmp_path
                                                    layer="body"))
     assert frozen.managed is not None and "conflict.txt" not in {path for _s, path in frozen.name_status}
     system = build_two_part_brief(frozen, PACKET, goal="g", commit_message="m")["system"]
-    changed = system[system.index("## Changed files"):]
-    assert "conflict.txt" in changed and "resolver_note.txt" in changed
+    for path in ("conflict.txt", "resolver_note.txt"):  # a reviewed path: a file heading, or a changed-files row
+        assert f"\n### {path}\n" in system or path in system[system.index("## Changed files"):], path
 
 
 def test_a_chapter_opening_naming_a_touched_file_is_sent_once(tmp_path, monkeypatch):
@@ -512,3 +512,57 @@ def test_a_packet_sendable_with_the_resident_opening_selected_stays_sendable(mon
     _prompt, _stable, error = review_admission.fit_triad_prompt(["openai/gpt-y"], assemble, "", "+one line", "a.py",
                                                                 ".", compact_diff=lambda: "+one line")
     assert "REVIEW_BLOCKED" in error
+
+
+def test_a_many_file_change_gets_every_full_body_where_the_pre_pr_target_did(tmp_path, monkeypatch):
+    """Thirteen synthetic web modules with one trailing comment each: at 262,750 the pre-PR target (7981018bb40e,
+    measured with its own governance code and documents) sends all thirteen full bodies; so must this packet, whose
+    changed-files list points at the file headings it already carries instead of repeating thirteen paths."""
+    from ouroboros.tools import review as review_tool
+    from ouroboros.tools.review_admission import CHANGED_FILES_ARE_HEADINGS
+    from ouroboros.tools.registry import ToolContext
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    paths = [f"web/modules/many_{index:02d}.js" for index in range(13)]
+    _installed, subject = _installed_and_subject(tmp_path)
+    for path in paths:
+        (subject / path).parent.mkdir(parents=True, exist_ok=True)
+        (subject / path).write_text("".join(f"// many line {k:05d}: " + "x" * 60 + "\n" for k in range(300)),
+                                    encoding="utf-8")
+    _git(subject, "add", "-A")
+    _git(subject, "commit", "-qm", "base")
+    for path in paths:
+        with (subject / path).open("a", encoding="utf-8") as stream:
+            stream.write("// Review one trailing comment.\n")
+    _git(subject, "add", "-A")
+    ctx = ToolContext(repo_dir=subject, drive_root=tmp_path / "drive")
+    ctx._review_iteration_count = 0
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(subject), "index", surface="commit_gate",
+                                                   governance_root=str(root), layer="body"))
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 262_750)
+    text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
+    assert "Full post-change snapshots were omitted" not in text
+    assert all(f"\n### {path}\n" in text for path in paths) and CHANGED_FILES_ARE_HEADINGS in text
+
+
+def test_the_fallback_step_buys_no_second_density_probe(monkeypatch):
+    """A cold overflowing route is probed once: switching to the governance fallback reuses the first pass's
+    calibrated limit instead of re-entering the cold-density rung (a provider without usage would be probed again)."""
+    from ouroboros.tools import review as review_tool, review_admission
+
+    monkeypatch.setattr(review_tool, "calibrated_input_token_limit", lambda *a, **k: 1_000)
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 1_000_000)
+    probes = []
+    monkeypatch.setattr(review_admission, "density_probe_before_size_refusal",
+                        lambda *a, **k: probes.append(a[1]) or "no_sample")
+    state = {"governance": "x" * 8_000}
+
+    def assemble(files, diff):
+        return state["governance"] + files + diff, 0
+
+    def fallback():
+        state["governance"] = "small"
+    assemble.fallback = fallback
+    prompt, _stable, error = review_admission.fit_triad_prompt(["openai/gpt-y"], assemble, "", "+one line", "a.py",
+                                                               ".", compact_diff=lambda: "+one line")
+    assert not error and prompt.startswith("small") and probes == ["openai/gpt-y"]

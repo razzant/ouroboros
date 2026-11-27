@@ -51,7 +51,6 @@ import pathlib
 import subprocess
 from typing import Any, Optional, Sequence, Tuple
 
-from ouroboros.tools.review_helpers import seat_vectors, triad_fit_note  # noqa: F401 -- their home; re-exported
 
 log = logging.getLogger(__name__)
 
@@ -129,9 +128,17 @@ def density_probe_before_size_refusal(ctx: Any, model: str, sample: str, *, surf
     return outcome
 
 
+def triad_fit_note() -> str:
+    """What a packet says in place of the full snapshots it dropped to fit the strictest reviewer; the touched paths
+    are the packet's own "Changed files" list, not repeated here."""
+    return ("TRIAD FIT NOTE: Full post-change snapshots were omitted because they duplicate the complete staged diff "
+            "and would exceed the strictest configured reviewer's input limit. Every touched path is listed under "
+            "\"Changed files\"; all added/deleted lines remain in the staged diff.")
+
+
 def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
                      diff_text: str, changed: str, target_repo, ctx=None,
-                     subject=None, slots: Optional[list] = None, compact_diff=None) -> tuple:
+                     subject=None, slots: Optional[list] = None, compact_diff=None, calibrated=None) -> tuple:
     """The api pack's guaranteed-fit ladder (P3 one-pass): drop only evidence
     duplicated by the complete staged diff — full snapshots first, then unchanged
     diff context. Each api slot's limit uses its REAL window from Capability
@@ -174,13 +181,15 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
         ))
 
     estimate_tokens = _rv.estimate_tokens
-    slot_limits = {key: _slot_input_limit(index) for index, key in enumerate(keys)}
-    input_limit = _rv._quorum_input_token_limit(keys, slot_limits)
+    # ``calibrated``: the input limit a first pass of this ladder already measured (its fallback rendering's retry
+    # buys no second cold-density probe for the same route).
+    slot_limits = None if calibrated is not None else {key: _slot_input_limit(index) for index, key in enumerate(keys)}
+    input_limit = calibrated if calibrated is not None else _rv._quorum_input_token_limit(keys, slot_limits)
     prompt, stable_prefix_len = assemble(current_files_section, diff_text)
     if input_limit and estimate_tokens(prompt) > input_limit and getattr(assemble, "compact_optional_evidence", None):
         assemble.compact_optional_evidence()
         prompt, stable_prefix_len = assemble(current_files_section, diff_text)
-    if input_limit and estimate_tokens(prompt) > input_limit:
+    if input_limit and estimate_tokens(prompt) > input_limit and calibrated is None:
         # Cold-start density rung: every api slot the full prompt overflows and
         # whose route has no fresh witness gets ONE bounded probe on a slice of
         # this very prompt; a recorded witness re-sizes the slots once, then
@@ -234,7 +243,7 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
         assemble.fallback()  # the governance selection that fit before (``GovernanceContext.fallback``), once
         assemble.fallback = None
         return fit_triad_prompt(api_models, assemble, current_files_section, diff_text, changed, target_repo, ctx=ctx,
-                                subject=subject, slots=slots, compact_diff=compact_diff)
+                                subject=subject, slots=slots, compact_diff=compact_diff, calibrated=input_limit)
     if not input_limit or prompt_tokens > input_limit:
         # The split imperative is structurally impossible for a managed
         # resolution — its terminal REPLACES the clause (never appends the
@@ -408,6 +417,9 @@ PACKET_TEMPLATE_DYNAMIC = """\
 """
 
 
+CHANGED_FILES_ARE_HEADINGS = "Every touched path is a `###` heading under \"Current touched files\" above."
+
+
 def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: Any, goal_section: str,
                            scope_section: str, files_section: str, diff_text: str, changed_files: str,
                            rebuttal_section: str = "", review_history_section: str = "",
@@ -419,6 +431,9 @@ def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: An
     from ouroboros.triad_review import REVIEW_JSON_ARRAY_CONTRACT
 
     stable_inline = str(getattr(governance, "stable_inline", "") or "")
+    paths = [path.strip() for path in changed_files.splitlines() if path.strip()]
+    if paths and all(f"\n### {path}\n" in f"\n{files_section}" for path in paths):  # each already a file heading
+        changed_files = CHANGED_FILES_ARE_HEADINGS
     tail = "\n\n".join(part for part in (str(getattr(governance, "selected_inline", "") or ""),
                                           str(getattr(governance, "navigation", "") or "")) if part.strip())
     stable = PACKET_TEMPLATE_STABLE.format(
@@ -470,7 +485,7 @@ def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = Tr
         layer=layer, checklist_section="⟨checklist⟩", governance=governance, goal_section="⟨goal⟩", scope_section="⟨scope⟩",
         files_section="⟨files⟩", diff_text="⟨diff⟩", changed_files="⟨paths⟩", rebuttal_section="⟨rebuttal⟩",
         review_history_section="⟨history⟩", task_evidence_section="⟨evidence⟩")
-    packet_words = [prompt, *packet_head_material(layer), triad_fit_note(),
+    packet_words = [prompt, *packet_head_material(layer), triad_fit_note(), CHANGED_FILES_ARE_HEADINGS,
                     pack_omission_note(["⟨path⟩"]), pack_exclusion_note(["⟨path⟩"], ["⟨path⟩"]),
                     *evidence_material(("packet",))]
     return every, packet_words, [*retrieving_material(layer), *evidence_material(("session", "native")),
@@ -528,6 +543,23 @@ def source_root_for(ctx: Any, task_evidence: dict) -> str:
         return str(canonical_data_root(ctx))
     except (AttributeError, OSError, TypeError, ValueError):
         return ""
+
+
+def seat_vectors(row_plan: dict) -> dict:
+    """The plan with its ``parts`` vector complete: a row without one is asked by
+    ``review_ledger.seat_parts`` (retrieving → both parts, packet → ``change``)."""
+    from ouroboros.review_ledger import seat_parts
+    from ouroboros.reviewer_slot_config import row_plan_retrieves
+
+    plan = dict(row_plan)
+    parts = list(plan.get("parts") or [])
+    for index in range(len(plan.get("models") or [])):
+        if index >= len(parts) or not parts[index]:
+            while len(parts) <= index:
+                parts.append(())
+            parts[index] = seat_parts({"retrieves": row_plan_retrieves(plan, index)})
+    plan["parts"] = [tuple(p) for p in parts]
+    return plan
 
 
 def retrieving_brief_for_seat(*, review_root: Any, governance_root: Any, path_subject: Any, managed_subject: Any,
@@ -778,9 +810,10 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     if words_section:
         _assemble.compact_optional_evidence = _compact_words
 
-    def _fallback():
-        nonlocal governance
-        governance = governance.fallback
+    def _fallback():  # the older selection, with the words compaction undone: they may fit beside it whole
+        nonlocal governance, words_section
+        governance, words_section = governance.fallback, full_words
+    full_words = words_section
     _assemble.fallback = _fallback if getattr(governance, "fallback", None) else None
 
     prompt, stable_len, fit_error = fit_triad_prompt(

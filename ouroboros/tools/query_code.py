@@ -397,8 +397,6 @@ def _query_code_read(
             scope=scope, path_allowed=admitted, parse=parse, name=name,
         )
         visible = [file for file in inventory.files if _visible_file(ctx, repo_root, file.path, binding, runtime_check)]
-        if len(visible) < len(inventory.files):  # the runtime admission skipped a listed entry: one anonymous fact
-            inventory.enumeration_limits = [*inventory.enumeration_limits, "enumeration_entries_not_admitted"]
         inventory.files = visible
         return inventory
 
