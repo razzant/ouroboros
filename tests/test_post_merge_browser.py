@@ -477,8 +477,12 @@ def test_non_ascii_and_control_character_paths_are_read_whole_and_outputs_stay_o
     git(repo, "commit", "-qm", "base")
     base = git(repo, "rev-parse", "HEAD")
     (repo / "web/настройки.css").write_text("1")
-    (repo / "web/tab\tname.css").write_text("1")
+    # A TAB is not a legal Windows file name character: record it in the index only (plumbing), so git holds the exact
+    # path bytes the parser must read whole on every platform without the file ever existing on disk.
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input="1", check=True,
+                          capture_output=True, text=True).stdout.strip()
     git(repo, "add", ".")
+    git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},web/tab\tname.css")
     git(repo, "commit", "-qm", "head")
     [commit] = sel.window_commits(base, "HEAD", cwd=repo)
     assert commit["files"] == ["web/tab\tname.css", "web/настройки.css"]
