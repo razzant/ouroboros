@@ -100,11 +100,12 @@ const heldEditor = server => staleDrafts.has(server) || heldDrafts.get(pageId(se
 
 const cardFor = (server) => (editorView?.server === server ? editorView.host.querySelector('[data-mcp-card]') : null);
 
-// The form's one result line, beside Save: a Save, a Test, a Refresh or a sign-in step says its outcome there.
-function setCardMessage(server, text, tone = 'muted', kind = '') {
-    if (text) cardMessages.set(server, { text, tone, kind });
+// The form's one result line, beside Save: a Save, a Test, a Refresh or a sign-in step says its outcome there. A host's
+// raw error (an address, a file's path, OpenSSL's words) rides `details`, behind Details and never translated.
+function setCardMessage(server, text, tone = 'muted', kind = '', details = '') {
+    if (text) cardMessages.set(server, { text, tone, kind, details });
     else cardMessages.delete(server);
-    setResult(cardFor(server)?.querySelector('[data-mcp-message]'), text ? { text, tone } : {});
+    setResult(cardFor(server)?.querySelector('[data-mcp-message]'), text ? { text, tone, details } : {});
 }
 
 function holdDraft(server, reason) {
@@ -267,10 +268,14 @@ function statusParts(server) {
     const facts = [
         ['Listed', listedAt ? absoluteTime(listedAt) || listedAt : ''],
         ['Last attempt', attempt?.at ? `${absoluteTime(attempt.at) || attempt.at}${attempt.ok === false ? ' · failed' : attempt.partial ? ' · partial' : ''}` : ''],
-        ['Error', attempt?.ok === false ? String(attempt.error || '') : lastError],
-        ['Catalog publication', status?.publication_error ? String(status.publication_error) : ''],
+        ['Error', attempt?.ok === false ? String(attempt.error || '') : lastError, true],
+        ['Catalog publication', status?.publication_error ? String(status.publication_error) : '', true],
     ].filter(([, value]) => value);
-    const factItems = facts.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
+    // Keep the engine's raw diagnostic behind Details and out of translation, as in the action result.
+    const factItems = facts.map(([name, value, raw]) =>
+        `<div><dt>${escapeHtml(name)}</dt><dd>${raw
+            ? `<details class="ui-disclosure"><summary>Details</summary><pre class="ui-result-details" data-i18n-skip>${escapeHtml(value)}</pre></details>`
+            : escapeHtml(value)}</dd></div>`).join('');
     const toolItems = tools.map((t) => `<li><strong>${escapeHtml(t.name || t.prefixed_name || '')}</strong>
                 ${t.description ? `<span class="mcp-tool-desc">${escapeHtml(String(t.description).slice(0, 220))}</span>` : ''}</li>`).join('');
     return { badgeText: label.charAt(0).toUpperCase() + label.slice(1), tone, factItems, toolItems };
@@ -336,7 +341,8 @@ function paintSignIn(card, server) {
 
 /** One step of a server's sign-in. `card` is its form (the paste and the app registration live there); a head's
  *  Sign in begins without one. `say` writes the step's words where the press was made. */
-async function signInAction(card, server, action, say = (text, tone) => setCardMessage(server, text, tone, 'sign-in')) {
+async function signInAction(card, server, action,
+    say = (text, tone, details = '') => setCardMessage(server, text, tone, 'sign-in', details)) {
     const sid = savedMcpSecrets.get(server)?.identity || '';
     if (!sid) { say('Save the server before signing in.', 'warn'); return; }
     const field = (name) => String(card?.querySelector(`[data-mcp-sign-in-${name}]`)?.value || '').trim();
@@ -350,7 +356,12 @@ async function signInAction(card, server, action, say = (text, tone) => setCardM
     say(action === 'sign_out' ? 'Signing out...' : 'Contacting the provider...', 'muted');
     try {
         const data = await jsonPost('/api/mcp/sign-in', body);
-        if (data.ok === false) say(`Sign-in refused: ${data.error || data.reason || 'unknown reason'}`, 'danger');
+        // A no-send's fixed words carry its next step; what only this computer should see stays under Details.
+        if (data.ok === false && data.reason === 'not_sent') say(data.error, 'warn', data.detail || '');
+        else if (data.ok === false && data.reason === 'no_self_registration') {
+            say('Register an app with this provider, then add its client ID under Details.', 'danger', data.error || '');
+        }
+        else if (data.ok === false) say('Sign-in refused.', 'danger', data.error || data.reason || 'unknown reason');
         else if (action === 'begin') {
             signInLinks.set(server, data.url);
             say('Finish signing in with the provider. This page updates when you come back here.', 'muted');
@@ -365,7 +376,7 @@ async function signInAction(card, server, action, say = (text, tone) => setCardM
                 : data.revoked === false ? 'Signed out here; the provider did not confirm the revocation.'
                     : 'Signed out here; the provider offers no revocation.', 'ok');
         }
-    } catch (err) { say(`Sign-in failed: ${err && err.message ? err.message : err}`, 'danger'); }
+    } catch (err) { say('Sign-in failed.', 'danger', String(err && err.message ? err.message : err)); }
     signInBusy.delete(server);
     buttons.forEach((button) => { button.disabled = heldEditor(server); });
     await refreshStatus();
@@ -940,8 +951,10 @@ function bindCardEvents(card, rowServer) {
             const warnings = (data.configuration_warnings || []).join(' ');
             said = stale() ? ['This server changed while it was tested. Test again to check what the form holds now.', 'warn']
                 : [`The connection works. ${toolCountLabel(Number(data.tool_count || 0))} discovered. No tool was called.${warnings ? ' ' + warnings : ''}`, warnings ? 'warn' : 'ok'];
-        } catch (err) { said = [`Test failed${stale() ? ' for an earlier draft' : ''}: ${err && err.message ? err.message : err}`, 'danger']; }
-        if (editorView?.server === server) setCardMessage(server, ...said, 'test');
+        } catch (err) {
+            said = [`Test failed${stale() ? ' for an earlier draft' : ''}.`, 'danger', String(err && err.message ? err.message : err)];
+        }
+        if (editorView?.server === server) setCardMessage(server, said[0], said[1], 'test', said[2]);
         setPending(server, 'test', false);
         await refreshStatus(); // a draft that asked for sign-in shows its Sign in
     });
@@ -956,9 +969,9 @@ function bindCardEvents(card, rowServer) {
             const data = await jsonPost('/api/mcp/refresh', { server_id: saved.identity }, { rejectOkFalse: true });
             if (data.published === false) throw new Error(data.publication_error || 'Catalog was not published');
             said = [`Listed again. ${toolCountLabel(Number(data.tool_count || 0))} discovered. No tool was called.`, 'ok'];
-        } catch (err) { said = [`Refresh failed: ${err && err.message ? err.message : err}`, 'danger']; }
+        } catch (err) { said = ['Refresh failed.', 'danger', String(err && err.message ? err.message : err)]; }
         await refreshStatus();
-        if (editorView?.server === server) setCardMessage(server, ...said, 'refresh');
+        if (editorView?.server === server) setCardMessage(server, said[0], said[1], 'refresh', said[2]);
         setPending(server, 'refresh', false);
     });
 }
@@ -1006,6 +1019,8 @@ function drawEditor({ keepFocus = true } = {}) {
     }
     if (more) moreOpen[more.open ? 'add' : 'delete'](view.server);
     view.host.innerHTML = editorHtml(view.server);
+    const message = cardMessages.get(view.server);  // a redraw keeps the result's Details as setResult wrote them
+    if (message?.details) setResult(view.host.querySelector('[data-mcp-message]'), message);
     view.boundEntry = savedMcpSecrets.get(view.server);
     view.host.querySelectorAll('[data-mcp-card]').forEach((card) => bindCardEvents(card, view.server));
     paintEditorActions(view);
@@ -1201,11 +1216,11 @@ function mountList(container, { path, ctx }) {
         const action = hit('[data-tools-action]');
         if (action?.dataset.toolsAction === 'tools:import') { void importServers(ctx, actionResult(action)); return; }
         if (action) {  // every saved server lists its tools again
-            const say = (text, tone) => setResult(actionResult(action), { text, tone });
+            const say = (text, tone, details = '') => setResult(actionResult(action), { text, tone, details });
             setButtonBusy(action, true);
             say('Listing every server again...', 'muted');
             await jsonPost('/api/mcp/refresh', {}, { rejectOkFalse: true }).then(() => say('Listed again. No tool was called.', 'ok'),
-                (err) => say(`Refresh failed: ${err?.message || err}`, 'danger'));
+                (err) => say('Refresh failed.', 'danger', String(err?.message || err)));
             setButtonBusy(action, false);
             await refreshStatus();
             return;
@@ -1219,7 +1234,10 @@ function mountList(container, { path, ctx }) {
         }
         const server = serverOf(event.target);
         if (!server) return;
-        if (hit('[data-entry-sign-in]')) { void signInAction(null, server, 'begin', (text, tone) => setResult(entryResult(), { text, tone })); return; }
+        if (hit('[data-entry-sign-in]')) {
+            void signInAction(null, server, 'begin', (text, tone, details = '') => setResult(entryResult(), { text, tone, details }));
+            return;
+        }
         if (!hit('.ui-switch')) ctx.openSettings(`tools/${pageId(server)}`, { opener: hit('[data-entry-open]') });
     };
     const onChange = (event) => {

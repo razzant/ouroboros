@@ -57,7 +57,7 @@ One row per key (`settings_defaults.py`). `unset`-default rows (plus `Env-only` 
 | GIGACHAT_BASE_URL | `https://api.giga.chat/v1` | Base URL |
 | GIGACHAT_VERIFY_SSL_CERTS | `true` | TLS check |
 | GIGACHAT_PROFANITY_CHECK | "" | Profanity passthrough |
-| OUROBOROS_EXTRA_CA_BUNDLE | "" | Extra CA PEM for first-party provider trust bundles |
+| OUROBOROS_EXTRA_CA_BUNDLE | "" | Extra CA PEM: providers, HTTPS MCP |
 | ANTHROPIC_API_KEY | "" | Direct-Anthropic key |
 | MINIMAX_API_KEY | "" | MiniMax key |
 | MINIMAX_REGION | "" | Region (empty = `global_en`) |

@@ -2346,7 +2346,7 @@ the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mc
 svc:<service>,nonce}` is a declared service's sign-in, posted to `/api/sign-in`. A skill's own `oauth/complete` flow
 remains the path on cores without `sign_in_version`.
 Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
-The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported; after a declared service's `answer_saved` (the provider's answer is kept, only the account read waits) it offers Finish sign-in, which sends the same return again from the page's memory on the owner's press.
+The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported; after a declared service's `answer_saved` (the provider's answer is kept, only the account read waits) or a remote MCP server's `not_sent` (stopped here before anything changed at the provider) it offers Finish sign-in, which sends the same return again from the page's memory on the owner's press.
 Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.
 
 ### Reading memory

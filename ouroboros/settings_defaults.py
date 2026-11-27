@@ -87,7 +87,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "GIGACHAT_VERIFY_SSL_CERTS": "true",
     "GIGACHAT_PROFANITY_CHECK": "",
     # PEM file with CA certificates ADDED to the default trust bundle for every
-    # first-party provider call (net_transport.extra_ca_bundle); "" = defaults only.
+    # first-party provider call and HTTPS MCP connection (net_transport); "" = defaults only.
     "OUROBOROS_EXTRA_CA_BUNDLE": "",
     "ANTHROPIC_API_KEY": "",
     "MINIMAX_API_KEY": "",

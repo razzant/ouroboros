@@ -1189,7 +1189,8 @@ class McpSignInRequest(TypedDict, total=False):
 
 
 class McpSignInResponse(TypedDict, total=False):
-    """``ok: false`` carries ``code`` (``MCP_AUTH_REQUIRED`` with its ``reason``) and ``error``."""
+    """``ok: false`` carries ``code`` (``MCP_AUTH_REQUIRED`` with its ``reason``, or ``MCP_UNAVAILABLE`` with reason
+    ``not_sent``: stopped here before anything changed at the provider, its technical ``detail`` apart) and ``error``."""
 
     ok: Required[bool]
     server: str
@@ -1201,6 +1202,7 @@ class McpSignInResponse(TypedDict, total=False):
     code: str
     reason: str
     error: str
+    detail: str
 
 
 class McpTestRequest(TypedDict, total=False):

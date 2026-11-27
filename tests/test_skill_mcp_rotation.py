@@ -16,7 +16,7 @@ def _write(path, document):
 
 
 @pytest.fixture()
-def installed(tmp_path, monkeypatch):
+def installed(tmp_path, monkeypatch, request):
     from ouroboros.skill_loader import SkillReviewState, load_skill, save_enabled, save_review_state, save_skill_grants
 
     data = tmp_path / "data"
@@ -24,7 +24,7 @@ def installed(tmp_path, monkeypatch):
     (skill_dir / "scripts").mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: weather\ndescription: d\nversion: 1.0.0\ntype: script\nruntime: node\nscripts: [setup.mjs]\n"
-        "env_from_settings: [WEATHER_API_KEY]\n"
+        f"env_from_settings: [{getattr(request, 'param', 'WEATHER_API_KEY')}]\n"
         'mcp_servers: [{"id": "weather", "entry": "scripts/server.mjs"}]\n---\nbody\n', encoding="utf-8")
     (skill_dir / "scripts" / "server.mjs").write_text("// server\n", encoding="utf-8")
     (skill_dir / "scripts" / "setup.mjs").write_text("// setup\n", encoding="utf-8")
@@ -144,6 +144,89 @@ def test_rotation_does_not_relist_other_servers_or_unready_binding(installed, mo
         mcp_client.ensure_configured_from_settings()
         assert lister.discovery.wait(5)
         assert [cfg.id for cfg in calls] == (["weather"] if gate == "ready" else [])
+    finally:
+        assert lister.discovery.wait(5)
+
+
+def test_a_bundle_path_alone_lists_only_https_servers_while_reports_and_co_saved_settings_keep_their_scope(
+        installed, monkeypatch):
+    from ouroboros.gateway.settings import _apply_settings_save_side_effects
+    from ouroboros.skill_loader import SkillReviewState, save_review_state
+
+    plain = {"id": "manual", "enabled": True, "transport": "stdio", "command": "unused"}
+    remote = {"id": "remote", "enabled": True, "url": "https://example.test/mcp"}
+    value = {**config.load_settings(), "MCP_SERVERS": [installed.row, plain, remote], "OUROBOROS_EXTRA_CA_BUNDLE": ""}
+    _write(config.SETTINGS_PATH, value)
+    save_review_state(installed.data, "weather", SkillReviewState(status="pending", content_hash=installed.revision))
+    calls = []
+    lister = _manager(calls)
+    lister.become_lister()
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: lister)
+    lister.configuration_changed(value, reason="startup")
+    assert lister.discovery.wait(5) and sorted(cfg.id for cfg in calls) == ["manual", "remote"]
+    save_review_state(installed.data, "weather", SkillReviewState(status="clean", content_hash=installed.revision))
+    assert lister.rebind() == ["weather"]  # admitted now, never listed: a cold ready binding
+
+    def listed_after(step) -> list:
+        calls.clear()
+        step()
+        assert lister.discovery.wait(5)
+        return sorted(cfg.id for cfg in calls)
+
+    def save(before, after):
+        _write(config.SETTINGS_PATH, after)
+        _apply_settings_save_side_effects(types.SimpleNamespace(), after, before, sorted(
+            key for key in after if after[key] != before.get(key)))
+
+    try:
+        saved = {**value, "OUROBOROS_EXTRA_CA_BUNDLE": "/owner/extra.pem"}
+        assert listed_after(lambda: save(value, saved)) == ["remote"]  # the path alone: no stdio, ready or not
+        by_hand = {**saved, "OUROBOROS_EXTRA_CA_BUNDLE": "/owner/other.pem"}  # unseen by any event yet
+        _write(config.SETTINGS_PATH, by_hand)
+        assert listed_after(lambda: skill_mcp.lifecycle_settled("weather")) == ["remote", "weather"]  # both scopes
+        both = {**by_hand, "OUROBOROS_EXTRA_CA_BUNDLE": "/owner/third.pem", "WEATHER_API_KEY": "key-two"}
+        assert listed_after(lambda: save(by_hand, both)) == ["remote", "weather"]  # co-saved: each its own scope
+    finally:
+        assert lister.discovery.wait(5)
+
+
+@pytest.mark.parametrize("installed", ["WEATHER_API_KEY, OUROBOROS_EXTRA_CA_BUNDLE"], indirect=True)
+@pytest.mark.parametrize("manual", [True, False])
+def test_saving_a_padded_bundle_value_corrected_relists_each_stdio_server_given_it_literally(installed, monkeypatch, manual):
+    """The TLS connections read the path stripped; a stdio row's ``env_from_settings`` and a skill's declared setting
+    receive it as written, so correcting its padding is their own change: a manual row's takes the full pass, the
+    skill alone has its catalog renewed, and the HTTPS server, whose path is unchanged, is not relisted for it."""
+    from ouroboros.gateway.settings import _apply_settings_save_side_effects
+
+    reader = {"id": "reader", "enabled": True, "transport": "stdio", "command": "unused",
+              "env_from_settings": {"NODE_EXTRA_CA_CERTS": "OUROBOROS_EXTRA_CA_BUNDLE"}}
+    remote = {"id": "remote", "enabled": True, "url": "https://example.test/mcp"}
+    padded = {**config.load_settings(), "OUROBOROS_EXTRA_CA_BUNDLE": " /owner/extra.pem ",
+              "MCP_SERVERS": [installed.row, *([reader] if manual else []), remote]}
+    _write(config.SETTINGS_PATH, padded)
+    calls = []
+    lister = _manager(calls)
+    lister.become_lister()
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: lister)
+    try:
+        lister.configuration_changed(padded, reason="startup")
+        assert lister.discovery.wait(5) and sorted(cfg.id for cfg in calls) == sorted(
+            ["weather", "remote", *(["reader"] if manual else [])])
+        before = lister.server_config("weather")
+        calls.clear()
+        corrected = {**padded, "OUROBOROS_EXTRA_CA_BUNDLE": "/owner/extra.pem"}
+        _write(config.SETTINGS_PATH, corrected)
+        _apply_settings_save_side_effects(types.SimpleNamespace(), corrected, padded, ["OUROBOROS_EXTRA_CA_BUNDLE"])
+        assert lister.discovery.wait(5)
+        listed = {cfg.id: cfg for cfg in calls}
+        assert sorted(listed) == (["reader", "remote", "weather"] if manual else ["weather"])
+        assert listed["weather"].skill_settings != before.skill_settings  # its start receives the corrected value
+        if manual:
+            assert listed["reader"].env["NODE_EXTRA_CA_CERTS"] == "/owner/extra.pem"
+        calls.clear()
+        _apply_settings_save_side_effects(types.SimpleNamespace(), corrected, corrected, [])
+        lister.configuration_changed(corrected, reason="settings")  # the same values again: nothing is owed
+        assert lister.discovery.wait(5) and calls == []
     finally:
         assert lister.discovery.wait(5)
 
