@@ -24,22 +24,24 @@ _RELEASE_SYNC = runpy.run_path(
 RELEASE_ASSET_TEMPLATES = _RELEASE_SYNC["RELEASE_ASSET_TEMPLATES"]
 DESKTOP_DOWNLOAD_IDS = _RELEASE_SYNC["DESKTOP_DOWNLOAD_IDS"]
 ANDROID_DOWNLOAD_IDS = _RELEASE_SYNC["ANDROID_DOWNLOAD_IDS"]
+WINDOWS_SETUP_PROOF_ID = _RELEASE_SYNC["WINDOWS_SETUP_PROOF_ID"]
 release_asset_download_url = _RELEASE_SYNC["release_asset_download_url"]
 release_asset_name = _RELEASE_SYNC["release_asset_name"]
 
 
-# One build job produces exactly one platform archive, so ``locate`` only ever
-# looks at these suffixes. The AppImage and native Linux packages are produced
-# after the tarball is located and are discovered separately.
+# One build job produces exactly one platform archive, so ``locate`` defaults
+# to these suffixes. Companion installers (.exe, .AppImage, .deb, .rpm, .apk)
+# are located explicitly via ``--suffix`` or discovered by release assembly.
 ARCHIVE_SUFFIXES = (".dmg", ".tar.gz", ".zip")
-RELEASE_ASSET_SUFFIXES = ARCHIVE_SUFFIXES + (".AppImage", ".deb", ".rpm", ".apk")
+RELEASE_ASSET_SUFFIXES = ARCHIVE_SUFFIXES + (".exe", ".AppImage", ".deb", ".rpm", ".apk")
 PROOF_IDS = {
     proof_id: partial(release_asset_name, proof_id)
     for proof_id in RELEASE_ASSET_TEMPLATES
 }
 DOWNLOAD_LABELS = {
     "macos-arm64": "macOS 12+ on Apple silicon (.dmg)",
-    "windows-x64": "Windows x64 (.zip)",
+    WINDOWS_SETUP_PROOF_ID: "Windows x64 installer (.exe)",
+    "windows-x64": "Windows x64 portable (.zip)",
     "linux-deb-amd64": "Debian, Ubuntu, or Astra Linux x86_64 (.deb)",
     "linux-rpm-x86_64": "Fedora or RHEL x86_64 (.rpm)",
     "linux-rpm-red80-x86_64": "RED OS 8 x86_64 (.rpm)",
@@ -97,6 +99,19 @@ PACKAGE_SMOKE_CHECKS = frozenset(
         "desktop_launcher_start",
     }
 )
+WINDOWS_SETUP_SMOKE_CHECKS = frozenset(
+    {
+        "installer_foreign_dir_refused",
+        "installer_busy_upgrade_refused",
+        "installer_silent_install",
+        "installer_payload_match_zip",
+        "start_menu_shortcut",
+        "uninstall_registry_entry",
+        "packaged_cli_help",
+        "embedded_betterleaks_runtime",
+        "uninstall_preserves_data",
+    }
+)
 REQUIRED_SMOKE_CHECKS = {
     "macos-arm64": COMMON_SMOKE_CHECKS
     | frozenset(
@@ -119,18 +134,30 @@ REQUIRED_SMOKE_CHECKS = {
     "linux-rpm-x86_64": PACKAGE_SMOKE_CHECKS,
     "linux-rpm-red80-x86_64": PACKAGE_SMOKE_CHECKS,
     "windows-x64": COMMON_SMOKE_CHECKS,
+    WINDOWS_SETUP_PROOF_ID: WINDOWS_SETUP_SMOKE_CHECKS,
     "android-arm64": frozenset({
         "embedded_repo_bundle", "android_source_manifest", "usb_installer_help",
     }),
     "android-apk": frozenset({"apk_signature", "apk_package_version"}),
 }
-# Windows signing is selected by configuration: without a signer thumbprint the
-# ZIP ships explicitly unsigned; with one, the receipt must name that verified
-# signer, carry these checks and hash exactly the catalogued executables before
-# and after signing, or the whole release stops.
+# Windows signing is selected by configuration: on forks without a signer
+# thumbprint both the Setup installer and the portable ZIP ship explicitly
+# unsigned (official razzant/ouroboros releases require a signer thumbprint);
+# with one, both receipts must name that verified signer, carry their signing
+# checks and bind the exact signed hashes before and after signing, or the
+# whole release stops.
 AUTHENTICODE_PROOF_ID = "windows-x64"
 AUTHENTICODE_SMOKE_CHECKS = frozenset(
     {"authenticode_signer", "timestamp", "signed_payload_archive_match"}
+)
+INSTALLER_AUTHENTICODE_PROOF_ID = WINDOWS_SETUP_PROOF_ID
+INSTALLER_AUTHENTICODE_SMOKE_CHECKS = frozenset(
+    {
+        "authenticode_signer",
+        "timestamp",
+        "signed_installer_match",
+        "installed_payload_signatures",
+    }
 )
 WINDOWS_SIGNING_CATALOG = json.loads(
     (Path(__file__).resolve().parent / "windows_signing_catalog.json").read_text(encoding="utf-8")
@@ -178,8 +205,8 @@ def _append_github_output(path: Path, values: dict[str, str]) -> None:
             handle.write(f"{key}={value}\n")
 
 
-def locate_artifact(directory: Path) -> Path:
-    archives = _release_assets(directory, ARCHIVE_SUFFIXES)
+def locate_artifact(directory: Path, suffixes: tuple[str, ...] = ARCHIVE_SUFFIXES) -> Path:
+    archives = _release_assets(directory, suffixes)
     if len(archives) != 1:
         names = ", ".join(path.name for path in archives) or "none"
         raise ValueError(f"expected exactly one release archive in {directory}, found: {names}")
@@ -187,7 +214,8 @@ def locate_artifact(directory: Path) -> Path:
 
 
 def command_locate(args: argparse.Namespace) -> None:
-    artifact = locate_artifact(args.directory)
+    suffixes = tuple(args.suffix) if getattr(args, "suffix", None) else ARCHIVE_SUFFIXES
+    artifact = locate_artifact(args.directory, suffixes=suffixes)
     values = {
         "path": artifact.as_posix(),
         "name": artifact.name,
@@ -251,6 +279,23 @@ def _archived_signed_files(artifact: Path, record: str) -> list[dict]:
     return files
 
 
+def _signed_installer(record: object, expected_name: str, *, actual_sha256: str | None = None) -> dict:
+    """The signing job's outer Setup .exe record, bound to the final artifact."""
+    if not isinstance(record, dict) or set(record) != {"name", "unsignedSha256", "sha256"} or not all(
+        isinstance(value, str) for value in record.values()
+    ):
+        raise ValueError("Windows installer signing record must give name, unsignedSha256 and sha256")
+    if record["name"] != expected_name:
+        raise ValueError(f"Windows installer signing record names {record['name']!r}, not {expected_name!r}")
+    if not all(re.fullmatch(r"[0-9a-f]{64}", record[key]) for key in ("unsignedSha256", "sha256")) or (
+        record["unsignedSha256"] == record["sha256"]
+    ):
+        raise ValueError(f"Windows installer signing record for {expected_name} lacks distinct SHA-256 digests")
+    if actual_sha256 is not None and record["sha256"] != actual_sha256:
+        raise ValueError(f"{expected_name} has SHA-256 {actual_sha256}, not the signed {record['sha256']}")
+    return {"name": record["name"], "unsignedSha256": record["unsignedSha256"], "sha256": record["sha256"]}
+
+
 def command_record_smoke(args: argparse.Namespace) -> None:
     if args.proof_id not in PROOF_IDS:
         raise ValueError(f"unsupported proof id: {args.proof_id}")
@@ -281,6 +326,22 @@ def command_record_smoke(args: argparse.Namespace) -> None:
             }
         elif args.authenticode_files:
             raise ValueError("signed Windows file hashes need the verified signer")
+    if args.proof_id == INSTALLER_AUTHENTICODE_PROOF_ID:
+        installer_arg = getattr(args, "authenticode_installer", "")
+        receipt["authenticode"] = {"status": "unsigned"}
+        if args.authenticode_thumbprint:
+            receipt["authenticode"] = {
+                "status": "signed",
+                "signerThumbprint": args.authenticode_thumbprint.upper(),
+                "publisher": args.authenticode_publisher,
+                "installer": _signed_installer(
+                    json.loads(installer_arg or "null"),
+                    args.artifact.name,
+                    actual_sha256=receipt["sha256"],
+                ),
+            }
+        elif installer_arg:
+            raise ValueError("signed Windows installer hashes need the verified signer")
     if args.proof_id == NOTARIZATION_PROOF_ID:
         receipt["notarization"] = {"status": args.macos_notarization or "not_notarized"}
     _write_json(args.output, receipt)
@@ -343,35 +404,51 @@ def _load_json(path: Path) -> dict:
     return value
 
 
-def _authenticode_state(smoke: dict, checks: list, signer_thumbprint: str) -> dict:
+def _authenticode_header(
+    proof_id: str, kind: str, smoke: dict, checks: list, required: frozenset[str], signer_thumbprint: str
+) -> tuple[dict | None, dict]:
     state = smoke.get("authenticode")
-    claimed = AUTHENTICODE_SMOKE_CHECKS & set(checks)
+    claimed = required & set(checks)
     if not signer_thumbprint:
         if state != {"status": "unsigned"} or claimed:
             raise ValueError(
-                "Windows signing is not configured, but the windows-x64 receipt "
-                "does not record an unsigned archive"
+                f"Windows signing is not configured, but the {proof_id} receipt does not record an unsigned {kind}"
             )
-        return state
+        return state, {}
     expected = signer_thumbprint.upper()
     state = state if isinstance(state, dict) else {}
     publisher = state.get("publisher")
-    if (
-        state.get("status") != "signed"
-        or state.get("signerThumbprint") != expected
-        or not isinstance(publisher, str)
-        or not publisher.strip()
-    ):
-        raise ValueError(
-            f"windows-x64 receipt does not record a signature by the configured certificate {expected}"
-        )
-    missing = AUTHENTICODE_SMOKE_CHECKS - claimed
+    if (state.get("status") != "signed" or state.get("signerThumbprint") != expected
+            or not isinstance(publisher, str) or not publisher.strip()):
+        raise ValueError(f"{proof_id} receipt does not record a signature by the configured certificate {expected}")
+    missing = required - claimed
     if missing:
-        raise ValueError(f"windows-x64 receipt is missing signing checks: {sorted(missing)}")
+        raise ValueError(f"{proof_id} receipt is missing signing checks: {sorted(missing)}")
+    return None, {"status": "signed", "signerThumbprint": expected, "publisher": publisher}
+
+
+def _authenticode_state(smoke: dict, checks: list, signer_thumbprint: str) -> dict:
+    unsigned, header = _authenticode_header(
+        AUTHENTICODE_PROOF_ID, "archive", smoke, checks, AUTHENTICODE_SMOKE_CHECKS, signer_thumbprint
+    )
+    if unsigned is not None:
+        return unsigned
+    state = smoke["authenticode"]
     if state.get("pythonUpstream") != WINDOWS_SIGNING_CATALOG["pythonUpstream"]:
         raise ValueError("windows-x64 receipt does not name the catalogued upstream Python")
-    return {"status": "signed", "signerThumbprint": expected, "publisher": publisher,
-            "files": _signed_files(state.get("files")), "pythonUpstream": state["pythonUpstream"]}
+    return {**header, "files": _signed_files(state.get("files")), "pythonUpstream": state["pythonUpstream"]}
+
+
+def _installer_authenticode_state(
+    smoke: dict, checks: list, signer_thumbprint: str, *, artifact_name: str, artifact_sha256: str
+) -> dict:
+    unsigned, header = _authenticode_header(
+        INSTALLER_AUTHENTICODE_PROOF_ID, "installer", smoke, checks, INSTALLER_AUTHENTICODE_SMOKE_CHECKS, signer_thumbprint
+    )
+    if unsigned is not None:
+        return unsigned
+    installer = _signed_installer(smoke["authenticode"].get("installer"), artifact_name, actual_sha256=artifact_sha256)
+    return {**header, "installer": installer}
 
 
 def _notarization_state(smoke: dict, checks: list) -> dict:
@@ -474,6 +551,14 @@ def _proof_files(
                 record["authenticode"] = _authenticode_state(
                     smoke, checks, windows_signer_thumbprint
                 )
+            if proof_id == INSTALLER_AUTHENTICODE_PROOF_ID:
+                record["authenticode"] = _installer_authenticode_state(
+                    smoke,
+                    checks,
+                    windows_signer_thumbprint,
+                    artifact_name=artifact.name,
+                    artifact_sha256=digest,
+                )
             if proof_id == NOTARIZATION_PROOF_ID:
                 record["notarization"] = _notarization_state(smoke, checks)
             records.append(record)
@@ -484,6 +569,14 @@ def _proof_files(
             records = [row for row in records if row["proofId"] not in ANDROID_DOWNLOAD_IDS]
             android["reason"] = str(exc)
             break
+    by_id = {row["proofId"]: row for row in records}
+    if windows_signer_thumbprint:
+        zip_pub = by_id[AUTHENTICODE_PROOF_ID]["authenticode"]["publisher"]
+        setup_pub = by_id[INSTALLER_AUTHENTICODE_PROOF_ID]["authenticode"]["publisher"]
+        if zip_pub != setup_pub:
+            raise ValueError(
+                f"Windows signing publisher mismatch between ZIP ({zip_pub!r}) and installer ({setup_pub!r})"
+            )
     if sum(row["proofId"] in ANDROID_DOWNLOAD_IDS for row in records) == len(ANDROID_DOWNLOAD_IDS):
         android["status"] = "verified"
     return records, android
@@ -588,16 +681,19 @@ def _release_notes(
         )
         lines.append(f"- **{label}:** [{name}]({url})")
     authenticode = records_by_id[AUTHENTICODE_PROOF_ID]["authenticode"]
+    setup_record = records_by_id[INSTALLER_AUTHENTICODE_PROOF_ID]
     if authenticode["status"] == "signed":
         python = authenticode["pythonUpstream"]
         lines.extend([
             "",
-            "Windows: `Ouroboros.exe` and the bundled interpreter's `python.exe` and `pythonw.exe` "
+            f"Windows: the Setup installer (`{setup_record['name']}`), `Ouroboros.exe`, and the bundled "
+            f"interpreter's `python.exe` and `pythonw.exe` "
             f"(CPython {python['pythonVersion']} from python-build-standalone {python['release']}) "
             "carry timestamped Authenticode signatures "
             f"from **{authenticode['publisher']}** (certificate SHA-1 "
             f"`{authenticode['signerThumbprint']}`); `release-evidence.json` lists each file's "
-            "SHA-256 before and after signing. This release signs no other file in the ZIP, "
+            "SHA-256 before and after signing. The installer and portable ZIP ship the exact same "
+            "payload files. This release signs no other file in the payload, "
             "no Python environment later created from that interpreter and no code that later "
             "Git updates bring, and SmartScreen or antivirus may still warn while the "
             "publisher's reputation builds.",
@@ -605,9 +701,9 @@ def _release_notes(
     else:
         lines.extend([
             "",
-            "Windows: this ZIP is unsigned. The release was built without a configured "
+            "Windows: this installer and portable ZIP are unsigned. The release was built without a configured "
             "code-signing certificate, so Windows reports an unknown publisher; check the "
-            "download against `SHA256SUMS` and its attestations below.",
+            "downloads against `SHA256SUMS` and their attestations below.",
         ])
     if records_by_id[NOTARIZATION_PROOF_ID]["notarization"]["status"] == "notarized":
         lines.extend([
@@ -684,6 +780,11 @@ def command_assemble(args: argparse.Namespace) -> None:
         r"[0-9A-Fa-f]{40}", args.windows_signer_thumbprint
     ):
         raise ValueError("ESIGNER_CERT_SHA1 is set but is not a 40-hex SHA-1 thumbprint")
+    if not args.windows_signer_thumbprint and args.repository.strip().lower() == "razzant/ouroboros":
+        raise ValueError(
+            "official razzant/ouroboros releases require a signed Windows Setup installer "
+            "(ESIGNER_CERT_SHA1 must be configured; unsigned Windows Setup is allowed only on forks)"
+        )
     gates = _gate_results(args.gate_result)
     verdict = _test_verdict(args.test_verdict)
     records, android = _proof_files(
@@ -809,6 +910,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     locate = commands.add_parser("locate", help="locate and hash one built archive")
     locate.add_argument("--directory", type=Path, default=Path("dist"))
+    locate.add_argument("--suffix", action="append", help="match only this asset suffix (repeatable)")
     locate.add_argument("--github-output", type=Path)
     locate.add_argument("--expect-sha256", help="fail unless the archive has this digest")
     locate.set_defaults(func=command_locate)
@@ -824,6 +926,8 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--authenticode-publisher", default="")
     # The windows-sign job's signed_files output: JSON rows of path, unsignedSha256, sha256.
     smoke.add_argument("--authenticode-files", default="")
+    # The windows-sign job's signed_installer output: JSON object of name, unsignedSha256, sha256.
+    smoke.add_argument("--authenticode-installer", default="")
     smoke.add_argument("--macos-notarization", choices=("notarized", "not_notarized"))
     smoke.set_defaults(func=command_record_smoke)
 

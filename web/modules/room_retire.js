@@ -212,38 +212,132 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
  * separately survives failure and the interval before begin. Leaving, disconnecting and beginning a reconnect record
  * the latest requested history version. Only an admitted newer read that was not cut short (`confirmWindow` takes its
  * answer: a refused source or a projection fault leaves rows out, CLIENT_CONTRACT "Reading history") discharges that
- * absence, however a page bounds it; a late pre-disconnect response cannot. `confirmWindow` returns whether the read was
+ * absence, however a page bounds it; a late pre-disconnect response cannot. A disconnect, and the read beginning a
+ * reconnect or a return (a window hidden on a live connection hears no start or end frame either), mark the sends still
+ * waiting: only a later admitted read carrying the host's own row for one (`answeredOwnerIds`) ends that wait; in a
+ * window that missed nothing the live start does. An older page can answer for its exact send without
+ * confirming freshness of the window. `confirmWindow` returns whether the read was
  * whole; a fault owes repair even without an absence. `end` ends only the matching read's
  * feedback; `cancel` records absence. `retry` distinguishes an unconfirmed attempt from absence alone. */
-export function createCatchUp(changed, bound = 300) {
-    let timer = null, active = false, reading = null, after = null, failed = false;
+const cutWindow = ({ reason_code: refused, window } = {}) => Boolean(refused)
+    || Boolean(window?.truncated_by?.some?.(cause => String(cause).endsWith('_projection_failed')));
+const degradedWindow = (data = {}) => cutWindow(data)
+    || Boolean(data.window?.truncated_by?.some?.(cause => String(cause).endsWith('_source_unavailable')));
+
+/** Local owner rows in a drawn history window by which the host answers for a pending send: its dispatch entered
+ * (`ingress_dispatched`), or, its process having ended, no dispatch fact at all, an outcome unknown that the bubble says
+ * as its delivery doubt (chat_attachments.js `settle`). `ingress_pending` is no answer: the running host still owes the
+ * start, and its live frame ends the wait. */
+export function answeredOwnerIds(rows, pending, { chatId, sessionId, localOwnerRow }) {
+    if (!pending?.size || !Array.isArray(rows)) return [];
+    const matched = [];
+    for (const row of rows) {
+        if (row?.role !== 'user' || row.is_progress || row.declared_author) continue;
+        if (row.ingress_accepted !== true || row.ingress_pending === true) continue;
+        const id = String(row.client_message_id || '');
+        const entry = id && pending.get(id);
+        if (!entry || !localOwnerRow(row)) continue;
+        if (row.chat_id != null && Number(row.chat_id) !== chatId) continue;
+        if (row.source && row.source !== 'web') continue;
+        if (row.sender_session_id != null && row.sender_session_id !== sessionId) continue;
+        if (entry.rowAddress && row.row_address != null && row.row_address !== entry.rowAddress) continue;
+        matched.push(id);
+    }
+    return matched;
+}
+
+export function createCatchUp(changed, bound = 300, pending = null, owner = null) {
+    let timer = null, active = false, reading = null, gate = null, after = null, failed = false, awaited = null;
+    let readVersion = 0, newestRequest = 0;
     const stop = () => { clearTimeout(timer); timer = null; };
+    const wake = () => { const current = gate; gate = null; current?.resolve(); };
+    const arm = (read) => {
+        wake();
+        if (!read) return;
+        let resolve;
+        const promise = new Promise((done) => { resolve = done; });
+        gate = { promise, resolve };
+        if (typeof read.then === 'function') read.then(() => { if (reading === read) wake(); }, () => { if (reading === read) wake(); });
+    };
+    const markDisconnected = (requested) => {
+        if (!pending) return;
+        for (const entry of pending.values()) {
+            if (!entry.queued) entry.disconnectedAfter = Math.max(entry.disconnectedAfter ?? -1, requested);
+        }
+    };
+    const settleSends = (version, confirmedIds = null) => {
+        if (!pending || !(version > 0) || !confirmedIds) return false;
+        const confirmed = confirmedIds instanceof Set ? confirmedIds : new Set(confirmedIds);
+        if (!confirmed.size) return false;
+        let settled = false;
+        for (const id of confirmed) {
+            const entry = pending.get(id);
+            if (entry && entry.disconnectedAfter != null && version > entry.disconnectedAfter) {
+                pending.delete(id);
+                settled = true;
+            }
+        }
+        return settled;
+    };
+    const confirmSends = ({ recentVersion }, rows) =>
+        settleSends(recentVersion, owner ? answeredOwnerIds(rows, pending, owner()) : rows);
     return {
+        stampRead(newest) {
+            readVersion += 1;
+            if (newest) newestRequest = readVersion;
+            return readVersion;
+        },
+        get newestRequest() { return newestRequest; },
         get active() { return active; },
         get reading() { return reading; },
+        get wait() { return gate?.promise || null; },
+        // A real reconnect's own whole read, still to come or out: the room's other reads wait for it, then read only
+        // what is left (a return shares its paint receipt's read instead).
+        get reconnecting() { return awaited && awaited === reading ? gate?.promise || null : null; },
         get owed() { return after !== null; },
         get retry() { return after !== null && failed && !reading; },
-        confirmWindow({ recentVersion, reason_code: refused, window }) {
-            const cut = refused || window?.truncated_by?.some?.(cause => String(cause).endsWith('_projection_failed'));
-            if (cut) after = Math.max(after ?? 0, recentVersion);
-            else if (recentVersion > after) after = null;
-            failed = after !== null;
-            return !cut;
+        wouldConfirm(data = {}) {
+            return !cutWindow(data) && (after === null || (!degradedWindow(data) && data.recentVersion > after));
         },
-        async settled(current) { while (current() && reading) await reading; },
-        begin(current, read = null, requested = 0) {
+        trackSend(id, queued = false) {
+            if (!pending || !id) return;
+            pending.set(id, { clientMessageId: id, timestamp: Date.now(), queued: Boolean(queued) });
+        },
+        flushSend(id) {
+            const entry = pending?.get(String(id || ''));
+            if (entry) entry.queued = false;
+        },
+        confirmPage(data, rows) { if (!degradedWindow(data) && confirmSends(data, rows)) changed(); },
+        confirmWindow(data = {}, rows = null) {
+            const { recentVersion } = data;
+            const cut = cutWindow(data);
+            const degraded = degradedWindow(data);
+            if (cut) after = Math.max(after ?? 0, recentVersion);
+            else if (!degraded && recentVersion > after) after = null;
+            failed = after !== null;
+            if (!degraded) confirmSends(data, rows);
+            return !cut && !(degraded && after !== null);
+        },
+        async settled(current) { while (current() && gate) await gate.promise; },
+        begin(current, read = null, requested = readVersion, reconnect = false) {
             stop();
             after = requested;
             reading = read;
+            awaited = reconnect ? read : null;
+            markDisconnected(requested);  // a return on a live connection missed the same frames
+            arm(read);
             timer = setTimeout(() => { timer = null; if (current()) { active = true; changed(); } }, bound);
         },
         end(read = null) {
             if (read !== reading) return;
-            stop(); reading = null;
+            stop(); reading = null; awaited = null; wake();
             if (read) failed = after !== null;
             if (active || read && failed) { active = false; changed(); }
         },
-        cancel(requested = 0) { stop(); failed ||= Boolean(reading); active = false; reading = null; after = requested; },
+        cancel(requested = readVersion, disconnected = false) {
+            stop(); failed ||= Boolean(reading); active = false; reading = null; awaited = null; wake(); after = requested;
+            if (disconnected) markDisconnected(requested);
+        },
     };
 }
 

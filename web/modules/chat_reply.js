@@ -567,11 +567,15 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             mountControl(bubble);
             if (row?.relay && bubble.dataset.systemType === 'relay_entry') decks.adopt(bubble, row, Boolean(relay));
         },
-        /** A row built outside addMessage (media, files, links, a question card): its address makes it a reply target. */
+        /** A row built outside addMessage (media, files, links, a question card), or revised in place: its address makes it a reply/action target. */
         stamp(bubble, row) {
             const address = String(row?.row_address || '');
             if (bubble && address && bubble.dataset.rowAddress !== address) bubble.dataset.rowAddress = address;
             if (bubble && row?.reply_author_label) bubble.dataset.replyAuthor = row.reply_author_label;
+            if (bubble && address) {
+                if (!bubble.classList?.contains('has-reply')) mountControl(bubble);
+                else bubbleActions.sync(bubble);
+            }
         },
         /**
          * The host's saved row for the owner's own echo: the bubble takes its address and, with it, its Reply. A

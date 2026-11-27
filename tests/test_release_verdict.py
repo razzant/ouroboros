@@ -15,19 +15,19 @@ import sys
 import pytest
 import yaml
 
-from tests.test_release_proof import GREEN_GATES, REPO, _fixture_release, _gate_env, _git_pin, _verdict, release_proof
+from tests.test_release_proof import GREEN_GATES, REPO, SIGNER, _fixture_release, _gate_env, _git_pin, _verdict, release_proof
 
 RED = {"full-test": "failure", "system-e2e-mock": "cancelled", "ui-smoke": "failure"}
 
 
 def _assemble_args(tmp_path, version, results, verdict):
-    release_dir, version_file, readme = _fixture_release(tmp_path, version=version)
+    release_dir, version_file, readme = _fixture_release(tmp_path, version=version, signer=SIGNER)
     return release_dir, argparse.Namespace(
         directory=release_dir, version_file=version_file, readme=readme,
         git_pin=_git_pin(tmp_path), repository="razzant/ouroboros",
         tag=f"v{version}", commit="a" * 40, run_url="https://example.test/run/7", previous_tag=None,
         generated_at=None, notes_output=tmp_path / "notes.md", android_build_result="skipped",
-        android_attestation_result="not_run", windows_signer_thumbprint="", github_output=None,
+        android_attestation_result="not_run", windows_signer_thumbprint=SIGNER, github_output=None,
         test_verdict=verdict,
         gate_result=[f"{name}={results.get(name, 'success')}" for name in release_proof.RELEASE_GATES])
 
@@ -119,11 +119,11 @@ def test_release_step_passes_actual_results_and_the_run_verdict(tmp_path, result
     jobs = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
     step = next(step for step in jobs["release"]["steps"]
                 if step.get("name") == "Assemble release proof capsule and notes")
-    _fixture_release(tmp_path, version="7.7.1")[0].rename(tmp_path / "release-artifacts")
+    _fixture_release(tmp_path, version="7.7.1", signer=SIGNER)[0].rename(tmp_path / "release-artifacts")
     _verdict(tmp_path, flaky=[{"nodeid": "tests/test_a.py::test_once"}])
     script = step["run"].replace("python scripts/release_proof.py", " ".join(map(shlex.quote, [
         Path(sys.executable).as_posix(), (REPO / "scripts/release_proof.py").as_posix()])))
-    env = dict(os.environ, GITHUB_OUTPUT=str(tmp_path / "output"), WINDOWS_SIGNER_THUMBPRINT="",
+    env = dict(os.environ, GITHUB_OUTPUT=str(tmp_path / "output"), WINDOWS_SIGNER_THUMBPRINT=SIGNER,
                GITHUB_REF_NAME="v7.7.1", GITHUB_SHA="a" * 40, GITHUB_REPOSITORY="razzant/ouroboros",
                GITHUB_SERVER_URL="https://example.test", GITHUB_RUN_ID="123",
                ANDROID_BUILD_RESULT="skipped", ANDROID_ATTESTATION_RESULT="not_run",

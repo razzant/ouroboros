@@ -36,7 +36,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -64,8 +64,8 @@ _QT_REMOVED = (  # QWebEnginePage.WebAction
 _patched: set = set()  # backends whose class was patched: a class is process-wide, its windows many
 
 
-def attach_every_window(webview_module: Any) -> None:
-    """Make ``webview.create_window`` attach each window it creates: one line in the launcher covers them all."""
+def attach_every_window(webview_module: Any, *, decorate: Callable[[Any], None] | None = None) -> None:
+    """Attach the context menu and optional platform decoration to every pywebview window."""
     create = getattr(webview_module, "create_window", None)
     if create is None or getattr(create, "_attaches_context_menu", False):
         return
@@ -74,6 +74,8 @@ def attach_every_window(webview_module: Any) -> None:
     def create_window(*args: Any, **kwargs: Any) -> Any:
         window = create(*args, **kwargs)
         attach(window)
+        if decorate is not None:
+            decorate(window)
         return window
 
     create_window._attaches_context_menu = True  # type: ignore[attr-defined]
