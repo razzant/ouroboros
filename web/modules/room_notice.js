@@ -1,7 +1,8 @@
 // A room's own news (its history read failed, a return landed inexactly, its project list was restored) is the page's
 // ordinary notice (toast.js), told only while the room is the one the person looks at: shown, and not covered by its own
-// work or consciousness sheet or by the setup wizard. chat.js adds the room's own visibility; chat_render_batch.js and
-// room_archive.js decide when a notice is owed and withdraw it when the room is left or covered.
+// work or consciousness sheet. chat.js adds the room's own visibility; chat_render_batch.js and room_archive.js decide
+// when a notice is owed and withdraw it when the room is left or covered. A blocking surface over the page (a dialog,
+// the setup wizard) is toast.js's: the page's notices wait behind it, their time held.
 import { showToast } from './toast.js';
 import { tr } from './i18n.js';
 
@@ -11,7 +12,7 @@ export const roomNotice = (text, kind) => showToast(text, kind === 'failed' ? 'd
 
 /** Whether the room is covered: `host` carries the open work or consciousness sheet's marker, `bar` the chip's. */
 export const roomCovered = (host, bar) => () => Boolean(host?.matches?.('[data-rw-open], [data-cx-shade]')
-    || bar?.hasAttribute?.('data-cx-shade') || globalThis.document?.getElementById?.('onboarding-overlay'));
+    || bar?.hasAttribute?.('data-cx-shade'));
 
 /** Calls `changed` whenever a cover comes or goes, or the page's own layers move (its body's classes and children). */
 export function watchRoomCover(host, bar, changed) {

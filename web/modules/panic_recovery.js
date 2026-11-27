@@ -75,7 +75,7 @@ export function panicCards(data) {
 export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mutate = (fn) => fn(), refresh = () => {},
     onChange = () => {}, resume = resumeTask, now = () => Date.now(), lifetimeMs = RESUME_ANSWER_MS,
     stopControl = null, notify = (text, options) => showToast(text, 'warn', options),
-    isVisible = () => !globalThis.document?.getElementById?.('onboarding-overlay'),
+    isVisible = () => true,  // Main shown (main_waiting.js); a blocking surface holds the page's notices (toast.js)
     storage = globalThis.sessionStorage } = {}) {
     // Task id -> {row, rank, current, unseen, gone, listedAt, checked, answer, card, vouched, view}, shown in
     // first-seen order; `rank` is its place in the latest census. `current`: the latest read named it while the socket
