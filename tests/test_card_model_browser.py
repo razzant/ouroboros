@@ -1,9 +1,9 @@
-"""A work's model on its card, the fallback in amber and the Main sheet's lists, on the real page.
+"""A work's model on its card, the fallback in amber and a follower's arrow after Main changed, on the real page.
 
 Owner, 10.11.2026: the model stands first in a work card's bottom line and is pressable; a work that went to a
-fallback by itself is amber until that is resolved; before Main changes, the sheet says how many running works
-follow it and lists what is not on Main, each with its own tick and nothing ticked beforehand. 11.11.2026: the amber
-line names where the fallback came from and gives three exits.
+fallback by itself is amber until that is resolved. 11.11.2026: the amber line names where the fallback came from
+and gives three exits. 26.11.2026: no capsule writes Main the role, so the confirming sheet with its lists is gone;
+Main changes in Settings › Models, and a running follower shows the arrow.
 
 The real page, with ``/api/state``, the chat history, the catalog and the two writes answered by the test in the
 published shapes (CLIENT_CONTRACT §5 and §9); the work rows are the server's own projection of the census rows,
@@ -121,20 +121,25 @@ class Stand:
         return {"ok": True, "task_id": task, "applied": "at_start" if queued else "next_step", "lead": lead}
 
     def chat_model(self, body: dict) -> dict:
-        """CLIENT_CONTRACT §9: a room's own model, or Main itself; a running follower then has a pending route."""
+        """CLIENT_CONTRACT §9: the model new work starts on in a room or in the Main chat; never Main the role."""
+        choice = {key: value for key, value in body.items() if key not in ("project_id", "scope")}
         if body.get("project_id"):
-            self.writes.append(("room", body["project_id"], {key: value for key, value in body.items() if key != "project_id"}))
+            self.writes.append(("room", body["project_id"], choice))
             previous, self.room["model_choice"] = self.room["model_choice"], {"kind": "main"}
-            return {"ok": True, "project_id": body["project_id"], "model_choice": {"kind": "main"}, "previous_model_choice": previous}
-        self.writes.append(("main", "", body))
-        previous, self.main = self.main, _route(body["model"])
+            return {"ok": True, "project_id": body["project_id"], "model_choice": {"kind": "main"}, "previous_model_choice": previous,
+                    "choice_token": "stand-room"}
+        self.writes.append(("main-chat", "", choice))
+        return {"ok": True, "project_id": "", "model_choice": choice, "previous_model_choice": {"kind": "main"}, "choice_token": "stand-main"}
+
+    def main_changed(self, model: str) -> None:
+        """Main the role moved (Settings › Models' write): a running follower then has a pending route."""
+        self.main = _route(model)
         for task, lead in self.leads.items():
             if lead["basis"] == "main" and not self.queued(task):
                 acting = _route(lead["model"])
                 self.leads[task] = _lead(acting["model"], "main", **({} if acting == self.main else {"pending": self.main}))
             elif lead["basis"] == "main":
                 self.leads[task] = _lead(self.main["model"], "main")
-        return {"ok": True, "project_id": "", "main_route": self.main, "previous_main_route": previous, "account": "kept", "window_reset": False}
 
 
 def _catalog() -> dict:
@@ -152,9 +157,9 @@ def _serve(page, stand: Stand) -> None:
 
     def history(route):
         main = "chat_id=1" in route.request.url or "chat_id" not in route.request.url
-        # The stand's rows, for the data profile the serving host proves (its own answer names it, api_client.js).
-        scope = route.fetch().json().get("profile_scope", "")
-        route.fulfill(json={"profile_scope": scope,
+        # The page reads only the history of the data profile its document proves: the stand's rows carry the real
+        # answer's own claim.
+        route.fulfill(json={"profile_scope": route.fetch().json().get("profile_scope"),
                             "messages": stand.history if main else [], "window": {"complete": True}, "page_cursor": "fixture",
                             "next_cursor": None, "has_more": False, "coverage": {"v": 1, "view": "fixture", "upper": {"chat": 1}, "spans": {
                                 "chat": {"chain": "fixture", "from": 0, "to": 1, "gaps": []}, "progress": None}}})
@@ -249,27 +254,6 @@ _POPOVER = """() => {
 }"""
 _GONE = "() => !document.querySelector('.ui-popup.model-sheet')"
 
-_SHEET = """() => {
-    const text = (node) => (node ? node.innerText.replace(/\\s+/g, ' ').trim() : null);
-    const dialog = document.querySelector('.confirm-dialog');
-    if (!dialog) return null;
-    const box = dialog.getBoundingClientRect();
-    return {
-        title: text(dialog.querySelector('h3')),
-        count: text(dialog.querySelector('[data-main-followers]')),
-        heads: [...dialog.querySelectorAll('.chat-model-sheet-sub')].map(text),
-        rows: [...dialog.querySelectorAll('.chat-model-off')].map((row) => ({
-            name: text(row.querySelector('.chat-model-off-name')), meta: text(row.querySelector('.chat-model-off-meta')),
-            tick: row.querySelector('.ui-checkbox') ? row.querySelector('.ui-checkbox').checked : null,
-            move: row.querySelector('.ui-checkbox')?.dataset.move || null,
-            amber: text(row.querySelector('.model-fallback')), result: row.dataset.result || null,
-        })),
-        ok: text(dialog.querySelector('[data-confirm-ok]')),
-        body: text(dialog.querySelector('.ui-modal-body > p')),
-        inside: box.left >= 0 && box.right <= window.innerWidth + 0.5,
-        wide: document.documentElement.scrollWidth - window.innerWidth,
-    };
-}"""
 
 
 def _fact(task: str) -> str:
@@ -298,6 +282,8 @@ def _open(page, url: str, tag: str, transcript: int | None) -> None:
     """The real page with its cards up; a desk viewport is then sized until the transcript is as wide as asked."""
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_selector("#chat-input", timeout=30_000)
+    # The cards first: they bring the transcript its scrollbar, whose 6 px are taken from the width sized below.
+    page.wait_for_function("() => document.querySelectorAll('.chat-live-card .card-model').length >= 5", timeout=30_000)
     for _ in range(4 if transcript else 0):
         page.wait_for_timeout(200)
         now = page.evaluate("() => document.querySelector('#chat-messages').clientWidth")
@@ -305,7 +291,6 @@ def _open(page, url: str, tag: str, transcript: int | None) -> None:
             break
         size = page.viewport_size
         page.set_viewport_size({"width": size["width"] + transcript - now, "height": size["height"]})
-    page.wait_for_function("() => document.querySelectorAll('.chat-live-card .card-model').length >= 5", timeout=30_000)
     page.wait_for_timeout(400)
     if transcript:
         assert page.evaluate("() => document.querySelector('#chat-messages').clientWidth") == transcript, tag
@@ -445,40 +430,8 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
         assert left["at"] != "BODY.", ("the focus stays where the keyboard took it", left)
         (shots / f"{tag}-sheet-focus.json").write_text(json.dumps({"floating_left": left}, indent=1), encoding="utf-8")
 
-    # 5. Main changes: the sheet's count and lists, nothing ticked; two ticks, then one act each after the Main write.
-    page.click("#chat-model-mode .chat-model-head")
-    page.wait_for_selector(f'.ui-popup.model-sheet .chat-model-row[data-row="route|{GLM}"]', timeout=10_000)
-    page.click(f'.ui-popup.model-sheet .chat-model-row[data-row="route|{GLM}"] .chat-model-cell')
-    page.wait_for_selector(".confirm-dialog [data-main-followers]", timeout=10_000)
-    sheet = page.evaluate(_SHEET)
-    assert sheet["title"] == "Change Main" and sheet["count"] == "2 running works follow Main now.", sheet
-    assert sheet["heads"] == ["Not on Main now · tick to move too", "Rooms that start new work on their own model · 1"], sheet
-    rows = {row["name"]: row for row in sheet["rows"]}  # the works in the server's own order, then the rooms
-    assert {name: (row["move"], row["tick"]) for name, row in rows.items()} == {
-        "Sort the inbox": ("work:t-queued", False), "Read last night's logs": ("work:t-fallback", False),
-        "Summarise the week": (None, None), "Research": ("room:p7", False)}, sheet["rows"]
-    assert sheet["rows"][-1]["name"] == "Research" and rows["Sort the inbox"]["meta"] == "OpenRouter · glm-5.3 · you chose it · Main Chat", sheet["rows"]
-    assert rows["Read last night's logs"]["amber"].startswith("fallback since 02:14"), sheet["rows"]
-    assert [name for name, row in rows.items() if row["amber"]] == ["Read last night's logs"], "only the fallback's word is amber"
-    assert sheet["ok"] == "Change Main" and sheet["inside"] and sheet["wide"] <= 0, sheet
-    page.click('.confirm-dialog [data-move="work:t-fallback"]')
-    page.click('.confirm-dialog [data-move="room:p7"]')
-    assert page.evaluate(_SHEET)["ok"] == "Change Main and move 2 more"
-    shoot("5-main-sheet")
-    sent = len(stand.writes)
-    page.click(".confirm-dialog [data-confirm-ok]")
-    page.wait_for_function("() => document.querySelector('.confirm-dialog h3')?.innerText === 'Main changed'", timeout=10_000)
-    main_write = stand.writes[sent][2]
-    assert set(main_write.pop("if_unchanged")) == {"OUROBOROS_MODEL", "USE_LOCAL_MAIN", "OUROBOROS_MODEL_ACCOUNTS",
-                                                  "OUROBOROS_MODEL_PROCESSING_PREFERENCES"}, "Main is written on the binding read"
-    assert stand.writes[sent:] == [("main", "", {"kind": "model", "model": GLM, "use_local": False}),
-                                   ("task", "t-fallback", {"action": "follow"}), ("room", "p7", {"kind": "main"})], stand.writes
-    moves = page.evaluate(_SHEET)
-    assert moves["body"] == "2 more were moved to Main." and moves["inside"], moves
-    assert [(row["name"], row["meta"], row["result"], row["tick"]) for row in moves["rows"]] == [
-        ("Read last night's logs", NEXT_STEP, "moved", None), ("Research", "New work here starts on Main.", "moved", None)], moves
-    shoot("6-main-moved")
-    page.click(".confirm-dialog [data-confirm-ok]")
+    # 5. Main the role changes (Settings › Models: no capsule writes it); the page's next read of the state says so.
+    stand.main_changed(GLM)
 
     # 6. The arrow after a Main change: a follower's call in flight finishes on the model it has.
     page.wait_for_function(f"""() => document.querySelector('{_fact("t-follow")}').closest('.card-model').querySelector('.card-model-pending .card-model-words').innerText.includes('glm-5.3')""",
@@ -492,7 +445,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_a_works_model_on_its_card_the_fallback_and_the_main_sheet(direct_server_with_data, engine, tmp_path):  # noqa: F811
+def test_a_works_model_on_its_card_the_fallback_and_a_changed_main(direct_server_with_data, engine, tmp_path):  # noqa: F811
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
 

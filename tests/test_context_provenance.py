@@ -76,3 +76,45 @@ def test_the_send_copy_carries_no_provenance_keys():
                                                    "content": "A"}]})["messages"]
     assert sent == [{"role": "user", "content": "[CONTEXT_FACTS] round 1"}, {"role": "user", "content": "A"}]
     assert HOST_TEXT_SHA_KEY in row  # the canonical row keeps its binding
+
+
+def test_the_size_facts_name_a_producer_only_where_its_binding_still_vouches_for_the_row(tmp_path):
+    """The size facts attribute a row by its producer's binding (Astra rev3 C5, 27.11): the owner's words an old merge
+    appended to a bound facts row, or a review body changed after its binding, are ordinary delivered rows, never the
+    host's or the review's; an intact facts row and a verified review body keep their producer, and the owner's words
+    as delivery types them (unbound) keep theirs. Read through the size terminal, which names the view's largest parts."""
+    import hashlib
+
+    from ouroboros.context_renewal import renew_after_refusal
+    from ouroboros.context_view_facts import refusal_frame_facts
+    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY
+
+    def largest(*rows):
+        usage = {"_last_llm_error_kind": "context_overflow", "_context_refusal_round": 3}
+        limit = SimpleNamespace(messages=[{"role": "system", "content": "S"}, {"role": "user", "content": "go"}, *rows],
+                                accumulated_usage=usage, drive_root=tmp_path, drive_logs=tmp_path / "logs", task_id="t",
+                                round_idx=3, event_queue=None, tool_schemas=[])
+        assert renew_after_refusal(limit, SimpleNamespace(_ctx=SimpleNamespace())) is False
+        return refusal_frame_facts(usage, 3)
+
+    intact = bound_host_row(CONTEXT_FACTS_NAME, "[CONTEXT_FACTS] round 3 | free unknown")
+    mixed = bound_host_row(CONTEXT_FACTS_NAME, "[CONTEXT_FACTS] round 2")
+    mixed["content"] += "\n\n---\n\n[Message from my human]: " + "Keep the old API until it is verified. " * 300
+    said = largest(intact, mixed)  # the old merge as test_only_host_state_still_bound_to_its_text_is_superseded keeps it
+    assert said.startswith("largest parts: other delivered rows (unit:") and ", ouroboros_context_facts ~" in said
+
+    def body(text):
+        return {"role": "user", "content": text, REVIEW_HISTORY_MESSAGE_KEY: {
+            "version": 1, "task_id": "t", "visible_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "binding": {"kind": "review_history_body", "field": "findings", "content_sha256": "b" * 64,
+                        "source_ref": {"path": "reviews/wave-1.json", "size": 4096, "sha256": "a" * 64}}}}
+
+    valid = body("[Recorded review dispute] The reviewer's finding, verbatim. " * 120)
+    changed = {**body("[Recorded review dispute] Another finding, verbatim. " * 110)}
+    changed["content"] += "\n\n---\n\n[Message from my human]: fixed"
+    owner = []
+    _append_or_merge_user_content(owner, "[Message from my human]: " + "Ship it after the review. " * 100,
+                                  slot=_unsent_slot(), kind=OWNER_WORDS_KIND)
+    said = largest(valid, changed, *owner)
+    assert said.startswith("largest parts: recorded review disputes (unit:") and "recorded review disputes ×" not in said
+    assert ", other delivered rows ~" in said and ", owner and principal words ~" in said

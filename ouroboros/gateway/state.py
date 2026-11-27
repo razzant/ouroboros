@@ -191,7 +191,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     """
     from ouroboros.tools.github import github_token_from_env_or_settings
     from ouroboros.config import load_settings
-    from ouroboros.composer_cognition import main_cognition
+    from ouroboros.composer_cognition import main_chat_choice, main_cognition
     from ouroboros.model_slots import processing_tiers
     from ouroboros.route_choice import configured_references
     from ouroboros.subagent_runtime import subagents_availability
@@ -359,6 +359,9 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "subagents_availability": subagents_availability(settings),
         "main_route": configured_references()["main"],
         "processing_tiers": processing_tiers(settings),
+        # The page reads the choice and whether a saved Ultrafast is withheld; the destination stays with the host.
+        "main_chat": {key: value for key, value in main_chat_choice(settings, withheld=True).items()
+                      if key not in ("processing_route", "processing_connection")},
         "projects": projects,
         "project_messages_revision": messages_revision,
         "project_listable_count": project_listable_count,

@@ -389,6 +389,8 @@ class LocalChatBridge:
         received_at = str(received_at or (surface or {}).get("received_at") or "") or utc_now_iso()
         if surface is not None and not surface.get("received_at"):
             task_metadata = {**(task_metadata or {}), "client_surface": {**surface, "received_at": received_at}}
+        if source != "web" and "new_work" in (task_metadata or {}):  # only the web acceptance's own answer rides on
+            task_metadata = {key: value for key, value in task_metadata.items() if key != "new_work"}
         # Invariant: the default chat/user id is the web owner (1). External
         # transports (source != "web") MUST pass explicit ids — the Host Service
         # injects 0 for unidentified senders so they can never bind/own the web
@@ -875,7 +877,7 @@ class LocalChatBridge:
         title: str = "",
         task_id: str = "",
     ) -> Tuple[bool, str]:
-        """Send validated HTTP(S) actions to UI and host event subscribers."""
+        """Send validated HTTP(S) and place actions to UI and host event subscribers."""
         safe_title = str(title or "")[:240]
         if is_a2a_chat_id(chat_id):
             return True, "ok"
@@ -899,6 +901,9 @@ class LocalChatBridge:
             actions=validated, title=safe_title,
         )
         from ouroboros.chat_references import delivery_transport, projection_fields
+        from ouroboros.sign_in_offers import note as note_sign_in_offers
+        # Noted at the row's own time before anyone sees it: a sign-in begun from its button always begins after it.
+        note_sign_in_offers(DATA_DIR, int(chat_id or 0), validated, at=ts)
         if stored:
             msg.update(projection_fields(stored))
         stamp_project_thread(DATA_DIR, msg)

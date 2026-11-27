@@ -63,14 +63,16 @@ def persisted(tmp_path, history, fields=None):
 
 
 def same_decisions(current, history):
-    """The resident row's decisions equal the producer's verbatim; each ``source`` key names an address
-    entry bound to the same immutable source (an unbound source stays as the producer wrote it)."""
-    from ouroboros.review_history_view import _decision_ref
+    """The resident row's decisions, read back through a display if it has one (``_expanded_view``), equal the
+    producer's verbatim as canonical JSON (``true`` is not ``1``); each ``source`` key names an address entry bound
+    to the same immutable source (an unbound source stays as the producer wrote it)."""
+    from ouroboros.review_history_view import _decision_ref, _expanded_view
 
-    rows, original = current["decision_rows"], history["decision_rows"]
+    rows, original = _expanded_view(current).get("decision_rows") or [], history["decision_rows"]
     assert len(rows) == len(original), (len(rows), len(original))
     for shown, row in zip(rows, original):
-        assert {k: v for k, v in shown.items() if k != "source"} == {k: v for k, v in row.items() if k != "source"}
+        assert encode({k: v for k, v in shown.items() if k != "source"}) == encode(
+            {k: v for k, v in row.items() if k != "source"})
         ref = _decision_ref(row.get("source"))
         if ref is None:
             assert shown.get("source") == row.get("source")

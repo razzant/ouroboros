@@ -112,6 +112,27 @@ def test_native_processing_is_in_the_exact_accounted_request(transport, provider
     assert rows[-1]["candidate_raw_sha256"] == hashlib.sha256(_canonical_candidate_bytes(candidate)).hexdigest()
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_main_chat_api_tier_is_checked_against_the_actual_wire_target(transport, monkeypatch, asynchronous):
+    root, client, sent = transport
+    model = "openrouter::test-model"
+    saved = client._resolve_remote_target(model)  # synthetic fixture, never makes a network call
+    captured = f"api:openrouter#{'1' * 32}"
+    replacement = f"api:openrouter#{'2' * 32}"
+    identity = {}
+    monkeypatch.setattr(client, "_resolve_remote_target", lambda _model: {**saved, **identity})
+    kwargs = dict(messages=[{"role": "user", "content": "same"}], model=model, max_tokens=12,
+                  processing_preference="ultrafast", processing_connection=(captured, "economy"))
+    for account, preference, native in ((captured, "ultrafast", "ultrafast"),
+                                        (replacement, "economy", "flex"), (None, "economy", "flex")):
+        identity["dispatch_account"] = account
+        _, usage = asyncio.run(client.chat_async(**kwargs)) if asynchronous else client.chat(**kwargs)
+        assert sent[-1]["service_tier"] == native
+        assert usage["processing"]["requested"] == preference
+        assert "processing_connection" not in sent[-1]
+    assert [row["submitted_processing_mode"] for row in ledger_rows(root)] == ["ultrafast", "flex", "flex"]
+
+
 def test_explicit_standard_does_not_inherit_global_fast(transport, monkeypatch):
     _root, client, sent = transport
     monkeypatch.setenv("OUROBOROS_PROCESSING_PREFERENCE", "fast")

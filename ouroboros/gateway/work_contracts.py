@@ -33,6 +33,7 @@ class CitedModelWords(TypedDict):
 class WorkPrimaryRoute(ChatModelRoute):
     basis: str  # main | a role it follows | room | owner | owner_words | owner_press | mind | fallback | place | circle.
     cited: NotRequired[CitedModelWords]
+    copied: NotRequired[Literal[True]]  # ``room`` only: the Main chat's model as the room copied it, never chosen there
 
 
 class WorkPendingRoute(ChatModelRoute):
@@ -83,6 +84,12 @@ class WorkProcessing(TypedDict):
     resolved: NotRequired[ProcessingTier]  # server resolver, including the acting fallback row
     source: NotRequired[Literal["room", "owner"]]
     last: NotRequired[ProcessingReceipt]
+    # A tier the work carries for one confirmed destination (the Main chat's Ultrafast). ``bound``: its calls go
+    # there, so ``choice`` is that tier for them alone (its helpers and calls elsewhere take the default resolution).
+    # ``withheld``: its calls go to another model or profile, or (Auto, an API connection) that confirmation no
+    # longer stands in the chat: ``choice`` is '' and they take the default resolution.
+    bound: NotRequired[Literal[True]]
+    withheld: NotRequired[ProcessingTier]
 
 
 class WorkLeadFields(TypedDict):
@@ -117,6 +124,17 @@ class ChatModelChoice(TypedDict):
     use_local: NotRequired[bool]  # kind ``model`` only
 
 
+class MainChatChoice(TypedDict):
+    """The Main chat's own model and tier for new work there (``/api/state`` ``main_chat``); a new room copies them
+    once. ``main_route`` and ``processing_tiers.main`` stay Main the role's."""
+
+    model_choice: ChatModelChoice
+    processing_choice: ProcessingTier
+    # A saved Ultrafast that is not in force: new work here now runs on another model or profile than the one it was
+    # confirmed for (a change no settings write made). New work takes Default until Ultrafast is chosen again.
+    processing_withheld: NotRequired[Literal["ultrafast"]]
+
+
 class MainBindingConditions(TypedDict):
     """``GET /api/settings`` read tokens of Main's binding as the owner was shown it, compared under the writer's lock
     (``409:settings_changed_elsewhere`` when one moved); ``connection`` is the shown ``_meta.connections[].revision``
@@ -130,46 +148,52 @@ class MainBindingConditions(TypedDict):
     connection: NotRequired[str]  # required where Ultrafast is written or carried on an API connection
 
 
-# Without `project_id` only kind `model` is a choice.
 class OwnerChatModelRequest(ChatModelChoice):
-    """``POST /api/owner/chat-model``: a Project follows Main or chooses a model; without project_id this writes
-    Main itself, on the binding its ``if_unchanged`` names when sent (Main only)."""
+    """``POST /api/owner/chat-model``: the model new work starts on in the named Project, or with ``scope`` in the
+    Main chat (which a new room copies). It never writes Main the role: a body naming neither is an older page's
+    write of that role and is refused (400, reload)."""
 
     project_id: NotRequired[str]
-    if_unchanged: NotRequired[MainBindingConditions]
+    scope: NotRequired[Literal["main_chat"]]  # the Main chat's own choice; never beside project_id
 
 
-# A Project's answer carries its choice; Main's own carries what Main is and was, what became of its
-# pinned account (`kept`, dropped to `auto`, or `none` on a route without accounts) and whether a window
-# set by hand was cleared.
 class OwnerChatModelResponse(TypedDict):
     ok: bool
-    project_id: str  # '' for Main.
-    model_choice: NotRequired[ChatModelChoice]  # Project response
-    previous_model_choice: NotRequired[ChatModelChoice]
-    main_route: NotRequired[ChatModelRoute]  # Main response
-    previous_main_route: NotRequired[ChatModelRoute]
-    account: NotRequired[Literal["kept", "auto", "none"]]
-    window_reset: NotRequired[bool]
+    project_id: str  # '' for the Main chat.
+    model_choice: ChatModelChoice
+    previous_model_choice: ChatModelChoice
+    choice_token: str  # the saved choice as one word: ``ChatInbound.new_work`` names it
+
+
+class ConfirmedChatUltrafast(TypedDict):
+    """What the owner was asked about before the Main chat took Ultrafast: the destination by name, and on an API
+    route its connection as shown. A profile is its name: nothing identifies the account signed in to it. Auto
+    names no account: it is its source's pool."""
+
+    model: str
+    use_local: bool
+    account: str  # the subscription profile new work there is pinned to; '' on Auto, an API route or the local model
+    connection: NotRequired[str]  # an API route's connection revision, ``<id>#<24 hex>``
 
 
 class OwnerChatProcessingRequest(TypedDict):
-    """A room's processing tier for new owner work, or Main's own without project_id. An empty tier is Default;
-    ``if_unchanged`` belongs to Main's Ultrafast alone."""
+    """The processing tier of new owner work in a room, or with ``scope`` in the Main chat (a body naming neither
+    is an older page's write of Main the role: 400, reload). An empty tier is Default; Main the role's own tier is a
+    Settings value. The Main chat's Ultrafast is ``confirmed`` for the route its new work runs on now: any other
+    model, locality, profile or connection is refused (409 ``settings_changed_elsewhere``), and the saved tier
+    answers on that route alone."""
 
     processing: ProcessingTier
     project_id: NotRequired[str]
-    if_unchanged: NotRequired[MainBindingConditions]
+    scope: NotRequired[Literal["main_chat"]]  # the Main chat's own tier; never beside project_id
+    confirmed: NotRequired[ConfirmedChatUltrafast]
 
 
 class OwnerChatProcessingResponse(TypedDict):
     ok: bool
-    project_id: str  # '' for Main.
-    processing_choice: NotRequired[ProcessingTier]  # Project response
-    previous_processing_choice: NotRequired[ProcessingTier]
-    main_processing: NotRequired[ProcessingTier]  # Main response: Main's own tier (a Settings value).
-    previous_main_processing: NotRequired[ProcessingTier]
-    processing_default: NotRequired[Literal["", "standard", "fast", "economy"]]  # what Default resolves to
+    project_id: str  # '' for the Main chat.
+    processing_choice: ProcessingTier
+    previous_processing_choice: ProcessingTier
 
 
 class WorkReason(TypedDict):

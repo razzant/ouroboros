@@ -131,24 +131,26 @@ test('without a query a room\'s list is Main to follow, the pinned models, the r
         `${key(PINNED)} -pin`, `${key(RECENT)} -pin`]);
 });
 
-test('in the Main chat Main\'s row is Main\'s own model, chosen, with its Pin, and stands nowhere else', () => {
-    const l = mountList({ mainRow: 'main', follows: false, store: storeOf({ pins: [PINNED] }), recents: [MAIN, RECENT] });
-    assert.deepEqual(l.outline(), ['main * -pin', '§ Pinned', `${key(PINNED)} +pin`, '§ Recent', `${key(RECENT)} -pin`,
-        '§ OpenAI', `${key(OTHER)} -pin`]);
-    assert.deepEqual(l.entry('main'), { key: 'main', kind: 'main', selected: true, name: 'model-main', tags: ['Main'],
-        facts: 'OpenAI · paid by key', pin: false });
-    l.pin('main');
-    assert.deepEqual(l.said.pins, [[MAIN, true]], 'Main\'s own model can be pinned from its row');
-    l.press('main');
-    assert.deepEqual(l.said.routes, [null], 'its row is Main: a press is no other model');
-    // No Main row at all: Main's model is a row of its source like any other.
-    const bare = mountList({ mainRow: false });
+test('a composer\'s list has no Main row: the model in force is a row like any other, marked, under its one lead line', () => {
+    const l = mountList({ mainRow: false, follows: false, lead: () => 'Follows Main. A pick leaves it.',
+        store: storeOf({ pins: [PINNED] }), recents: [MAIN, RECENT] });
+    assert.deepEqual(l.outline(), ['lead: Follows Main. A pick leaves it.', '§ Pinned', `${key(PINNED)} +pin`,
+        '§ Recent', `${key(MAIN)} * -pin`, `${key(RECENT)} -pin`, '§ OpenAI', `${key(OTHER)} -pin`]);
+    assert.equal(l.entry('main'), undefined);
+    l.pin(key(MAIN));
+    assert.deepEqual(l.said.pins, [[MAIN, true]], 'the model in force can be pinned from its row');
+    l.press(key(MAIN));
+    assert.deepEqual(l.said.routes, [MAIN], 'a press is that route, even on the row in force: its caller decides what it changes');
+    // The line stands over the rows only: a search shows none, and an empty one is no line.
+    l.type('other');
+    assert.equal(l.outline().some((entry) => entry.startsWith('lead: ')), false);
+    const bare = mountList({ mainRow: false, lead: () => '' });
     assert.deepEqual(bare.outline(), ['§ OpenAI', `${key(MAIN)} -pin`, `${key(OTHER)} -pin`, `${key(PINNED)} -pin`, `${key(RECENT)} -pin`]);
 });
 
-test('a heading stands only over rows: Main\'s pinned model already on Main\'s row leaves no empty Pinned', () => {
-    const l = mountList({ mainRow: 'main', follows: false, store: storeOf({ pins: [MAIN] }) });
-    assert.deepEqual(l.outline(), ['main * +pin', '§ OpenAI', `${key(OTHER)} -pin`, `${key(PINNED)} -pin`, `${key(RECENT)} -pin`]);
+test('a heading stands only over rows: a recent model already under Pinned leaves no empty Recent', () => {
+    const l = mountList({ mainRow: false, follows: false, store: storeOf({ pins: [MAIN] }), recents: [MAIN] });
+    assert.deepEqual(l.outline(), ['§ Pinned', `${key(MAIN)} * +pin`, '§ OpenAI', `${key(OTHER)} -pin`, `${key(PINNED)} -pin`, `${key(RECENT)} -pin`]);
 });
 
 test('several sources fold under All sources; opened, each is a step into its own models, and Escape comes back', () => {
@@ -286,22 +288,24 @@ test('a catalog price is said only where the row\'s context pays the catalog\'s 
     const opus = route(OPUS.value);
     const facts = (tierOf) => {
         const asked = [];
-        const l = mountList({ store, main: opus, mainRow: 'main', follows: false,
+        const l = mountList({ store, main: opus, mainRow: false, follows: false,
             tierOf: (seen, options) => { asked.push([seen.model, options]); return tierOf(seen, options); } });
         return { facts: Object.fromEntries(l.rows().map((entry) => [entry.key, entry.facts])), asked };
     };
     const standard = facts(() => 'standard');
-    assert.deepEqual(standard.facts, { main: 'OpenRouter · $4 in / $20 out', 'route|openai/gpt-6': 'OpenRouter · $1.25 in / $10 out',
+    assert.deepEqual(standard.facts, { [`route|${OPUS.value}`]: 'OpenRouter · $4 in / $20 out', 'route|openai/gpt-6': 'OpenRouter · $1.25 in / $10 out',
         'route|z-ai/glm-5.3': 'OpenRouter · paid by key' });
-    assert.deepEqual(standard.asked.find(([model]) => model === OPUS.value), [OPUS.value, { main: true }],
-        'Main\'s row asks the tier of what follows Main');
-    assert.deepEqual(standard.asked.find(([model]) => model === GPT.value), [GPT.value, {}]);
+    // A row asks for the tier a pick of it would run on; the row current now, for the tier its scope's work runs on.
+    assert.deepEqual(standard.asked.find(([model]) => model === GPT.value), [GPT.value, { current: false }]);
+    assert.deepEqual(standard.asked.find(([model]) => model === OPUS.value), [OPUS.value, { current: true }]);
     for (const tier of ['fast', 'economy', 'ultrafast']) {
         assert.deepEqual(Object.values(facts(() => tier).facts), Array(3).fill('OpenRouter · paid by key'), `${tier} names no catalog price`);
     }
-    assert.equal(facts(() => '').facts.main, 'OpenRouter · Catalog rate · $4 in / $20 out');
-    // Each row in its own context: Main on Fast, a lead on Standard.
-    assert.deepEqual(facts((_seen, { main = false } = {}) => (main ? 'fast' : 'standard')).facts, { ...standard.facts, main: 'OpenRouter · paid by key' });
+    assert.equal(facts(() => '').facts[`route|${OPUS.value}`], 'OpenRouter · Catalog rate · $4 in / $20 out');
+    // A work's list keeps Main's row, which asks the tier of what follows Main and says that it follows.
+    const followed = [];
+    const work = mountList({ store, main: opus, mainRow: 'follow', tierOf: (seen, options) => { followed.push([seen.model, options]); return 'standard'; } });
+    assert.deepEqual([work.entry('main').facts, followed[0]], ['Follows Main · claude-opus-5.5', [OPUS.value, { main: true }]]);
     assert.equal(routeFacts(describeRoute(store.index(), opus)), 'OpenRouter · $4 in / $20 out');
 });
 

@@ -36,6 +36,7 @@ _REF = {"kind": "task_artifact", "root": "artifact_store", "task_id": "t1", "pat
 _EMPTY = [  # each carries nothing its handler sends
     ("chat.links", {"title": "Links", "actions": [{"label": " ", "url": "https://example.org"}, {"label": "Docs"}, "x"]}),
     ("chat.links", {"title": "Links", "actions": "https://example.org"}),
+    ("chat.links", {"title": "Links", "actions": [{"label": "Sign in", "place": "skill-sign-in/../google"}]}),
     ("chat.quiz", {"task_id": "t1", "quiz_id": "q1", "question": "  ", "options": [{"label": "Yes"}]}),
     ("chat.quiz", {"task_id": "t1", "question": "Which db?", "options": [{"label": "sqlite"}]}),
     ("chat.photo", {"image_base64": " ", "caption": "chart"}),
@@ -44,6 +45,7 @@ _EMPTY = [  # each carries nothing its handler sends
 ]
 _ELIGIBLE = [
     ("chat.links", {"title": "", "actions": [{"label": "Docs", "url": "https://example.org/docs"}]}),
+    ("chat.links", {"title": "", "actions": [{"label": "Sign in", "place": "skill-sign-in/calendar/google"}]}),
     ("chat.quiz", {"task_id": "t1", "quiz_id": "q1", "question": "Which db?", "options": []}),
     ("chat.photo", {"image_base64": base64.b64encode(b"PNG").decode(), "caption": "chart"}),
     ("chat.video", {"video_base64": base64.b64encode(b"MP4").decode()}),

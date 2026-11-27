@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.gateway.work_contracts import (  # the owner's model and tier choices live with the routes they name
-    ChatModelChoice, ChatModelRoute, MainBindingConditions, OwnerChatModelRequest, OwnerChatModelResponse,
+    ChatModelChoice, ChatModelRoute, MainBindingConditions, MainChatChoice, OwnerChatModelRequest, OwnerChatModelResponse,
     OwnerChatProcessingRequest, OwnerChatProcessingResponse,
 )
 
@@ -979,7 +979,7 @@ __all__ = [
     "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
-    "MainBindingConditions",
+    "MainBindingConditions", "MainChatChoice",
     "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "OwnerChatModelResponse", "OwnerChatProcessingRequest", "OwnerChatProcessingResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
     "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceModelRoute", "PlaceSummary", "PlaceDisconnectRequest",
