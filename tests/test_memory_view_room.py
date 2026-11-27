@@ -1246,3 +1246,31 @@ def test_my_humans_words_of_other_rooms_as_addresses_state_their_reader_once(tmp
         found, text = _returned(registry, room, word["address"], word["address"])
         own = next(words for words in said if words in word["line"])
         assert found == [word["address"]] and own in text and said[own] == int(room)
+
+
+def test_the_floors_estimate_of_my_humans_addressed_words_is_the_line_it_draws(tmp_path):
+    """The floor's "Holding the room" price (``memory_form_facts._hold_conversations``) of my human's messages of
+    another room shown by address equals the lines the view draws for them (``owner_pointer``), not the older
+    per-line form with its reading instruction; whole words are priced as their whole lines."""
+    from ouroboros import memory_view_conversation_forms as forms
+    from ouroboros.memory_floor import view_tokens
+    from ouroboros.memory_forms import holding_room
+
+    root = tmp_path / "data"
+    rooms = shared.projects(root)
+    shared.append(root / "logs" / "chat.jsonl", shared.msg(_ts(1), "main question", client_message_id="m-q"),
+                  *(shared.msg(_ts(2 + n), f"OWNER WORDS {n} " + "a longer message of mine " * (n + 2),
+                               chat_id=rooms["alpha"], client_message_id=f"w{n}") for n in range(4)))
+    shared.import_all(root)
+    assert ChronicleStore(root).ensure_activated()["kind"] == "activation"
+    snapshot, _whole = _view(root, MAIN_TASK)
+    owners = forms.owner_items(snapshot.conversations)
+    assert len(owners) == 4
+    for level in (mv.FloorLevel((("F7", tuple(owners)),)), mv.FULL_VIEW):
+        drawn = mv.render_room(snapshot, level)
+        lines = [line for line in drawn.splitlines() if any(line.startswith(word["head"]) for word in owners.values())]
+        assert len(lines) == 4
+        if level is not mv.FULL_VIEW:
+            assert lines == [forms.owner_pointer(word) for word in owners.values()]
+        held = holding_room(snapshot, level)["tokens"]
+        assert held["owner words in other rooms"] == view_tokens("\n".join(lines))
