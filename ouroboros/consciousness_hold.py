@@ -27,14 +27,21 @@ HELD_WORDS = {
                      f"Changing the setting in Costs does not raise it: raise this work's cap in chat, then Resume. {_FREES}"),
     "launch_ceiling": ("Its own wake-up is paused at the spending limit it started with{limit}.",
                        f"Raising a limit alone resumes nothing; Resume checks what is left. {_FREES}"),
-    "total_budget": ("Its own wake-up is paused: the total budget was spent.",
-                     f"Raising Total budget in Costs alone resumes nothing: raise it, then Resume. {_FREES}"),
+    # The pause keeps its rail until Resume, so the words say the past stop and stay true after a raise; whether the
+    # total budget has room now is the client's line, from the budget the same state carries.
+    "total_budget": ("Its own wake-up stopped when the total budget was spent.",
+                     f"Raising Total budget alone resumes nothing. {_FREES}"),
     "per_task_fence": ("Its own wake-up is paused at a spending limit of its own work; its card shows which.",
                        f"Resume once that limit has room. {_FREES}"),
     "sleep": ("Its own wake-up sleeps until what it waits for happens, then goes on by itself; its card shows what.",
               _NEXT_WAITS),
     "technical": ("Its own wake-up is paused: a record it needs could not be read; its card shows which.",
                   f"It goes on by itself once that record can be read. {_NEXT_WAITS}"),
+    "technical_resume": ("Its own wake-up is paused: a record it needs could not be read; its card shows which.",
+                         f"Resume continues it once that record can be read. {_FREES}"),
+    # A stop of the app (owner Restart, saved work) or Panic held it in the queue: only a Resume lets it go on.
+    "restart": ("Its own wake-up is held since Ouroboros stopped or restarted.", f"Resume continues it. {_FREES}"),
+    "panic": ("Its own wake-up was stopped by Panic.", f"Resume continues it. {_FREES}"),
     "queued": ("Its own wake-up waits in the queue for a worker and starts by itself.", ""),
     "": ("Its own wake-up is paused or waiting in the queue; its card shows why.", _NEXT_WAITS),
 }
@@ -52,24 +59,50 @@ def held_sentence(hold: Any) -> tuple:
     facts += ["the per-task cap too"] if cause == "allowance_and_cap" else []
     limit = f" ({', '.join(facts)})" if facts else ""
     if cause in ALLOWANCE_HOLDS:
-        room = ("Resume checks what is left now; if there is room, it continues this wake without resetting its spend."
-                if "resume_additional_usd" in hold
+        room = ("Raising the limit alone resumes nothing; Resume checks what is left now and, if there is room, "
+                "continues this wake without resetting its spend." if "resume_additional_usd" in hold
                 else "No spending estimate is available for Resume. Raising the limit alone resumes nothing.")
         return f"Its own wake-up stopped at its allowance{limit}.", f"{room} {_FREES}"
     detail, note = HELD_WORDS.get(cause) or HELD_WORDS[""]
     return detail.format(limit=limit), note
 
 
-def hold_cause(metadata: dict, own: dict, members=()) -> dict:
+def queue_hold(row: Any, budget_fences: Any = None) -> str | None:
+    """What the wake's own pool row holds it with, read from memory through the queue's own reading of a row
+    (``work_stop.current_stop`` over the tree's budget latches, ``continuation_refusal``, ``task_deadline``), or None
+    when the row is free to dispatch without anyone's move. A stop before dispatch says its own pause: an owner's
+    Pause is ``owner``, a global one the total budget (``total_budget``; no store row records it). A stop of the app
+    (owner Restart, saved work) is ``restart``, Panic ``panic``, an owner's unsaved Pause ``owner``; any other stop, a
+    refusal (a consumed or superseded grant, an owner hold) or a passed deadline proves no cause (``""``)."""
+    from ouroboros.deadline_utils import task_deadline, utc_now
+    from ouroboros.work_stop import continuation_refusal, current_stop, hold_fact, pause_marker
+
+    row = row if isinstance(row, dict) else {}
+    stop = current_stop(row, {"budget": budget_fences if isinstance(budget_fences, dict) else {}})
+    if stop:
+        pause = pause_marker(row) if stop.get("scope") == "member" and hold_fact(row) is None else {}
+        if pause.get("status") in {"paused_before_dispatch", "resource_limited"}:
+            return "owner" if pause.get("cause") == "owner_pause" else "total_budget" if pause.get("scope") == "global" else ""
+        return {"app_stop": "restart", "panic": "panic", "pause": "owner"}.get(stop.get("cause"), "")
+    if continuation_refusal(row):
+        return ""
+    deadline = task_deadline(row)
+    return "" if deadline is not None and deadline <= utc_now() else None
+
+
+def hold_cause(metadata: dict, own: dict, members=(), held: str | None = None) -> dict:
     """``{"cause", "ceiling_usd"}``: what holds my own held wake, only as far as its records prove it (pure).
 
-    ``own`` is the wake's pause row, ``members`` the pause rows of its paused tree members. The wake paused at the
+    ``own`` is the wake's pause row, ``members`` the pause rows of its paused tree members, ``held`` what its queue
+    row holds it with (``queue_hold``; None: nothing). The wake paused at the
     carried ceiling (initial or renewed), or, child first, its tree's latch refused it while a member
     holding that inherited number paused at it: the launch stamp (``consciousness_wake.wake_task_metadata``) names
     ``allowance``, ``allowance_and_cap`` or ``per_task_cap``, and a record from before the stamp is only
-    ``launch_ceiling``. Otherwise the pause's own reason or rail: ``owner``, ``sleep``, ``technical``,
-    ``total_budget``, ``per_task_fence``. No live pause (none recorded, a Resume granted or consumed) is ``queued``: the
-    held wake waits for a worker. ``""`` proves nothing: a money stop no limit explains (a lifted allowance)."""
+    ``launch_ceiling``. Otherwise the pause's own reason or rail: ``owner``, ``sleep``, ``technical`` (a typed cause
+    that continues by itself) or ``technical_resume`` (an older, untyped one: Resume continues it), ``total_budget``,
+    ``per_task_fence``; a stop of the app or Panic the queue row carries replaces a pause's own self-waking door. With
+    no live pause the queue row decides: its hold, else ``queued`` (none recorded, a Resume granted or consumed: it
+    waits for a worker). ``""`` proves nothing: a money stop no limit explains (a lifted allowance), a refusal."""
     from ouroboros.budget_pause import (RAIL_DISPATCH_REFUSED, RAIL_GLOBAL_EXHAUSTED, REASON_AUTHORITY, REASON_OWNER,
                                         REASON_SLEEP, STATE_PAUSED, STATE_PAUSING)
     from ouroboros.consciousness_allowance import at_wake_ceiling
@@ -78,9 +111,12 @@ def hold_cause(metadata: dict, own: dict, members=()) -> dict:
     metadata = metadata if isinstance(metadata, dict) else {}
     own = own if isinstance(own, dict) else {}
     if own.get("state") not in (STATE_PAUSED, STATE_PAUSING):
-        return {"cause": "queued", "ceiling_usd": None}
+        return {"cause": "queued" if held is None else held, "ceiling_usd": None}
     reason, rail = own.get("reason"), own.get("rail")
-    other = {REASON_OWNER: "owner", REASON_SLEEP: "sleep", REASON_AUTHORITY: "technical"}.get(reason)
+    technical = "technical" if own.get("auto_resume") is True else "technical_resume"  # budget_pause's typed cause
+    other = {REASON_OWNER: "owner", REASON_SLEEP: "sleep", REASON_AUTHORITY: technical}.get(reason)
+    if other in ("sleep", "technical") and held in ("restart", "panic"):
+        return {"cause": held, "ceiling_usd": None}
     if other or reason != "budget":
         return {"cause": other or "", "ceiling_usd": None}
     lifted = isinstance(metadata.get("producer_allowance_lifted"), dict)
@@ -130,9 +166,10 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
     when its tree's latch refused it, its paused members' rows (one compact hot-facts read each, no task body). An
     unreadable record proves nothing, and only what it would have proven is lost: a pause the hot facts name as the
     owner's, a sleep or a technical one stays that, and a money stop whose task record is unreadable falls back to the
-    launch stamp. ``window`` (the display's own read, given only while consciousness is on) asks for the room a Resume
-    would add now; the room is read afresh (``_resume_room``), never from that window. ``started_at`` (ISO) is the
-    wake's own start as its pause row keeps it (a pause never moves it): its block names it in the viewer's clock."""
+    launch stamp. Its queue row is read under the queue lock (``queue_hold``). ``window`` (the display's own read,
+    given only while consciousness is on) asks for the room a Resume would add now; the room is read afresh
+    (``_resume_room``), never from that window. ``started_at`` (ISO) is the wake's own start as its pause row keeps it
+    (a pause never moves it): its block names it in the viewer's clock; an unusable value drops only the time."""
     from ouroboros.budget_pause import RAIL_DISPATCH_REFUSED, budget_pause_row
     from ouroboros.consciousness_allowance import allowance_stopped, fenced_allowance_members, wake_ceiling_metadata
     from ouroboros.owner_pause import fence_closed
@@ -140,15 +177,15 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
     from ouroboros.store_hot_facts import controls
     from ouroboros.task_results import load_task_result
     from supervisor import queue as q
-    from supervisor.consciousness_carriers import live_task_rows, paused_tree_members
+    from supervisor.consciousness_carriers import paused_tree_members
 
     try:
-        metadata = (live_task_rows([task_id]).get(task_id) or {}).get("metadata") or {}
+        with q._queue_lock:  # the pool's own row: its metadata and what it holds the wake with, decided in place
+            row = next((task for task in q.PENDING if str(task.get("id") or "") == task_id), None) or {}
+            metadata, held = dict(row.get("metadata") or {}), queue_hold(row, q.BUDGET_ROOT_FENCES)
         facts = controls(drive_root, task_id)
         own = facts.get("budget_pause") or {}
-        started = own.get("started_at")
-        started = ({"started_at": datetime.fromtimestamp(started, tz=timezone.utc).isoformat()}
-                   if type(started) in (int, float) and started > 0 else {})
+        started = _start_of(own)
         fence = facts.get("owner_pause") or {}
         if fence_closed(fence) and task_id not in (fence.get("selected_members") or {}):
             return {"cause": "owner", "ceiling_usd": None, **started}
@@ -170,7 +207,19 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
                 metadata = wake_ceiling_metadata(load_task_result(drive_root, task_id, strict=True) or {}) or metadata
         except Exception:
             log.debug("The task record of held wake %s is unreadable; its launch stamp stands", task_id, exc_info=True)
-    result = {**hold_cause(metadata, own, members), **started}
+    result = {**hold_cause(metadata, own, members, held), **started}
     if window is not None and allowance_stopped(metadata, own, witnesses):
         result.update(_resume_room(drive_root, task_id, metadata, own))
     return result
+
+
+def _start_of(own: dict) -> dict:
+    """``{"started_at": ISO}`` of the wake's own start as its pause row keeps it, or nothing: an absent or unusable
+    value costs only the time, never the cause it rides with."""
+    value = own.get("started_at")
+    if type(value) not in (int, float) or not value > 0:
+        return {}
+    try:
+        return {"started_at": datetime.fromtimestamp(value, tz=timezone.utc).isoformat()}
+    except (OverflowError, OSError, ValueError):
+        return {}
