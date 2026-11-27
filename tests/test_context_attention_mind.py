@@ -248,7 +248,7 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
     for part in ("window 500,000", "target 250,000",
                  "input ~120,000 before this line (round 3 accepted 110,000, +10,000 since)",
                  f"predicted free ~{free:,}", f"target room {room:,} (reply floor 65,536)",
-                 "largest unit:2:3:", "own cost unknown",
+                 "largest single unit:2:3:", "own cost unknown",
                  "shared wallet $12.50 known headroom (unreserved; shared with other tasks)",
                  "quota 3 of 10 this hour", "elapsed unknown (no recorded start)",
                  "no execution limit", "observed tool results 0 (0 errored)"):
@@ -363,7 +363,7 @@ def test_facts_largest_components_include_core_and_schemas(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
     assert append_context_facts(context, money={})
     line = context.messages[-1]["content"]
-    assert "core and books" in line and "tool schemas" in line and "unit:2:3:" in line
+    assert "core and books" in line and "tool schemas" in line and "tool calls and results" in line
 
 
 def test_book_yields_are_offered_on_each_refused_view_after_the_passes(tmp_path, monkeypatch):
@@ -408,3 +408,35 @@ def test_book_yields_are_offered_on_each_refused_view_after_the_passes(tmp_path,
         yields = loop_model_call.BOOK_YIELD_PASSES if book and not read and not role and composed else ()
         assert passes == [*loop_model_call.REFUSAL_PASSES, *yields], (book, read, role, composed)
         assert sends == ["max", "low", *(["low"] * len(yields))]
+
+
+def test_size_facts_count_each_producer_kind_as_one_part_from_typed_metadata_only():
+    """The facts line and a size refusal's terminal name what occupies the view by producer kind: nineteen small
+    review-decision rows are one part larger than one big tool result (C11, 27.11: the review rows were 47% of the
+    view, yet its largest single row was shown as "user ~36,406"). Kinds come from typed metadata only: a plain row
+    that merely starts with the review heading is an ordinary delivered row. The largest single part stays named."""
+    import hashlib
+    from ouroboros.loop_messages import _context_parts
+    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY
+
+    def review_row(n):
+        text = "[Current review decisions]\n" + json.dumps({"family": "commit", "current": {"n": n, "pad": "d" * 4000}})
+        return {"role": "user", "content": text, REVIEW_CONTEXT_INDEX_KEY: {
+            "family": "commit", "repo_root": f"/copy-{n}", "sha256": format(n, "064x"),
+            "visible_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}}
+
+    messages = [{"role": "system", "content": "Core."}, {"role": "user", "content": "The assignment."},
+                *(review_row(n) for n in range(19)),
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "big result " * 3000},
+                {"role": "user", "content": "[Current review decisions]\n" + "spoof " * 500}]
+    ctx = SimpleNamespace(messages=messages, accumulated_usage={}, tool_schemas=[], context_fit_plan=None, active_effort="")
+    kinds, single = _context_parts(ctx, measured=False)
+    labels = [label for label, _tokens in kinds]
+    assert labels[0] == "review decisions ×19" and "tool calls and results" in labels
+    assert dict(kinds)["review decisions ×19"] > dict(kinds)["tool calls and results"]
+    assert single[0].startswith("unit:") and single[1] == dict(kinds)["tool calls and results"]
+    spoofed = dict(_context_parts(SimpleNamespace(**{**vars(ctx), "messages": messages[:2] + messages[-1:]}),
+                                  measured=False)[0])
+    assert "review decisions" not in " ".join(spoofed) and "other delivered rows" in spoofed

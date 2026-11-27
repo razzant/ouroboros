@@ -19,7 +19,7 @@ import pathlib
 import queue
 import time
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ouroboros.llm import LLMClient
 from ouroboros.observability import timed_phase
 from ouroboros.context_timing import timed_section
@@ -918,9 +918,10 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
             excess = int(estimate) + floor - int(target) - book
             parts.append((f"over target {excess:,}" if excess > 0 else f"target room {-excess:,}")
                          + (f" (reply floor {floor:,})" if floor != int(reserve or 0) else ""))
-    components = _context_components(ctx, measured=measured)
+    components, single = _context_parts(ctx, measured=measured)
     if components:
-        parts.append("largest " + ", ".join(f"{label} ~{tokens:,}" for label, tokens in components))
+        parts.append("largest by kind " + ", ".join(f"{label} ~{tokens:,}" for label, tokens in components)
+                     + (f"; largest single {single[0]} ~{single[1]:,}" if single and single[0] not in dict(components) else ""))
     from ouroboros.context_compaction import _capsule_metadata
     # The mind's own folds stay countable to it (17.10.2026: after 42 folds it told the owner it never folded).
     parts.append(f"own notes in view {sum(1 for row in ctx.messages if (_capsule_metadata(row)[1] or {}).get('authorship') == 'actor')}")
@@ -1053,28 +1054,70 @@ def _tool_results_fact(usage: Dict[str, Any]) -> str:
     return f"observed tool results {calls} ({errors} errored)"
 
 
-def _context_components(ctx: Any, *, measured: bool) -> list:
-    """Largest blocks, complete units and schema segment, calibrated for the current request shape."""
+def _producer_kind(messages: Sequence[Dict[str, Any]], index: int, first_user: int) -> str:
+    """Who produced a transcript row, from its typed metadata only (never its text): the class the size facts count."""
+    from ouroboros.context_budget import OWNER_WORDS_KIND
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, _review_index_identity
+
+    row = messages[index]
+    if _review_index_identity(row) is not None:
+        return "review decisions"
+    if row.get(REVIEW_HISTORY_MESSAGE_KEY):
+        return "recorded review disputes"
+    meta = _capsule_metadata(row)[1]
+    if meta:
+        return "my notes" if meta.get("authorship") == "actor" else "recovery address records"
+    kind = row.get(HOST_CONTEXT_KIND_KEY)
+    if kind:
+        return {OWNER_WORDS_KIND: "owner and principal words", "owner_dialogue": "my outward replies"}.get(kind, str(kind))
+    if row.get("role") == "tool" or row.get("tool_calls"):
+        return "tool calls and results"
+    if row.get("role") == "assistant":
+        return "my replies"
+    return "assignment" if index == first_user else "other delivered rows"
+
+
+def _context_parts(ctx: Any, *, measured: bool) -> Tuple[list, Optional[Tuple[str, int]]]:
+    """The view's largest parts by producer kind (``label ×rows`` when a kind has several), and its largest single
+    part (a unit's id, else its block or kind): calibrated for the current request shape. Many small rows of one kind
+    are named as the one part they are, so a resident class that only grows is visible (BIBLE P1) — facts, no advice
+    (owner 09.10 5A). System blocks keep their block labels; the route's tool schemas are one part."""
     from ouroboros.context_compaction import context_units
     from ouroboros.context_fit import estimate_context_prompt_tokens, tool_schema_tokens
     from ouroboros.context_view_facts import block_label
 
     density = float(ctx.accumulated_usage.get("_context_measurement_density") or 1.0) if measured else 1.0
-    units = context_units(ctx.messages, scope="dialogue", measurement_density=density)
+    messages = ctx.messages
+    first_user = next((i for i, row in enumerate(messages) if row.get("role") == "user"), -1)
+    units = context_units(messages, scope="dialogue", measurement_density=density)
     covered = {i for unit in units for i in range(unit.start, unit.end + 1)}
-    sizes = [(unit.unit_id, unit.context_size_tokens) for unit in units]
-    for i, message in enumerate(ctx.messages):
+    sizes = [(_producer_kind(messages, unit.start, first_user), unit.unit_id, unit.context_size_tokens) for unit in units]
+    for i, message in enumerate(messages):
         if i in covered:
             continue
         content = message.get("content")
         chunks = [{**message, "content": [block]} for block in content] if message.get("role") == "system" and isinstance(content, list) else [message]
-        for j, chunk in enumerate(chunks):
+        for chunk in chunks:
             block = chunk.get("content")
-            label = block_label(message, i, block[0] if isinstance(block, list) and block else block, ctx.context_fit_plan)
-            sizes.append((label, int(estimate_context_prompt_tokens([chunk]) * density)))
-    sizes.append(("tool schemas", int(tool_schema_tokens(ctx.tool_schemas,
+            label = (block_label(message, i, block[0] if isinstance(block, list) and block else block, ctx.context_fit_plan)
+                     if message.get("role") == "system" else _producer_kind(messages, i, first_user))
+            sizes.append((label, label, int(estimate_context_prompt_tokens([chunk]) * density)))
+    sizes.append(("tool schemas", "tool schemas", int(tool_schema_tokens(ctx.tool_schemas,
         provider=getattr(ctx.context_fit_plan, "provider", ""), reasoning_effort=getattr(ctx, "active_effort", "")) * density)))
-    return sorted(sizes, key=lambda item: item[1], reverse=True)[:3]
+    totals: Dict[str, List[int]] = {}
+    for kind, _item, tokens in sizes:
+        total = totals.setdefault(kind, [0, 0])
+        total[0], total[1] = total[0] + tokens, total[1] + 1
+    kinds = sorted(totals.items(), key=lambda item: item[1][0], reverse=True)[:3]
+    largest = max(sizes, key=lambda item: item[2], default=None)
+    return ([(f"{kind} ×{rows}" if rows > 1 else kind, tokens) for kind, (tokens, rows) in kinds],
+            (largest[1], largest[2]) if largest else None)
+
+
+def _context_components(ctx: Any, *, measured: bool) -> list:
+    """The view's three largest parts by producer kind (``_context_parts``)."""
+    return _context_parts(ctx, measured=measured)[0]
 
 
 def cached_tariff_text(model: str, provider: str, prompt: Optional[int], *, unknown: str = "tariff unknown") -> str:
