@@ -3,10 +3,11 @@
 A start of the mind's own focus (not a declared start, a child, a nanny or a held-note resume) always carries, whole,
 its system prompt and constitution, its tier-0 sections (identity, scratchpad, the authored overview where its view
 holds knowledge: ``context_layout.TIER0_ALWAYS_FULL``), the marks it keeps in view (counted only when the chronicle is
-already active; this module never activates it), the connections text (the smaller of its two forms: it has no shorter
-one) and the Nano frame's resident tool schemas, beside Nano's reply reserve. Nano is the last physical rescue of the
-fit (``context_fit._view_projections``), so when that frame already exceeds the route's known window no request of
-this start can fit: it is refused before the memory capture (``context.build_context_fit_plan``), with no memory read.
+already active; this module never activates it), the connections text (of its two forms the one with fewer escaped
+characters, the measure the fit prices it by: no mode carries less) and the Nano frame's resident tool schemas,
+beside Nano's reply reserve. Nano is the last physical rescue of the fit (``context_fit._view_projections``), so when
+that frame already exceeds the route's known window no request of this start can fit: it is refused before the memory
+capture (``context.build_context_fit_plan``), with no memory read.
 
 Everything else a request holds is left out, and each omission keeps this a lower bound: the assignment (priced as
 empty, so ``context_input_selection.rescued_start`` keeps its smaller inputs), book maps, the knowledge outline,

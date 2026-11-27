@@ -10,6 +10,7 @@ import datetime
 import json
 import math
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -110,31 +111,117 @@ def test_a_frame_just_under_the_window_reaches_the_ordinary_fit_unchanged(drive,
             assert outcome(window) == with_bound
 
 
-@pytest.mark.parametrize("mode", ["max", "low", "nano"])
-@pytest.mark.parametrize("route", [("grok", 80_000, "estimator"), ("gemini", 92_000, "provider"),
-                                   ("openai", 133_554, "provider"), ("text-85k", 85_000, "provider")])
-@pytest.mark.parametrize("shape", ["fresh", "mature"])
-def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape, route, mode):
-    """The identity ``bound <= fitted minimum``: the fitter's own refusal at the window its core alone fills, memory
-    rendered beside it. The windows are the shipped catalogues' (``skills/*/plugin.py``) and a hard 85k text route;
-    the comparison is made at the window that forces the fitter's minimum."""
-    provider, _window, basis = route
-    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
-    drive = scale.installed(tmp_path, shape)
-    unfit_bound = refused_by_bound(drive, monkeypatch, mode=mode)
-    monkeypatch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
+def _distinct_routes():
+    """The shipped call routes (``skills/*/plugin.py``) without rows that repeat one case, plus a hard 85k text route:
+    ``(label, provider, RouteFacts or None)``. Two models with the same provider and facts are one case."""
+    rows, seen = [], set()
+    for skill, model, facts in scale.call_routes():
+        key = (skill, facts.basis, facts.working_reserve_tokens)
+        if key not in seen:
+            seen.add(key)
+            rows.append((f"{skill}:{model}", skill, facts))
+    return rows + [("text:85k", "synthetic", None)]
 
-    def refusal(window):
+
+def route_at(provider, facts, window):
+    """The route of one row, answering ``window``: its provider, unit basis and working reserve from its facts."""
+    if facts is None:
+        return scale.route_resolver(window, "provider", None)
+    return scale.route_resolver(window, facts.basis, facts.working_reserve_tokens, provider=provider,
+                                facts=replace(facts, conversation_window_tokens=window, accepted_input_tokens=None))
+
+
+REVERSED = ('"' * 400_000, "a" * 400_100)  # the raw-shorter connections form is the one with more escaped characters
+
+
+@pytest.mark.parametrize("mode", ["max", "low", "nano"])
+@pytest.mark.parametrize("row", [pytest.param(row, id=row[0]) for row in _distinct_routes()]
+                         + [pytest.param(("witness", "gemini_live", "witness"), id="provider-witness-under-1"),
+                            pytest.param(("reversed", "synthetic", "reversed"), id="reversed-connections")])
+@pytest.mark.parametrize("shape", ["fresh", "mature"])
+def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape, row, mode):
+    """The identity ``bound <= fitted minimum`` on each route's own basis, working reserve and density: the bound's
+    refusal (at a window the frame overflows) never prices more than the fitter's own refusal at the window its core
+    alone fills (memory rendered beside it, or first the work room that core wants); and at the window that holds that
+    minimum with its reserve the start with the bound enabled gets a plan. Rows: the shipped call routes' distinct
+    cases and a hard 85k text route; a provider route with a fresh witness under 1.0 (the bound's density is no higher
+    than the fit's); and a connections pair whose raw-shorter form is the escape-heavier one."""
+    label, provider, facts = row
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
+    evidence_root = tmp_path / "evidence"
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: evidence_root)
+    if facts == "witness":
+        gemini = next(route for route in _distinct_routes() if route[1] == "gemini_live")
+        facts = gemini[2]
+        path = ce._store_path(evidence_root)
+        path.parent.mkdir(parents=True)
+        pairs = [_witness(0.8, 40_000, hours=5, fp="gemini_live-route"),
+                 _witness(0.95, 400_000, hours=1, fp="gemini_live-route")]
+        path.write_text(json.dumps({"token_density": {"gemini_live": {"pairs": pairs}}}), encoding="utf-8")
+        assert ce.lowest_main_token_density(evidence_root, "gemini_live-route", "gemini_live",
+                                            view_kind="owner_turn") == pytest.approx(0.8)
+    elif facts == "reversed":
+        facts = None
+        monkeypatch.setattr(context, "_connections", lambda *_a, **_kw: REVERSED)
+    drive = scale.installed(tmp_path, shape)
+
+    def outcome(window, *, bounded):
+        with monkeypatch.context() as patch:
+            if not bounded:
+                patch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
+            return build(drive, route_at(provider, facts, window), mode=mode)
+
+    def refusal(window, *, bounded=False):
         with pytest.raises(fit.MinimumViewUnfit) as raised:
-            build(drive, resolver(window, basis=basis), mode=mode)
+            outcome(window, bounded=bounded)
         return raised.value
 
+    with monkeypatch.context() as patch:
+        patch.setattr(context, "_capture_memory_view", lambda *_a, **_kw: pytest.fail("the memory capture ran"))
+        unfit_bound = refusal(25_000, bounded=True)
+    assert not unfit_bound.memory_measured
     core_alone = refusal(20_000)
     assert not core_alone.memory_measured
+    assert unfit_bound.measurement_density <= core_alone.measurement_density, label
     minimum = refusal(core_alone.fixed_input_tokens + core_alone.response_reserve_tokens)
-    assert minimum.memory_measured and minimum.memory_view_tokens > 0, provider
-    assert unfit_bound.raw_input_tokens <= minimum.raw_input_tokens, provider
-    assert math.ceil(unfit_bound.raw_input_tokens * unfit_bound.measurement_density) <= minimum.estimated_input_tokens
+    admit = minimum.estimated_input_tokens + minimum.response_reserve_tokens
+    if not minimum.memory_measured:  # that core was refused for the work room it wants beside it, before memory
+        assert minimum.work_room_deficit_tokens > 0, label
+        admit += minimum.work_room_tokens
+        try:
+            minimum = refusal(admit)
+            admit = minimum.estimated_input_tokens + minimum.response_reserve_tokens
+        except pytest.fail.Exception:  # the core with its work room starts: that window is the fitted minimum
+            minimum = None
+    if minimum is not None:
+        assert minimum.memory_measured and minimum.memory_view_tokens > 0, label
+        assert unfit_bound.raw_input_tokens <= minimum.raw_input_tokens, label
+        assert unfit_bound.measurement_density <= minimum.measurement_density, label
+        assert math.ceil(unfit_bound.raw_input_tokens * unfit_bound.measurement_density) <= minimum.estimated_input_tokens
+    # The admitted control: the window that holds the fitter's own minimum with its reserve starts, bound enabled.
+    plan = outcome(admit, bounded=True)
+    assert plan.initial_mode in {"max", "low", "nano"}, label
+
+
+def test_the_connections_term_is_the_form_with_fewer_escaped_characters(drive, monkeypatch):
+    """The fit prices each mode's connections form escaped (``section_floor``); the bound takes the form with fewer
+    escaped characters, which can be the raw-longer one."""
+    from ouroboros.memory_view import json_chars
+
+    monkeypatch.setattr(context, "_connections", lambda *_a, **_kw: REVERSED)
+    with monkeypatch.context() as patch:
+        patch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
+        wide = build(drive, resolver(1_000_000))
+    window = wide.projection(wide.initial_mode).calibrated_tokens + 16_384 + 20_000  # that Nano request and room
+    plan = build(drive, resolver(window))
+    assert plan.initial_mode == "nano"
+    smaller = min(REVERSED, key=json_chars)
+    assert smaller == REVERSED[1]
+    capture_spy(monkeypatch, fail=True)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:  # a window smaller than that form alone
+        build(drive, resolver(json_chars(smaller) // 4 - 1_000))
+    assert raised.value.memory_measured is False
+    assert dict(raised.value.parts)["connections"] == json_chars(smaller) // 4
 
 
 def test_an_arrived_route_answer_is_asked_again_before_an_early_refusal_stands(drive, monkeypatch):

@@ -1268,9 +1268,10 @@ def _start_frame_texts(env: Any, memory: Memory, ctx: Any, spec: Any, connection
 
     Each is read by its own producer, as the capture reads it: SYSTEM and BIBLE; the tier-0 sections (identity, the
     scratchpad and, where the view holds knowledge, the authored overview); the ordinary marks this view keeps, only
-    from a chronicle already active (activating it is the capture's); the smaller connections form.
+    from a chronicle already active (activating it is the capture's); the connections form of fewer escaped characters.
     """
     from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.memory_view import json_chars
     from ouroboros.context_layout import TIER0_ALWAYS_FULL
     from ouroboros.context_sections import _shared_understanding
     from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
@@ -1291,7 +1292,7 @@ def _start_frame_texts(env: Any, memory: Memory, ctx: Any, spec: Any, connection
         ordinary = [mark for mark in _capture_marks(store, spec, room_labeler(root)) if not mark.get("late_review")]
         if ordinary:
             texts.append(("marks", _marks_text(ordinary)))
-    return [*texts, ("connections", min(connections, key=len))]
+    return [*texts, ("connections", min(connections, key=json_chars))]
 
 
 def _context_fit_route(
