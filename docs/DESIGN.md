@@ -3709,8 +3709,9 @@ becomes a row of the work list (below). The room's and the drawer's × give way 
 ### One edge
 
 Everything that scrolls ends in the same edge: one curve, `--edge-curve` (smoothstep from
-opaque to clear, flat at both ends, so neither end of a fade reads as a line), over one length, `--edge-length`
-(32 px), both in `web/ui.css`. A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
+opaque to clear, flat at both ends, so neither end of a fade reads as a line), in `web/ui.css`. Its length is
+`--edge-length` (32 px) for a room's edges and by default for vertical lists; sideways rails take a smaller spacing
+token and a folded answer two of its line heights. A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
 more waits), a clipped preview `[data-fold-clipped]`, and a painted fade (a colour into what passes under it) is the
 colour masked by `linear-gradient(var(--edge-curve))`; a sheet sets only where an edge is and how long, never a
 gradient, curve or blur of its own. The Widgets board stays crisp and a room's feed unmasked.
