@@ -272,7 +272,7 @@ class _FirstSendGap(AssertionError):
     work room: the start fit does not price the loop's own first-send host rows (roster snapshot, context facts)."""
 
 
-FIRST_SEND_GAP = ("razzant/ouroboros#TBD-work-room: a request-tipped Low start's first real send overruns the reply "
+FIRST_SEND_GAP = ("razzant/ouroboros#4351: a request-tipped Low start's first real send overruns the reply "
                   "reserve and the work room by about 630 tokens, because the start fit does not price the loop's own "
                   "first-send host rows (roster snapshot, context facts); strict, so the fix turns this case red")
 
