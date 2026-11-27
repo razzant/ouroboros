@@ -16,7 +16,7 @@
   "version": "0.1.22"
  },
  "grok_realtime": {
-  "content_hash": "07ec5376e1bf9e7adcf49ae774a592e9bd6a6fbdbe062bdf9914655ff8ec42cc",
+  "content_hash": "5b9526cd9c22a1e85fe783fe2ba8c1019d792a796c600eef2c25be0fd70a057c",
   "version": "0.1.15"
  },
  "live_conversation": {
@@ -24,7 +24,7 @@
   "version": "0.1.40"
  },
  "openai_realtime": {
-  "content_hash": "022770226af3d9c40a243758695fcd0835a8693abd5359ef20d91d8b26f0fd33",
+  "content_hash": "9e0aa1bee8fe6458260b58b9ac87b332f4d17aaa83be0b5ddaed60009a96ae8d",
   "version": "0.1.11"
  },
  "telegram": {

@@ -17,8 +17,10 @@ secret_fields:
 Registers `grok_realtime:grok` for ordinary host-selected context and tools.
 Grok Voice 3.0 declares a conversation window of
 80,000 tokens in Ouroboros's own estimate (characters / 4), under the spoken-turn
-limit operator probes measured (2026-10-21, 2026-11-27): about 98,300 o200k tokens
-of setup, whatever the text. The 231,828 o200k-token accepted input is separate evidence,
+limit operator probes measured (2026-10-21, 2026-11-27) with memory-shaped and
+neutral text: last pass 98,276, first failure 99,700 o200k tokens of whole setup.
+o200k stands in for Grok's own count, which the wire does not report; a smaller
+effect of text shape is not excluded. The 231,828 o200k-token accepted input is separate evidence,
 not a fit target. This package never selects or cuts memory. Host facts keep their roles;
 `Respond` opens the greeting only after setup acknowledgements. Call instructions
 follow host system text; language tags add a recognition sentence, not a session

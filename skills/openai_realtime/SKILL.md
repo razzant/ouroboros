@@ -19,8 +19,9 @@ acknowledgements, captions, usage axes and its catalog. The route's window is
 the spoken fact and the late recall there (2 of 2 near 290k, 3 of 3 near 231k). The
 vendor documents a 128,000 context, which that account did not enforce; 493,554 was
 accepted over three turns and is recorded as accepted input, a lower bound. First
-answers on a large room wait for the uncached prefill (about 18-19 s at 290k, from
-the end of the person's first words).
+answers on a large room wait for the uncached prefill: about 18-19 s at 290k, timed
+from the end of the probe's sent audio (which included about 1.5 s of trailing
+silence); later answers typically 1-3 s.
 Automatic truncation is disabled.
 Text fields preserve every character and role across the observed 256000-character
 item limit. Images remain native input. Unsupported content fails explicitly.

@@ -30,8 +30,9 @@ CATALOG = ProviderCatalog(
                    "27.11.2026 calls of this size were served: whole spoken calls kept the spoken fact and the late "
                    "recall at 290,666 input tokens (2 of 2 sessions near 290k, 3 of 3 near 231k), 493,554 was "
                    "accepted with the fact kept over three turns (one session), no truncation or context error in 20 "
-                   "sessions. First answer, from the end of the person's first words: about 5 s at 100k input "
-                   "tokens, 10 s at 198k, 15-17 s at 231k, 18-19 s at 290k; later answers 1-3 s",
+                   "sessions. First answer, timed from the end of the probe's sent audio (which included about 1.5 s "
+                   "of trailing silence): about 5 s at 100k input tokens, 10 s at 198k, 15-17 s at 231k, 18-19 s at "
+                   "290k; later answers typically 1-3 s",
                    observed="2026-11-27"),
         default=True, vision=True, silent_tool_results=True,
         voices=tuple(CatalogVoice(name, name.capitalize()) for name in (

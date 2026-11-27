@@ -23,9 +23,9 @@ ENDPOINT = 'wss://api.x.ai/v1/realtime'
 ROUTE = RealtimeRoute('grok_realtime', ENDPOINT, 'xai::')
 # Measured 27.11.2026 (28 spoken sessions): Grok Voice 3.0 keeps earlier spoken turns while the
 # whole session.update setup stays under about 98,300 o200k tokens (last pass 98,276) and loses
-# them from about 99,700 (first fail), for memory-shaped and neutral text alike: a token limit,
-# not an effect of the text's shape (the 21.10 passes at 105,000 neutral and 75,000 memory-shaped
-# estimator units and failures at 117k sit on the same cliff). Grok's usage counts no text tokens,
+# them from about 99,700 (first fail), for memory-shaped and neutral text alike: a token limit;
+# a smaller effect of the text's shape is not excluded (the 21.10 passes at 105,000 neutral and
+# 75,000 memory-shaped estimator units and failures at 117k sit on the same cliff). Grok's usage counts no text tokens,
 # so nothing calibrates its tokenizer: the window stays 80,000 in the host's own estimate
 # (characters / 4). Its 70,000 admitted after the reserve is about 87.5k o200k even at 1.25 o200k
 # per estimator token, and the full 80,000 at 1.2 is about 96k, under the last pass.
@@ -35,9 +35,10 @@ CATALOG = ProviderCatalog(
     models=(CatalogModel(
         'grok-voice-3.0', 'grok-voice-3.0 \u2014 xAI\u2019s voice model',
         RouteFacts(conversation_window_tokens=80_000, working_reserve_tokens=10_000, basis='estimator',
-                   source='measured spoken-retention bound of the whole setup (operator probes 21.10 and 27.11.2026: '
-                          'spoken turns kept up to about 98,300 o200k tokens and lost from about 99,700, whatever the '
-                          'text); counted in the host estimate, which nothing calibrates against Grok\'s tokenizer',
+                   source='spoken-turn limit of the whole setup, operator probes 21.10 and 27.11.2026 with '
+                          'memory-shaped and neutral text: last pass 98,276, first failure 99,700 o200k tokens. o200k '
+                          'stands in for Grok\'s own count, which the wire does not report; a smaller effect of text '
+                          'shape is not excluded. Counted in the host estimate',
                    observed='2026-11-27'),
         default=True, silent_tool_results=True, voices=(CatalogVoice('eve', 'Eve'), CatalogVoice('xai_ara', 'Ara')),
         thinking_levels=('none', 'high'), honours=frozenset({'languages', 'thinking'}),

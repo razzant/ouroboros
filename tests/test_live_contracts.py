@@ -128,6 +128,9 @@ def test_openai_states_its_measured_accepted_input_reserve_and_raise():
     facts = _plugin_catalog("openai_realtime").model("gpt-realtime-2.1").facts
     assert facts.accepted_input_tokens == 493_554
     assert facts.working_reserve_tokens == 10_000 and facts.acceptance_can_raise is True and facts.basis == "provider"
+    # Calls settings show the source: the vendor's figure, the measuring account, and the clock the latency used.
+    assert "vendor documents a 128,000" in facts.source and "measuring account" in facts.source
+    assert "end of the probe's sent audio" in facts.source and "typically 1-3 s" in facts.source
 
 
 @pytest.mark.parametrize("skill,window,credential", [

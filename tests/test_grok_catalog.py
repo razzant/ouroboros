@@ -13,8 +13,10 @@ def test_grok_window_uses_host_estimate_and_operator_probe_attribution(providers
     if surface == "skill":
         text = (Path(__file__).resolve().parents[1] / "skills/grok_realtime/SKILL.md").read_text(encoding="utf-8")
         assert f"{facts.conversation_window_tokens:,} tokens in Ouroboros's own estimate" in text
-        assert "90,000 o200k tokens" not in text
+        assert "90,000 o200k tokens" not in text and "whatever the text" not in text
+        assert "memory-shaped and\nneutral text" in text and "first failure 99,700 o200k tokens" in text
     else:
-        assert "operator probes 21.10 and 27.11.2026" in facts.source
+        assert "operator probes 21.10 and 27.11.2026" in facts.source and "memory-shaped and neutral" in facts.source
+        assert "last pass 98,276, first failure 99,700 o200k" in facts.source and "not excluded" in facts.source
         assert "owner probes" not in facts.source
         assert facts.observed == "2026-11-27"
