@@ -1426,7 +1426,8 @@ def _release_marks(ctx: Any, store: ChronicleStore, author: Dict[str, Any], ids:
         else:
             refused.append({"id": mark, "reason": result.reason, "detail": result.detail})
     return _reply(ctx, {"ok": not refused, "operation": "mark_release", "released_ids": released, "refused": refused,
-                        "reason": "saved" if not refused else "partial" if released else refused[0]["reason"]},
+                        "reason": "saved" if not refused else "partial" if released else refused[0]["reason"],
+                        "resident_marks": _resident_marks(ctx)},
                   code="TOOL_REPORTED_FAILURE" if refused else "OK",
                   meta={"memory_mark_ids": released, "memory_mark_operation": "mark_release"})
 
@@ -1476,8 +1477,15 @@ def _memory_mark(ctx: Any, text: str = "", node_id: str = "", address: str = "",
     mark = str(record.get("target_id") or record.get("id") or "")
     return _reply(ctx, {"ok": True, "reason": result.reason, "operation": record.get("kind"), "mark_id": mark,
                         "room_id": record.get("room_id"), "scope": record.get("scope"),
-                        "visibility": record.get("visibility"), "sequence": record.get("sequence")},
+                        "visibility": record.get("visibility"), "sequence": record.get("sequence"),
+                        "resident_marks": _resident_marks(ctx)},
                   meta={"memory_mark_id": mark, "memory_mark_operation": str(record.get("kind") or "")})
+
+
+def _resident_marks(ctx: Any) -> Dict[str, Any]:
+    from ouroboros.context_view_facts import resident_marks  # what this focus's marks cost after the change
+
+    return resident_marks(_root(ctx), getattr(ctx, "context_fit_plan", None))
 
 
 # --- schemas ---------------------------------------------------------------------------------------
