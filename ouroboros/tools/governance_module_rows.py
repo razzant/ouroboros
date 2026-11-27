@@ -50,17 +50,11 @@ def _change(status: str, old: str) -> str:
     return CHANGES.get(str(status or "")[:1].upper(), TOUCHED).format(old=old)
 
 
-def _owner(manifest, path: str) -> tuple:
-    """``(kind, key)``: the path's installed domain, else its longest registered surface, else ``("", "")``."""
-    if manifest.modules.get(path):
-        return "domain", manifest.modules[path]
-    surfaces = [key for key in manifest.references if key not in manifest.domains and path.startswith(key)]
-    return ("surface", max(surfaces, key=len)) if surfaces else ("", "")
-
-
 def render_rows(manifest, entries: Iterable[Change]) -> ModuleRows:
     """The block for ``entries`` against ``manifest`` (``domains``, ``modules``, ``references``): the one renderer,
     which ``contract_material`` also runs. A rename or copy is owned where its source was, else where it landed."""
+    from ouroboros.code_intelligence_architecture import path_owner as _owner  # the one resolution of ownership
+
     lines = []
     for path, status, old in sorted((str(p).replace("\\", "/"), s, o) for s, p, o in entries):
         source = _owner(manifest, old) if old and str(status)[:1].upper() in ("R", "C") else ("", "")
