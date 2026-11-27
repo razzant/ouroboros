@@ -1,3 +1,5 @@
+"""Execution readiness of a skill: review, content hash, enablement, grants, dependencies and conflicts as separate blockers (§13)."""
+
 from __future__ import annotations
 
 import datetime as _dt

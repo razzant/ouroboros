@@ -131,7 +131,7 @@ def test_architecture_subject_map_row_resolves_its_owner_section():
     assert len(rows) == 1, rows
     assert "§6 Subject operation" in rows[0]
     section = read_book_section(load_reference_book(REPO, "architecture"), "Subject operation")
-    assert section.sources[0].path == "docs/architecture/06-agent-core.md"
+    assert section.sources[0].path == "docs/architecture/06-4-self-change-and-review.md"  # chapter 6's split
 
 
 def _change_review_items() -> dict:
@@ -485,3 +485,40 @@ def test_architecture_settings_table_mirrors_config_defaults():
         if key in expected and _normalize_default_cell(cell) != str(config.SETTINGS_DEFAULTS[key]).lower()
     ]
     assert not mismatched, f"documented default differs from config.SETTINGS_DEFAULTS: {mismatched}"
+
+
+def _architecture_openings() -> dict:
+    from ouroboros.reference_books import _preamble, load_reference_book
+
+    book = load_reference_book(REPO, "architecture")
+    return {chapter.source_path: chapter.text_at(_preamble(chapter)) for chapter in book.chapters}
+
+
+def test_every_architecture_chapter_opens_in_the_first_person_without_volatile_numbers():
+    """The openings are what Low and Nano read of a chapter (owner's choice of first-person
+    openings): each speaks in the first person, whatever its wording, and carries no line
+    number, count or version stamp that would move with every edit. Section signs, file
+    names and backticked identifiers are addresses, not counts. Whether a claim is true is
+    review's to check against the owning code."""
+    openings = _architecture_openings()
+    assert len(openings) >= 17
+    for path, text in openings.items():
+        assert re.search(r"\b(?:I|me|my)\b", re.sub(r"`[^`]*`", "", text)), path
+        stripped = re.sub(r"`[^`]*`|\]\([^)]*\)|§[\d.]+|BIBLE P\d+|exits? \d+|E2E", "", text)
+        assert not re.search(r"\d", stripped), (path, re.findall(r"[^ ]*\d[^ ]*", stripped))
+
+
+def test_closed_roads_state_the_road_and_its_reason_without_ciphers():
+    """§10.2 keeps rejected approaches that have no file of their own: each line is
+    "Not X, because Y" in the present tense. Where it was decided stays in Git (the
+    residue rule keeps decision labels out of the book), so no line carries a private
+    operator cipher such as "3A" or "Q7=A"."""
+    from ouroboros.reference_books import load_reference_book, read_book_section
+
+    section = read_book_section(load_reference_book(REPO, "architecture"), "10.2 Closed roads")
+    assert section.sources[0].path == "docs/architecture/10-key-invariants.md"
+    roads = [line for line in section.text.splitlines() if line.startswith("- ")]
+    assert roads
+    for road in roads:
+        assert road.startswith("- **Not ") and ", because " in road, road
+        assert not re.search(r"\b\d+[A-Z]\b|\bQ\d+\s*=|\bD-[A-Z]{2,}", road), road

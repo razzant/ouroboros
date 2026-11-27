@@ -513,10 +513,16 @@ def _subject_changed_paths(frozen: Any, target_repo) -> tuple[str, str]:
         changed = "\n".join(path for _status, path in frozen.name_status)
         return changed, format_name_status_for_preflight(
             "\n".join(f"{status}\t{path}" for status, path in frozen.name_status), fallback=changed)
-    try:
-        changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=target_repo)
-    except Exception:
-        changed = ""
+    from ouroboros.tools.review_subject import subject_changes
+
+    # NUL-decoded paths: a display-quoted name (a UTF-8 rename on default Git) would not open in the touched-file
+    # pack. Git's display form is for the preflight's text alone.
+    changed = "\n".join(path for _status, path, _source in subject_changes(target_repo))
+    if not changed:
+        try:
+            changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=target_repo)
+        except Exception:
+            changed = ""
     return changed, _build_preflight_staged(target_repo, fallback=changed)
 
 
@@ -725,6 +731,12 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         words_section = words.omission()
     if task_evidence or words_section:
         _assemble_prompt.compact_optional_evidence = _compact_task_evidence
+
+    def _fallback():  # the older selection, with evidence compaction undone: it may fit beside it whole
+        nonlocal governance, task_evidence_compact, words_section
+        governance, task_evidence_compact, words_section = governance.fallback, False, full_words
+    full_words = words_section
+    _assemble_prompt.fallback = _fallback if getattr(governance, "fallback", None) else None
 
     # P3 stays one-pass. The api pack, its fit ladder and the fixed_overflow
     # gate exist ONLY for the api rows (5.2/5.7): a retrieving row reads with

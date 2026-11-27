@@ -396,10 +396,8 @@ def _query_code_read(
             repo_root, drive_root=pathlib.Path(ctx.drive_root), persist=persist, exclude_paths=exclude_paths,
             scope=scope, path_allowed=admitted, parse=parse, name=name,
         )
-        inventory.files = [
-            file for file in inventory.files
-            if _visible_file(ctx, repo_root, file.path, binding, runtime_check)
-        ]
+        visible = [file for file in inventory.files if _visible_file(ctx, repo_root, file.path, binding, runtime_check)]
+        inventory.files = visible
         return inventory
 
     try:
@@ -429,10 +427,19 @@ def _query_code_read(
                 # would resolve the spelling again in the container, under different facts.
                 return work_domain.read_bytes(source.target_path, strict=True)
 
+            def list_prefix(prefix: str) -> tuple[list[str], list[str]]:
+                # module_map walks only the named prefix, path-only: no whole-repository parse.
+                listed = admitted_inventory(prefix, parse=False)
+                limits = list(listed.enumeration_limits)
+                scope = repo_root / prefix
+                if not listed.files and work_domain.kind(scope) != "missing" and not admitted(scope):
+                    limits.append("module_map_scope_not_admitted: this resource view cannot list that prefix")
+                return [file.path for file in listed.files], limits
+
             try:
                 rows = architecture_fact_rows(
                     repo_root, query, inventory=lambda: admitted_inventory(""),
-                    read_book_bytes=read_book_bytes,
+                    read_book_bytes=read_book_bytes, list_prefix=list_prefix, deadline=deadline,
                 )
                 view.notes = ["method: pinned architecture carriers; scope: repository; path targets are in query"]
             except ValueError as exc:
@@ -515,7 +522,8 @@ def get_tools() -> List[ToolEntry]:
                 "separate bounded filesystem walk (Python also supports AST class names). Missing grammar or "
                 "partial coverage is disclosed. architecture reads pinned repository carriers with query='<fact> "
                 "<argument>': owner_of, domain_dependencies, facade_consumers, persistence_entities_written_by, "
-                "protected_contracts_affected. Pages rescan current files, not an immutable snapshot. "
+                "protected_contracts_affected, module_map (domains, a domain id or a path prefix: addresses with "
+                "docstring/header leads). Pages rescan current files, not an immutable snapshot. "
                 "Use search_code for arbitrary literal/regex search; inspect source anchors to assess meaning."
             ),
             "parameters": {"type": "object", "properties": {
