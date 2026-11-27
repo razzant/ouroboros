@@ -1328,6 +1328,7 @@ def call_llm_with_retry(
     send_clock_policy: Any = None, max_tokens: int = MAIN_LOOP_MAX_TOKENS, configured_api_child: bool = False,
     physical_fit_predicate: Optional[Callable[[Any], Any]] = None,  # every send; candidate_predicate is first-attempt-only
     local_consideration: bool = False, letter_send: Any = None,
+    processing_connection: tuple[str, str] | None = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
     """Call one model with bounded retries and deadline-aware transport.
 
@@ -1405,6 +1406,7 @@ def call_llm_with_retry(
                     _own_capture(last_physical_attempt_capture(), prior)),  # sent: its own attempt's fact
                 "model_account_override": account,
                 "processing_preference": processing_preference,
+                **({"processing_connection": processing_connection} if processing_connection else {}),
                 "reasoning_effort": effort,
                 "max_tokens": max_tokens,
                 **main_loop_wire_options(model, allow_server_web_search=allow_server_web_search,

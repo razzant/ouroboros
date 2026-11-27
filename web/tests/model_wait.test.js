@@ -386,7 +386,7 @@ test('saving a new Main model from its wait card says once, before Apply, that M
     root.querySelector('[data-wait-persist]').checked = true;
     main(2);
     assert.equal(scope(), MAIN_KEEPS_TIER);
-    assert.match(MAIN_KEEPS_TIER, /confirm it in Main or Settings/);
+    assert.match(MAIN_KEEPS_TIER, /confirm it in Settings/);
     // Another role saved in Settings takes nothing of Main's tier.
     main(3, 'light');
     assert.doesNotMatch(scope(), /tier/);

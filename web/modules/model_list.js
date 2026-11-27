@@ -1,15 +1,16 @@
 // The one list of models (docs/DESIGN.md "Composer owner controls"): a field and its suggestions, the body of the Model
 // sheet in a composer (composer_model.js) and on a work's card (card_model.js), model_sheet.js around both. Without a
-// query it shows Main (`mainRow`), the pinned models, the recent ones, then the sources that can lead a work (one
-// source: its models at once; more: folded under `All sources`); typed words search every source; any id can be used
-// as typed. The catalog suggests and never admits (chat_model_routes.js).
+// query it shows Main on a work's card (`mainRow`; a composer has no such row and may say one line instead, `lead`),
+// the pinned models, the recent ones, then the sources that can lead a work (one source: its models at once; more:
+// folded under `All sources`); typed words search every source; any id can be used as typed. The catalog suggests and
+// never admits (chat_model_routes.js).
 //
 // The list is a grid the field drives (a combobox over it, focus stays in the field): a row's first cell picks its
 // model, its second is its Pin. Arrows Up and Down move among rows, then Right and Left between that row's cells
 // (until then they move the caret), Enter presses the active cell; a pointer presses either. The active row is its
 // model's, not a place: a repaint (another window's Pin, a state read) keeps it on that model or clears it when the
-// model left the list. Main's row is the one way to follow Main: a model row is always that route, even the model Main
-// runs on now. A Pin chooses nothing and leaves the list open.
+// model left the list. Main's row, where a list has one, is the one way to follow Main: a model row is always that
+// route, even the model Main runs on now. A Pin chooses nothing and leaves the list open.
 import { fmt, tr } from './i18n.js';
 import { sourceMark } from './model_source_mark.js';
 import { SHELL_ICONS } from './page_icons.js';
@@ -52,16 +53,17 @@ export function modelSearchField(doc, listId) {
 /**
  * The list painted into `el` (the grid) and driven by `input`. `main()`, `current()` and `recents()` are the caller's
  * routes (Main's now, the chosen one, the recent ones to offer); `follows()` says whether the scope follows Main now.
- * `mainRow`: `follow` puts Main first as the way to follow it (its facts `mainFacts()`), `main` puts Main's own model
- * first as the chosen one (the Main chat), false none. `tierOf(route, { main })` is the processing tier a pick would
- * run on here: a catalog price is said only where that tier pays it. `onRoute(route)` takes a pick (null: follow
- * Main), `onPin(route, pinned)` a Pin, `onSettings()` the way to Settings › Accounts and keys where nothing but Main can
- * lead, `onLeave({focus})` an Escape with nothing typed; `onPaint()` follows every repaint. Returns
- * `{ paint, destroy }`.
+ * `mainRow`: `follow` puts Main first as the way to follow it (its facts `mainFacts()`), false none (a composer:
+ * `lead()` then gives the one line it says above its rows, '' for none). `tierOf(route, { main, current })` is the
+ * processing tier a pick would run on here, and for the row `current` now the tier its scope's work runs on: a
+ * catalog price is said only where that tier pays it. `onRoute(route)` takes a pick
+ * (null: follow Main), `onPin(route, pinned)` a Pin, `onSettings()` the way to Settings › Accounts and keys where
+ * nothing but Main can lead, `onLeave({focus})` an Escape with nothing typed; `onPaint()` follows every repaint.
+ * Returns `{ paint, destroy }`.
  */
 export function createModelList({ el, input, id, store, main, current, recents, follows = () => false, mainRow = 'follow',
-    mainFacts = null, tierOf = () => undefined, onRoute, onPin = () => {}, onSettings = () => {}, onLeave = () => {},
-    onPaint = () => {} }) {
+    mainFacts = null, lead = null, tierOf = () => undefined, onRoute, onPin = () => {}, onSettings = () => {},
+    onLeave = () => {}, onPaint = () => {} }) {
     // `key` is the active row's model (its data-row), `nav` whether the arrows made it active, `shown` the row and cell
     // last scrolled into view.
     const search = { query: '', only: '', sources: false, active: -1, key: '', cell: 0, nav: false, rows: [],
@@ -96,7 +98,8 @@ export function createModelList({ el, input, id, store, main, current, recents, 
         const parts = [];
         const shown = new Set();
         const add = (route, options = {}) => {
-            const said = describe(route);
+            // The row current now says what is true of it now: the tier its scope's work runs on, never a pick's.
+            const said = describe(route, { current: sameRoute(route, chosen) });
             const key = said.key;
             if (shown.has(key)) return;
             shown.add(key);
@@ -113,15 +116,16 @@ export function createModelList({ el, input, id, store, main, current, recents, 
         };
         if (!search.query && !search.only) {
             if (mainRow && mainRoute) {
-                // Main's row: the way to follow Main (a room, a work), or Main itself (the Main chat).
+                // Main's row: a work's way to follow Main.
                 const said = describe(mainRoute, { main: true });
                 picks.set('main', { main: true, route: mainRoute });
-                parts.push(rowMarkup('main', said, mainRow === 'follow'
-                    ? { name: tr('model.row.main', 'Main'), selected: following, kind: 'main',
-                        facts: mainFacts?.() || fmt('Follows Main · {model}', { model: said.short }) }
-                    : { tag: 'Main', selected: true, kind: 'main', pin: store.isPinned(mainRoute) }));
-                if (mainRow === 'main') shown.add(said.key);
+                parts.push(rowMarkup('main', said, { name: tr('model.row.main', 'Main'), selected: following, kind: 'main',
+                    facts: mainFacts?.() || fmt('Follows Main · {model}', { model: said.short }) }));
             }
+            // A composer's one line above its rows: composed (it may name an account), so the overlay leaves it.
+            const leading = lead?.();
+            // Its own class: `chat-model-note` is the list's passing word (a read in flight, nothing to offer).
+            if (leading) parts.push(`<p class="chat-model-lead" role="presentation" data-i18n-skip>${esc(leading)}</p>`);
             // A section heads only rows it adds: a pin already shown above (Main's own model) adds none.
             const pins = store.pins().filter((route) => !shown.has(routeKey(route)));
             if (pins.length) { section(tr('model.section.pinned', 'Pinned')); pins.forEach((route) => add(route)); }

@@ -128,6 +128,15 @@ def _ordinary_room_reader(ctx: Any, row: dict) -> bool:
         restricted_return(task) for task in getattr(ctx, "PENDING", ()) if str(task.get("id") or "") == tid)
 
 
+def _sent_as_new_work(task_metadata: Any) -> bool:
+    """My human's web words accepted as new work on their room's model (``message_ingress.new_work_choice``): their
+    own turn starts on what that acceptance assigned (``worker_chat_lane._seed_task``), so no work already running
+    reads them as its input."""
+    from ouroboros.route_choice import new_work_carriers
+
+    return isinstance(task_metadata, dict) and bool(new_work_carriers(task_metadata.get("new_work")))
+
+
 def _route_project_chat_to_running_task(
     ctx: Any,
     chat_id: int,
@@ -147,10 +156,11 @@ def _route_project_chat_to_running_task(
     answer or a press on a finished author's card (``thread_of``: that author)
     reads only a head that a late answer or press of the same author started,
     in a Project or Main, the earliest of several: one author's late input is
-    one thread. No other reader receives it. ``roots``: the message's one root snapshot.
+    one thread. No other reader receives it. Words sent as new work (``_sent_as_new_work``) reach no reader
+    either: they start their own turn. ``roots``: the message's one root snapshot.
     """
     try:
-        if not thread_of and not _project_id_for_registered_chat(ctx, chat_id):
+        if not thread_of and (_sent_as_new_work(task_metadata) or not _project_id_for_registered_chat(ctx, chat_id)):
             return ""
     except Exception:
         return ""
@@ -229,11 +239,11 @@ def _route_main_followup(
     a choice among readers. From its confirmed admission the turn takes them only under its durable intake for the
     attempt judged (``conversation_lease.owner_conversation_key``), which its final drain closes under the same mail
     lock, and never once its result settled: no settled-result check alone orders words against a loop in another
-    process. A refusal at any step is the words' own new turn; the receipt says saved, never read. ``roots``: the
-    message's one root snapshot."""
+    process. A refusal at any step is the words' own new turn; the receipt says saved, never read. Words sent as new
+    work (``_sent_as_new_work``) are their own turn too. ``roots``: the message's one root snapshot."""
     try:
         roots = roots if roots is not None else addressable_roots(ctx)
-        if roots.gap:
+        if roots.gap or (not note and _sent_as_new_work(task_metadata)):
             return ""
         fallback = task_metadata.get("work_reply_fallback") if isinstance(task_metadata, dict) else None
         excluded = str(fallback.get("target") or "") if isinstance(fallback, dict) else ""

@@ -1,18 +1,18 @@
 // The Model capsule (composer_model.js; DESIGN "Composer owner controls"): the first capsule of the row. A room's
-// capsule follows Main until the room chooses, and says so; closed it shows the room's choice, never a running work's
-// model, and its processing tier when that is not Standard. A press, never hover, opens the Model sheet (model_sheet.js)
-// over the page: Main's row, the pinned and recent models, all sources, and the tier strip at its foot. A room's pick
-// saves at once for that room; the Main chat's pick asks first and writes Main itself; a tier saves at once and leaves
-// the sheet open; a Pin chooses nothing. The list's own grammar is model_list.test.js; engines, geometry and the sheet's
-// place are the browser lane's.
+// capsule, the Main chat's included, holds the model its next work starts on; it follows Main until the room chooses,
+// and says so; closed it shows the room's choice, never a running work's model, and its processing tier when that is
+// not Standard. A press, never hover, opens the Model sheet (model_sheet.js) over the page: the pinned and recent
+// models, all sources, and the tier strip at its foot; no row follows Main again. A pick saves at once for its room
+// and never writes Main; one that leaves the room on another model arms this window's next message as new work; a
+// tier saves at once, leaves the sheet open and arms nothing; a Pin chooses nothing. The list's own grammar is
+// model_list.test.js; engines, geometry and the sheet's place are the browser lane's.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { describeRoute } from '../modules/chat_model_routes.js';
 import { GENERIC_HARNESS_MARK, HARNESS_MARKS } from '../modules/harness_presentation.js';
-import { MAIN_CACHE_NOTE, MAIN_RULE, confirmMainChange } from '../modules/composer_model.js';
+import { CHAT_NOT_READ, SERVER_OLDER, sameChoice } from '../modules/composer_model.js';
 import { createModelCatalogStore } from '../modules/model_catalog_store.js';
 import { closeModelSheet } from '../modules/model_sheet.js';
-import { MAIN_FOLLOW_NOTE } from '../modules/model_roles.js';
+import { CHAT_ULTRAFAST_FOLLOWS, CHAT_ULTRAFAST_PROFILE_SCOPE, CHAT_ULTRAFAST_SCOPE, confirmChatUltrafast } from '../modules/processing_choice.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { modelSheetOutline, modelSheetRows, mountPair, sleep } from './composer_controls_fixture.js';
 
@@ -30,13 +30,13 @@ const CATALOG = {
         codex('gpt-5-old', { availability: 'unavailable' }), openrouter(GLM), openrouter(KIMI), openrouter('x-ai/grok-4.7')],
 };
 const STANDARD = { main: '', default: 'standard' };
-const MAIN_FALLBACK_WORK = { work_id: 'fallback-work', live: true, activity: 'working',
-    lead: { ...route(SOL), basis: 'fallback', role: 'fallback:0', primary: { ...route(ASTRA), basis: 'main' } },
-    processing: { choice: '', resolved: 'standard' } };
-const MAIN_TOKENS = { OUROBOROS_MODEL: 'a'.repeat(24), USE_LOCAL_MAIN: 'b'.repeat(24),
-    OUROBOROS_MODEL_ACCOUNTS: 'c'.repeat(24), OUROBOROS_MODEL_PROCESSING_PREFERENCES: 'd'.repeat(24) };
-// Each API connection's opaque revision (`_meta.connections[].revision`, its picker id first).
-const OR_SOURCE = 'openrouter#r1', OPENAI_SOURCE = 'openai#r1';
+// An API connection's opaque revision (`_meta.connections[].revision`, its picker id first).
+const OR_SOURCE = 'openrouter#r1';
+// The token the fixture's writer answers a saved choice with (composer_controls_fixture.js), as the host's own does.
+const tokenOf = (projectId, model) => `token:${projectId}:${model}`;
+// What a sheet says above its rows while its room still follows Main, before any pick (the fixture's outline form).
+const OWN_ROUTE = 'New tasks here take the model you pick, on Auto across its source’s accounts and with its own context window; running tasks keep theirs.';
+const FOLLOWS = `lead: This model is set in Settings › Models. ${OWN_ROUTE}`;
 // The window's catalog store with its reads counted; its pins are written as the server keeps them (`savePins` answers
 // instead when given).
 const storeOf = ({ catalog = CATALOG, recents = [], pins = [], connections = [{ id: 'openrouter', configured: true, revision: OR_SOURCE }], main = ASTRA, settings = {}, savePins = null, processing = null } = {}) => {
@@ -51,7 +51,7 @@ const storeOf = ({ catalog = CATALOG, recents = [], pins = [], connections = [{ 
             reads.settings += 1;
             if (settings instanceof Error) throw settings;
             const doc = { OUROBOROS_MODEL: main, USE_LOCAL_MAIN: false, OUROBOROS_MODEL_ACCOUNTS: {}, OUROBOROS_MODEL_PROCESSING_PREFERENCES: {},
-                _meta: { connections, tokens: { ...MAIN_TOKENS, OUROBOROS_MODEL_LIGHT: 'unrelated' } } };
+                _meta: { connections, tokens: { OUROBOROS_MODEL_LIGHT: 'unrelated' } } };
             return typeof settings === 'function' ? settings(doc) : { ...doc, ...settings };
         },
         readProcessing: async (value) => { reads.processing.push(value); if (!processing) throw new Error('not read'); return processing(value); },
@@ -67,18 +67,24 @@ const storeOf = ({ catalog = CATALOG, recents = [], pins = [], connections = [{ 
 };
 const flush = async () => { for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 const COGNITION = { context_mode: 'max', subagents_mode: 'auto', effort_range: { min: 'low', recommended: 'high', max: 'max' } };
+const MAIN_CHAT = { scope: 'main_chat' };  // how a save names the Main chat (a room is named by its project_id)
 
 /* A room's composer row (or the Main chat's, `projectId: ''`) with its Model capsule, fed one state body: Main's route,
-   the tiers (`processing_tiers`), and the room's own model (`choice`) and tier (`tier`). */
+   the tiers (`processing_tiers`), and the room's own model (`choice`) and tier (`tier`): a Project's on its row, the
+   Main chat's as `main_chat`. `asked` holds the Ultrafast questions put (`confirmed.value` answers them), `armings`
+   counts the capsule's words that what the next message is sent as may have changed. */
 function room({ projectId = 'p7', chatId = 7, choice = { kind: 'main' }, tier = '', main = ASTRA, tiers = STANDARD, model = {},
     storeOptions, ...rest } = {}) {
     const kept = storeOf({ main, settings: { OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: tiers?.main || '' },
         OUROBOROS_PROCESSING_PREFERENCE: tiers?.default || '' }, ...storeOptions });
     const asked = [];
     const confirmed = { value: true };
+    const armings = { count: 0 };
     const m = mountPair({ projectId, chatId, subagents: true, ...rest, model: { store: kept.store,
-        askMain: async (request) => { asked.push(request); return confirmed.value; }, ...model } });
+        askTier: async (request) => { asked.push(request); return confirmed.value; },
+        onNewWork: () => { armings.count += 1; }, ...model } });
     const state = (extra = {}) => ({ ...(projectId ? {} : COGNITION), main_route: route(main), ...(tiers ? { processing_tiers: tiers } : {}),
+        ...(projectId ? {} : { main_chat: { model_choice: choice, processing_choice: tier } }),
         projects: projectId ? [{ id: projectId, chat_id: chatId, cognition: COGNITION, model_choice: choice, processing_choice: tier }] : [], ...extra });
     m.controls.syncState(state());
     const el = m.modelEl;
@@ -111,7 +117,8 @@ function room({ projectId = 'p7', chatId = 7, choice = { kind: 'main' }, tier = 
         return m.fire(input(), 'keydown', event).then(() => event);
     };
     const posted = (url) => () => m.posts.filter(([to]) => to === url).map(([, body]) => body);
-    return { ...m, ...kept, el, state, asked, confirmed, sheet, list, input, take, pin, strip, chooseTier, tierView, type, key,
+    return { ...m, ...kept, el, state, asked, confirmed, armings, sheet, list, input, take, pin, strip, chooseTier, tierView, type, key,
+        newWork: m.controls.model.newWork,
         modelPosts: posted('/api/owner/chat-model'), tierPosts: posted('/api/owner/chat-processing'),
         name: () => part('name').textContent, value: () => part('value').textContent,
         tierWord: () => (part('tier').hidden ? '' : part('tier').textContent),
@@ -122,7 +129,7 @@ function room({ projectId = 'p7', chatId = 7, choice = { kind: 'main' }, tier = 
 test('a room follows Main until it chooses, and says so: the name word is Main, the value Main\'s model', () => {
     const r = room();
     assert.deepEqual([r.name(), r.value(), r.el.dataset.known, r.el.dataset.own], ['Main', 'gpt-6-astra', 'true', 'false']);
-    assert.match(r.modelHead.getAttribute('aria-label'), /^Model for new work here: gpt-6-astra, Codex\. Follows Main\.$/);
+    assert.match(r.modelHead.getAttribute('aria-label'), /^Model for new work here: gpt-6-astra, Codex\. Set in Settings › Models\.$/);
     // Main moves: a follower reads it live.
     r.controls.syncState(r.state({ main_route: route(GLM) }));
     assert.deepEqual([r.name(), r.value()], ['Main', 'glm-5.3']);
@@ -217,18 +224,25 @@ test('closed, the capsule names the tier its new work takes beside the model, on
     assert.deepEqual(closed({ tiers: { main: 'fast', default: 'economy' }, tier: 'standard' }), ['', 'standard'],
         'an explicit Standard is a choice of its own, and is not named');
     assert.deepEqual(closed({ tiers: null }), ['', 'default'], 'no tiers read: nothing named');
-    assert.deepEqual(closed({ projectId: '', chatId: 1, tiers: { main: '', default: 'fast' } }), ['Fast', 'fast'], 'the Main chat is Main\'s own tier');
+    assert.deepEqual(closed({ projectId: '', chatId: 1, tiers: { main: '', default: 'fast' } }), ['Fast', 'fast'], 'the Main chat follows Main like a room');
     assert.deepEqual(closed({ projectId: '', chatId: 1, tiers: { main: 'standard', default: 'fast' } }), ['', 'standard']);
+    assert.deepEqual(closed({ projectId: '', chatId: 1, tiers: { main: 'fast', default: 'standard' }, tier: 'economy' }), ['Flex', 'economy'],
+        'and its own tier comes first, as a room\'s does');
+    assert.deepEqual(closed({ projectId: '', chatId: 1, tiers: { main: 'fast', default: 'standard' }, choice: { kind: 'model', model: GLM, use_local: false } }),
+        ['', 'standard'], 'on a model of its own it takes the default tier, not Main\'s');
     // Read live, and said to a screen reader with the model.
     const r = room({ tiers: { main: 'fast', default: 'standard' } });
-    assert.equal(r.modelHead.getAttribute('aria-label'), 'Model for new work here: gpt-6-astra, Fast, Codex. Follows Main.');
+    assert.equal(r.modelHead.getAttribute('aria-label'), 'Model for new work here: gpt-6-astra, Fast, Codex. Set in Settings › Models.');
     r.controls.syncState(r.state({ processing_tiers: STANDARD }));
     assert.deepEqual([r.tierWord(), r.el.querySelector('.chat-capsule-tier').hidden], ['', true]);
     r.controls.syncState(r.state({ projects: [{ id: 'p7', cognition: COGNITION, model_choice: { kind: 'main' }, processing_choice: 'fast' }] }));
     assert.equal(r.tierWord(), 'Fast', 'the room\'s own tier from its project row');
     r.controls.destroy();
     const main = room({ projectId: '', chatId: 1, tiers: { main: 'economy', default: 'standard' } });
-    assert.equal(main.modelHead.getAttribute('aria-label'), 'Main model: gpt-6-astra, Flex, Codex.');
+    assert.equal(main.modelHead.getAttribute('aria-label'), 'Model for new work here and in new rooms: gpt-6-astra, Flex, Codex. Set in Settings › Models.');
+    main.controls.syncState(main.state({ main_chat: { model_choice: { kind: 'model', model: GLM, use_local: false }, processing_choice: '' } }));
+    assert.equal(main.modelHead.getAttribute('aria-label'), 'Model for new work here and in new rooms: glm-5.3, OpenRouter.');
+    assert.deepEqual([main.name(), main.value(), main.el.dataset.own], ['OpenRouter', 'glm-5.3', 'true']);
     main.controls.destroy();
 });
 
@@ -258,64 +272,6 @@ test('a press opens the Model sheet over the page, by the composer row; a second
     assert.equal(r.sheet(), null, 'the sheet goes with its capsule');
 });
 
-test('a room\'s sheet: Main\'s row to follow Main, the pinned and recent models, then all sources; its own model leads the recents', async () => {
-    const r = room({ tiers: { main: 'fast', default: 'standard' }, storeOptions: { recents: [route(GLM), route(ASTRA)], pins: [route(KIMI)] } });
-    await r.open();
-    assert.deepEqual(r.outline(), ['main *', '§ Pinned', `route|${KIMI} +pin`, '§ Recent', `route|${GLM} -pin`, `route|${ASTRA} -pin`, 'sources']);
-    assert.deepEqual([r.rows()[0].name, r.rows()[0].facts], ['Main', 'Follows Main · gpt-6-astra · Fast'], 'Main\'s row says what it follows');
-    r.controls.destroy();
-    const own = room({ choice: { kind: 'model', model: SOL, use_local: false }, storeOptions: { recents: [route(GLM), route(SOL)] } });
-    await own.open();
-    assert.deepEqual(own.outline(), ['main', '§ Recent', `route|${SOL} * -pin`, `route|${GLM} -pin`, 'sources'], 'once, first');
-    assert.equal(own.rows()[0].facts, 'Follows Main · gpt-6-astra');
-    own.controls.destroy();
-});
-
-test('a model row is always that model: Main\'s model picked as a row becomes the room\'s own; only Main\'s row follows Main', async () => {
-    const r = room({ storeOptions: { recents: [route(ASTRA)] } });
-    await r.open();
-    await r.take(`route|${ASTRA}`);
-    assert.equal(r.sheet(), null, 'a pick closes the sheet');
-    assert.equal(await r.controls.model.pendingSave(), true);
-    assert.deepEqual(r.modelPosts(), [{ kind: 'model', model: ASTRA, use_local: false, project_id: 'p7' }], 'never a follow of Main');
-    assert.deepEqual([r.name(), r.value(), r.el.dataset.own], ['Codex', 'gpt-6-astra', 'true'], 'it stays when Main moves');
-    r.controls.syncState(r.state({ main_route: route(GLM), projects: [{ id: 'p7', model_choice: { kind: 'model', model: ASTRA, use_local: false } }] }));
-    assert.deepEqual([r.name(), r.value()], ['Codex', 'gpt-6-astra']);
-    await r.open();
-    assert.deepEqual(r.rows().filter((entry) => entry.selected).map((entry) => entry.key), [`route|${ASTRA}`]);
-    await r.take('main');
-    assert.equal(await r.controls.model.pendingSave(), true);
-    assert.deepEqual(r.modelPosts().at(-1), { kind: 'main', project_id: 'p7' });
-    assert.deepEqual([r.name(), r.value(), r.el.dataset.own], ['Main', 'glm-5.3', 'false']);
-    // Already following: Main's row saves nothing and closes the sheet.
-    await r.open();
-    await r.take('main');
-    assert.deepEqual([r.modelPosts().length, r.sheet()], [2, null]);
-    r.controls.destroy();
-});
-
-test('a room\'s pick saves at once for that room and Send can wait for it; the chosen model again saves nothing', async () => {
-    const r = room({ storeOptions: { recents: [route(GLM)] } });
-    r.modelHead.isConnected = true;  // on the page: the focus can come back to it
-    await r.open();
-    let answer;
-    r.modelAnswer.value = new Promise((resolve) => { answer = resolve; });
-    await r.take(`route|${GLM}`);
-    assert.deepEqual(r.modelPosts(), [{ kind: 'model', model: GLM, use_local: false, project_id: 'p7' }]);
-    assert.deepEqual([r.controls.hasPendingSave(), r.el.dataset.disabled, r.name()], [true, 'true', 'Main'], 'unsaved, it is not shown as saved');
-    assert.equal(r.doc.activeElement, r.modelHead, 'the sheet closed with the pick, the focus is back on the capsule');
-    r.controls.syncState(r.state());
-    answer({ ok: true, project_id: 'p7', model_choice: { kind: 'model', model: GLM, use_local: false }, previous_model_choice: { kind: 'main' } });
-    assert.equal(await r.controls.pendingSave(), true);
-    assert.deepEqual([r.name(), r.value(), r.el.dataset.disabled, r.refreshes.at(-1)], ['OpenRouter', 'glm-5.3', 'false', true]);
-    assert.equal(r.reads.recents, 2, 'the server wrote the act into the recents: they are read again');
-    r.modelAnswer.value = null;
-    await r.open();
-    await r.take(`route|${GLM}`);
-    assert.deepEqual([r.modelPosts().length, r.sheet()], [1, null], 'the chosen model again saves nothing');
-    r.controls.destroy();
-});
-
 test('a refused save keeps the saved value and says why; an answer for another room or without the choice is no save', async () => {
     const r = room({ storeOptions: { recents: [route(GLM)] } });
     // The answer is made as the press is: a refusal waits for no one. Send asks while the save is out.
@@ -336,245 +292,6 @@ test('a refused save keeps the saved value and says why; an answer for another r
     r.controls.destroy();
 });
 
-test('in the Main chat the capsule is Main itself: a pick asks first, then writes Main and says what else changed', async () => {
-    const r = room({ projectId: '', chatId: 1, storeOptions: { recents: [route(GLM)] } });
-    assert.deepEqual([r.name(), r.value(), r.el.dataset.own], ['Main', 'gpt-6-astra', 'false']);
-    assert.match(r.modelHead.getAttribute('aria-label'), /^Main model: gpt-6-astra, Codex\.$/);
-    await r.open();
-    assert.equal(r.sheet().getAttribute('aria-label'), 'Main model');
-    assert.deepEqual(r.outline(), ['main * -pin', '§ Recent', `route|${GLM} -pin`, 'sources'], 'Main\'s own model, chosen, with its Pin');
-    assert.deepEqual([r.rows()[0].name, r.rows()[0].tags, r.rows()[0].facts], ['gpt-6-astra', ['Main'], '872K · Codex · subscription']);
-    await r.take('main');
-    await flush();
-    assert.deepEqual([r.asked, r.modelPosts()], [[], []], 'Main\'s own row changes nothing');
-    r.confirmed.value = false;
-    await r.open();
-    await r.take(`route|${GLM}`);
-    await flush();
-    assert.deepEqual([r.sheet(), r.modelPosts(), r.value()], [null, [], 'gpt-6-astra'], 'cancelled: nothing is written');
-    assert.deepEqual([r.asked[0].next.short, r.asked[0].next.sourceLabel, r.asked[0].previous.short], ['glm-5.3', 'OpenRouter', 'gpt-6-astra']);
-    r.confirmed.value = true;
-    r.modelAnswer.value = { ok: true, project_id: '', main_route: route(GLM), previous_main_route: route(ASTRA), account: 'auto', window_reset: true };
-    await r.open();
-    await r.take(`route|${GLM}`);
-    await flush();
-    assert.deepEqual(r.modelPosts(), [{ kind: 'model', model: GLM, use_local: false, if_unchanged: MAIN_TOKENS }],
-        'no project: the write is Main\'s own, on the binding it was shown');
-    assert.deepEqual([r.value(), r.toasts.at(-1)], ['glm-5.3', ['Main\'s account is Auto now. Main\'s context window set by hand was cleared.', 'info']]);
-    // Nothing else changed: nothing more is said.
-    r.settings.OUROBOROS_MODEL = GLM;  // the server's Main now
-    r.modelAnswer.value = { ok: true, project_id: '', main_route: route(ASTRA), previous_main_route: route(GLM), account: 'kept', window_reset: false };
-    const toasts = r.toasts.length;
-    await r.controls.model.pick(route(ASTRA));
-    await flush();
-    assert.deepEqual([r.value(), r.toasts.length], ['gpt-6-astra', toasts]);
-    r.controls.destroy();
-});
-
-test('the confirming sheet says what Main becomes, what running work does, and in one line what else is reset', async () => {
-    const calls = [];
-    const dialog = async (options) => { calls.push(options); return true; };
-    const doc = { createElement: (tag) => new ElementStub(tag, doc), byId: new Map() };
-    const next = { short: 'glm-5.3', id: GLM, source: 'openrouter', lane: 'api', kind: 'openrouter', sourceLabel: 'OpenRouter', pay: 'paid by key', window: '1M' };
-    const previous = { short: 'gpt-6-astra', source: 'subscription:codex', lane: 'subscription' };
-    assert.deepEqual(await confirmMainChange({ next, previous, dialog, doc }), { moves: [] });
-    const [sheet] = calls;
-    assert.deepEqual([sheet.title, sheet.confirmLabel], ['Change Main', 'Change Main']);
-    assert.equal(sheet.body, 'If Main\'s account is pinned it becomes Auto, and a context window set by hand for Main is cleared.');
-    const content = doc.createElement('section');
-    sheet.content.mount(content);
-    assert.match(content.children[0].innerHTML, />z-ai\/glm-5\.3<\/b><span data-i18n-skip>was gpt-6-astra<\/span>$/);
-    assert.deepEqual(content.children.slice(1).map((node) => node.textContent),
-        ['OpenRouter · paid by key · 1M window.', `${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`, MAIN_CACHE_NOTE,
-            'How many running works follow Main is unknown right now: the list of running work is incomplete.']);
-    assert.equal(content.children.length, 5, 'no census was given: the count is unknown and there is nothing to list (main_sheet.test.js)');
-    // The catalog's cache-write price for the install's cache tier follows the fact when the catalog states one.
-    await confirmMainChange({ next: { ...next, cacheWrite: 'Cache write: $16 per 1M tokens.' }, previous, dialog, doc });
-    const priced = doc.createElement('section');
-    calls[1].content.mount(priced);
-    assert.equal(priced.children[3].textContent, `${MAIN_CACHE_NOTE} Cache write: $16 per 1M tokens.`);
-    assert.deepEqual([content.children[3].dataset.i18nFmt, priced.children[3].dataset.i18nFmt], [undefined, 'main cache note'],
-        'only the line that carries a figure is composed; the plain sentence stays the overlay\'s to translate');
-    // The same subscription keeps Main's account, so only the window is said.
-    await confirmMainChange({ next: { ...next, source: 'subscription:codex', lane: 'subscription' }, previous, dialog, doc });
-    assert.equal(calls[2].body, 'A context window set by hand for Main is cleared.');
-});
-
-test('an open Change Main dialog updates its source mark and name on a late descriptor while preserving selection, price snapshot, ticks, focus and binding', async () => {
-    const CUSTOM = 'claudexor::custom=model-one';
-    const initialCatalog = {
-        model_sources: [{ id: 'custom', label: 'Custom Source', credentialHarness: 'codex' }],
-        items: [{ provider_id: 'claudexor', provider: 'Custom Source', source_id: 'custom', id: 'model-one', name: 'model-one',
-            value: CUSTOM, max_context_window: 128000, price: { input: 2, output: 10 } }],
-    };
-    let resolveConfirm;
-    let mountedContent;
-    let disposeMounted;
-    const labels = [];
-    const moved = [];
-    const works = [{ work_id: 'w1', room: 7, name: 'Keep work', kind: 'task', project_id: 'p7',
-        episode: { task_id: 't9', live: true }, activity: 'working', live: true, confirmed: true,
-        controls: [{ action: 'model', target: 't9' }], lead: { ...route(GLM), basis: 'owner' } }];
-    const r = room({
-        projectId: '', chatId: 1,
-        storeOptions: { catalog: initialCatalog, recents: [route(CUSTOM)] },
-        model: {
-            moveWork: async (taskId) => { moved.push(taskId); return { ok: true, task_id: taskId, applied: 'next_step' }; },
-            sayMoves: async () => {},
-            askMain: (opts) => confirmMainChange({
-                ...opts,
-                dialog: (dialogOpts) => new Promise((resolve) => {
-                    mountedContent = opts.doc.createElement('section');
-                    const seam = { setConfirmLabel: (words, params = null) => labels.push(params ? words.replace('{n}', String(params.n)) : words) };
-                    disposeMounted = dialogOpts.content.mount(mountedContent, seam);
-                    resolveConfirm = (ok) => { disposeMounted?.(); resolve(ok); };
-                }),
-            }),
-        },
-    });
-    r.controls.syncState(r.state({ works, works_complete: true, supervisor_ready: true }));
-    await r.open();
-    const pickPromise = r.take(`route|${CUSTOM}`);
-    await flush();
-
-    const row = mountedContent.children[0];
-    const facts = mountedContent.children[1];
-    const checkbox = mountedContent.querySelectorAll('.ui-checkbox')[0];
-    assert.ok(row.innerHTML.includes(HARNESS_MARKS.codex.path), 'initial mark while dialog is open');
-    assert.equal(facts.textContent, 'Custom Source · $2 in / $10 out · 128K window.');
-
-    // Tick a checkbox and place focus on it before the late descriptor arrives.
-    checkbox.checked = true;
-    (mountedContent.listeners.get('change') || []).forEach((fn) => fn({}));
-    r.doc.activeElement = checkbox;
-    assert.equal(labels.at(-1), 'Change Main and move 1 more');
-
-    // A late catalog update changes the selected source's mark & label AND alters price/window in the catalog.
-    r.store.adopt({
-        model_sources: [{ id: 'custom', label: 'Claude Custom', credentialHarness: 'claude' }],
-        items: [{ provider_id: 'claudexor', provider: 'Claude Custom', source_id: 'custom', id: 'model-one', name: 'model-one',
-            value: CUSTOM, max_context_window: 999000, price: { input: 99, output: 199 } }],
-    });
-    assert.ok(row.innerHTML.includes(HARNESS_MARKS.claude.path), 'source mark updates in place');
-    assert.match(row.innerHTML, />model-one<\/b><span data-i18n-skip>was gpt-6-astra<\/span>$/);
-    assert.equal(facts.textContent, 'Claude Custom · $2 in / $10 out · 128K window.',
-        'source name updates while displayed price and window snapshot stay frozen');
-    assert.equal(checkbox.checked, true, 'tick stays checked');
-    assert.equal(r.doc.activeElement, checkbox, 'focus is preserved');
-    assert.equal(labels.at(-1), 'Change Main and move 1 more', 'confirm button label stays intact');
-
-    // Confirming writes the original selected route with its exact binding and executes the ticked move.
-    resolveConfirm(true);
-    await pickPromise;
-    await flush();
-    assert.deepEqual(r.modelPosts(), [{ kind: 'model', model: CUSTOM, use_local: false, if_unchanged: MAIN_TOKENS }]);
-    assert.deepEqual(moved, ['t9']);
-
-    // After dialog closes, further catalog updates do not mutate the closed dialog's DOM.
-    r.store.adopt({
-        model_sources: [{ id: 'custom', label: 'After Close', credentialHarness: 'agy' }],
-        items: [],
-    });
-    assert.ok(row.innerHTML.includes(HARNESS_MARKS.claude.path));
-    assert.equal(facts.textContent, 'Claude Custom · $2 in / $10 out · 128K window.');
-    r.controls.destroy();
-});
-
-test('an open Change Main dialog refreshes the listed rows\' model words on the same late rename, in place: their nodes, ticks and targets stay the sheet\'s own', async () => {
-    const CUSTOM = 'claudexor::custom=model-one';
-    const initialCatalog = {
-        model_sources: [{ id: 'custom', label: 'Custom Source', credentialHarness: 'codex' }],
-        items: [{ provider_id: 'claudexor', provider: 'Custom Source', source_id: 'custom', id: 'model-one', name: 'model-one',
-            value: CUSTOM, max_context_window: 128000, price: { input: 2, output: 10 } }],
-    };
-    let resolveConfirm;
-    let mountedContent;
-    let disposeMounted;
-    const labels = [];
-    const moved = [];
-    const works = [{ work_id: 'w1', room: 7, name: 'Keep work', kind: 'task', project_id: 'p7',
-        episode: { task_id: 't9', live: true }, activity: 'working', live: true, confirmed: true,
-        controls: [{ action: 'model', target: 't9' }], lead: { ...route(CUSTOM), basis: 'owner' } }];
-    const rooms = [
-        { id: 'p7', name: 'Work room', model_choice: { kind: 'main' } },
-        { id: 'p8', name: 'Own room', model_choice: { kind: 'model', model: CUSTOM, use_local: false } },
-    ];
-    const r = room({
-        projectId: '', chatId: 1,
-        storeOptions: { catalog: initialCatalog, recents: [route(CUSTOM)] },
-        model: {
-            moveWork: async (taskId) => { moved.push(taskId); return { ok: true, task_id: taskId, applied: 'next_step' }; },
-            sayMoves: async () => {},
-            askMain: (opts) => confirmMainChange({
-                ...opts,
-                dialog: (dialogOpts) => new Promise((resolve) => {
-                    mountedContent = opts.doc.createElement('section');
-                    const seam = { setConfirmLabel: (words, params = null) => labels.push(params ? words.replace('{n}', String(params.n)) : words) };
-                    disposeMounted = dialogOpts.content.mount(mountedContent, seam);
-                    resolveConfirm = (ok) => { disposeMounted?.(); resolve(ok); };
-                }),
-            }),
-        },
-    });
-    r.controls.syncState(r.state({ works, projects: rooms, works_complete: true, supervisor_ready: true }));
-    await r.open();
-    const pickPromise = r.take(`route|${CUSTOM}`);
-    await flush();
-
-    const rowsOf = () => mountedContent.querySelectorAll('.chat-model-off');
-    const tickOf = (row) => row.querySelector('.ui-checkbox');
-    const rowOf = (move) => rowsOf().find((row) => tickOf(row)?.dataset.move === move);
-    const modelWords = (row) => row.querySelector('.chat-model-off-meta').children[0].textContent;
-    const workRow = rowOf('work:t9');
-    const roomRow = rowOf('room:p8');
-    assert.ok(workRow && roomRow, 'a work on other models and a room with its own, both on the picked route\'s source');
-    assert.deepEqual([modelWords(workRow), modelWords(roomRow)], ['Custom Source · model-one · ', 'Custom Source · model-one'],
-        'the rows beneath the heading say the source as the catalog the census met');
-    const workTick = tickOf(workRow);
-    const roomTick = tickOf(roomRow);
-    workTick.checked = true;
-    roomTick.checked = true;
-    (mountedContent.listeners.get('change') || []).forEach((fn) => fn({}));
-    r.doc.activeElement = workTick;
-    assert.equal(labels.at(-1), 'Change Main and move 2 more');
-
-    // A late catalog update renames the source both rows and the heading name.
-    const readsBefore = [r.reads.catalog, r.reads.recents, r.reads.settings];
-    r.store.adopt({
-        model_sources: [{ id: 'custom', label: 'Lab Claude', credentialHarness: 'claude' }],
-        items: [{ provider_id: 'claudexor', provider: 'Lab Claude', source_id: 'custom', id: 'model-one', name: 'model-one',
-            value: CUSTOM, max_context_window: 128000, price: { input: 2, output: 10 } }],
-    });
-    assert.equal(mountedContent.children[1].textContent, 'Lab Claude · $2 in / $10 out · 128K window.', 'the heading said the renamed source');
-    assert.deepEqual([modelWords(workRow), modelWords(roomRow)], ['Lab Claude · model-one · ', 'Lab Claude · model-one'],
-        'the rows beneath say the renamed source too, written in place');
-    assert.ok(rowsOf().includes(workRow) && rowsOf().includes(roomRow), 'the same nodes, not a rebuild');
-    assert.deepEqual([workTick.checked, roomTick.checked], [true, true], 'the ticks stay checked');
-    assert.equal(r.doc.activeElement, workTick, 'the focus stays where the owner put it');
-    assert.equal(labels.at(-1), 'Change Main and move 2 more', 'the confirm label stays intact');
-    assert.deepEqual([r.reads.catalog, r.reads.recents, r.reads.settings], readsBefore,
-        'no fetch: the words come from the store the sheet already holds');
-
-    // Confirming writes the picked route with its binding, and each tick moves its own original target.
-    resolveConfirm(true);
-    await pickPromise;
-    await flush();
-    assert.deepEqual(r.modelPosts(), [
-        { kind: 'model', model: CUSTOM, use_local: false, if_unchanged: MAIN_TOKENS },
-        { kind: 'main', project_id: 'p8' },
-    ]);
-    assert.deepEqual(moved, ['t9']);
-
-    // After the dialog closed, its rows keep their words: the sheet's subscription went with it.
-    r.store.adopt({
-        model_sources: [{ id: 'custom', label: 'After Close', credentialHarness: 'agy' }],
-        items: [],
-    });
-    assert.deepEqual([modelWords(workRow), modelWords(roomRow)], ['Lab Claude · model-one · ', 'Lab Claude · model-one'],
-        'a closed sheet is not repainted');
-    r.controls.destroy();
-});
-
 test('a Pin chooses nothing: it writes the pins alone, keeps the sheet open, and the pinned model stands under Pinned', async () => {
     const r = room({ storeOptions: { recents: [route(GLM)] } });
     await r.open();
@@ -586,11 +303,12 @@ test('a Pin chooses nothing: it writes the pins alone, keeps the sheet open, and
         'no model is chosen, so no recent is written or read');
     assert.ok(r.sheet(), 'the sheet stays open');
     assert.deepEqual([r.name(), r.el.dataset.own], ['Main', 'false']);
-    assert.deepEqual(r.outline(), ['main *', '§ Pinned', `route|${GLM} +pin`, 'sources'], 'a model listed once: under Pinned');
+    assert.deepEqual(r.outline(), [FOLLOWS, '§ Pinned', `route|${GLM} +pin`, '§ Recent', `route|${ASTRA} * -pin`, 'sources'],
+        'a model listed once: under Pinned');
     await r.pin(`route|${GLM}`);
     await flush();
     assert.deepEqual(r.pinWrites.at(-1), { model_pins: { unpin: [route(GLM)] } });
-    assert.deepEqual(r.outline(), ['main *', '§ Recent', `route|${GLM} -pin`, 'sources']);
+    assert.deepEqual(r.outline(), [FOLLOWS, '§ Recent', `route|${ASTRA} * -pin`, `route|${GLM} -pin`, 'sources']);
     r.controls.destroy();
     // A refused pin is said; the list is read again as the server has it.
     const refused = room({ storeOptions: { recents: [route(GLM)], savePins: async () => { throw new Error('Preferences are read-only.'); } } });
@@ -623,7 +341,8 @@ test('a tier press saves the room\'s own tier at once and keeps the sheet open; 
     r.tierAnswer.value = new Promise((resolve) => { answer = resolve; });
     await r.chooseTier('economy');
     assert.deepEqual(r.tierPosts(), [{ processing: 'economy', project_id: 'p7' }]);
-    assert.deepEqual([r.controls.hasPendingSave(), r.modelPosts(), r.asked], [true, [], []], 'a tier moves nothing else');
+    assert.deepEqual([r.controls.hasPendingSave(), r.modelPosts(), r.asked, r.newWork.armed()], [true, [], [], null],
+        'a tier moves nothing else and arms no new work');
     answer({ ok: true, project_id: 'p7', processing_choice: 'economy', previous_processing_choice: '' });
     assert.equal(await r.controls.pendingSave(), true);
     assert.ok(r.sheet(), 'a tier is no pick: the sheet stays open');
@@ -672,41 +391,6 @@ test('Default returns the room to the tier it would take without one; a refused 
     await r.chooseTier('fast');
     assert.equal(await r.controls.pendingSave(), true, 'a refused tier holds no message back: the model is saved');
     assert.deepEqual([r.toasts.at(-1), r.tierView().checked, Boolean(r.sheet())], [['Settings are being written.', 'error'], [], true]);
-    r.controls.destroy();
-});
-
-test('in the Main chat a tier is Main\'s own: no confirmation, and its answer is the tiers every room reads', async () => {
-    const r = room({ projectId: '', chatId: 1, tiers: STANDARD });
-    await r.open();
-    assert.deepEqual([r.tierView().ring, r.tierView().scope.split(' · ')[0]], [['standard'], 'Default'], 'no tier of its own: the default');
-    await r.chooseTier('fast');
-    await r.controls.pendingSave();
-    assert.deepEqual(r.tierPosts(), [{ processing: 'fast' }], 'no project: Main\'s own tier');
-    assert.deepEqual([r.asked, r.modelPosts()], [[], []], 'a tier is no change of Main\'s model: nothing to confirm');
-    assert.deepEqual(r.store.tiers(), { main: 'fast', default: 'standard' }, 'as the answer says them');
-    assert.deepEqual([r.tierWord(), r.tierView().checked, Boolean(r.sheet())], ['Fast', ['fast'], true]);
-    r.tierAnswer.value = { ok: true, project_id: '', main_processing: '', previous_main_processing: 'fast', processing_default: 'economy' };
-    await r.chooseTier('');
-    await r.controls.pendingSave();
-    assert.deepEqual([r.tierPosts().at(-1), r.store.tiers(), r.tierView().ring, r.tierWord()],
-        [{ processing: '' }, { main: '', default: 'economy' }, ['economy'], 'Flex'], 'Default: Main takes the default tier again');
-    r.controls.destroy();
-});
-
-test('the Main tier strip explains inheritance even when the only visible work is on a fallback', async () => {
-    const main = room({ projectId: '', chatId: 1 });
-    main.controls.syncState(main.state({ works: [MAIN_FALLBACK_WORK], works_complete: true, supervisor_ready: true }));
-    await main.open();
-    assert.match(main.tierView().scope, /^Default · Standard · .*inherits its tier, even on a fallback model/);
-    const said = main.tierView().scope;
-    main.controls.syncState(main.state({ works: [], works_complete: false, supervisor_ready: true }));
-    assert.equal(main.tierView().scope, said, 'the rule does not change with the completeness of the model census');
-    main.controls.destroy();
-    // A room's tier is for its new work only.
-    const r = room({ choice: { kind: 'model', model: GLM, use_local: false } });
-    r.controls.syncState(r.state({ works: [MAIN_FALLBACK_WORK], works_complete: true, supervisor_ready: true }));
-    await r.open();
-    assert.equal(r.tierView().scope, 'Default · Standard · for new work here and its new subagents without a tier of their own; running work keeps its own');
     r.controls.destroy();
 });
 
@@ -857,44 +541,35 @@ test('the tiers come with the state body: a price is said where the scope\'s new
     assert.deepEqual(await kimi({ main: 'fast', default: 'standard' }), ['OpenRouter · $0.60 in / $2.50 out', 0],
         'a model row is the room\'s own model: it runs on the default tier, whatever Main\'s');
     assert.deepEqual(await kimi(STANDARD, { tier: 'economy' }), ['OpenRouter · paid by key', 0], 'the room\'s own tier first');
-    assert.deepEqual(await kimi({ main: 'economy', default: 'standard' }, { projectId: '', chatId: 1 }), ['OpenRouter · paid by key', 0],
-        'the Main chat pays Main\'s own tier');
-    assert.deepEqual(await kimi(STANDARD, { projectId: '', chatId: 1 }), ['OpenRouter · $0.60 in / $2.50 out', 0]);
-});
-
-test('Main reads the cache tier for a catalog figure and takes a fresh binding for confirmation', async () => {
-    const cached = { ...CATALOG, items: CATALOG.items.map((item) => (item.value === GLM
-        ? { ...item, price: { input: 1, output: 4, cache_write: 1.25, cache_write_ttl: '1h' } } : item)) };
-    // The settings document says the same tiers as the state body, in its own keys.
-    const asked = async ({ mainTier = '', ...options }) => {
-        const settings = { OUROBOROS_PROMPT_CACHE_TTL: '1h', OUROBOROS_PROCESSING_PREFERENCE: 'standard',
-            OUROBOROS_MODEL_PROCESSING_PREFERENCES: JSON.stringify(mainTier ? { main: mainTier } : {}) };
-        const r = room({ main: KIMI, tiers: { main: mainTier, default: 'standard' }, storeOptions: { catalog: cached, recents: [route(GLM)], settings }, ...options });
+    assert.deepEqual(await kimi({ main: 'economy', default: 'standard' }, { projectId: '', chatId: 1 }), ['OpenRouter · $0.60 in / $2.50 out', 0],
+        'a model picked in the Main chat is its own too: the default tier, never Main\'s');
+    assert.deepEqual(await kimi(STANDARD, { projectId: '', chatId: 1, tier: 'fast' }), ['OpenRouter · paid by key', 0], 'the chat\'s own tier first');
+    // The row current now is Main's model, which this room follows: pressed it changes nothing, so it says the tier
+    // the room's work runs on (Main's), never the one a pick of that model would take.
+    const mainPriced = { ...CATALOG, items: CATALOG.items.map((item) => (item.value === GLM ? { ...item, price: { input: 0.6, output: 2.5 } } : item)) };
+    const current = async (tiers, options = {}) => {
+        const r = room({ tiers, main: GLM, storeOptions: { catalog: mainPriced }, ...options });
         await r.open();
-        await flush();
-        const readsAtOpen = r.reads.settings;
-        await r.take(`route|${GLM}`);
-        await flush();
-        const said = [readsAtOpen, r.reads.settings - readsAtOpen, r.asked[0]?.next.cacheWrite ?? null];
+        const said = r.rows().find((entry) => entry.key === `route|${GLM}`).facts;
         r.controls.destroy();
         return said;
     };
-    assert.deepEqual(await asked({ projectId: '', chatId: 1 }), [1, 1, 'Cache write: $1.25 per 1M tokens.']);
-    assert.deepEqual(await asked({ projectId: '', chatId: 1, mainTier: 'fast' }), [1, 1, ''],
-        'Main on Fast: the figure is Standard\'s, so it is not said');
-    assert.deepEqual(await asked({}), [0, 0, null], 'a room asks no confirmation and needs no cache tier');
+    assert.equal(await current({ main: 'fast', default: 'standard' }), 'OpenRouter · paid by key', 'Main\'s Fast is priced by its endpoint');
+    assert.equal(await current({ main: 'standard', default: 'fast' }), 'OpenRouter · $0.60 in / $2.50 out', 'Main\'s Standard pays the catalog\'s');
+    assert.equal(await current({ main: 'fast', default: 'standard' }, { projectId: '', chatId: 1 }), 'OpenRouter · paid by key', 'the Main chat\'s too');
+    assert.equal(await current({ main: 'fast', default: 'standard' }, { tier: 'standard' }), 'OpenRouter · $0.60 in / $2.50 out', 'the room\'s own tier first');
 });
 
 test('nothing but Main to lead offers the way to Settings › Accounts and keys; a failed catalog read says so', async () => {
     const alone = room({ storeOptions: { catalog: { model_sources: CATALOG.model_sources, items: [] } } });
     await alone.open();
-    assert.deepEqual(alone.outline(), ['main *', 'note: Only Main\'s model can lead work here.', 'accounts']);
+    assert.deepEqual(alone.outline(), [FOLLOWS, '§ Recent', `route|${ASTRA} * -pin`, 'note: Only Main\'s model can lead work here.', 'accounts']);
     await alone.take('accounts');
     assert.deepEqual([alone.settingsOpened, alone.sheet()], [['accounts'], null]);
     alone.controls.destroy();
     const failed = room({ storeOptions: { catalog: new Error('offline') } });
     await failed.open();
-    assert.deepEqual(failed.outline(), ['main *', 'note: The model catalog could not be read.', 'accounts']);
+    assert.deepEqual(failed.outline(), [FOLLOWS, '§ Recent', `route|${ASTRA} * -pin`, 'note: The model catalog could not be read.', 'accounts']);
     failed.controls.destroy();
 });
 
@@ -946,7 +621,8 @@ test('what follows Main reads Main\'s own account, its pin or Auto; a room\'s ow
     assert.deepEqual([offered(work), supports(work).fast, supports(work).ultrafast], [['standard', 'fast', 'ultrafast'], 'listed', 'unknown']);
     work.controls.destroy();
     const home = await opened(room({ storeOptions: pinned('home'), projectId: '', chatId: 1 }));
-    assert.deepEqual([offered(home), supports(home).ultrafast], [['standard', 'fast', 'ultrafast'], 'listed'], 'the Main chat is Main itself');
+    assert.deepEqual([offered(home), supports(home).ultrafast], [['standard', 'fast', 'ultrafast'], 'listed'],
+        'the Main chat that follows Main runs on Main\'s account like any follower');
     home.controls.destroy();
     // The room's own model, the same one: it runs on Auto whatever Main's pin, and no settings are read for it.
     const own = await opened(room({ choice: { kind: 'model', model: ASTRA, use_local: false }, storeOptions: pinned('work') }));
@@ -1131,15 +807,13 @@ test('Main and a room can request Standard over a workspace default even when th
         try {
             assert.deepEqual([offered(r), r.tierView().checked, r.tierView().reset], [['standard'], [], false]);
             assert.match(means(r), /No tier requested.*OpenRouter may apply a workspace default/);
-            if (!projectId) r.tierAnswer.value = { ok: true, project_id: '', main_processing: 'standard', processing_default: '' };
             await r.chooseTier('standard');
             await r.controls.pendingSave();
             assert.deepEqual([offered(r), r.tierView().checked, r.tierView().reset, r.tierWord()], [['standard'], ['standard'], true, '']);
-            if (!projectId) r.tierAnswer.value = { ok: true, project_id: '', main_processing: '', processing_default: '' };
             await r.chooseTier('');
             await r.controls.pendingSave();
             assert.deepEqual([offered(r), r.tierView().checked, r.tierView().reset], [['standard'], [], false]);
-            assert.deepEqual(r.tierPosts(), ['standard', ''].map((processing) => ({ processing, ...(projectId ? { project_id: projectId } : {}) })));
+            assert.deepEqual(r.tierPosts(), ['standard', ''].map((processing) => ({ processing, ...(projectId ? { project_id: projectId } : MAIN_CHAT) })));
         } finally { r.controls.destroy(); }
     }
 });
@@ -1176,343 +850,484 @@ test('a key model\'s own endpoints are read for the route the sheet is on, when 
     offline.controls.destroy();
 });
 
-test('Ultrafast for Main asks first, for the route and account Main has: a cancel writes nothing, a Main that moved is not written', async () => {
-    const questions = [];
-    const answer = { value: false };
-    const main = (options = {}) => room({ projectId: '', chatId: 1, storeOptions: { catalog: TWO_ACCOUNTS,
-        settings: { OUROBOROS_MODEL_ACCOUNTS: { main: 'home' }, OUROBOROS_PROCESSING_PREFERENCE: 'standard' } },
-        model: { askTier: async (facts) => { questions.push(facts); return typeof answer.value === 'function' ? answer.value() : answer.value; } }, ...options });
-    const r = await opened(main());
-    assert.deepEqual(offered(r), ['standard', 'fast', 'ultrafast'], 'Main is offered Ultrafast where its own route and account list it');
-    // Cancel: nothing is written, Main keeps its tier, and the question stood alone (the sheet closed for it).
-    await r.chooseTier('ultrafast');
-    await r.controls.pendingSave();
-    assert.equal(questions.length, 1);
-    const { doc: _doc, ...facts } = questions[0];
-    assert.deepEqual(facts, { model: 'gpt-6-astra', source: 'Codex · Pinned account home', pinned: true, priceSaid: false,
-        explain: 'Requests the fastest processing this source offers. It may cost more.' }, 'the route, what it says of Ultrafast, and no price it was not told');
-    assert.deepEqual([r.tierPosts(), r.store.tiers(), r.sheet(), r.tierWord(), r.toasts, r.controls.hasPendingSave()],
-        [[], STANDARD, null, '', [], false], 'a cancel writes nothing');
-    // Fast and Flex still save at once, without a question.
-    await opened(r);
-    await r.chooseTier('fast');
-    await r.controls.pendingSave();
-    assert.deepEqual([questions.length, r.tierPosts()], [1, [{ processing: 'fast' }]]);
-    // Confirmed: one write of Main's own tier. Even a complete model census cannot narrow the question's scope.
-    r.settings.OUROBOROS_MODEL_PROCESSING_PREFERENCES = { main: 'fast' };
-    const fastTokens = { ...MAIN_TOKENS, OUROBOROS_MODEL_PROCESSING_PREFERENCES: 'e'.repeat(24) };
-    r.settings._meta = { tokens: fastTokens };
-    answer.value = () => {
-        // Another read after the dialog would describe a different saved model.
-        r.settings.OUROBOROS_MODEL = SOL;
-        r.settings._meta = { tokens: { ...fastTokens, OUROBOROS_MODEL: 'f'.repeat(24) } };
-        return true;
-    };
-    const readsBefore = r.reads.settings;
-    r.controls.syncState(r.state({ processing_tiers: { main: 'fast', default: 'standard' }, works_complete: true, supervisor_ready: true,
-        works: [MAIN_FALLBACK_WORK] }));
-    await r.chooseTier('ultrafast');
-    await r.controls.pendingSave();
-    assert.equal(Object.hasOwn(questions[1], 'scope'), false, 'the complete but fallback-only census must not override the shared disclosure');
-    assert.equal(r.reads.settings, readsBefore + 1);
-    assert.equal(questions.length, 2, 'one question per Ultrafast press, including the cancelled one');
-    assert.deepEqual(r.tierPosts(), [{ processing: 'fast' }, { processing: 'ultrafast', if_unchanged: { ...fastTokens, ultrafast: JSON.stringify([ASTRA, false, 'home', 'store-a', 'fp-home']) } }], 'a subscription has no API connection to bind');
-    assert.deepEqual([r.store.tiers().main, r.tierWord(), r.modelPosts()], ['ultrafast', 'Ultrafast', []]);
-    // The server now holds what was written: a sheet opening reads Main's pin fresh (model_sheet.js), and that read is
-    // the stored document, not the one the question was asked on.
-    r.settings.OUROBOROS_MODEL = ASTRA;
-    r.settings.OUROBOROS_MODEL_PROCESSING_PREFERENCES = { main: 'ultrafast' };
-    await opened(r);
-    assert.deepEqual([r.tierView().checked, offered(r)], [['ultrafast'], ['standard', 'fast', 'ultrafast']], 'reopened: the choice is there');
-    r.controls.destroy();
-    // Main moved to another model while the question stood: it was not asked about that one, so nothing is written.
-    const moved = await opened(main());
-    answer.value = () => { moved.controls.syncState(moved.state({ main_route: route(GLM) })); return true; };
-    await moved.chooseTier('ultrafast');
-    await moved.controls.pendingSave();
-    assert.deepEqual([moved.tierPosts(), moved.toasts], [[], [['Main changed while you were asked: Ultrafast was not set.', 'info']]]);
-    moved.controls.destroy();
-    // Its account moved under the question (a pin dropped elsewhere): the same.
-    const unpinned = await opened(main());
-    answer.value = () => { unpinned.store.adoptMainAccount(''); return true; };
-    await unpinned.chooseTier('ultrafast');
-    await unpinned.controls.pendingSave();
-    assert.deepEqual([unpinned.tierPosts(), unpinned.toasts.length], [[], 1]);
-    unpinned.controls.destroy();
-    // The catalog was read again from another engine store under the question: the account's word it was asked on
-    // is not this store's.
-    const restored = await opened(main());
-    answer.value = () => { restored.store.adopt({ ...TWO_ACCOUNTS, store_id: 'another-store' }); return true; };
-    await restored.chooseTier('ultrafast');
-    await restored.controls.pendingSave();
-    assert.deepEqual([restored.tierPosts(), restored.toasts.length], [[], 1]);
-    restored.controls.destroy();
-    const reauthed = await opened(main());
-    const catalog = structuredClone(TWO_ACCOUNTS);
-    const home = catalog.account_catalogs[0].accounts[0].catalog;
-    home.accountFingerprint = 'first';
-    reauthed.store.adopt(catalog);
-    answer.value = () => { home.accountFingerprint = 'replacement'; reauthed.store.adopt(catalog); return true; };
-    await reauthed.chooseTier('ultrafast');
-    await reauthed.controls.pendingSave();
-    assert.deepEqual([reauthed.tierPosts(), reauthed.toasts.length], [[], 1], 'the same pin in the same store changed identity');
-    reauthed.controls.destroy();
-    // A room's Ultrafast is the room's own row: no question, as before.
-    const own = await opened(room({ choice: { kind: 'model', model: ASTRA, use_local: false }, storeOptions: { catalog: TWO_ACCOUNTS },
-        model: { askTier: async (facts) => { questions.push(facts); return false; } } }));
-    const before = questions.length;
-    await own.chooseTier('ultrafast');
-    await own.controls.pendingSave();
-    assert.deepEqual([questions.length, own.tierPosts()], [before, [{ processing: 'ultrafast', project_id: 'p7' }]]);
-    own.controls.destroy();
-});
-
-test('Main Ultrafast needs Settings tokens for the binding actually on screen', async () => {
-    for (const changed of [{ OUROBOROS_MODEL: SOL }, { USE_LOCAL_MAIN: true }, { OUROBOROS_MODEL_ACCOUNTS: { main: 'work' } },
-        { OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }, { _meta: { tokens: { OUROBOROS_MODEL: MAIN_TOKENS.OUROBOROS_MODEL } } }]) {
-        const questions = [];
-        const r = await opened(room({ projectId: '', storeOptions: { catalog: TWO_ACCOUNTS, settings: { OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } } },
-            model: { askTier: async (question) => { questions.push(question); return true; } } }));
-        Object.assign(r.settings, changed);
-        await r.chooseTier('ultrafast');
-        await r.controls.pendingSave();
-        assert.deepEqual([questions, r.tierPosts(), r.toasts.length], [[], [], 1], JSON.stringify(changed));
-        if (changed.OUROBOROS_MODEL_ACCOUNTS) assert.equal(r.store.mainAccount(), 'work', 'the new pin is available for the next choice');
-        r.controls.destroy();
-    }
-});
-
-test('on a transport known to carry it, Main may try an Ultrafast nothing confirms: said so in the strip and in its question, with no price it was not told', async () => {
-    const responses = { provider_id: 'openai', provider: 'OpenAI', id: 'gpt-6', name: 'gpt-6', value: 'openai::gpt-6' };
-    const main = (transport) => room({ projectId: '', chatId: 1, main: 'openai::gpt-6', model: { askTier: async (facts) => { questions.push(facts); return true; } },
-        storeOptions: { connections: [{ id: 'openai', configured: true, revision: OPENAI_SOURCE }],
-            catalog: { ...CATALOG, items: [...CATALOG.items, { ...responses, ...(transport ? { processing_transport: transport } : {}) }] } } });
-    const questions = [];
-    const r = await opened(main(['standard', 'fast', 'economy', 'ultrafast']));
-    assert.deepEqual([offered(r), supports(r).ultrafast, r.reads.settings, r.reads.processing], [['economy', 'standard', 'fast', 'ultrafast'], 'unknown', 0, []],
-        'no per-model or per-account word, and none is asked for: the tier is offered as unconfirmed');
-    // An empty census does not override the shared disclosure either.
-    r.controls.syncState(r.state({ works: [], works_complete: true, supervisor_ready: true }));
-    await r.chooseTier('ultrafast');
-    await r.controls.pendingSave();
-    const { doc: _doc, ...facts } = questions[0];
-    assert.deepEqual(facts, { model: 'gpt-6', source: 'OpenAI', priceSaid: true, pinned: false,
-        explain: 'Requests the fastest processing this source offers. It may cost more. Not confirmed for gpt-6 here: a provider may serve it as Standard. Price unknown.' });
-    assert.deepEqual(r.tierPosts(), [{ processing: 'ultrafast', if_unchanged: { ...MAIN_TOKENS, connection: OPENAI_SOURCE, ultrafast: JSON.stringify(['openai::gpt-6', false, '', '', '']) } }],
-        'on the key\'s connection as the question was shown it');
-    r.controls.destroy();
-    // A transport that says nothing, and one that carries no Ultrafast (Chat Completions): no new Ultrafast; a saved one stays.
-    for (const transport of [null, ['standard', 'fast', 'economy']]) {
-        const plain = await opened(main(transport));
-        assert.deepEqual(offered(plain), ['economy', 'standard', 'fast']);
-        plain.controls.destroy();
-        const kept = await opened(room({ projectId: '', chatId: 1, main: 'openai::gpt-6', tiers: { main: 'ultrafast', default: 'standard' },
-            storeOptions: { catalog: { ...CATALOG, items: [...CATALOG.items, { ...responses, ...(transport ? { processing_transport: transport } : {}) }] } } }));
-        assert.deepEqual([offered(kept), kept.tierView().checked, kept.tierView().reset, kept.tierWord()], [['economy', 'standard', 'fast', 'ultrafast'], ['ultrafast'], true, 'Ultrafast']);
-        kept.controls.destroy();
-    }
-});
-
-test('a change of Main says what the new route makes of Main\'s own tier, before it is written', async () => {
-    const r = await opened(room({ projectId: '', chatId: 1, tiers: { main: 'ultrafast', default: 'standard' }, storeOptions: { recents: [route(GLM)] } }));
-    await r.take(`route|${GLM}`);
-    await flush();
-    assert.ok(r.asked[0].tierNote.startsWith('Main keeps its tier, Ultrafast. Requests the fastest processing this source offers. It may cost more. '
-        + 'Not confirmed for glm-5.3 here: a provider may serve it as Standard. Price unknown.'));
-    assert.match(r.asked[0].tierNote, /Direct reviews using Main and Safety falling back to Main/);
-    r.controls.destroy();
-    const plain = await opened(room({ projectId: '', chatId: 1, storeOptions: { recents: [route(GLM)] } }));
-    await plain.take(`route|${GLM}`);
-    await flush();
-    assert.equal(plain.asked[0].tierNote, '', 'Standard and Default go with any route: nothing to say');
-    plain.controls.destroy();
-    // The sheet's own line, on the shared dialog.
-    const doc = { createElement: (tag) => new ElementStub(tag, doc), byId: new Map() };
-    const content = doc.createElement('section');
-    await confirmMainChange({ next: { ...describeRoute(null, route(GLM)) }, previous: null, tierNote: 'Main keeps its tier, Fast.', doc,
-        dialog: async (options) => { options.content.mount(content, null); return false; } });
-    assert.ok(content.children.some((line) => line.textContent === 'Main keeps its tier, Fast.'));
-});
-
-// A thenable the writer awaits: the server's typed refusal, without an unhandled rejection before it is read.
-const refusedWith = (code) => ({ then: (_resolve, reject) => reject(Object.assign(new Error('Changed on another device.'), { body: { code } })) });
-
-test('a pinned Main Ultrafast refusal rereads the account catalog; the owner\'s next choice is saved on what that read names, and nothing is written for them', async () => {
-    for (const writer of ['tier', 'model']) {
-        const first = structuredClone(TWO_ACCOUNTS);
-        const again = structuredClone(first);
-        again.store_id = 'store-after-conflict';
-        again.account_catalogs[0].accounts[0].catalog.accountFingerprint = 'new-home';
-        let catalog = first;
-        // The server's own comparison (owner_effort.check_main_ultrafast): the confirmed pin, store and fingerprint
-        // against its last catalog observation, which is what it last served and holds only while the engine has not
-        // moved on. So the second write is saved for the identity the reread brought, never for a repeat of the first.
-        let served = null;
-        const observed = () => (served === catalog ? ['home', served.store_id, served.account_catalogs[0].accounts[0].catalog.accountFingerprint] : null);
-        const tiers = { main: writer === 'model' ? 'ultrafast' : '', default: 'standard' };
-        // Each writer reaches its write as the owner does: the question about Ultrafast answered yes, the picked row in view.
-        const r = await opened(room({ projectId: '', chatId: 1, tiers, model: { askTier: async () => true },
-            storeOptions: { catalog: () => { served = catalog; return catalog; }, recents: [route(SOL)],
-                settings: { OUROBOROS_MODEL_ACCOUNTS: { main: 'home' }, OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: tiers.main } } } }));
-        const choose = () => writer === 'model' ? r.take(`route|${SOL}`) : r.chooseTier('ultrafast');
-        const requests = writer === 'model' ? r.modelPosts : r.tierPosts;
-        const answer = writer === 'model' ? r.modelAnswer : r.tierAnswer;
-        const sent = (at) => JSON.parse(requests().at(at).if_unchanged.ultrafast).slice(2);
-        answer.value = { then: (resolve, reject) => (JSON.stringify(sent(-1)) === JSON.stringify(observed())
-            ? resolve(null) : refusedWith('settings_changed_elsewhere').then(resolve, reject)) };
-        const before = r.reads.catalog;
-        catalog = again;  // The saved model, tier and pin name did not change; its engine observation did.
-        await choose();
-        await flush();
-        assert.equal(requests().length, 1);
-        assert.deepEqual(sent(0), ['home', 'store-a', 'fp-home']);
-        assert.equal(r.store.index().storeId, 'store-after-conflict');
-        assert.equal(r.reads.catalog, before + 1);
-        assert.match(r.toasts.at(-1)[0], /changed/i);
-        assert.deepEqual([r.store.tiers().main, r.value()], [tiers.main, 'gpt-6-astra'], 'refused: nothing was changed');
-
-        const said = r.toasts.length;
-        await opened(r);
-        await choose();
-        await flush();
-        assert.equal(requests().length, 2, 'only a second owner choice sends a second write');
-        assert.deepEqual(sent(1), ['home', 'store-after-conflict', 'new-home']);
-        assert.deepEqual([r.store.tiers().main, r.tierWord(), r.value()], ['ultrafast', 'Ultrafast', writer === 'model' ? 'gpt-6.1-sol' : 'gpt-6-astra'],
-            'saved: the same choice, on the store and fingerprint the reread named');
-        assert.deepEqual([r.reads.catalog, r.toasts.length], [before + 1, said], 'on that one reread, with nothing more to say');
-        r.controls.destroy();
-    }
-});
-
-test('two windows: a change of Main\'s model stands on Main as stored; a tier set elsewhere is said first, a move after the question is refused', async () => {
-    // Window 2 set Main's Ultrafast after this page last read the tiers: the confirming sheet says what the new model
-    // keeps, and the write carries the binding the owner was shown (the read's four tokens).
-    const r = await opened(room({ projectId: '', chatId: 1, storeOptions: { recents: [route(GLM)] } }));
-    const elsewhere = { ...MAIN_TOKENS, OUROBOROS_MODEL_PROCESSING_PREFERENCES: 'u'.repeat(24) };
-    Object.assign(r.settings, { OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'ultrafast' }, _meta: { tokens: elsewhere, connections: [{ id: 'openrouter', configured: true, revision: OR_SOURCE }] } });
-    await r.take(`route|${GLM}`);
-    await flush();
-    assert.match(r.asked[0].tierNote, /^Main keeps its tier, Ultrafast\. /, 'the tier the new model keeps, as stored now');
-    assert.deepEqual([r.store.tiers().main, r.modelPosts()], ['ultrafast', [{ kind: 'model', model: GLM, use_local: false, if_unchanged: { ...elsewhere, connection: OR_SOURCE, ultrafast: JSON.stringify([GLM, false, '', '', '']) } }]],
-        'the Ultrafast it carries stands on the picked key as shown');
-    r.controls.destroy();
-    // Window 2 changed Main again while the question stood: the server refuses on the tokens, nothing is said saved.
-    const late = await opened(room({ projectId: '', chatId: 1, storeOptions: { recents: [route(GLM)] } }));
-    late.modelAnswer.value = refusedWith('settings_changed_elsewhere');
-    const reads = late.reads.settings;
-    await late.take(`route|${GLM}`);
-    await flush();
-    assert.deepEqual([late.value(), late.toasts.at(-1)], ['gpt-6-astra',
-        ['Main changed on another device. Check its model and tier, then choose again: nothing was changed.', 'info']]);
-    assert.ok(late.reads.settings > reads + 1, 'read again after the refusal');
-    late.controls.destroy();
-    // Main itself moved before the question: nothing is asked about the Main that is gone.
-    const gone = await opened(room({ projectId: '', chatId: 1, storeOptions: { recents: [route(GLM)] } }));
-    gone.settings.OUROBOROS_MODEL = SOL;
-    await gone.take(`route|${GLM}`);
-    await flush();
-    assert.deepEqual([gone.asked, gone.modelPosts(), gone.toasts.at(-1)?.[1]], [[], [], 'info']);
-    gone.controls.destroy();
-});
-
-test('a pin this page had not read is learnt at the press, never a change of Main; a change after the question still refuses', async () => {
-    const questions = [];
-    const answer = { value: true };
-    const main = () => {
-        const made = room({ projectId: '', chatId: 1, storeOptions: { catalog: TWO_ACCOUNTS, settings: { OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } } },
-            model: { askTier: async (facts) => { questions.push(facts); return typeof answer.value === 'function' ? answer.value(made) : answer.value; } } });
-        made.store.readConnections = async () => {};  // the page never read Main's pin before the press
-        return made;
-    };
-    const r = await opened(main());
-    assert.equal(r.store.mainAccount(), null);
-    await r.chooseTier('ultrafast');
-    await r.controls.pendingSave();
-    assert.deepEqual([r.toasts, questions.length, questions[0].source], [[], 1, 'Codex · Pinned account home'], 'no "Main changed": the pin was only not known');
-    assert.deepEqual(r.tierPosts(), [{ processing: 'ultrafast', if_unchanged: { ...MAIN_TOKENS, ultrafast: JSON.stringify([ASTRA, false, 'home', 'store-a', 'fp-home']) } }]);
-    r.controls.destroy();
-    const moved = await opened(main());
-    answer.value = (made) => { made.store.adoptMainAccount('work'); return true; };
-    await moved.chooseTier('ultrafast');
-    await moved.controls.pendingSave();
-    assert.deepEqual([moved.tierPosts(), moved.toasts], [[], [['Main changed while you were asked: Ultrafast was not set.', 'info']]]);
-    moved.controls.destroy();
-});
-
 test('a local Main takes what the local adapter can send: Fast is no new choice there, and an inherited one says it is not sent', async () => {
     const local = { provider_id: 'local', provider: 'Local', id: 'qwen3', name: 'qwen3', value: 'qwen3', use_local: true, processing_transport: ['standard'] };
     const r = await opened(room({ projectId: '', chatId: 1, main: 'qwen3', tiers: { main: 'fast', default: 'standard' },
         storeOptions: { catalog: { ...CATALOG, items: [...CATALOG.items, local] } } }));
     r.controls.syncState(r.state({ main_route: route('qwen3', true) }));
     await flush();
-    assert.deepEqual([offered(r), supports(r).fast, r.tierView().checked], [['standard', 'fast'], 'unlisted', ['fast']],
-        'the inherited choice stays in view to be left; nothing else is offered');
+    assert.deepEqual([offered(r), supports(r).fast, r.tierView().checked, r.tierView().ring], [['standard', 'fast'], 'unlisted', [], ['fast']],
+        'the tier it takes from Main stays in view to be left; nothing else is offered');
     assert.match(means(r), /does not send Fast\./);
     r.controls.destroy();
 });
 
-test('a key that changed between the sheet and the press is read again before any question; the yes stands on the key shown', async () => {
-    const questions = [];
-    const responses = { provider_id: 'openai', provider: 'OpenAI', id: 'gpt-6', name: 'gpt-6', value: 'openai::gpt-6', processing_transport: ['standard', 'fast', 'economy', 'ultrafast'] };
-    const r = await opened(room({ projectId: '', chatId: 1, main: 'openai::gpt-6', model: { askTier: async (facts) => { questions.push(facts); return true; } },
-        storeOptions: { connections: [{ id: 'openai', configured: true, revision: OPENAI_SOURCE }], catalog: { ...CATALOG, items: [...CATALOG.items, responses] } } }));
-    await r.store.readConnections({ fresh: true });  // the sheet shows the key as this read has it
-    assert.equal(r.store.revisionOf(route('openai::gpt-6')), OPENAI_SOURCE);
-    // Another tab rotates the key (or its API surface) under the same routed name.
-    r.settings._meta = { tokens: MAIN_TOKENS, connections: [{ id: 'openai', configured: true, revision: 'openai#r2' }] };
-    const catalogReads = r.reads.catalog;
-    await r.chooseTier('ultrafast');
+/* --- the choice a room remembers, and the new work a pick arms --- */
+
+test('the sheet has no row to follow Main: the room\'s model now leads the recents, marked, and every row is that route', async () => {
+    const r = room({ tiers: { main: 'fast', default: 'standard' }, storeOptions: { recents: [route(GLM), route(ASTRA)], pins: [route(KIMI)] } });
+    await r.open();
+    assert.deepEqual(r.outline(), [FOLLOWS, '§ Pinned', `route|${KIMI} +pin`, '§ Recent', `route|${ASTRA} * -pin`, `route|${GLM} -pin`, 'sources']);
+    assert.equal(r.rows().some((entry) => entry.key === 'main'), false);
+    r.controls.destroy();
+    const own = room({ choice: { kind: 'model', model: SOL, use_local: false }, storeOptions: { recents: [route(GLM), route(SOL)] } });
+    await own.open();
+    assert.deepEqual(own.outline(), ['§ Recent', `route|${SOL} * -pin`, `route|${GLM} -pin`, 'sources'], 'a room on its own model says no such line');
+    own.controls.destroy();
+    const main = room({ projectId: '', chatId: 1, storeOptions: { recents: [route(GLM)] } });
+    await main.open();
+    assert.equal(main.sheet().getAttribute('aria-label'), 'Model for new work here and in new rooms');
+    assert.deepEqual(main.outline(), [FOLLOWS, '§ Recent', `route|${ASTRA} * -pin`, `route|${GLM} -pin`, 'sources'], 'the Main chat\'s sheet is a room\'s');
+    main.controls.destroy();
+});
+
+test('before a pick the sheet names where its model is set, the pinned account, and what a pick does for new and running tasks', async () => {
+    const pinned = room({ storeOptions: { settings: { OUROBOROS_MODEL_ACCOUNTS: { main: 'work' } } } });
+    await pinned.open();
+    await flush();
+    assert.equal(pinned.outline()[0], `lead: This model is set in Settings › Models, on its pinned account work. ${OWN_ROUTE}`);
+    pinned.controls.destroy();
+    // An account not read is never said as pinned, nor as Auto.
+    const unread = room({ storeOptions: { settings: new Error('offline') } });
+    await unread.open();
+    await flush();
+    assert.equal(unread.outline()[0], FOLLOWS);
+    unread.controls.destroy();
+});
+
+test('the row current now changes nothing: a room that follows Main keeps Main\'s binding, and nothing is armed', async () => {
+    for (const projectId of ['p7', '']) {
+        const r = room({ projectId, storeOptions: { recents: [route(GLM)] } });
+        await r.open();
+        await r.take(`route|${ASTRA}`);  // Main's own model, the row marked current
+        assert.deepEqual([r.modelPosts(), r.sheet(), r.name(), r.el.dataset.own, r.newWork.armed()], [[], null, 'Main', 'false', null],
+            'never a covert move from following Main to a route of the same name');
+        r.controls.destroy();
+    }
+});
+
+test('a pick saves at once for its room, the Main chat\'s included, asks nothing and never writes Main', async () => {
+    for (const projectId of ['p7', '']) {
+        const r = room({ projectId, storeOptions: { recents: [route(GLM)] } });
+        r.modelHead.isConnected = true;  // on the page: the focus can come back to it
+        await r.open();
+        let answer;
+        r.modelAnswer.value = new Promise((resolve) => { answer = resolve; });
+        await r.take(`route|${GLM}`);
+        // Each save names its one scope: a room by its id, the Main chat by `scope` (a body with neither is an older
+        // page's write of Main the role, which the host refuses).
+        assert.deepEqual(r.modelPosts(), [{ kind: 'model', model: GLM, use_local: false, ...(projectId ? { project_id: projectId } : MAIN_CHAT) }]);
+        assert.deepEqual([r.controls.hasPendingSave(), r.el.dataset.disabled, r.name(), r.asked], [true, 'true', 'Main', []],
+            'unsaved, it is not shown as saved; no question stands before a pick');
+        assert.equal(r.doc.activeElement, r.modelHead, 'the sheet closed with the pick, the focus is back on the capsule');
+        r.controls.syncState(r.state());
+        answer({ ok: true, project_id: projectId, model_choice: { kind: 'model', model: GLM, use_local: false },
+            previous_model_choice: { kind: 'main' }, choice_token: tokenOf(projectId, GLM) });
+        assert.equal(await r.controls.pendingSave(), true);
+        assert.deepEqual([r.name(), r.value(), r.el.dataset.disabled, r.refreshes.at(-1)], ['OpenRouter', 'glm-5.3', 'false', true]);
+        assert.equal(r.reads.recents, 2, 'the server wrote the act into the recents: they are read again');
+        r.modelAnswer.value = null;
+        await r.open();
+        await r.take(`route|${GLM}`);
+        assert.deepEqual([r.modelPosts().length, r.sheet()], [1, null], 'the chosen model again saves nothing');
+        // It stays when Main moves: the choice is the room's until its owner changes it.
+        const chosen = { model_choice: { kind: 'model', model: GLM, use_local: false }, processing_choice: '' };
+        r.controls.syncState(r.state({ main_route: route(KIMI), ...(projectId ? { projects: [{ id: projectId, ...chosen }] } : { main_chat: chosen }) }));
+        assert.deepEqual([r.name(), r.value()], ['OpenRouter', 'glm-5.3']);
+        r.controls.destroy();
+    }
+});
+
+test('a pick of another model arms this window\'s next message as new work, on the saved choice\'s token', async () => {
+    const r = room({ storeOptions: { recents: [route(GLM), route(KIMI)] } });
+    assert.equal(r.newWork.armed(), null, 'nothing picked: an ordinary message');
+    await r.open();
+    const before = r.armings.count;
+    await r.take(`route|${GLM}`);
     await r.controls.pendingSave();
-    assert.deepEqual([questions, r.tierPosts()], [[], []], 'nothing is asked or written on a key the owner was not shown');
-    assert.match(r.toasts.at(-1)[0], /changed on another device\. Its tiers were read again/);
-    assert.equal(r.store.revisionOf(route('openai::gpt-6')), 'openai#r2');
-    assert.ok(r.reads.catalog > catalogReads, 'the transport this source carries is read again, never the earlier one\'s');
-    // Pressed again, the question is about the key now shown, and the write stands on it.
-    await opened(r);
-    await r.chooseTier('ultrafast');
+    assert.deepEqual(r.newWork.armed(), { token: tokenOf('p7', GLM), model: 'glm-5.3', changed: false });
+    assert.ok(r.armings.count > before, 'the composer hears it: Send says so before the press');
+    // Another pick moves the choice it names; the room it started from is still what it was before the first.
+    await r.open();
+    await r.take(`route|${KIMI}`);
     await r.controls.pendingSave();
-    assert.equal(questions.length, 1);
-    assert.deepEqual(r.tierPosts(), [{ processing: 'ultrafast', if_unchanged: { ...MAIN_TOKENS, connection: 'openai#r2', ultrafast: JSON.stringify(['openai::gpt-6', false, '', '', '']) } }]);
+    assert.deepEqual(r.newWork.armed(), { token: tokenOf('p7', KIMI), model: 'kimi-k3', changed: false });
+    // The message goes out naming it: no later message names it too, until the host says how it took that one.
+    const kimi = { token: tokenOf('p7', KIMI), model: 'kimi-k3', changed: false };
+    r.newWork.sent('msg-0', tokenOf('p7', GLM));
+    assert.deepEqual(r.newWork.armed(), kimi, 'a message that named an earlier choice is not this one\'s');
+    r.newWork.sent('msg-1', kimi.token);
+    assert.equal(r.newWork.armed(), null);
+    r.newWork.settled('another', true);
+    r.newWork.settled('another', false);
+    r.newWork.refused('another');
+    r.newWork.released('another');
+    assert.equal(r.newWork.armed(), null, 'only that message\'s own word settles it');
+    r.newWork.settled('msg-1', false);  // a Reply the host gave to its work: the choice is not spent
+    assert.deepEqual(r.newWork.armed(), kimi);
+    r.newWork.sent('msg-2', kimi.token);
+    r.newWork.settled('msg-2', true);  // taken as new work
+    assert.equal(r.newWork.armed(), null);
+    r.newWork.settled('msg-2', false);
+    assert.equal(r.newWork.armed(), null, 'a spent choice does not come back');
     r.controls.destroy();
 });
 
-test('a change of Main that carries Ultrafast onto a key the sheet showed otherwise asks nothing until that key is read again', async () => {
-    const r = await opened(room({ projectId: '', chatId: 1, tiers: { main: 'ultrafast', default: 'standard' }, storeOptions: { recents: [route(GLM)] } }));
-    await r.store.readConnections({ fresh: true });
-    r.settings._meta = { tokens: MAIN_TOKENS, connections: [{ id: 'openrouter', configured: true, revision: 'openrouter#r2' }] };
-    const asked = r.reads.processing.length;
-    await r.take(`route|${GLM}`);
-    await flush();
-    assert.deepEqual([r.asked, r.modelPosts()], [[], []]);
-    assert.ok(r.reads.processing.length > asked, 'the picked model\'s endpoints are read under the key it has now');
+/* A room on Sol whose window picked `first` and sent `msg-a` naming it; the host has not said how it took it. */
+async function inFlight(first = GLM) {
+    const r = room({ choice: { kind: 'model', model: SOL, use_local: false }, storeOptions: { recents: [route(GLM), route(KIMI), route(SOL)] } });
+    const pick = async (model) => { await r.open(); await r.take(`route|${model}`); await r.controls.pendingSave(); };
+    const armed = (model) => ({ token: tokenOf('p7', model), model: model.split(/[/=]/).pop(), changed: false });
+    await pick(first);
+    r.newWork.sent('msg-a', tokenOf('p7', first));
+    assert.equal(r.newWork.armed(), null);
+    return { r, pick, armed };
+}
+
+test('a pick made while an earlier message waits for the host\'s word is its own choice: that word never takes it', async () => {
+    // Taken as new work, the room stands on the first choice: the later pick still starts its own, and a return to
+    // the first is an ordinary message of the room as it is now.
+    const spent = await inFlight();
+    await spent.pick(KIMI);
+    assert.deepEqual(spent.r.newWork.armed(), spent.armed(KIMI));
+    spent.r.newWork.settled('msg-a', true);
+    assert.deepEqual(spent.r.newWork.armed(), spent.armed(KIMI), 'the first message\'s success spends its own choice alone');
+    await spent.pick(GLM);
+    assert.equal(spent.r.newWork.armed(), null, 'back on the model the new work took');
+    spent.r.controls.destroy();
+    // Given to a work as its Reply, nothing started on the first choice: the room is where it was before both picks.
+    const kept = await inFlight();
+    await kept.pick(KIMI);
+    kept.r.newWork.settled('msg-a', false);
+    assert.deepEqual(kept.r.newWork.armed(), kept.armed(KIMI));
+    await kept.pick(GLM);
+    assert.deepEqual(kept.r.newWork.armed(), kept.armed(GLM), 'the first choice was never used: a pick of it is a new task again');
+    await kept.pick(SOL);
+    assert.equal(kept.r.newWork.armed(), null, 'and the model the room had is an ordinary message');
+    kept.r.controls.destroy();
+    // The later pick returned to what the room had: once the first message proves unspent, nothing is armed.
+    const back = await inFlight();
+    await back.pick(SOL);
+    assert.deepEqual(back.r.newWork.armed(), back.armed(SOL), 'while the first is read as taken, Sol is another model');
+    back.r.newWork.settled('msg-a', false);
+    assert.equal(back.r.newWork.armed(), null);
+    back.r.controls.destroy();
+    // Refused because the choice changed: nothing started on it and it does not wait; the later pick stands.
+    const refused = await inFlight();
+    await refused.pick(KIMI);
+    refused.r.newWork.refused('msg-a');
+    assert.deepEqual(refused.r.newWork.armed(), refused.armed(KIMI));
+    await refused.pick(SOL);
+    assert.equal(refused.r.newWork.armed(), null, 'the room never left Sol');
+    refused.r.controls.destroy();
+    const alone = await inFlight();
+    alone.r.newWork.refused('msg-a');
+    assert.equal(alone.r.newWork.armed(), null, 'a refused choice does not come back');
+    alone.r.newWork.settled('msg-a', false);
+    assert.equal(alone.r.newWork.armed(), null);
+    alone.r.controls.destroy();
+});
+
+test('a copy the owner gave up frees its choice for the next message; a row that proves it taken still settles it', async () => {
+    const given = await inFlight();
+    given.r.newWork.released('msg-a');  // Discard, or its words went back to the composer
+    assert.deepEqual(given.r.newWork.armed(), given.armed(GLM), 'the choice waits for a message again');
+    given.r.newWork.released('msg-a');
+    given.r.newWork.settled('msg-a', false);  // the row says a work took it as its Reply: it already waits
+    assert.deepEqual(given.r.newWork.armed(), given.armed(GLM));
+    given.r.controls.destroy();
+    // History later shows the given-up message was taken as new work after all: its choice is spent.
+    const taken = await inFlight();
+    taken.r.newWork.released('msg-a');
+    taken.r.newWork.settled('msg-a', true);
+    assert.equal(taken.r.newWork.armed(), null);
+    taken.r.newWork.settled('msg-a', false);
+    assert.equal(taken.r.newWork.armed(), null, 'one word per message');
+    taken.r.controls.destroy();
+    // A pick made after the give-up is its own choice there too; the late word only moves what it started from.
+    const later = await inFlight();
+    later.r.newWork.released('msg-a');
+    await later.pick(KIMI);
+    later.r.newWork.settled('msg-a', true);
+    assert.deepEqual(later.r.newWork.armed(), later.armed(KIMI));
+    await later.pick(GLM);
+    assert.equal(later.r.newWork.armed(), null, 'the room stands on the model the taken message started');
+    later.r.controls.destroy();
+    // The next message names the freed choice again: the first message's late word is not about it.
+    const again = await inFlight();
+    again.r.newWork.released('msg-a');
+    again.r.newWork.sent('msg-b', tokenOf('p7', GLM));
+    again.r.newWork.settled('msg-a', false);
+    assert.equal(again.r.newWork.armed(), null, 'msg-b still waits for its own word');
+    again.r.newWork.settled('msg-b', false);
+    assert.deepEqual(again.r.newWork.armed(), again.armed(GLM));
+    again.r.controls.destroy();
+    // A pick made while the given-up message flew was read from its choice; given up, it is read from the room as it was.
+    const during = await inFlight();
+    await during.pick(SOL);
+    during.r.newWork.released('msg-a');
+    assert.equal(during.r.newWork.armed(), null, 'Sol is what the room had');
+    during.r.controls.destroy();
+});
+
+test('back on the model the room had, the next message is an ordinary one again', async () => {
+    const r = room({ choice: { kind: 'model', model: SOL, use_local: false }, storeOptions: { recents: [route(GLM), route(SOL)] } });
     await r.open();
     await r.take(`route|${GLM}`);
-    await flush();
-    assert.equal(r.asked.length, 1);
-    assert.deepEqual(r.modelPosts(), [{ kind: 'model', model: GLM, use_local: false, if_unchanged: { ...MAIN_TOKENS, connection: 'openrouter#r2', ultrafast: JSON.stringify([GLM, false, '', '', '']) } }]);
-    // Without Ultrafast nothing of the key is bound: an ordinary change of Main stays as it was.
-    const plain = await opened(room({ projectId: '', chatId: 1, storeOptions: { recents: [route(GLM)] } }));
-    await plain.take(`route|${GLM}`);
-    await flush();
-    assert.deepEqual(plain.modelPosts(), [{ kind: 'model', model: GLM, use_local: false, if_unchanged: MAIN_TOKENS }]);
+    await r.controls.pendingSave();
+    assert.equal(r.newWork.armed().token, tokenOf('p7', GLM));
+    await r.open();
+    await r.take(`route|${SOL}`);
+    await r.controls.pendingSave();
+    assert.deepEqual([r.modelPosts().length, r.value(), r.newWork.armed()], [2, 'gpt-6.1-sol', null], 'the room is as it was');
     r.controls.destroy();
-    plain.controls.destroy();
+    // A room that followed Main has no row to return to: a model of the same name is that route, and stays armed.
+    const follower = room({ storeOptions: { recents: [route(GLM), route(ASTRA)] } });
+    await follower.open();
+    await follower.take(`route|${GLM}`);
+    await follower.controls.pendingSave();
+    await follower.open();
+    await follower.take(`route|${ASTRA}`);
+    await follower.controls.pendingSave();
+    assert.deepEqual(follower.modelPosts().at(-1), { kind: 'model', model: ASTRA, use_local: false, project_id: 'p7' }, 'never a follow of Main');
+    assert.deepEqual([follower.name(), follower.el.dataset.own, follower.newWork.armed().token], ['Codex', 'true', tokenOf('p7', ASTRA)]);
+    follower.controls.destroy();
 });
 
-test('a sheet dismissed while its key\'s endpoints are read opens no question afterwards', async () => {
-    const questions = [];
-    let release = () => {};
-    const glm = { ...openrouter(GLM), processing_transport: ['standard', 'fast', 'ultrafast'] };
-    const r = await opened(room({ projectId: '', chatId: 1, main: GLM, model: { askTier: async (facts) => { questions.push(facts); return true; } },
-        storeOptions: { catalog: { ...CATALOG, items: [...CATALOG.items.filter((row) => row.value !== GLM), glm] },
-            processing: (value) => new Promise((resolve) => { release = () => resolve({ value, processing: { modes: ['standard', 'ultrafast'], complete: true, endpoints: [] } }); }) } }));
-    await r.store.readConnections({ fresh: true });
-    r.store.readDetail(route(GLM)).catch(() => {});
-    await r.chooseTier('ultrafast');
-    await flush();
-    r.controls.model.capsule.snapClosed();  // dismissed while the endpoints are read
-    release();
+test('a refused pick arms nothing, and an answer without a token is no word to send on', async () => {
+    const r = room({ storeOptions: { recents: [route(GLM)] } });
+    await r.open();
+    r.modelAnswer.value = Promise.reject(new Error('Not a model route'));
+    const pressed = r.take(`route|${GLM}`);
+    const send = r.controls.model.pendingSave();  // Send asks while the save is out
+    await pressed;
+    assert.equal(await send, false);
+    assert.deepEqual([r.newWork.armed(), r.name()], [null, 'Main']);
+    r.modelAnswer.value = { ok: true, project_id: 'p7', model_choice: { kind: 'model', model: GLM, use_local: false } };
+    await r.open();
+    await r.take(`route|${GLM}`);
     await r.controls.pendingSave();
-    assert.deepEqual([questions, r.tierPosts()], [[], []], 'the dismissed press asks nothing and writes nothing');
+    assert.deepEqual([r.value(), r.newWork.armed()], ['glm-5.3', null], 'saved, and the next message is an ordinary one');
     r.controls.destroy();
+});
+
+test('another window\'s pick voids the one made here: it is said as changed, never sent on, and dropped once told', async () => {
+    const r = room({ storeOptions: { recents: [route(GLM)] } });
+    await r.open();
+    await r.take(`route|${GLM}`);
+    await r.controls.pendingSave();
+    const before = r.armings.count;
+    r.controls.syncState(r.state({ projects: [{ id: 'p7', model_choice: { kind: 'model', model: KIMI, use_local: false }, processing_choice: '' }] }));
+    assert.deepEqual([r.value(), r.newWork.armed()], ['kimi-k3', { token: tokenOf('p7', GLM), model: 'glm-5.3', changed: true }],
+        'the capsule shows what is saved now; the pick made here still names its own choice');
+    assert.ok(r.armings.count > before);
+    r.newWork.drop();
+    assert.equal(r.newWork.armed(), null);
+    // A pick made while the overtaken one still stands unsaid starts from the room as the other window left it: back
+    // on the model this window began from is a pick of another model there, never a return to an ordinary message.
+    const again = room({ storeOptions: { recents: [route(GLM), route(ASTRA)] }, choice: { kind: 'model', model: ASTRA, use_local: false } });
+    await again.open();
+    await again.take(`route|${GLM}`);
+    await again.controls.pendingSave();
+    again.controls.syncState(again.state({ projects: [{ id: 'p7', model_choice: { kind: 'model', model: KIMI, use_local: false }, processing_choice: '' }] }));
+    assert.equal(again.newWork.armed().changed, true);
+    await again.open();
+    await again.take(`route|${ASTRA}`);
+    await again.controls.pendingSave();
+    assert.deepEqual(again.newWork.armed(), { token: tokenOf('p7', ASTRA), model: 'gpt-6-astra', changed: false });
+    again.controls.destroy();
+    // Its own tier moving there is no change of the choice.
+    const tiered = room({ storeOptions: { recents: [route(GLM)] } });
+    await tiered.open();
+    await tiered.take(`route|${GLM}`);
+    await tiered.controls.pendingSave();
+    tiered.controls.syncState(tiered.state({ projects: [{ id: 'p7', model_choice: { kind: 'model', model: GLM, use_local: false }, processing_choice: 'fast' }] }));
+    assert.equal(tiered.newWork.armed().changed, false);
+    for (const made of [r, tiered]) made.controls.destroy();
+});
+
+test('two saved choices are one when both follow Main or both name the same route', () => {
+    const glm = { kind: 'model', model: GLM, use_local: false };
+    assert.deepEqual([sameChoice({ kind: 'main' }, { kind: 'main' }), sameChoice(glm, { ...glm }), sameChoice(glm, { kind: 'main' }),
+        sameChoice(glm, { ...glm, use_local: true }), sameChoice(glm, { kind: 'model', model: KIMI, use_local: false }), sameChoice(null, glm)],
+    [true, true, false, false, false, false]);
+});
+
+test('the Main chat\'s tier is its own like a room\'s; Ultrafast asks first there, and a cancel writes nothing', async () => {
+    const r = await opened(room({ projectId: '', chatId: 1, tiers: { main: 'fast', default: 'standard' }, storeOptions: { catalog: TWO_ACCOUNTS } }));
+    assert.deepEqual([r.tierView().checked, r.tierView().ring], [[], ['fast']], 'no tier of its own: Main\'s, as a follower');
+    assert.equal(r.tierView().scope, 'Default · Fast as Main · for new work here and its new subagents without a tier of their own; a new room copies it, running work keeps its own');
+    await r.chooseTier('standard');
+    await r.controls.pendingSave();
+    assert.deepEqual([r.tierPosts(), r.asked, r.modelPosts(), r.newWork.armed()], [[{ processing: 'standard', ...MAIN_CHAT }], [], [], null],
+        'its own setting, named as the Main chat\'s; no question, no model, no new work');
+    assert.deepEqual([r.tierView().checked, r.store.tiers().main, Boolean(r.sheet())], [['standard'], 'fast', true],
+        'Main the role\'s own tier is not this one');
+    // Ultrafast: asked first, for the route and account the sheet shows.
+    r.confirmed.value = false;
+    await r.chooseTier('ultrafast');
+    await r.controls.pendingSave();
+    assert.deepEqual([r.asked.length, r.tierPosts().length, r.tierWord()], [1, 1, ''], 'a cancel writes nothing');
+    assert.deepEqual([r.asked[0].model, r.asked[0].source, r.asked[0].follows, r.asked[0].account],
+        ['gpt-6-astra', 'Codex · Account: Auto', 'auto', ''], 'Auto is said as Auto, its source\'s pool: no one account is named for it');
+    r.confirmed.value = true;
+    await r.open();
+    await r.chooseTier('ultrafast');
+    await r.controls.pendingSave();
+    // The write names what was asked about, by name: the model, its locality and the profile ('' on Auto). The
+    // host saves the tier for that route and answers on it alone.
+    assert.deepEqual([r.asked.length, r.tierPosts().at(-1), r.tierWord()],
+        [2, { processing: 'ultrafast', ...MAIN_CHAT, confirmed: { model: ASTRA, use_local: false, account: '' } }, 'Ultrafast']);
+    await r.open();  // the question closed the sheet
+    // New work carries the confirmation; the sheet describes its destination, not later picks in the room.
+    assert.equal(r.tierView().scope, 'Ultrafast · for new work here, on calls to this model through the confirmed destination; no new room copies it, running work keeps its own');
+    r.controls.destroy();
+    // While the chat follows Main, the route asked about is Main's own, its pinned profile included: by its name
+    // alone. The catalog's reading of who is signed in to it (TWO_ACCOUNTS names a store and fingerprints) is
+    // neither asked about nor sent, and the profile that does not list Ultrafast may still be asked for.
+    const pinned = await opened(room({ projectId: '', chatId: 1, storeOptions: { catalog: TWO_ACCOUNTS, settings: { OUROBOROS_MODEL_ACCOUNTS: { main: 'work' } } } }));
+    await pinned.chooseTier('ultrafast');
+    await pinned.controls.pendingSave();
+    assert.deepEqual([pinned.asked.map((one) => [one.source, one.follows, one.account]), pinned.tierPosts()],
+        [[['Codex · Pinned account work', 'profile', 'work']],
+            [{ processing: 'ultrafast', ...MAIN_CHAT, confirmed: { model: ASTRA, use_local: false, account: 'work' } }]]);
+    // A pinned profile alone carries the tier from the first call, whatever is chosen here later: its own words.
+    await pinned.open();
+    assert.equal(pinned.tierView().scope, 'Ultrafast · for new work here, on its own calls to this model and profile from the first one; no new room copies it, running work keeps its own');
+    pinned.controls.destroy();
+    // An account not read yet was not asked about: no question, no write.
+    const unread = await opened(room({ projectId: '', chatId: 1, storeOptions: { catalog: TWO_ACCOUNTS, settings: new Error('offline') } }));
+    await unread.chooseTier('ultrafast');
+    await unread.controls.pendingSave();
+    assert.deepEqual([unread.asked, unread.tierPosts()], [[], []]);
+    assert.match(unread.toasts.at(-1)?.[0] || '', /account or this connection is not read yet/);
+    unread.controls.destroy();
+    // An API route names its connection's revision as the settings read it: the host compares it under its lock, so
+    // the same model on a connection saved since then is not what was asked about.
+    const OFFERS = { catalog: { ...CATALOG, api_sources: [{ id: 'openrouter', processing_transport: ['standard', 'economy', 'fast', 'ultrafast'] }] },
+        processing: (value) => ({ value, processing: { modes: ['standard', 'ultrafast'], complete: true, endpoints: [] } }) };
+    const keyed = await opened(room({ projectId: '', chatId: 1, main: GLM, storeOptions: { ...OFFERS,
+        connections: [{ id: 'openrouter', configured: true, revision: 'openrouter#0123456789abcdef01234567' }] } }));
+    await keyed.chooseTier('ultrafast');
+    await keyed.controls.pendingSave();
+    assert.deepEqual(keyed.tierPosts(), [{ processing: 'ultrafast', ...MAIN_CHAT, confirmed: { model: GLM, use_local: false, account: '',
+        connection: 'openrouter#0123456789abcdef01234567' } }]);
+    assert.deepEqual([keyed.asked[0].source, keyed.asked[0].follows], ['OpenRouter', 'api'], 'a key\'s connection has no name to follow');
+    await keyed.open();
+    assert.match(keyed.tierView().scope, /^Ultrafast · for new work here, on calls to this model through the confirmed destination; /);
+    keyed.controls.destroy();
+    // A connection the settings gave no revision for cannot be bound: nothing is asked, nothing written.
+    const unbound = await opened(room({ projectId: '', chatId: 1, main: GLM, storeOptions: { ...OFFERS, connections: [{ id: 'openrouter', configured: true }] } }));
+    await unbound.chooseTier('ultrafast');
+    await unbound.controls.pendingSave();
+    assert.deepEqual([unbound.asked, unbound.tierPosts()], [[], []]);
+    assert.match(unbound.toasts.at(-1)?.[0] || '', /account or this connection is not read yet/);
+    unbound.controls.destroy();
+    // A room takes it without a question, as before.
+    const own = await opened(room({ storeOptions: { catalog: TWO_ACCOUNTS } }));
+    await own.chooseTier('ultrafast');
+    await own.controls.pendingSave();
+    assert.deepEqual([own.asked, own.tierPosts()], [[], [{ processing: 'ultrafast', project_id: 'p7' }]]);
+    own.controls.destroy();
+});
+
+test('a saved Ultrafast that names another model or account reads Default in the Main chat, and the strip says why', async () => {
+    const r = await opened(room({ projectId: '', chatId: 1, tiers: { main: 'fast', default: 'standard' }, storeOptions: { catalog: TWO_ACCOUNTS } }));
+    // The host withholds it (new work now runs on another model or profile than it was saved for): Default.
+    r.controls.syncState(r.state({ main_chat: { model_choice: { kind: 'main' }, processing_choice: '', processing_withheld: 'ultrafast' } }));
+    assert.deepEqual([r.tierView().checked, r.tierView().ring], [[], ['fast']], 'Default, on Main\'s tier: never shown as Ultrafast');
+    assert.notEqual(r.tierWord(), 'Ultrafast');
+    assert.equal(r.tierView().scope, 'Default · Fast as Main · The saved Ultrafast no longer matches the destination of new work here. New work takes Default until you confirm again.');
+    // In force again (the route it names is the one new work runs on), it is Ultrafast with its own words.
+    r.controls.syncState(r.state({ main_chat: { model_choice: { kind: 'main' }, processing_choice: 'ultrafast' } }));
+    assert.equal(r.tierWord(), 'Ultrafast');
+    assert.match(r.tierView().scope, /^Ultrafast · for new work here, on calls to this model through the confirmed destination; /);
+    // A room has no such state: its row never reads the Main chat's field.
+    const own = await opened(room({ storeOptions: { catalog: TWO_ACCOUNTS } }));
+    own.controls.syncState(own.state({ main_chat: { model_choice: { kind: 'main' }, processing_choice: '', processing_withheld: 'ultrafast' } }));
+    assert.doesNotMatch(own.tierView().scope, /Ultrafast is saved here/);
+    for (const made of [r, own]) made.controls.destroy();
+});
+
+test('a window newer than its server sends the Main chat\'s choice nowhere: an older server would change Main the role', async () => {
+    // An update not finished, or rolled back: the page is this version, the server an older one. Its state body
+    // names Main's route but no `main_chat`, and it reads a write without a room as Main the role's own.
+    const OLDER = { main_route: route(ASTRA), processing_tiers: STANDARD, projects: [] };
+    const r = room({ projectId: '', chatId: 1, storeOptions: { recents: [route(GLM)], catalog: TWO_ACCOUNTS } });
+    r.controls.syncState(OLDER);
+    await r.open();
+    await r.take(`route|${GLM}`);
+    await r.controls.pendingSave();
+    assert.deepEqual([r.modelPosts(), r.newWork.armed(), r.toasts.at(-1)?.[0]], [[], null, SERVER_OLDER],
+        'nothing was sent, nothing is armed, and the owner is told what to do');
+    await r.open();
+    await r.chooseTier('fast');  // a press on the strip
+    assert.equal(await r.controls.model.chooseTier('fast'), false, 'the tier path answers that nothing was saved');
+    assert.deepEqual([r.tierPosts(), r.toasts.at(-1)?.[0]], [[], SERVER_OLDER]);
+    // The server of this version answers: the same presses save, each naming the Main chat.
+    r.controls.syncState(r.state());
+    await r.take(`route|${GLM}`);
+    await r.controls.pendingSave();
+    assert.deepEqual(r.modelPosts(), [{ kind: 'model', model: GLM, use_local: false, ...MAIN_CHAT }]);
+    assert.equal(r.newWork.armed().token, tokenOf('', GLM));
+    // Rolled back under an armed pick: an older server takes no new task, so the next message is an ordinary one.
+    r.controls.syncState(OLDER);
+    assert.equal(r.newWork.armed(), null);
+    r.controls.destroy();
+    // Before any state body is read the server is not known: nothing is sent either, with its own words.
+    const early = mountPair({ projectId: '', chatId: 1, subagents: true, model: { store: storeOf({ recents: [route(GLM)] }).store } });
+    assert.equal(early.controls.model.pick(route(GLM)), undefined);
+    assert.equal(await early.controls.model.chooseTier('fast'), false);
+    assert.deepEqual([early.posts, early.toasts.map(([text]) => text)], [[], [CHAT_NOT_READ, CHAT_NOT_READ]]);
+    early.controls.destroy();
+    // A room's writes name their project, which every server version reads the same way: they are never held back.
+    const own = room({ storeOptions: { recents: [route(GLM)] } });
+    own.controls.syncState({ main_route: route(ASTRA), processing_tiers: STANDARD, projects: [{ id: 'p7', chat_id: 7, cognition: COGNITION, model_choice: { kind: 'main' } }] });
+    await own.open();
+    await own.take(`route|${GLM}`);
+    await own.controls.pendingSave();
+    assert.deepEqual(own.modelPosts(), [{ kind: 'model', model: GLM, use_local: false, project_id: 'p7' }]);
+    own.controls.destroy();
+});
+
+test('the question before the Main chat\'s Ultrafast says what it follows, what it reaches and what the route says of it', async () => {
+    const asked = [];
+    const doc = { createElement: () => ({ dataset: {}, className: '', textContent: '' }) };
+    const dialog = async (question) => {
+        const lines = [];
+        question.content.mount({ append: (...nodes) => lines.push(...nodes.map((node) => node.textContent)) });
+        asked.push({ title: question.title, body: question.body, confirm: question.confirmLabel, lines });
+        return true;
+    };
+    const about = { model: 'gpt-6-astra', explain: 'Requests the fastest processing.', dialog, doc };
+    // A pinned profile: the tier follows its name, and the owner reads what a new sign-in there does before agreeing.
+    assert.equal(await confirmChatUltrafast({ ...about, source: 'Codex · Pinned account work', follows: 'profile', account: 'work' }), true);
+    const signIn = 'Ultrafast follows the profile work by its name, not the subscription signed in to it. After a new sign-in to that profile, later calls, in work already started too, can spend the new subscription’s quota or money.';
+    assert.deepEqual(asked.pop(), { title: 'Ultrafast for new work', body: CHAT_ULTRAFAST_PROFILE_SCOPE, confirm: 'Use Ultrafast',
+        lines: ['gpt-6-astra · Codex · Pinned account work', signIn, 'Requests the fastest processing.', 'What Ultrafast costs on this route is not known here.'] });
+    // Its reach is said in profiles: this model on this profile alone, from the first call, never a fallback, another
+    // model or profile given to the work, or its subagents; and a later choice here is new work's alone. "Another
+    // account" is never said: a new sign-in to the same profile is another account, and it keeps the tier.
+    assert.match(CHAT_ULTRAFAST_PROFILE_SCOPE, /requests Ultrafast from its first call, only on its own calls to this model on this profile\./);
+    assert.match(CHAT_ULTRAFAST_PROFILE_SCOPE, /A call that goes anywhere else \(another model, another profile, a fallback\) and the work’s subagents take Default\./);
+    assert.match(CHAT_ULTRAFAST_PROFILE_SCOPE, /Another model or tier chosen here later changes only work started after it: work already started keeps Ultrafast on this model and profile until you change its tier on its card\./);
+    assert.match(CHAT_ULTRAFAST_PROFILE_SCOPE, /a new room does not copy Ultrafast/);
+    assert.doesNotMatch(CHAT_ULTRAFAST_PROFILE_SCOPE, /account/);
+    // Auto names no individual account: it is the source's pool.
+    await confirmChatUltrafast({ ...about, source: 'Codex · Account: Auto', follows: 'auto' });
+    assert.deepEqual(asked.pop(), { title: 'Ultrafast for new work', body: CHAT_ULTRAFAST_SCOPE, confirm: 'Use Ultrafast',
+        lines: ['gpt-6-astra · Codex · Account: Auto', CHAT_ULTRAFAST_FOLLOWS.auto, 'Requests the fastest processing.', 'What Ultrafast costs on this route is not known here.'] });
+    assert.match(CHAT_ULTRAFAST_FOLLOWS.auto, /^Auto is this source’s pool of accounts, not one account: /);
+    assert.deepEqual(Object.keys(CHAT_ULTRAFAST_FOLLOWS), ['profile', 'auto', 'api']);
+    // A key's connection, with the price its endpoints list said in the route's own words: no "not known" line, no
+    // unknown price, but an explicit warning about changing the connection.
+    await confirmChatUltrafast({ ...about, model: 'glm-5.3', source: 'OpenRouter', follows: 'api',
+        explain: 'Requests the fastest processing. Listed at $4 in / $20 out per 1M tokens.', priceSaid: true });
+    assert.deepEqual(asked.pop(), { title: 'Ultrafast for new work', body: CHAT_ULTRAFAST_SCOPE, confirm: 'Use Ultrafast',
+        lines: ['glm-5.3 · OpenRouter', CHAT_ULTRAFAST_FOLLOWS.api, 'Requests the fastest processing. Listed at $4 in / $20 out per 1M tokens.'] });
+    assert.match(CHAT_ULTRAFAST_SCOPE, /on its own calls to this destination\./);
+    assert.match(CHAT_ULTRAFAST_SCOPE, /A call that goes elsewhere and the work’s subagents take Default\./);
+    assert.match(CHAT_ULTRAFAST_SCOPE, /Later picks in this chat change only future work\./);
+    assert.match(CHAT_ULTRAFAST_SCOPE, /a new room does not copy Ultrafast/);
+    assert.equal(await confirmChatUltrafast({ dialog: async () => false, doc }), false);
 });

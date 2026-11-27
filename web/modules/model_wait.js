@@ -105,7 +105,7 @@ const requestIdentity = () => globalThis.crypto?.randomUUID?.()
     || `model-wait-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 /** The wait card changes only the model. Moving Main's Ultrafast needs a confirmed destination. */
-export const MAIN_KEEPS_TIER = "Main keeps its tier. To move Ultrafast to another model or account, confirm it in Main or Settings › Models. Uncheck this option to switch only this task.";
+export const MAIN_KEEPS_TIER = "Main keeps its tier. To move Ultrafast to another model or account, confirm it in Settings › Models. Uncheck this option to switch only this task.";
 
 /** A requested Settings save that did not land, told once its wait resolved; '' otherwise. */
 export function unsavedPersistenceNotice(row, outcome) {

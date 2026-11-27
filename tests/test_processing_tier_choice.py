@@ -1,10 +1,11 @@
 """The owner's processing tier beside the model, and the routes the owner keeps pinned.
 
-A room's tier (``processing_choice``) and Main's own tier (its role option) are written by
-``POST /api/owner/chat-processing`` and change nothing else; ``/api/state`` says both. Admission stamps
-a root's tier once into ``metadata.processing`` (the room's, or the decided Default) independently of its
-lead, and the carried tier answers for the root's own route. Pins change one route at a time under the
-preferences lock, are announced to every window, and never choose a model.
+A room's tier (``processing_choice``) and the Main chat's own (its setting) are written by
+``POST /api/owner/chat-processing`` and change nothing else; ``/api/state`` says both, beside Main the role's own
+tier, which Settings › Models writes on the binding shown (``MODELS``). Admission stamps a root's tier once into
+``metadata.processing`` (the room's, the Main chat's, or the decided Default) independently of its lead, and the
+carried tier answers for the root's own route. Pins change one route at a time under the preferences lock, are
+announced to every window, and never choose a model.
 """
 from __future__ import annotations
 
@@ -22,13 +23,14 @@ from starlette.testclient import TestClient
 
 from ouroboros import config, route_choice
 from ouroboros import projects_registry as projects
-from ouroboros.gateway.owner_effort import api_owner_chat_model, api_owner_chat_processing
+from ouroboros.gateway.owner_effort import api_owner_chat_model, api_owner_chat_processing, chat_consent_word
 from ouroboros.gateway.state import api_state
 from ouroboros.gateway.ui_preferences import api_ui_preferences_get, api_ui_preferences_post, record_model_recent
 from ouroboros.model_slots import (
     MODEL_ACCOUNTS_KEY,
     MODEL_CONTEXT_WINDOWS_KEY,
     processing_tiers,
+    send_processing_preference,
     task_processing_preference,
 )
 from ouroboros.model_slots import MODEL_PROCESSING_PREFERENCES_KEY as ROLES
@@ -51,6 +53,9 @@ CHOSEN = {"kind": "model", "model": ASTRA, "use_local": False}
 ROOM_ECONOMY = {"source": "room", "tier": "economy"}
 DEFAULT = {"source": "default"}
 CHAT_PROCESSING, CHAT_MODEL = "/api/owner/chat-processing", "/api/owner/chat-model"
+MAIN_CHAT = {"scope": "main_chat"}  # how a composer write names the Main chat; a room is named by its project_id
+MODELS = "/api/owner/safety-model"  # Settings › Models' writer: Main the role's model and tier, on the binding shown
+MAIN_CHAT_TIER = "OUROBOROS_MAIN_CHAT_PROCESSING"
 PREFS = "/api/ui/preferences"
 R1 = {"model": "openai::gpt-6.1", "use_local": False}
 R2 = {"model": ASTRA, "use_local": False}
@@ -70,6 +75,12 @@ def _registry(root) -> dict:
     return json.loads((root / "state/projects.json").read_text(encoding="utf-8"))
 
 
+def _observe(monkeypatch, read) -> None:
+    """What the catalog says of a pinned account, for the check Main the role's own Ultrafast makes in Settings ›
+    Models (a gateway handshake in production). The Main chat's Ultrafast follows a profile's name and never asks."""
+    monkeypatch.setattr("ouroboros.gateway.models.observed_profile", read)
+
+
 @pytest.fixture
 def room(isolated_runtime, monkeypatch):  # noqa: F811 -- the imported fixture, used by name
     from supervisor import workers
@@ -78,13 +89,16 @@ def room(isolated_runtime, monkeypatch):  # noqa: F811 -- the imported fixture, 
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "_worker_pool_execution_state",
                         lambda *_a, **_kw: {"available": True, "disabled_reason": "", "worker_count": 1})
-    monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda source, pin:
-                        ("fixture-store", "fixture-account") if (source, pin) == ("codex", "acc-main") else None)
-    save_owner(OWNER)
+    _observe(monkeypatch, lambda source, pin:
+             ("fixture-store", "fixture-account") if (source, pin) == ("codex", "acc-main") else None)
+    from ouroboros.gateway.safety_settings import api_owner_safety_model
+
+    _booted(OWNER)
     for pid in ("alpha", "beta"):
         projects.create_project(isolated_runtime, pid, origin="owner_ui")
     app = Starlette(routes=[Route(CHAT_MODEL, api_owner_chat_model, methods=["POST"]),
                             Route(CHAT_PROCESSING, api_owner_chat_processing, methods=["POST"]),
+                            Route(MODELS, api_owner_safety_model, methods=["POST"]),
                             Route("/api/state", api_state)])
     app.state.drive_root = isolated_runtime
     app.state.app_start = 0.0
@@ -96,6 +110,28 @@ def _state(client) -> dict:
     response = client.get("/api/state")
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def _booted(values: dict) -> None:
+    """A saved document as a running install holds it: its locked boot read saved the one-time upgrades, which a
+    Settings writer's own locked read would otherwise save before any refusal."""
+    save_owner(values)
+    config.load_settings(migrate=True)
+
+
+def _main_tier(client, tier: str, tokens=None):
+    """Settings › Models writes Main the role's own tier (``""`` removes it), on the read tokens shown."""
+    roles = json.loads(_saved().get(ROLES) or "{}")
+    roles.pop("main", None)
+    if tier:
+        roles["main"] = tier
+    return client.post(MODELS, json={"settings": {ROLES: roles}, **({} if tokens is None else {"if_unchanged": tokens})})
+
+
+def _main_model(client, model: str, tokens=None):
+    """Settings › Models writes Main the role's own model, on the read tokens shown."""
+    return client.post(MODELS, json={"settings": {"OUROBOROS_MODEL": model, "USE_LOCAL_MAIN": False},
+                                     **({} if tokens is None else {"if_unchanged": tokens})})
 
 
 # --- Pins ---------------------------------------------------------------------------------------------------------
@@ -280,43 +316,60 @@ def _effective() -> dict:
     return {key: value for key, value in copy.deepcopy(config.load_settings()).items() if key != "OUROBOROS_SUBAGENTS"}
 
 
-def test_mains_own_tier_moves_only_its_role_option(room):
+def test_the_main_chats_tier_is_its_own_and_moves_no_role_option(room):
     root, client = room
     before, raw = _effective(), _saved()
     registry = _registry(root)
-    reply = client.post(CHAT_PROCESSING, json={"processing": "fast"})
+    reply = client.post(CHAT_PROCESSING, json={"processing": "fast", **MAIN_CHAT})
     assert reply.status_code == 200, reply.text
-    assert reply.json() == {"ok": True, "project_id": "", "main_processing": "fast", "previous_main_processing": "",
-                            "processing_default": "economy"}
+    assert reply.json() == {"ok": True, "project_id": "", "processing_choice": "fast", "previous_processing_choice": ""}
+    saved = _saved()
+    assert saved[MAIN_CHAT_TIER] == "fast"
+    # Main the role's tier, model, locality, account pin and context window stay exactly as they were.
+    for key in (ROLES, "OUROBOROS_MODEL", MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, GLOBAL, "OUROBOROS_MODEL_FALLBACKS"):
+        assert saved[key] == raw[key], key
+    assert _without(_effective(), MAIN_CHAT_TIER) == _without(before, MAIN_CHAT_TIER)
+    assert _registry(root) == registry, "the Main chat's tier is not a room's"
+    state = _state(client)
+    assert state["processing_tiers"] == {"main": "", "default": "economy"}
+    assert state["main_chat"] == {"model_choice": {"kind": "main"}, "processing_choice": "fast"}
+    # The owner's work in Main carries it from admission, on the route it follows; nothing names a model for it.
+    turn = {"id": "turn"}
+    route_choice.capture_lead(turn, root)
+    assert turn["metadata"] == {"lead": {"source": "main"}, "processing": {"source": "room", "tier": "fast"}}
+    assert task_processing_preference({"metadata": turn["metadata"]}) == "fast"
+    # An explicit Standard is a tier of its own, distinct from Default.
+    reply = client.post(CHAT_PROCESSING, json={"processing": "standard", **MAIN_CHAT})
+    assert (reply.json()["processing_choice"], reply.json()["previous_processing_choice"]) == ("standard", "fast")
+    assert _saved()[MAIN_CHAT_TIER] == "standard"
+    # Default removes the chat's own: its new work pays what Main pays again.
+    reply = client.post(CHAT_PROCESSING, json={"processing": "", **MAIN_CHAT})
+    assert reply.json() == {"ok": True, "project_id": "", "processing_choice": "", "previous_processing_choice": "standard"}
+    assert _saved()[MAIN_CHAT_TIER] == ""
+    later = {"id": "later"}
+    route_choice.capture_lead(later, root)
+    assert later["metadata"]["processing"] == DEFAULT
+    again = client.post(CHAT_PROCESSING, json={"processing": "", **MAIN_CHAT})
+    assert again.status_code == 200 and again.json()["previous_processing_choice"] == ""
+    assert _without(_effective(), MAIN_CHAT_TIER) == _without(before, MAIN_CHAT_TIER)
+
+
+def test_mains_role_tier_moves_only_its_role_option(room):
+    root, client = room
+    raw, registry = _saved(), _registry(root)
+    assert _main_tier(client, "fast").status_code == 200
     saved = _saved()
     assert json.loads(saved[ROLES]) == {"main": "fast", "light": "economy", "fallback": ["fast"]}
-    # Main's model, locality, account pin and context window stay exactly as they were.
     for key in ("OUROBOROS_MODEL", MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, GLOBAL, "OUROBOROS_MODEL_FALLBACKS"):
         assert saved[key] == raw[key], key
-    assert json.loads(saved[MODEL_ACCOUNTS_KEY]) == {"main": "acc-main", "fallback": ["acc-fallback"]}
-    assert json.loads(saved[MODEL_CONTEXT_WINDOWS_KEY]) == {"main": 123456, "fallback": [654321]}
-    assert _effective()["USE_LOCAL_MAIN"] == before["USE_LOCAL_MAIN"]
-    assert _without(_effective(), ROLES) == _without(before, ROLES)
-    assert _registry(root) == registry, "Main's tier is not a room's"
+    assert _registry(root) == registry and saved.get(MAIN_CHAT_TIER, "") == ""
     assert _state(client)["processing_tiers"] == {"main": "fast", "default": "economy"}
-    # An explicit Standard is a tier of Main's own, distinct from Default.
-    reply = client.post(CHAT_PROCESSING, json={"processing": "standard"})
-    assert reply.status_code == 200
-    assert (reply.json()["main_processing"], reply.json()["previous_main_processing"]) == ("standard", "fast")
-    assert json.loads(_saved()[ROLES])["main"] == "standard"
-    assert task_processing_preference({"metadata": {"lead": {"source": "main"}}}) == "standard"
-    assert _state(client)["processing_tiers"] == {"main": "standard", "default": "economy"}
+    assert task_processing_preference({"metadata": {"lead": {"source": "main"}}}) == "fast"
     # Default removes Main's own: Main's work pays the default tier again.
-    reply = client.post(CHAT_PROCESSING, json={"processing": ""})
-    assert reply.json() == {"ok": True, "project_id": "", "main_processing": "", "previous_main_processing": "standard",
-                            "processing_default": "economy"}
+    assert _main_tier(client, "").status_code == 200
     assert json.loads(_saved()[ROLES]) == {"light": "economy", "fallback": ["fast"]}
     assert task_processing_preference({"metadata": {"lead": {"source": "main"}}}) == "economy"
     assert _state(client)["processing_tiers"] == {"main": "", "default": "economy"}
-    again = client.post(CHAT_PROCESSING, json={"processing": ""})
-    assert again.status_code == 200 and again.json()["previous_main_processing"] == ""
-    assert _without(_effective(), ROLES) == _without(before, ROLES)
-    assert all(_saved()[key] == raw[key] for key in ("OUROBOROS_MODEL", MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY))
 
 
 def test_a_rooms_tier_is_its_own_and_both_axes_survive_each_others_writes(room):
@@ -352,15 +405,571 @@ def test_a_rooms_tier_is_its_own_and_both_axes_survive_each_others_writes(room):
     assert _saved() == settings, "a room's choices never write Main"
 
 
-def test_mains_tier_and_mains_model_survive_each_others_writes(room):
+def test_the_main_chats_tier_and_model_survive_each_others_writes_and_main_keeps_both_of_its_own(room):
     _root, client = room
-    assert client.post(CHAT_PROCESSING, json={"processing": "economy"}).status_code == 200
-    assert client.post(CHAT_MODEL, json=CHOSEN).status_code == 200
+    assert _main_tier(client, "fast").status_code == 200
+    assert client.post(CHAT_PROCESSING, json={"processing": "economy", **MAIN_CHAT}).status_code == 200
+    assert client.post(CHAT_MODEL, json={**CHOSEN, **MAIN_CHAT}).status_code == 200
     saved = _saved()
-    assert saved["OUROBOROS_MODEL"] == ASTRA and json.loads(saved[ROLES])["main"] == "economy"
-    assert client.post(CHAT_PROCESSING, json={"processing": "standard"}).status_code == 200
+    assert (saved["OUROBOROS_MAIN_CHAT_MODEL"], saved[MAIN_CHAT_TIER]) == (ASTRA, "economy")
+    assert client.post(CHAT_PROCESSING, json={"processing": "standard", **MAIN_CHAT}).status_code == 200
     saved = _saved()
-    assert saved["OUROBOROS_MODEL"] == ASTRA and json.loads(saved[ROLES])["main"] == "standard"
+    assert (saved["OUROBOROS_MAIN_CHAT_MODEL"], saved[MAIN_CHAT_TIER]) == (ASTRA, "standard")
+    assert saved["OUROBOROS_MODEL"] == SOL and json.loads(saved[ROLES])["main"] == "fast"
+    assert _state(client)["main_chat"] == {"model_choice": CHOSEN, "processing_choice": "standard"}
+    assert _state(client)["main_route"] == {"model": SOL, "use_local": False}
+
+
+def _asked(model: str = SOL, account: str = "acc-main", *, local: bool = False, connection: str = "") -> dict:
+    """What the page asked the owner about, by name: the model, its locality, the subscription profile (``""`` on
+    Auto and where a route has none) and, on an API route, its connection's revision as read. By default the route
+    new work in the Main chat runs on while it follows Main."""
+    from ouroboros.gateway.owner_settings import CONNECTION_CONDITION, connection_revision
+
+    return {"model": model, "use_local": local, "account": account,
+            **({CONNECTION_CONDITION: connection_revision(_saved(), connection)} if connection else {})}
+
+
+def _chat_ultrafast(client, confirmed="main"):
+    confirmed = _asked() if confirmed == "main" else confirmed
+    return client.post(CHAT_PROCESSING, json={"processing": "ultrafast", **MAIN_CHAT,
+                                              **({} if confirmed is None else {"confirmed": confirmed})})
+
+
+def _never_asked(*_args):
+    raise AssertionError("the Main chat's Ultrafast follows a profile by its name: nothing asks who is signed in to it")
+
+
+def test_the_main_chats_ultrafast_is_saved_with_the_route_it_was_asked_for_without_writing_main(room, monkeypatch):
+    _root, client = room
+    _observe(monkeypatch, _never_asked)
+    roles = _saved()[ROLES]
+    taken = _chat_ultrafast(client)
+    assert taken.status_code == 200, taken.text
+    assert taken.json() == {"ok": True, "project_id": "", "processing_choice": "ultrafast", "previous_processing_choice": ""}
+    # Saved with one word for what was confirmed: the model, its locality and the profile's name. None of it is a
+    # key, made from one, or anything of the account signed in to that profile.
+    assert _saved()[MAIN_CHAT_TIER] == "ultrafast@" + chat_consent_word([SOL, False, "acc-main"])
+    assert _saved()[ROLES] == roles
+    assert _state(client)["main_chat"] == {"model_choice": {"kind": "main"}, "processing_choice": "ultrafast"}
+    assert _state(client)["processing_tiers"] == {"main": "", "default": "economy"}
+
+
+@pytest.mark.parametrize("asked", [
+    None,  # nothing confirmed: nobody was asked
+    {"model": ASTRA},  # another model
+    {"account": ""},  # the same model, asked for on Auto while Main pins a profile
+    {"account": "acc-other"},  # another profile
+    {"local": True},
+    {"connection": "anthropic"},  # a connection named for a route that has none
+])
+def test_ultrafast_asked_for_another_route_than_the_main_chats_saves_nothing(room, asked):
+    _root, client = room
+    save_owner({**_saved(), "ANTHROPIC_API_KEY": "sk-fictional-one"})
+    before = _saved()
+    reply = _chat_ultrafast(client, None if asked is None else _asked(**asked))
+    assert reply.status_code == 409, reply.text
+    assert reply.json()["saved"] is False and reply.json()["code"] == "settings_changed_elsewhere"
+    assert _saved() == before
+
+
+@pytest.mark.parametrize("confirmed", [
+    {"model": SOL}, {"model": SOL, "use_local": "no", "account": "acc-main"}, {"model": 7, "use_local": False, "account": ""},
+    {"ultrafast": json.dumps([SOL, False, "acc-main", "", ""])},  # an earlier spelling, with an account's identity
+    "acc-main", {**{"model": SOL, "use_local": False, "account": "acc-main"}, "connection": 7},
+])
+def test_a_confirmation_that_does_not_name_its_route_is_refused_by_the_grammar(room, confirmed):
+    _root, client = room
+    before = _saved()
+    reply = _chat_ultrafast(client, confirmed)
+    assert reply.status_code == 400 and reply.json()["code"] == "chat_processing_invalid", reply.text
+    assert reply.json()["saved"] is False and _saved() == before
+
+
+@pytest.mark.parametrize("model,connection,first,changed", [
+    (OPUS, "anthropic", {"ANTHROPIC_API_KEY": "sk-fictional-one"}, {"ANTHROPIC_API_KEY": "sk-fictional-two"}),
+    ("openai-compatible::fictional-gamma", "openai-compatible",
+     {"OPENAI_COMPATIBLE_API_KEY": "sk-fictional-one", "OPENAI_COMPATIBLE_BASE_URL": "https://one.fictional.invalid/v1"},
+     {"OPENAI_COMPATIBLE_BASE_URL": "https://two.fictional.invalid/v1"}),
+], ids=["another-key", "another-address"])
+def test_a_changed_api_connection_under_the_same_model_does_not_inherit_the_main_chats_ultrafast(room, model, connection, first, changed):
+    """The same model on a connection whose key or address changed is another destination: the consent given on the
+    connection as it was shown starts no new work on Ultrafast there, and the work admitted on it stops asking it too.
+    A work carries a random saved revision, not the key or a derivative of it. A chip pick does not re-price it."""
+    from ouroboros.lead_fact import processing_fields
+    from ouroboros.provider_connections import live_connection_account
+    from supervisor.message_ingress import new_work_choice
+    from ouroboros.composer_cognition import saved_choice
+
+    root, client = room
+    save_owner({**_saved(), **first})
+    own = {"kind": "model", "model": model, "use_local": False}
+    assert client.post(CHAT_MODEL, json={**own, **MAIN_CHAT}).status_code == 200
+    # An API route's Ultrafast stands on its connection as shown: without that revision nothing is saved.
+    before = _saved()
+    assert _chat_ultrafast(client, _asked(model, "")).status_code == 409 and _saved() == before
+    shown = _asked(model, "", connection=connection)
+    taken = _chat_ultrafast(client, shown)
+    assert taken.status_code == 200, taken.text
+    kept = _saved()[MAIN_CHAT_TIER]
+    old_connection = live_connection_account(model)
+    assert old_connection.startswith(f"api:{connection}#")
+    assert _saved() == {**before, MAIN_CHAT_TIER: "ultrafast@" + chat_consent_word([model, False, ""], old_connection)}
+    assert _state(client)["main_chat"] == {"model_choice": own, "processing_choice": "ultrafast"}
+    work = _main_work(root, "on-the-shown-connection")
+    assert work == {"lead": {"source": "room", "model": model, "use_local": False},
+                    "processing": {**_confirmed(model, ""), "connection": old_connection}}
+    accepted = new_work_choice(root, 1, "New work on API", None, saved_choice(root, "")["choice_token"])
+    assert route_choice.new_work_carriers(json.loads(json.dumps(accepted))) == work
+    assert send_processing_preference(work, model, False, "lead") == "ultrafast"
+    on_route = {"model": model, "use_local": False, "basis": "room"}
+    assert processing_fields({"metadata": work}, on_route)["processing"] == {
+        "choice": "ultrafast", "source": "room", "bound": True, "resolved": "ultrafast"}
+    assert client.post(CHAT_PROCESSING, json={"processing": "fast", **MAIN_CHAT}).status_code == 200
+    assert send_processing_preference(work, model, False, "lead") == "ultrafast"
+    assert _main_work(root, "on-fast")["processing"] == {"source": "room", "tier": "fast"}
+    assert _chat_ultrafast(client, shown).status_code == 200
+    assert live_connection_account(model) == old_connection and _saved()[MAIN_CHAT_TIER] == kept
+    # An ordinary save of that connection, under the same model and the same connection name, ends the answer:
+    # for new work, and for the calls of the work admitted before it, which now go through the changed connection.
+    save_owner({**_saved(), **changed})
+    assert _saved()[MAIN_CHAT_TIER] == "" and _state(client)["main_chat"] == {"model_choice": own, "processing_choice": ""}
+    assert send_processing_preference(work, model, False, "lead") == "economy"
+    assert processing_fields({"metadata": work}, on_route)["processing"] == {"choice": "", "withheld": "ultrafast", "resolved": "economy"}
+    assert _main_work(root, "on-the-changed-connection") == {
+        "lead": {"source": "room", "model": model, "use_local": False}, "processing": {"source": "default"}}
+    assert "processing_choice" not in projects.create_project(root, "after-the-connection-changed", origin="owner_ui")
+    # The answer given on the connection as it was is stale for the connection as it is, and the old window is told so.
+    stale = _chat_ultrafast(client, shown)
+    assert stale.status_code == 409 and stale.json()["code"] == "settings_changed_elsewhere", stale.text
+    assert "connection this model is sent through changed" in stale.json()["error"]
+    assert _saved()[MAIN_CHAT_TIER] == ""
+    again = _chat_ultrafast(client, _asked(model, "", connection=connection))
+    assert again.status_code == 200, again.text
+    assert _saved()[MAIN_CHAT_TIER] != kept and _state(client)["main_chat"]["processing_choice"] == "ultrafast"
+    new_work = _main_work(root, "reconfirmed")
+    assert new_work["processing"]["connection"] != old_connection
+    assert send_processing_preference(work, model, False, "lead") == "economy"
+    assert send_processing_preference(new_work, model, False, "lead") == "ultrafast"
+    # A setting of another connection or the chip moves nothing of this one's accepted work.
+    save_owner({**_saved(), "OPENROUTER_API_KEY": "sk-fictional-unrelated"})
+    assert _state(client)["main_chat"]["processing_choice"] == "ultrafast"
+    assert client.post(CHAT_MODEL, json={**CHOSEN, **MAIN_CHAT}).status_code == 200
+    assert send_processing_preference(work, model, False, "lead") == "economy"
+    assert send_processing_preference(new_work, model, False, "lead") == "ultrafast"
+    # A rollback to the old payer's fields is a new revision, not authority to revive the old work's tier.
+    save_owner({**_saved(), **first})
+    assert live_connection_account(model) not in (old_connection, new_work["processing"]["connection"])
+    assert send_processing_preference(work, model, False, "lead") == "economy"
+    assert send_processing_preference(new_work, model, False, "lead") == "economy"
+
+
+def test_legacy_api_carriers_cannot_assert_the_current_payer(room):
+    root, _client = room
+    save_owner({**_saved(), "ANTHROPIC_API_KEY": "fictional-key",
+                "OUROBOROS_MAIN_CHAT_MODEL": OPUS,
+                MAIN_CHAT_TIER: "ultrafast@" + chat_consent_word([OPUS, False, ""])})
+    assert _main_work(root, "old-setting")["processing"] == DEFAULT
+    assert send_processing_preference({"processing": _confirmed(OPUS, "")}, OPUS, False, "lead") == "economy"
+
+
+def _confirmed(model: str = SOL, account: str = "acc-main", local: bool = False) -> dict:
+    """The carrier of work admitted on the Main chat's Ultrafast: the tier with the one destination it was confirmed
+    for, by value (its calls are another process's)."""
+    return {"source": "room", "tier": "ultrafast", "route": [model, local, account]}
+
+
+def _main_work(root, name: str) -> dict:
+    task = {"id": name}
+    route_choice.capture_lead(task, root)
+    return task["metadata"]
+
+
+def test_a_changed_system_route_does_not_inherit_the_main_chats_ultrafast(room):
+    """Only the tier moved to Ultrafast while the Main chat follows Main; then Main the role's own route is changed
+    on purpose, as a separate act. The consent names the old route: the new one starts no work on Ultrafast."""
+    root, client = room
+    assert _chat_ultrafast(client).status_code == 200
+    kept = _saved()[MAIN_CHAT_TIER]
+    assert _main_work(root, "on-the-asked-route") == {"lead": {"source": "main"}, "processing": _confirmed()}
+    # Settings › Models moves Main's own model. Main's own tier is not Ultrafast, so that write asks nothing, and it
+    # lands with the chat's answer ended: the route under it moved.
+    moved = _main_model(client, ASTRA)
+    assert moved.status_code == 200, moved.text
+    assert kept.startswith("ultrafast@") and _saved()[MAIN_CHAT_TIER] == ""
+    assert _state(client)["main_route"] == {"model": ASTRA, "use_local": False}
+    assert _state(client)["main_chat"] == {"model_choice": {"kind": "main"}, "processing_choice": ""}
+    assert _main_work(root, "on-the-new-route") == {"lead": {"source": "main"}, "processing": {"source": "default"}}
+    assert task_processing_preference({"task_metadata": _main_work(root, "again")}, model_role="main") == "economy"
+    # Ultrafast on the new route is a new question: the old answer names another route.
+    assert _chat_ultrafast(client).status_code == 409
+    asked = _chat_ultrafast(client, _asked(ASTRA))
+    assert asked.status_code == 200, asked.text
+    assert _saved()[MAIN_CHAT_TIER].startswith("ultrafast@") and _saved()[MAIN_CHAT_TIER] != kept  # another destination
+    assert _state(client)["main_chat"]["processing_choice"] == "ultrafast"
+
+
+def test_the_main_chats_ultrafast_ends_when_its_route_moves_and_a_return_asks_again(room, monkeypatch):
+    """Ordinary Settings saves move Main's pinned profile away and back. The save that moves the route ends the
+    answer for new work and the return brings nothing back. Asked again, Ultrafast is saved for the profile by its
+    name: whoever is signed in to it then is not asked for."""
+    root, client = room
+    _observe(monkeypatch, _never_asked)
+    assert _chat_ultrafast(client).status_code == 200
+    # Another pinned profile under the same model is another route.
+    save_owner({**_saved(), MODEL_ACCOUNTS_KEY: json.dumps({"main": "acc-other", "fallback": ["acc-fallback"]})})
+    assert _saved()[MAIN_CHAT_TIER] == "" and _state(client)["main_chat"]["processing_choice"] == ""
+    assert _main_work(root, "other-account")["processing"] == {"source": "default"}
+    assert _chat_ultrafast(client).status_code == 409  # asked for the profile Main left
+    save_owner({**_saved(), MODEL_ACCOUNTS_KEY: OWNER[MODEL_ACCOUNTS_KEY]})
+    assert _saved()[MAIN_CHAT_TIER] == "" and _state(client)["main_chat"]["processing_choice"] == ""
+    assert _main_work(root, "the-first-label-again")["processing"] == {"source": "default"}
+    asked = _chat_ultrafast(client)
+    assert asked.status_code == 200, asked.text
+    assert _main_work(root, "asked-again")["processing"] == _confirmed()
+    # A model picked in the capsule is another route too: the same press never carries the consent along.
+    assert client.post(CHAT_MODEL, json={**CHOSEN, **MAIN_CHAT}).status_code == 200
+    assert _saved()[MAIN_CHAT_TIER] == "" and _state(client)["main_chat"] == {"model_choice": CHOSEN, "processing_choice": ""}
+    assert _main_work(root, "own-model")["processing"] == {"source": "default"}
+    assert _chat_ultrafast(client).status_code == 409  # asked for Main's route, which the chat left
+    assert _chat_ultrafast(client, _asked(ASTRA)).status_code == 409  # its own model runs on Auto, never on Main's profile
+    own = _chat_ultrafast(client, _asked(ASTRA, ""))
+    assert own.status_code == 200, own.text
+    assert _main_work(root, "own-ultrafast")["processing"] == _confirmed(ASTRA, "")
+    # Main the role moving under a chat with its own model changes nothing of that chat's route.
+    assert _main_model(client, LUNA).status_code == 200
+    assert _state(client)["main_chat"]["processing_choice"] == "ultrafast"
+
+
+def test_a_new_room_never_copies_the_main_chats_ultrafast(room):
+    root, client = room
+    assert _chat_ultrafast(client).status_code == 200
+    made = projects.create_project(root, "after-ultrafast", origin="owner_ui")
+    assert "processing_choice" not in made and "model_choice" not in made
+    assert client.post(CHAT_PROCESSING, json={"processing": "fast", **MAIN_CHAT}).status_code == 200
+    assert projects.create_project(root, "after-fast", origin="owner_ui")["processing_choice"] == "fast"
+
+
+def test_an_ultrafast_no_confirmed_write_saved_is_default(room):
+    """Only the chat's confirmed write sets Ultrafast: a settings write that merely names the tier lands as Default,
+    and a word no tier spells reads as Default."""
+    root, client = room
+    for stored in ("ultrafast", "ultrafast@", "ultrafast@0000", "fast@" + "0" * 24):
+        save_owner({**_saved(), MAIN_CHAT_TIER: stored})
+        assert _state(client)["main_chat"]["processing_choice"] == "", stored
+        assert _main_work(root, f"stored-{stored}")["processing"] == {"source": "default"}
+    assert not _saved()[MAIN_CHAT_TIER].startswith("ultrafast")
+    # Even the right word for this destination, saved by anything but the chat's confirmed write.
+    right = "ultrafast@" + chat_consent_word([SOL, False, "acc-main"])
+    for stored in ("ultrafast", right):
+        save_owner({**_saved(), MAIN_CHAT_TIER: stored})
+        assert _saved()[MAIN_CHAT_TIER] == "" and _state(client)["main_chat"]["processing_choice"] == ""
+    assert _chat_ultrafast(client).status_code == 200 and _saved()[MAIN_CHAT_TIER] == right
+
+
+def test_the_main_chats_ultrafast_is_judged_on_one_locked_read_of_the_destination(room, monkeypatch):
+    """The destination is compared under the lock with that write's one read, a tier already saved included, and
+    by its names alone: no engine is asked who is signed in to the profile, before the lock or under it."""
+    root, client = room
+    _observe(monkeypatch, _never_asked)
+    assert _chat_ultrafast(client).status_code == 200
+    # Another window gave the Main chat its own model: only the chat's default changed. The old window's answer names
+    # Main's route, and is told exactly that, whether or not Ultrafast is already saved for the new one.
+    assert client.post(CHAT_MODEL, json={**CHOSEN, **MAIN_CHAT}).status_code == 200
+    for saved_first in (False, True):
+        if saved_first:
+            assert _chat_ultrafast(client, _asked(ASTRA, "")).status_code == 200
+        before = _saved()
+        old = _chat_ultrafast(client)
+        assert old.status_code == 409 and old.json()["code"] == "settings_changed_elsewhere", old.text
+        assert old.json()["error"].startswith("The model or profile new work runs on here is not the one Ultrafast was asked for")
+        assert _saved() == before
+    # The same answer for the destination as it is saves nothing new and is no refusal.
+    assert _chat_ultrafast(client, _asked(ASTRA, "")).status_code == 200 and _saved() == before
+
+
+def test_a_saved_ultrafast_is_in_force_only_while_new_work_runs_on_the_route_it_names(room, monkeypatch):
+    """The consent names the model, its locality and the profile. A new sign-in to that profile changes nothing the
+    host reads, so the tier stays in force. A destination that moved without the settings writer (a document edited
+    by hand here; a shipped default or an operator's variable does the same) is another route: new work takes the
+    ordinary mode, the state says the saved Ultrafast is withheld and nothing is written for it; the same route
+    again puts it back in force."""
+    root, client = room
+    assert _chat_ultrafast(client).status_code == 200
+    saved = _saved()
+    in_force = {"model_choice": {"kind": "main"}, "processing_choice": "ultrafast"}
+    withheld = {"model_choice": {"kind": "main"}, "processing_choice": "", "processing_withheld": "ultrafast"}
+    _observe(monkeypatch, _never_asked)  # whoever is signed in to the profile now
+    assert _state(client)["main_chat"] == in_force
+    assert _main_work(root, "after-a-new-sign-in")["processing"] == _confirmed()
+    for index, moved in enumerate(({"OUROBOROS_MODEL": ASTRA}, {MODEL_ACCOUNTS_KEY: json.dumps({"main": "acc-other"})},
+                                   {MODEL_ACCOUNTS_KEY: "{}"})):
+        config.SETTINGS_PATH.write_text(json.dumps({**saved, **moved}), encoding="utf-8")  # no writer ended it
+        assert _state(client)["main_chat"] == withheld, moved
+        assert _main_work(root, f"withheld-{index}") == {"lead": {"source": "main"}, "processing": {"source": "default"}}
+        assert _saved()[MAIN_CHAT_TIER] == saved[MAIN_CHAT_TIER]
+    config.SETTINGS_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    assert _state(client)["main_chat"] == in_force
+    assert _main_work(root, "the-same-route-again")["processing"] == _confirmed()
+    # An unrelated settings save keeps the saved consent as it is: nothing moved under it.
+    save_owner({**_saved(), GLOBAL: "fast"})
+    assert _saved()[MAIN_CHAT_TIER] == saved[MAIN_CHAT_TIER] and _state(client)["main_chat"] == in_force
+
+
+def test_the_consent_word_is_made_of_the_names_the_page_was_shown_and_of_no_key():
+    """A pure rule: the same model, locality and profile name are the same word; any one of them changed is another.
+    The word has no input but those three, so neither a connection's key or address nor an account's identity can be
+    read back from it."""
+    word = chat_consent_word([SOL, False, "acc-main"])
+    assert word == chat_consent_word([SOL, False, "acc-main", "ignored-revision"]) == chat_consent_word((SOL, False, "acc-main"))
+    assert len(word) == 24 and int(word, 16) >= 0
+    others = [chat_consent_word([ASTRA, False, "acc-main"]), chat_consent_word([SOL, True, "acc-main"]),
+              chat_consent_word([SOL, False, "acc-other"]), chat_consent_word([SOL, False, ""])]
+    assert word not in others and len(set(others)) == len(others)
+
+
+@pytest.mark.parametrize("url,body,code", [
+    (CHAT_PROCESSING, {"processing": "fast"}, "chat_processing_invalid"),
+    (CHAT_PROCESSING, {"processing": ""}, "chat_processing_invalid"),
+    (CHAT_MODEL, CHOSEN, "chat_model_invalid"),
+])
+def test_a_write_that_names_no_scope_is_an_older_pages_and_saves_nothing(room, url, body, code):
+    """A page loaded before the Main chat kept its own model and tier meant Main the role by a body without
+    ``project_id``, and its plain Standard, Fast or Default press carried no binding tokens to tell it by. It is told
+    to reload, and nothing is saved under another setting's name; a room's write, named by its project_id as ever,
+    still saves."""
+    root, client = room
+    before = config.SETTINGS_PATH.read_bytes(), _registry(root)
+    reply = client.post(url, json=body)
+    assert reply.status_code == 400 and reply.json()["code"] == code, reply.text
+    assert reply.json()["saved"] is False and "Reload the page" in reply.json()["error"]
+    both = client.post(url, json={**body, "project_id": "alpha", **MAIN_CHAT})  # two scopes name none
+    assert both.status_code == 400 and both.json()["code"] == code and both.json()["saved"] is False, both.text
+    assert (config.SETTINGS_PATH.read_bytes(), _registry(root)) == before
+    assert client.post(url, json={**body, "project_id": "alpha"}).status_code == 200
+    assert config.SETTINGS_PATH.read_bytes() == before[0]  # the room's own row, never the settings document
+    assert client.post(url, json={**body, **MAIN_CHAT}).status_code == 200
+
+
+def test_a_tier_confirmed_for_one_destination_is_asked_of_that_destination_alone(room):
+    """Pure policy on fictional routes over the fixture's ordinary save: the carrier names where its tier was
+    confirmed, and a send bound to that model, locality and profile asks it. Anywhere else, and for a reader that
+    names no send (a helper taking the work's tier), the default resolution stands. Carriers without a destination
+    answer as they always did, and a destination without a named profile also needs the chat's word to stand."""
+    root, client = room
+    assert _chat_ultrafast(client).status_code == 200
+    bound = {"lead": {"source": "main"}, "processing": _confirmed()}
+
+    def asked(metadata, role, route):
+        return task_processing_preference({"task_metadata": metadata}, model_role=role, route=route)
+
+    assert asked(bound, "main", (SOL, False, "acc-main")) == "ultrafast"
+    assert asked(bound, "main", lambda: [SOL, False, "acc-main"]) == "ultrafast"  # read only for such a carrier
+    for elsewhere in ((ASTRA, False, "acc-main"), (SOL, False, "acc-other"), (SOL, False, ""), (SOL, True, "acc-main"), None):
+        assert asked(bound, "main", elsewhere) == "economy", elsewhere  # the default resolution: what this work takes there
+    # A fallback row is another destination: its authored tier, else the work's primary role's; never the confirmed one.
+    assert asked(bound, "fallback:0", (LUNA, False, "acc-fallback")) == "fast"
+    assert asked(bound, "fallback:1", (OPUS, False, "")) == "economy"
+    # The same model and profile reached as a fallback row are the destination that was confirmed.
+    assert asked(bound, "fallback:1", (SOL, False, "acc-main")) == "ultrafast"
+    # No send named: a helper inheriting the work's tier, a nanny's frozen route, any older reader.
+    assert route_choice.task_processing(bound) == ""
+    assert route_choice.task_processing(bound, (SOL, False, "acc-main")) == "ultrafast"
+    assert task_processing_preference({"task_metadata": bound}) == task_processing_preference({"metadata": bound}) == "economy"
+    # A room's own Ultrafast and the owner's card act name no destination: they answer on every route, as before,
+    # whatever the Main chat confirmed.
+    for source in ("room", "owner"):
+        free = {"lead": {"source": "main"}, "processing": {"source": source, "tier": "ultrafast"}}
+        for role, route in (("main", None), ("main", (ASTRA, False, "")), ("fallback:0", (LUNA, False, "acc-fallback"))):
+            assert asked(free, role, route) == "ultrafast", (source, role)
+        assert route_choice.task_processing(free) == "ultrafast"
+    # The carrier is host-made and validated whole: one that names a destination it cannot state confirms nothing.
+    assert route_choice.processing_snapshot(_confirmed()) == _confirmed()
+    assert route_choice.processing_snapshot({**_confirmed(), "extra": 1}) == _confirmed()
+    for broken in ([SOL, False], [SOL, "no", "acc-main"], ["", False, ""], [SOL, False, None], "route", None):
+        assert route_choice.processing_snapshot({"source": "room", "tier": "ultrafast", "route": broken}) is None, broken
+        assert asked({"processing": {"source": "room", "tier": "ultrafast", "route": broken}}, "main", (SOL, False, "acc-main")) == "economy"
+    # New work's carriers keep the destination its acceptance assigned; a broken one starts on Default.
+    assigned = {"model_choice": {"kind": "main"}, "processing_choice": "ultrafast", "processing_route": [SOL, False, "acc-main"]}
+    assert route_choice.new_work_carriers(assigned) == {"lead": {"source": "main"}, "processing": _confirmed()}
+    assert route_choice.new_work_carriers({**assigned, "processing_route": [SOL]})["processing"] == DEFAULT
+    assert route_choice.new_work_carriers({"model_choice": {"kind": "main"}, "processing_choice": "fast"})["processing"] == {
+        "source": "room", "tier": "fast"}
+    # The chat's own model runs on Auto: confirmed with no profile, and asked on Auto alone. That later choice is
+    # new work's: the work admitted on Main's named profile carries its own answer.
+    assert client.post(CHAT_MODEL, json={**CHOSEN, **MAIN_CHAT}).status_code == 200
+    assert _chat_ultrafast(client, _asked(ASTRA, "")).status_code == 200
+    own = {"lead": {"source": "room", "model": ASTRA, "use_local": False}, "processing": _confirmed(ASTRA, "")}
+    assert asked(own, "lead", (ASTRA, False, "")) == "ultrafast"
+    assert asked(own, "lead", (ASTRA, False, "acc-main")) == asked(own, "lead", (LUNA, False, "")) == "economy"
+    assert asked(bound, "main", (SOL, False, "acc-main")) == "ultrafast"
+    # Later tier picks apply only to new work even on the Auto pool.
+    assert client.post(CHAT_PROCESSING, json={"processing": "fast", **MAIN_CHAT}).status_code == 200
+    assert asked(own, "lead", (ASTRA, False, "")) == "ultrafast"
+    assert asked(bound, "main", (SOL, False, "acc-main")) == "ultrafast"
+
+
+def test_each_send_names_its_own_destination_and_a_moved_wait_asks_again(room):
+    """The round's call, its wrap-up and a letter's candidate ask through one reader, which names the destination the
+    send is bound to by the existing resolver: model, locality and account, a wait card's live choice included."""
+    from ouroboros.model_slots import moved_send_processing_options
+
+    _root, client = room
+    assert _chat_ultrafast(client).status_code == 200
+    bound = {"lead": {"source": "main"}, "processing": _confirmed()}
+
+    def sent(model, role="main", local=False, **more):
+        return send_processing_preference(bound, model, local, role, **more)
+
+    assert sent(SOL) == "ultrafast"
+    assert sent(ASTRA) == "economy"  # Main's model moved since admission
+    assert sent(SOL, local=True) == "economy"
+    assert sent(LUNA, "fallback:0") == "fast"
+    # A wait card's choice for this work replaces the route exactly as its send applies it: another model, another
+    # profile and Auto are not the profile that was confirmed.
+    for chosen in ({"model": ASTRA, "use_local": False}, {"model_account_override": "acc-other"}, {"model_account_override": ""}):
+        assert sent(SOL, overrides={"main": chosen}) == "economy", chosen
+    assert sent(SOL, overrides={"main": {"model_account_override": "acc-main"}}) == "ultrafast"
+
+    # A waiting send keeps the tier it captured; only a tier confirmed for one destination is asked again when the
+    # wait card moves that send, and then for the route it now takes.
+    def waiting(metadata, tier, model, **more):
+        return moved_send_processing_options(metadata, tier, model, False, "main", **more)["processing_preference"]
+
+    assert waiting(bound, "ultrafast", ASTRA) == "economy"
+    assert waiting(bound, "ultrafast", SOL) == "ultrafast"
+    assert waiting(bound, "ultrafast", SOL, overrides={"main": {"model_account_override": "acc-other"}}) == "economy"
+    free = {"lead": {"source": "main"}, "processing": {"source": "owner", "tier": "ultrafast"}}
+    assert waiting(free, "ultrafast", ASTRA) == "ultrafast" and waiting({}, "fast", ASTRA) == "fast"
+    assert waiting(None, "fast", ASTRA) == "fast"
+
+
+def test_the_card_says_a_confirmed_tier_only_where_its_calls_go_to_that_destination(room, monkeypatch):
+    """What ``/api/state`` publishes for a work's card: the tier is the work's own choice while its calls are bound
+    to the confirmed model and profile, said as bound to them (its helpers and calls elsewhere take the default); on
+    a fallback, another model or another profile the card says no choice, names the tier as withheld and resolves
+    what those calls take. What the chat chooses later is not the card's."""
+    from ouroboros.lead_fact import processing_fields
+
+    _root, client = room
+    assert _chat_ultrafast(client).status_code == 200
+    _observe(monkeypatch, _never_asked)
+    row = {"metadata": {"lead": {"source": "main"}, "processing": _confirmed()}}
+    on_main = {"model": SOL, "use_local": False, "basis": "main"}
+    own = {"processing": {"choice": "ultrafast", "source": "room", "bound": True, "resolved": "ultrafast"}}
+    held = {"processing": {"choice": "", "withheld": "ultrafast", "resolved": "economy"}}
+    assert processing_fields(row, on_main) == own
+    fallback = {"model": LUNA, "use_local": False, "basis": "fallback", "role": "fallback:0", "primary": on_main}
+    assert processing_fields(row, fallback) == {"processing": {"choice": "", "withheld": "ultrafast", "resolved": "fast"}}
+    moved = {"model": ASTRA, "use_local": False, "basis": "main"}  # Main the role changed under the running work
+    assert processing_fields(row, moved) == held
+    # The owner's own tier act on the card is this work's everywhere, as it always was; its receipt rides beside it.
+    last = {"requested": "ultrafast", "submitted": "ultrafast", "observed": "ultrafast", "reason": None}
+    chosen = {"metadata": {"lead": {"source": "main"}, "processing": {"source": "owner", "tier": "ultrafast"}}, "processing_last": last}
+    for lead in (on_main, fallback, moved):
+        assert processing_fields(chosen, lead) == {"processing": {"choice": "ultrafast", "source": "owner", "last": last, "resolved": "ultrafast"}}
+    withheld_last = processing_fields({**row, "processing_last": {**last, "requested": "fast"}}, fallback)["processing"]
+    assert (withheld_last["withheld"], withheld_last["last"]["requested"]) == ("ultrafast", "fast")
+    # Main's pin moved to another profile under the running work: another destination, by its name. Back on the
+    # profile it was confirmed for, the tier is the work's own again.
+    save_owner({**_saved(), MODEL_ACCOUNTS_KEY: json.dumps({"main": "acc-other", "fallback": ["acc-fallback"]})})
+    assert processing_fields(row, on_main) == held
+    save_owner({**_saved(), MODEL_ACCOUNTS_KEY: OWNER[MODEL_ACCOUNTS_KEY]})
+    assert processing_fields(row, on_main) == own
+    # Those saves ended the chat's own Ultrafast, and another tier chosen there is new work's alone: the card of the
+    # work admitted on it still says it, and the card's own act stays.
+    assert _state(client)["main_chat"]["processing_choice"] == ""
+    assert client.post(CHAT_PROCESSING, json={"processing": "fast", **MAIN_CHAT}).status_code == 200
+    assert processing_fields(row, on_main) == own
+    assert processing_fields(chosen, on_main)["processing"]["choice"] == "ultrafast"
+
+
+def test_work_admitted_on_the_main_chats_ultrafast_asks_it_from_its_first_call_whatever_the_chat_chooses_later(room, monkeypatch):
+    """The ordinary path with fictional settings: the owner confirms Ultrafast in the Main chat for Main's model on
+    its pinned profile, a turn is accepted, and its calls are made by another process that holds what the turn
+    carries. Each call bound to that model and profile asks Ultrafast, the first one included: no receipt, catalog
+    reading or engine handshake is waited for, and nothing asks who is signed in to the profile. Another model,
+    another profile and a fallback take what they would without this choice. What the chat chooses afterwards is new
+    work's alone, in both directions. That is the named profile's rule alone: work admitted on Auto reads the choice
+    as it stands."""
+    from supervisor import worker_chat_lane
+    from supervisor.message_ingress import new_work_choice
+    from ouroboros.composer_cognition import saved_choice
+
+    root, client = room
+    assert _chat_ultrafast(client).status_code == 200
+    seed = worker_chat_lane._seed_task(1, "Compare the two drafts", None, None, {})
+    worker_chat_lane._stamp_admitted_choice(seed, root)  # the turn's route and tier are accepted here, once
+    carried = json.loads(json.dumps(seed["metadata"]))  # what crosses to the carrier's process, by value
+    assert carried == {"lead": {"source": "main"}, "processing": _confirmed()}
+    _observe(monkeypatch, _never_asked)
+
+    def sent(model=SOL, role="main", metadata=carried, **more):
+        return send_processing_preference(metadata, model, False, role, **more)
+
+    assert sent() == "ultrafast"  # the first call: the turn's own carrier is all it needs
+    assert sent(LUNA, "fallback:0") == "fast"  # a fallback row: its own authored tier
+    assert sent(ASTRA) == "economy"  # another model given to the work
+    assert sent(overrides={"main": {"model_account_override": "acc-other"}}) == "economy"  # another profile, by a wait card
+    # Main's pinned profile moves under the running work: its calls go to another profile, at its usual tier.
+    save_owner({**_saved(), MODEL_ACCOUNTS_KEY: json.dumps({"main": "acc-other", "fallback": ["acc-fallback"]})})
+    assert sent() == "economy"
+    # Back on the profile it was admitted on, by the same name: its tier again. That save ended the chat's own
+    # saved Ultrafast, which is new work's question; the admitted work reads its carrier.
+    save_owner({**_saved(), MODEL_ACCOUNTS_KEY: OWNER[MODEL_ACCOUNTS_KEY]})
+    assert _saved()[MAIN_CHAT_TIER] == "" and sent() == "ultrafast"
+    later = worker_chat_lane._seed_task(1, "And a third draft", None, None, {})
+    worker_chat_lane._stamp_admitted_choice(later, root)
+    assert later["metadata"] == {"lead": {"source": "main"}, "processing": {"source": "default"}}
+    assert sent(metadata=later["metadata"]) == "economy"
+    # The chat chooses again: Ultrafast, another tier, Default. None of it re-prices work already admitted: the one
+    # admitted on Default stays there, the one admitted on Ultrafast keeps it.
+    assert _chat_ultrafast(client).status_code == 200
+    assert sent(metadata=later["metadata"]) == "economy"
+    for tier in ("fast", ""):
+        assert client.post(CHAT_PROCESSING, json={"processing": tier, **MAIN_CHAT}).status_code == 200
+        assert sent() == "ultrafast"
+    # A model picked in the capsule is another route for new work; the admitted work stays on Main's, on its tier.
+    picked = client.post(CHAT_MODEL, json={**CHOSEN, **MAIN_CHAT})
+    assert picked.status_code == 200 and _state(client)["main_chat"] == {"model_choice": CHOSEN, "processing_choice": ""}
+    assert sent() == "ultrafast"
+    # Ultrafast for the picked model is asked on its own, on Auto: words sent as new work are assigned the tier with
+    # that destination and ask it on Auto alone, never on a profile nobody was asked about.
+    assert _chat_ultrafast(client, _asked(ASTRA, "")).status_code == 200
+    token = saved_choice(root, "")["choice_token"]
+    assert token == picked.json()["choice_token"]
+    assigned = new_work_choice(root, 1, "Now on the other model", None, token)
+    assert assigned == {"model_choice": CHOSEN, "processing_choice": "ultrafast", "processing_route": [ASTRA, False, ""]}
+    new_work = json.loads(json.dumps(route_choice.new_work_carriers(assigned)))
+    assert new_work == {"lead": {"source": "room", "model": ASTRA, "use_local": False}, "processing": _confirmed(ASTRA, "")}
+    assert sent(ASTRA, "lead", new_work) == "ultrafast"
+    assert sent(ASTRA, "lead", new_work, overrides={"lead": {"model_account_override": "acc-main"}}) == "economy"
+    assert sent(LUNA, "fallback:0", new_work) == "fast"
+    assert sent() == "ultrafast"  # the earlier work, still on Main's route and its own tier
+    assert _state(client)["main_chat"] == {"model_choice": CHOSEN, "processing_choice": "ultrafast"}, "no destination is published"
+    # Default chosen here is new work's, even when the earlier work is on the source's Auto pool.
+    assert client.post(CHAT_PROCESSING, json={"processing": "", **MAIN_CHAT}).status_code == 200
+    assert sent(ASTRA, "lead", new_work) == sent() == "ultrafast"
+    after = _main_work(root, "after-default")
+    assert sent(ASTRA, "lead", after) == "economy"
+    assert client.post(CHAT_MODEL, json={"kind": "main", **MAIN_CHAT}).status_code == 200
+    assert sent(ASTRA, "lead", new_work) == sent() == "ultrafast"
+
+
+def test_the_main_chat_follows_mains_destination_as_mains_own_rule_resolves_it(room):
+    """One resolver names Main's destination for both Ultrafast rules: a model the document labels local is local
+    whatever its box says, and the pinned account belongs to a subscription route alone."""
+    from ouroboros.gateway.owner_effort import _chat_destination, _main_destination
+    from ouroboros.gateway.owner_settings import settings_in_place_of
+
+    for values, expected in (
+            ({}, [SOL, False, "acc-main"]),
+            ({"OUROBOROS_MODEL": "qwen3 (local)", "USE_LOCAL_MAIN": False}, ["qwen3 (local)", True, ""]),
+            ({"OUROBOROS_MODEL": OPUS}, [OPUS, False, ""])):
+        settings = settings_in_place_of({**_saved(), **values})
+        assert _main_destination(settings) == _chat_destination(settings) == expected
+    own = settings_in_place_of({**_saved(), "OUROBOROS_MAIN_CHAT_MODEL": ASTRA})
+    assert _chat_destination(own) == [ASTRA, False, ""] and _main_destination(own) == [SOL, False, "acc-main"]
 
 
 @pytest.mark.parametrize("body,status,code", [
@@ -418,31 +1027,41 @@ def _binding(connection: str = "", *, model=None) -> dict:
     return {"ultrafast": confirmed, **setting_tokens(saved, MAIN_TIER_KEYS), **({CONNECTION_CONDITION: connection_revision(saved, connection)} if connection else {})}
 
 
-def test_main_ultrafast_conditions_are_exact_and_exclusive_to_main_ultrafast(room):
+def test_mains_own_ultrafast_never_moves_to_another_system_route_unconfirmed(room):
+    """Only Main the role's tier moved to Ultrafast, confirmed for its route. A separate change of that route
+    (Settings › Models, or the owner's cited words through the role's writer) is refused until Ultrafast is
+    confirmed for the new one or the tier is changed first: the old consent allows no other route."""
+    from ouroboros.gateway.owner_effort import BindingRefused, _write_main_route
+
+    _, client = room
+    assert _main_tier(client, "ultrafast", _binding()).status_code == 200
+    before = config.SETTINGS_PATH.read_bytes()
+    moved = _main_model(client, ASTRA)
+    assert 400 <= moved.status_code < 500 and moved.json()["saved"] is False, moved.text
+    assert "Confirm Ultrafast" in moved.json()["error"] and "Settings → Models" in moved.json()["error"]
+    with pytest.raises(BindingRefused, match="Confirm Ultrafast"):
+        _write_main_route(None, {"kind": "model", "model": ASTRA, "use_local": False})
+    assert config.SETTINGS_PATH.read_bytes() == before
+    assert _state(client)["main_route"] == {"model": SOL, "use_local": False}
+    confirmed = _main_model(client, ASTRA, _binding(model=ASTRA))  # asked again, for the new route
+    assert confirmed.status_code == 200, confirmed.text
+    assert _state(client)["main_route"] == {"model": ASTRA, "use_local": False}
+    assert _state(client)["processing_tiers"]["main"] == "ultrafast"
+
+
+def test_a_composer_write_naming_mains_binding_is_refused_and_saves_nothing(room):
+    """A page loaded before the Main chat kept its own model and tier still sends Main's read tokens."""
     root, client = room
-    tokens = _binding()  # Main is a subscription: no API connection to bind
-    body = {"processing": "ultrafast", "if_unchanged": tokens}
+    tokens = _binding()
     before = config.SETTINGS_PATH.read_bytes(), _registry(root)
-    for invalid in (
-        {**body, "project_id": "alpha"}, {**body, "processing": "standard"},
-        {**body, "if_unchanged": None}, {**body, "if_unchanged": {}},
-        {**body, "if_unchanged": {k: v for k, v in tokens.items() if k != MODEL_ACCOUNTS_KEY}},
-        {**body, "if_unchanged": {**tokens, "OPENROUTER_API_KEY": "unexpected"}},
-        {**body, "if_unchanged": {**tokens, GLOBAL: "unexpected"}},
-        {**body, "if_unchanged": {**tokens, ROLES: 1}}, {**body, "if_unchanged": {**tokens, ROLES: ""}},
-        {**body, "if_unchanged": {**tokens, "connection": ""}},
-        {**body, "if_unchanged": {**tokens, "connection": "unknown#" + "a" * 24}},
-        {**body, "if_unchanged": {**tokens, "connection": "openai@invalid@name#" + "a" * 24}},
-        {**body, "if_unchanged": {key: token for key, token in tokens.items() if key != "ultrafast"}},
-        # A current read naming a connection Main's route does not send to: wrong destination (a made-up revision
-        # would be stale first, 409: test_main_ultrafast_binds_the_named_connection_under_the_same_route).
-        {**body, "if_unchanged": {**tokens, "connection": _binding("openai")["connection"]}},
-        {**body, "if_unchanged": {**tokens, "main_connection": "x"}},
-    ):
-        reply = client.post(CHAT_PROCESSING, json=invalid)
-        assert reply.status_code == 400 and reply.json()["code"] == "chat_processing_invalid", reply.text
-        assert reply.json()["saved"] is False
-        assert (config.SETTINGS_PATH.read_bytes(), _registry(root)) == before
+    for url, body, code in ((CHAT_PROCESSING, {"processing": "ultrafast"}, "chat_processing_invalid"),
+                            (CHAT_PROCESSING, {"processing": "standard", "project_id": "alpha"}, "chat_processing_invalid"),
+                            (CHAT_MODEL, CHOSEN, "chat_model_invalid")):
+        for condition in (tokens, {}, None):
+            reply = client.post(url, json={**body, "if_unchanged": condition})
+            assert reply.status_code == 400 and reply.json()["code"] == code, reply.text
+            assert reply.json()["saved"] is False and "Reload the page" in reply.json()["error"]
+            assert (config.SETTINGS_PATH.read_bytes(), _registry(root)) == before
 
 
 @pytest.mark.parametrize("changed", MAIN_TIER_KEYS)
@@ -456,7 +1075,7 @@ def test_main_ultrafast_compares_every_read_token_before_writing(room, changed):
              MODEL_ACCOUNTS_KEY: '{"main":"another"}', ROLES: '{"main":"standard"}'}
     tokens.update(setting_tokens({**_saved(), changed: other[changed]}, [changed]))
     before = config.SETTINGS_PATH.read_bytes()
-    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": tokens})
+    reply = _main_tier(client, "ultrafast", tokens)
     assert reply.status_code == 409 and reply.json()["code"] == "settings_changed_elsewhere", reply.text
     assert reply.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
 
@@ -465,41 +1084,29 @@ def test_main_ultrafast_conditions_survive_an_unrelated_settings_save(room):
     _, client = room
     before = _saved()
     tokens = _binding()
-    save_owner({**before, GLOBAL: "fast"})
-    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": tokens})
-    assert reply.status_code == 200 and reply.json()["processing_default"] == "fast", reply.text
+    _booted({**before, GLOBAL: "fast"})
+    reply = _main_tier(client, "ultrafast", tokens)
+    assert reply.status_code == 200, reply.text
     saved = _saved()
     assert saved[GLOBAL] == "fast" and json.loads(saved[ROLES]) == {**json.loads(before[ROLES]), "main": "ultrafast"}
 
 
 @pytest.mark.parametrize("new_identity", [("fixture-store", "replacement"), ("replacement-store", "fixture-account"), None])
-def test_replaced_pinned_identity_refuses_composer_and_settings(room, monkeypatch, new_identity):
-    from ouroboros.gateway.safety_settings import api_owner_safety_model
-
+def test_replaced_pinned_identity_refuses_the_settings_writer(room, monkeypatch, new_identity):
     _, client = room
-    client.app.router.routes.append(Route("/api/owner/safety-model", api_owner_safety_model, methods=["POST"]))
-    # A booted install: its locked boot read saved the one-time Safety upgrade. Otherwise the Settings writer's own
-    # locked read (``safety_settings._persist``) saves it before any refusal, as every writer's locked read may.
-    config.load_settings(migrate=True)
-    assert _saved()["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "full"
+    assert _saved()["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "full"  # the booted install the fixture saved
     seen = _binding()
     before = config.SETTINGS_PATH.read_bytes()
     monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda source, pin: new_identity)
-    for url, body in [(CHAT_PROCESSING, {"processing": "ultrafast"}),
-                      ("/api/owner/safety-model", {"settings": {ROLES: {"main": "ultrafast"}}})]:
-        reply = client.post(url, json={**body, "if_unchanged": seen})
-        assert reply.status_code == 409 and not reply.json()["saved"]
-        assert config.SETTINGS_PATH.read_bytes() == before
+    reply = client.post(MODELS, json={"settings": {ROLES: {"main": "ultrafast"}}, "if_unchanged": seen})
+    assert reply.status_code == 409 and not reply.json()["saved"]
+    assert config.SETTINGS_PATH.read_bytes() == before
 
 
 def test_safety_model_writer_returns_shared_invalid_main_binding_code(room):
-    from ouroboros.gateway.safety_settings import api_owner_safety_model
-
     _, client = room
-    client.app.router.routes.append(Route("/api/owner/safety-model", api_owner_safety_model, methods=["POST"]))
-    config.load_settings(migrate=True)
     before = config.SETTINGS_PATH.read_bytes()
-    reply = client.post("/api/owner/safety-model", json={"settings": {ROLES: {"main": "ultrafast"}}})
+    reply = client.post(MODELS, json={"settings": {ROLES: {"main": "ultrafast"}}})
     assert reply.status_code == 400, reply.text
     assert reply.json()["code"] == "main_binding_invalid" and reply.json()["saved"] is False
     assert config.SETTINGS_PATH.read_bytes() == before
@@ -511,18 +1118,21 @@ def test_a_choice_refused_for_a_replaced_pinned_identity_is_saved_when_made_agai
     the store and fingerprint a catalog reread names is saved; the identity first shown, sent again, is refused again."""
     _, client = room
     if writer == "model":  # Main already holds Ultrafast: its model change carries the tier to the new destination
-        assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
-    url, body, shown = ((CHAT_MODEL, CHOSEN, _binding(model=ASTRA)) if writer == "model"
-                        else (CHAT_PROCESSING, {"processing": "ultrafast"}, _binding()))
+        assert _main_tier(client, "ultrafast", _binding()).status_code == 200
+
+    def write(tokens):
+        return _main_model(client, ASTRA, tokens) if writer == "model" else _main_tier(client, "ultrafast", tokens)
+
+    shown = _binding(model=ASTRA) if writer == "model" else _binding()
     observed = ("replacement-store", "replacement-account")
     monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda source, pin: observed)
     before = config.SETTINGS_PATH.read_bytes()
     for _ in range(2):
-        refused = client.post(url, json={**body, "if_unchanged": shown})
+        refused = write(shown)
         assert refused.status_code == 409 and refused.json()["code"] == "settings_changed_elsewhere", refused.text
         assert refused.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
     again = {**shown, "ultrafast": json.dumps([*json.loads(shown["ultrafast"])[:3], *observed])}
-    reply = client.post(url, json={**body, "if_unchanged": again})
+    reply = write(again)
     assert reply.status_code == 200, reply.text
     saved = _saved()
     assert saved["OUROBOROS_MODEL"] == (ASTRA if writer == "model" else SOL)
@@ -531,13 +1141,13 @@ def test_a_choice_refused_for_a_replaced_pinned_identity_is_saved_when_made_agai
 
 def test_auto_ultrafast_confirms_the_model_without_freezing_account_membership(room, monkeypatch):
     _, client = room
-    save_owner({**OWNER, MODEL_ACCOUNTS_KEY: "{}"})
+    _booted({**OWNER, MODEL_ACCOUNTS_KEY: "{}"})
     monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda *_: pytest.fail("Auto never reads an account"))
-    assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    assert _main_tier(client, "ultrafast", _binding()).status_code == 200
     before = config.SETTINGS_PATH.read_bytes()
-    assert client.post(CHAT_MODEL, json=CHOSEN).status_code == 400
+    assert _main_model(client, ASTRA).status_code == 400
     assert config.SETTINGS_PATH.read_bytes() == before
-    assert client.post(CHAT_MODEL, json={**CHOSEN, "if_unchanged": _binding(model=ASTRA)}).status_code == 200
+    assert _main_model(client, ASTRA, _binding(model=ASTRA)).status_code == 200
 
 
 WORK = {"kind": "openai", "name": "work", "api_key": "sk-test-first-synthetic-key"}
@@ -559,22 +1169,22 @@ def test_main_ultrafast_binds_the_named_connection_under_the_same_route(room, ed
     from ouroboros.gateway.owner_settings import BindingRefused, connection_revisions
 
     _, client = room
-    save_owner(KEYED)
+    _booted(KEYED)
     tokens = _binding("openai@work")
     assert "sk-test" not in json.dumps(tokens) and tokens["connection"].startswith("openai@work#")
     other = {"kind": "openai", "name": "home", "api_key": "sk-test-home-synthetic-key"}
-    save_owner({**KEYED, "OUROBOROS_BG_WAKEUP_MIN": 750, **_connections(WORK, other)})  # unrelated edits
+    _booted({**KEYED, "OUROBOROS_BG_WAKEUP_MIN": 750, **_connections(WORK, other)})  # unrelated edits
     assert _binding("openai@work") == tokens
     rows = connection_revisions([{"id": "openai@work"}, {"id": "openai@home"}], _saved())
     assert rows[0]["revision"] == tokens["connection"] and rows[1]["revision"].startswith("openai@home#")
     assert "sk-test" not in json.dumps(rows)
-    save_owner({**KEYED, "OUROBOROS_BG_WAKEUP_MIN": 750, **edit})
+    _booted({**KEYED, "OUROBOROS_BG_WAKEUP_MIN": 750, **edit})
     assert _binding("openai@work")["connection"] != tokens["connection"]
     before = config.SETTINGS_PATH.read_bytes()
-    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": tokens})
+    reply = _main_tier(client, "ultrafast", tokens)
     assert reply.status_code == 409 and reply.json()["code"] == "settings_changed_elsewhere", reply.text
     assert reply.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
-    selected = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding("openai@work")})
+    selected = _main_tier(client, "ultrafast", _binding("openai@work"))
     assert selected.status_code == 200, selected.text
     saved = _saved()
     selected_binding = _binding("openai@work")
@@ -585,12 +1195,12 @@ def test_main_ultrafast_binds_the_named_connection_under_the_same_route(room, ed
     assert _binding("openai@work") == selected_binding
 
 
-def test_confirming_ultrafast_again_checks_the_same_unauthored_main_the_composer_read(room):
+def test_confirming_ultrafast_again_checks_the_same_unauthored_main_the_page_read(room):
     from ouroboros.gateway.owner_settings import connection_revision
     from ouroboros.gateway.settings import api_settings_get
 
     _, client = room
-    save_owner({"OPENAI_API_KEY": "fixture-openai-only"})
+    _booted({"OPENAI_API_KEY": "fixture-openai-only"})
     client.app.router.routes.append(Route("/api/settings", api_settings_get, methods=["GET"]))
 
     def read_choice():
@@ -604,27 +1214,29 @@ def test_confirming_ultrafast_again_checks_the_same_unauthored_main_the_composer
                 "ultrafast": json.dumps([model, False, "", "", ""])}
 
     def choose(seen):
-        return client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": seen})
+        return _main_tier(client, "ultrafast", seen)
 
     first = choose(read_choice())
-    assert first.status_code == 200 and first.json()["main_processing"] == "ultrafast", first.text
+    assert first.status_code == 200 and json.loads(_saved()[ROLES])["main"] == "ultrafast", first.text
     unchanged = config.SETTINGS_PATH.read_bytes()
     again = read_choice()  # fresh tokens for the now-saved tier, still no authored model
     same = choose(again)
-    assert same.status_code == 200 and same.json()["previous_main_processing"] == "ultrafast", same.text
-    wrong = choose({**again, "connection": connection_revision(_saved(), "openrouter")})
+    assert same.status_code == 200 and config.SETTINGS_PATH.read_bytes() == unchanged, same.text
+    # Another connection's revision is no word on this route: a write that would move the tier there is refused.
+    assert _main_tier(client, "", again).status_code == 200
+    wrong = choose({**read_choice(), "connection": connection_revision(_saved(), "openrouter")})
     assert wrong.status_code == 400 and wrong.json()["saved"] is False, wrong.text
-    assert config.SETTINGS_PATH.read_bytes() == unchanged
+    assert "main" not in json.loads(_saved()[ROLES])
 
 
 def test_main_ultrafast_on_an_api_connection_needs_its_revision(room):
     _, client = room
-    save_owner(KEYED)
+    _booted(KEYED)
     before = config.SETTINGS_PATH.read_bytes()
-    bare = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()})
-    assert bare.status_code == 400 and bare.json()["code"] == "chat_processing_invalid", bare.text
+    bare = _main_tier(client, "ultrafast", _binding())
+    assert bare.status_code == 400 and bare.json()["code"] == "main_binding_invalid", bare.text
     assert config.SETTINGS_PATH.read_bytes() == before
-    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding("openai@work")})
+    reply = _main_tier(client, "ultrafast", _binding("openai@work"))
     assert reply.status_code == 200, reply.text
 
 
@@ -634,14 +1246,14 @@ def test_mains_model_change_stands_on_the_tier_it_was_shown(room):
     writes, and an unrelated save between read and write does not refuse it."""
     _, client = room
     shown = _binding()
-    assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    assert _main_tier(client, "ultrafast", _binding()).status_code == 200
     before = config.SETTINGS_PATH.read_bytes()
-    refused = client.post(CHAT_MODEL, json={**CHOSEN, "if_unchanged": shown})
+    refused = _main_model(client, ASTRA, shown)
     assert refused.status_code == 409 and refused.json()["code"] == "settings_changed_elsewhere", refused.text
     assert refused.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
     again = _binding(model=ASTRA)
-    save_owner({**_saved(), "OUROBOROS_BG_WAKEUP_MIN": 750})
-    reply = client.post(CHAT_MODEL, json={**CHOSEN, "if_unchanged": again})
+    _booted({**_saved(), "OUROBOROS_BG_WAKEUP_MIN": 750})
+    reply = _main_model(client, ASTRA, again)
     assert reply.status_code == 200, reply.text
     saved = _saved()
     assert saved["OUROBOROS_MODEL"] == ASTRA and json.loads(saved[ROLES])["main"] == "ultrafast"
@@ -651,18 +1263,21 @@ def test_mains_model_change_stands_on_the_tier_it_was_shown(room):
 def test_a_model_change_carrying_ultrafast_onto_a_key_stands_on_that_key_as_shown(room):
     """The picked route's connection, not Main's old one: its revision as window 1 showed it is the condition."""
     _, client = room
-    save_owner({**OWNER, **_connections(WORK)})
-    assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
-    picked = {"kind": "model", "model": "openai@work::gpt-6.1", "use_local": False}
-    for missing in (_binding(), {**_binding(), "connection": _binding("openai@work", model=picked["model"])["connection"].replace("openai@work", "openai")}):
-        reply = client.post(CHAT_MODEL, json={**picked, "if_unchanged": missing})
-        assert reply.status_code == 400 and reply.json()["code"] == "chat_model_invalid", reply.text
-    shown = _binding("openai@work", model=picked["model"])
-    save_owner({**_saved(), **_connections({**WORK, "api_key": "sk-test-rotated-synthetic-key"})})
-    rotated = client.post(CHAT_MODEL, json={**picked, "if_unchanged": {**_binding(), "connection": shown["connection"]}})
+    _booted({**OWNER, **_connections(WORK)})
+    assert _main_tier(client, "ultrafast", _binding()).status_code == 200
+    picked = "openai@work::gpt-6.1"
+    bare = _main_model(client, picked, _binding())  # the old route's confirmation says nothing of the picked one
+    assert bare.status_code == 400 and bare.json()["code"] == "main_binding_invalid", bare.text
+    other = {**_binding(), "connection": _binding("openai@work", model=picked)["connection"].replace("openai@work", "openai")}
+    refused = _main_model(client, picked, other)  # a revision of another connection is no current read of this one
+    assert refused.status_code in (400, 409) and refused.json()["saved"] is False, refused.text
+    assert _saved()["OUROBOROS_MODEL"] == SOL
+    shown = _binding("openai@work", model=picked)
+    _booted({**_saved(), **_connections({**WORK, "api_key": "sk-test-rotated-synthetic-key"})})
+    rotated = _main_model(client, picked, {**_binding(), "connection": shown["connection"]})
     assert rotated.status_code == 409 and rotated.json()["saved"] is False, rotated.text
     assert _saved()["OUROBOROS_MODEL"] == SOL, "nothing of the refused change landed"
-    reply = client.post(CHAT_MODEL, json={**picked, "if_unchanged": _binding("openai@work", model=picked["model"])})
+    reply = _main_model(client, picked, _binding("openai@work", model=picked))
     assert reply.status_code == 200, reply.text
 
 
@@ -687,9 +1302,9 @@ def test_main_ultrafast_round_trips_until_the_owner_resets_it_for_rollback(room,
 
     _root, client = room
     before = config.SETTINGS_PATH.read_bytes()
-    refused = client.post(CHAT_PROCESSING, json={"processing": "ultrafast"})
+    refused = _main_tier(client, "ultrafast")
     assert refused.status_code == 400 and not refused.json()["saved"] and config.SETTINGS_PATH.read_bytes() == before
-    selected = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()})
+    selected = _main_tier(client, "ultrafast", _binding())
     assert selected.status_code == 200, selected.text
     roles = {**json.loads(OWNER[ROLES]), "main": "ultrafast"}
     loaded = config.load_settings(strict=True)
@@ -703,13 +1318,11 @@ def test_main_ultrafast_round_trips_until_the_owner_resets_it_for_rollback(room,
     assert task_processing_preference(work, model_role="fallback:0") == "fast"
     assert task_processing_preference(work, model_role="fallback:1") == "ultrafast"
 
-    # An unrelated Settings edit goes through a different reader and writer than the composer.
+    # An unrelated Settings edit goes through a different reader and writer.
     config.save_settings({**loaded, "OUROBOROS_BG_WAKEUP_MIN": 750})
     assert json.loads(config.load_settings(strict=True)[ROLES]) == roles
-    saved = client.post(CHAT_PROCESSING, json={"processing": reset})
+    saved = _main_tier(client, reset)
     assert saved.status_code == 200, saved.text
-    assert saved.json()["previous_main_processing"] == "ultrafast"
-    assert saved.json()["main_processing"] == reset
     compatible = json.loads(OWNER[ROLES])
     if reset:
         compatible["main"] = reset
@@ -794,7 +1407,7 @@ def test_admission_stamps_the_rooms_tier_once_and_the_decided_default_otherwise(
     assert plain["metadata"] == {"lead": {"source": "main"}, "processing": DEFAULT}
     assert main["metadata"] == {"lead": {"source": "main"}, "processing": DEFAULT}
     # Main's own tier is Main's role option, never a carrier: Main's work keeps the decided Default and pays it.
-    client.post(CHAT_PROCESSING, json={"processing": "fast"})
+    assert _main_tier(client, "fast").status_code == 200
     later_main = {"id": "later-main"}
     route_choice.capture_lead(later_main, root)
     assert later_main["metadata"]["processing"] == DEFAULT
@@ -971,11 +1584,134 @@ def test_a_conversation_turn_takes_its_rooms_tier_and_its_row_learns_it_by_frame
     frames: list = []
     worker_chat_lane.prepare_conversation_task(types.SimpleNamespace(), turn, root, broadcast=frames.append)
     assert turn["metadata"]["processing"] == expected
-    # A room turn's decided Default reaches its row too, so a step rebuilt from the row never reads the room's tier as
-    # new; a Main turn has no room tier to drift to and sends no frame.
-    assert [frame for frame in frames if "processing" in (frame.get("facts") or {})] == ([{
-        "type": "direct_turn_bound", "task_id": turn["id"], "task_attempt": 1, "facts": {"processing": expected}}]
-        if project_id else [])
+    # The admitted tier reaches the row beside the admitted model, a decided Default and a Main turn's too (the Main
+    # chat has its own choice to drift to), so a step rebuilt from the row never reads either as new.
+    assert [frame for frame in frames if "processing" in (frame.get("facts") or {})] == [{
+        "type": "direct_turn_bound", "task_id": turn["id"], "task_attempt": 1,
+        "facts": {"lead": {"source": "main"}, "processing": expected}}]
+
+
+@pytest.mark.parametrize("project_id", ["alpha", ""])
+@pytest.mark.parametrize("tier", ["", "fast"])
+def test_a_turn_rebuilt_from_its_row_keeps_the_model_and_tier_it_was_admitted_with(room, project_id, tier):
+    """A Pause and its Resume, a park or a restore rebuild a turn from its queue row, in another process than the
+    carrier that admitted it. The row learned the admitted model and tier by frame (the decided Default and the Main
+    chat's own choice included), so what the chip chose since reaches only turns admitted after it."""
+    from supervisor import conversation_lane, worker_chat_lane
+
+    root, client = room
+    where = {"project_id": project_id} if project_id else {}
+    scope = where or MAIN_CHAT
+    assert client.post(CHAT_MODEL, json={**CHOSEN, **scope}).status_code == 200
+    if tier:
+        assert client.post(CHAT_PROCESSING, json={"processing": tier, **scope}).status_code == 200
+    chat_id = projects.get_project(root, "alpha")["chat_id"] if project_id else 1
+    row = worker_chat_lane._seed_task(chat_id, "Hello", None, None, dict(where))
+    row.update(project_id=project_id, _conversation_prepare={"quiet": False})
+    admitted = {"lead": {"source": "room", "model": ASTRA, "use_local": False},
+                "processing": {"source": "room", "tier": tier} if tier else DEFAULT}
+    held = lambda task: {key: (task.get("metadata") or {}).get(key) for key in admitted}  # noqa: E731
+    running = {row["id"]: {"task": row, "attempt": 1}}
+    carried = copy.deepcopy(row)  # the carrier's own copy, as its process receives it
+    frames: list = []
+    worker_chat_lane.prepare_conversation_task(types.SimpleNamespace(), carried, root, broadcast=frames.append)
+    assert held(carried) == admitted and held(row) == {"lead": None, "processing": None}
+    for frame in frames:
+        if frame.get("type") == "direct_turn_bound":
+            conversation_lane.handle_direct_turn_bound(copy.deepcopy(frame), types.SimpleNamespace(RUNNING=running))
+    assert held(row) == admitted
+    # The owner moves the chip while the turn is paused: the next task's choice, never this turn's.
+    assert client.post(CHAT_MODEL, json={"kind": "model", "model": LUNA, "use_local": False, **scope}).status_code == 200
+    assert client.post(CHAT_PROCESSING, json={"processing": "economy", **scope}).status_code == 200
+    again = copy.deepcopy(row)  # its Resume hands the row to a carrier again, the same attempt
+    frames.clear()
+    worker_chat_lane.prepare_conversation_task(types.SimpleNamespace(), again, root, broadcast=frames.append)
+    assert held(again) == admitted
+    assert not [frame for frame in frames if set(admitted) & set(frame.get("facts") or {})], frames
+
+
+@pytest.mark.parametrize("project_id", ["alpha", ""])
+@pytest.mark.parametrize("tier", ["", "fast"])
+def test_a_turn_takes_its_model_and_tier_once_as_it_is_admitted(room, project_id, tier):
+    """Words accepted as work of their own take the model and tier saved then, the decided Default included, and keep
+    them on the seed its queue row is made from. What the chip chooses while the turn waits for a carrier, is
+    stopped, paused or resumed reaches only work accepted after it: the carrier's first step admits nothing new."""
+    from supervisor import worker_chat_lane
+
+    root, client = room
+    scope = {"project_id": project_id} if project_id else MAIN_CHAT
+    assert client.post(CHAT_MODEL, json={**CHOSEN, **scope}).status_code == 200
+    if tier:
+        assert client.post(CHAT_PROCESSING, json={"processing": tier, **scope}).status_code == 200
+    chat_id = projects.get_project(root, "alpha")["chat_id"] if project_id else 1
+    seed = worker_chat_lane._seed_task(chat_id, "Hello", None, None, {"project_id": project_id} if project_id else {})
+    worker_chat_lane._stamp_admitted_choice(seed, root)
+    admitted = {"lead": {"source": "room", "model": ASTRA, "use_local": False},
+                "processing": {"source": "room", "tier": tier} if tier else DEFAULT}
+    assert {key: seed["metadata"].get(key) for key in admitted} == admitted
+    # The chip moves before any carrier took the turn.
+    assert client.post(CHAT_MODEL, json={"kind": "model", "model": LUNA, "use_local": False, **scope}).status_code == 200
+    assert client.post(CHAT_PROCESSING, json={"processing": "economy", **scope}).status_code == 200
+    carried = {**copy.deepcopy(seed), "_conversation_prepare": {"quiet": False}}  # the carrier's copy of the row
+    frames: list = []
+    worker_chat_lane.prepare_conversation_task(types.SimpleNamespace(), carried, root, broadcast=frames.append)
+    assert {key: carried["metadata"].get(key) for key in admitted} == admitted
+    assert not [frame for frame in frames if set(admitted) & set(frame.get("facts") or {})], frames
+    # The next turn is the one that starts on what the chip says now.
+    later = worker_chat_lane._seed_task(chat_id, "Again", None, None, {"project_id": project_id} if project_id else {})
+    worker_chat_lane._stamp_admitted_choice(later, root)
+    assert later["metadata"]["lead"]["model"] == LUNA and later["metadata"]["processing"] == ROOM_ECONOMY
+
+
+def test_the_admission_stamp_never_refuses_a_turn_and_leaves_the_capture_to_its_carrier(room, monkeypatch):
+    """A room that cannot be read, or a fault in the capture itself, stamps nothing at admission and never raises:
+    the turn is admitted as before, and its carrier's first step is the one that captures then (the frame test
+    above)."""
+    from supervisor import worker_chat_lane
+
+    root, _client = room
+    seed = worker_chat_lane._seed_task(1, "Hello", None, None, {})
+
+    def broken(*_args, **_kwargs):
+        raise TypeError("a fault of the capture's own")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("ouroboros.route_choice.capture_lead", broken)
+        worker_chat_lane._stamp_admitted_choice(seed, root)
+    assert "lead" not in seed.get("metadata", {}) and "processing" not in seed.get("metadata", {})
+    gone = worker_chat_lane._seed_task(7, "Hello", None, None, {"project_id": "nowhere"})
+    worker_chat_lane._stamp_admitted_choice(gone, root)
+    assert "lead" not in gone["metadata"] and "processing" not in gone["metadata"]
+    # Words accepted as new work already carry what their acceptance assigned: nothing is chosen again.
+    assigned = {"model_choice": CHOSEN, "processing_choice": "fast"}
+    new_work = worker_chat_lane._seed_task(1, "Hello", None, None, {"new_work": assigned})
+    before = copy.deepcopy(new_work["metadata"])
+    worker_chat_lane._stamp_admitted_choice(new_work, root)
+    assert new_work["metadata"] == before == {"lead": {"source": "room", "model": ASTRA, "use_local": False},
+                                              "processing": {"source": "room", "tier": "fast"}}
+
+
+def test_the_row_keeps_a_newer_model_or_tier_than_the_admission_frame_brings(room):
+    """An owner's act on the work (its model, its tier) and new work's own carriers reach the row first: the
+    admission frame that lands after them changes neither."""
+    from supervisor import conversation_lane
+
+    lead, tier = {"source": "room", "model": ASTRA, "use_local": False}, {"source": "room", "tier": "fast"}
+    newer = {"lead": {"source": "owner", "model": LUNA, "use_local": False}, "processing": {"source": "owner", "tier": "economy"}}
+    frame = {"type": "direct_turn_bound", "task_id": "turn", "task_attempt": 1, "facts": {"lead": lead, "processing": tier}}
+    for row, expected in (
+            ({"id": "turn", "metadata": {}}, {"lead": lead, "processing": tier}),
+            ({"id": "turn"}, {"lead": lead, "processing": tier}),
+            ({"id": "turn", "metadata": dict(newer), "owner_model": {"request_id": "r"}, "owner_processing": {"request_id": "p"}}, newer),
+            ({"id": "turn", "metadata": {"lead": {"source": "main"}}}, {"lead": {"source": "main"}, "processing": tier})):
+        conversation_lane.handle_direct_turn_bound(copy.deepcopy(frame), types.SimpleNamespace(RUNNING={"turn": {"task": row, "attempt": 1}}))
+        assert {key: row["metadata"][key] for key in ("lead", "processing") if key in row["metadata"]} == expected
+    # A frame of another attempt, or one that names no model the host could have admitted, teaches the row nothing.
+    row = {"id": "turn", "metadata": {}}
+    for stale in ({**frame, "task_attempt": 2}, {**frame, "facts": {"lead": {"source": "elsewhere", "model": ASTRA, "use_local": False}}},
+                  {**frame, "facts": {"lead": {"source": "room", "model": "", "use_local": False}}}):
+        conversation_lane.handle_direct_turn_bound(copy.deepcopy(stale), types.SimpleNamespace(RUNNING={"turn": {"task": row, "attempt": 1}}))
+    assert row["metadata"] == {}
 
 
 def test_a_turn_rebuilt_from_its_row_keeps_the_decided_default_after_its_room_takes_a_tier(room):
@@ -1096,11 +1832,11 @@ def test_a_stale_binding_is_409_before_any_destination_rule(room):
     """Window 1 was shown Fast and picks a key model, so it rightly names no connection; window 2 sets Ultrafast while
     the question stands. The lock judges staleness first: 409 and nothing saved, never a 400 for a missing revision."""
     _, client = room
-    save_owner({**OWNER, ROLES: json.dumps({"main": "fast"}), **_connections(WORK)})
+    _booted({**OWNER, ROLES: json.dumps({"main": "fast"}), **_connections(WORK)})
     shown = _binding()
-    assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    assert _main_tier(client, "ultrafast", _binding()).status_code == 200
     before = config.SETTINGS_PATH.read_bytes()
-    reply = client.post(CHAT_MODEL, json={"kind": "model", "model": "openai@work::gpt-6.1", "use_local": False, "if_unchanged": shown})
+    reply = _main_model(client, "openai@work::gpt-6.1", shown)
     assert reply.status_code == 409 and reply.json()["code"] == "settings_changed_elsewhere", reply.text
     assert reply.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
 
@@ -1112,11 +1848,11 @@ def test_main_ultrafast_read_on_one_route_is_409_after_main_moved_to_the_other_k
     _, client = room
     keyed = {**OWNER, "OUROBOROS_MODEL": "openai@work::gpt-6.1", MODEL_ACCOUNTS_KEY: json.dumps({}), **_connections(WORK)}
     start, then = (keyed, {**keyed, "OUROBOROS_MODEL": SOL}) if direction == "api_to_subscription" else ({**OWNER, **_connections(WORK)}, keyed)
-    save_owner(start)
+    _booted(start)
     shown = _binding("openai@work" if direction == "api_to_subscription" else "")
-    save_owner(then)
+    _booted(then)
     before = config.SETTINGS_PATH.read_bytes()
-    reply = client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": shown})
+    reply = _main_tier(client, "ultrafast", shown)
     assert reply.status_code == 409 and reply.json()["code"] == "settings_changed_elsewhere", reply.text
     assert reply.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
 

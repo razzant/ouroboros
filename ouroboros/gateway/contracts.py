@@ -30,7 +30,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import ProcessingTiers, TaskCancelRequest, WorkLeadFields, WorkStateFields  # noqa: F401
+from ouroboros.gateway.work_contracts import MainChatChoice, ProcessingTiers, TaskCancelRequest, WorkLeadFields, WorkStateFields  # noqa: F401
 from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.history_contracts import AgentNoteFields, ChatHistoryResponse, PeerLetterCardFact, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
@@ -134,6 +134,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField, AgentNo
     ingress_pending: NotRequired[bool]  # This live host process accepted the row and has entered or refused neither yet. A later echo or history read determines whether dispatch occurred or was refused.
     attachments: NotRequired[List[Union[ChatAttachmentView, QuizAnswerFile]]]  # owner message's attachments (same views as history); a project_question_pointer's: its answer's files
     text_placeholder: NotRequired[bool]  # owner row whose text the host wrote (no words were sent); shown as no caption
+    new_work: NotRequired[Literal[True]]  # the live echo of an owner message accepted as new work of its own (``ChatInbound.new_work``)
     reply_excerpt_disabled: NotRequired[bool]  # a wordless or mixed card display; whole-row Reply still works
     markdown: NotRequired[bool]
     is_progress: NotRequired[bool]
@@ -617,7 +618,7 @@ class ProjectEntry(TypedDict, total=False):
     no_folder: Dict[str, str]  # {at, by}: the recorded choice to keep no folder, until one is chosen
     pinned: bool  # absent on legacy rows means unpinned; no routing/activity effect
     cognition: ProjectCognition
-    model_choice: ChatModelChoice  # the room's own model for new owner work; never copied from Main
+    model_choice: ChatModelChoice  # the room's own model for new owner work; a new room copies the Main chat's
     processing_choice: Literal["", "standard", "fast", "economy", "ultrafast"]  # the room's own tier for new owner work; '' = Default
     provenance: str
     clone_url: str
@@ -805,8 +806,9 @@ class StateResponse(WorkStateFields):
     subagents_availability: Literal["available", "disabled", "unsaved"]
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
-    main_route: ChatModelRoute  # Main itself, written by POST /api/owner/chat-model without project_id
-    processing_tiers: ProcessingTiers  # Main's own tier and the default one; POST /api/owner/chat-processing
+    main_route: ChatModelRoute  # Main the role's route now: what follows Main runs on it
+    processing_tiers: ProcessingTiers  # Main the role's own tier and the default one (Settings values)
+    main_chat: MainChatChoice  # the Main chat's own model and tier for new work there; POST /api/owner/chat-model, /chat-processing
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool

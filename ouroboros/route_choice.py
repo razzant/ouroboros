@@ -14,7 +14,10 @@ unset; this process tree's own mirrored values never do, so a key the owner clea
 back from a reused worker's environment), memoised behind the document's stat and the operator
 variables. A document that exists but cannot be read makes credential keys unavailable; nothing
 answers from stale env. A process with no saved document (an operator-run one) has nothing to
-resurrect and keeps reading its environment as every other key. Every other setting keeps the
+resurrect and keeps reading its environment as every other key. An absent key is not an empty one:
+only a key the document holds answers for itself. A live owner choice for a role replaces its
+configured route (``model_slots.route_binding``), and a deployment policy's managed key is read last,
+as the policy lets it (``settings_integrity.runtime_setting``). Every other setting keeps the
 task's entry snapshot (context mode, effort, review settings, the subagent catalog, access).
 
 Choice. ``following(role)``: the acting route is the role's current binding, re-read at every new
@@ -26,11 +29,13 @@ adopted fallback, the room's chat model) stays until the mind returns to its pri
 (``classify_legacy``: a disclosed migration policy, never reconstructed intent).
 
 Lead. Admission records a room's choice once in ``metadata.lead`` (``capture_lead``),
-including a recorded follow of Main. Continue, Resume and placement keep it; a separately
-started root reads its own destination. A carried model uses role ``lead``: Auto account,
-the model's own window and default processing. Place and circle models use the same carrier
-and derived role for place turns. Other Presence turns, delegated and autonomous work,
-role-named tasks and call turns keep their own routing. Failures use the ordinary chain walk.
+including a recorded follow of Main. The owner's work in the Main chat takes that chat's own
+saved choice the same way; a schedule born there keeps following Main. Continue, Resume and
+placement keep it; a separately started root reads its own destination. A carried model uses
+role ``lead``: Auto account, the model's own window and default processing. Place and circle
+models use the same carrier and derived role for place turns. Other Presence turns, delegated
+and autonomous work, role-named tasks and call turns keep their own routing. Failures use the
+ordinary chain walk.
 
 Processing. A room's own tier is stamped by the same admission into ``metadata.processing``
 (``{"source": "room", "tier": ...}``; a room without one records the decided Default,
@@ -40,6 +45,14 @@ changes it, a tier act never moves the route); Continue and Resume keep it as st
 admitted before tiers), the work keeps the default resolution (``model_slots``) and its Continue
 records the decided Default; a separately started root, a promoted one too, reads its destination
 anew. A carrier binds the root's own calls only: a helper captures its tier when it starts.
+A tier its owner confirmed for one destination (the Main chat's Ultrafast) also carries that destination
+(``route``: ``[model, use_local, account]``) and answers only for a call bound to it (``task_processing``):
+on a fallback, another model or profile given to the work or a moved Main, and for every helper, the default
+resolution stands. A named profile is its name, never the account signed in to it: a call bound to it asks the
+tier from the work's first one and after a new sign-in there, and that carrier is the work's own, by value, so
+what the chat chooses later reaches only work admitted after it and a Continue keeps its copy. Auto carries the
+source's pool. API work additionally carries a random revision of the saved connection, compared with the send's
+own connection; a replacement or an unproven identity does not take the old tier.
 """
 
 from __future__ import annotations
@@ -316,12 +329,15 @@ def lead_snapshot(value: Any) -> Optional[dict]:
     carrier = {"source": source, "model": value["model"].strip(), "use_local": value["use_local"]}
     if source in CITED_LEAD_SOURCES and isinstance(value.get("cited"), str) and value["cited"]:
         carrier["cited"] = value["cited"]
+    if source == "room" and value.get("copied") is True:
+        carrier["copied"] = True  # the Main chat's model as the room took it at registration: nobody chose it there
     return carrier
 
 
 def processing_snapshot(value: Any) -> Optional[dict]:
     """Validate the host's processing carrier: ``{"source", "tier"}`` with a real tier, or the decided Default
-    (``{"source": "default"}``); anything else is None, which reads as Default too."""
+    (``{"source": "default"}``); anything else is None, which reads as Default too. A tier confirmed for one
+    destination keeps it (``route``: ``[model, use_local, account]``); one naming a route it cannot state is None."""
     from ouroboros.model_slots import normalize_call_tier
 
     if not isinstance(value, Mapping):
@@ -334,15 +350,54 @@ def processing_snapshot(value: Any) -> Optional[dict]:
         tier = normalize_call_tier(value.get("tier"))
     except ValueError:
         return None
-    return {"source": value["source"], "tier": tier} if tier else None
+    if not tier:
+        return None
+    carrier = {"source": value["source"], "tier": tier}
+    if "route" in value:
+        route = value["route"]
+        if not (isinstance(route, (list, tuple)) and len(route) == 3 and isinstance(route[0], str) and route[0]
+                and isinstance(route[1], bool) and isinstance(route[2], str)):
+            return None
+        carrier["route"] = list(route)
+        if "connection" in value:
+            from ouroboros.provider_connections import connection_account_matches
+
+            if not connection_account_matches(value["connection"], *route[:2]):
+                return None
+            carrier["connection"] = value["connection"]
+    elif "connection" in value:
+        return None
+    return carrier
 
 
-def task_processing(metadata: Any) -> str:
-    """A root's carried tier, or ``""`` (the default resolution); a delegated child never reads one."""
+def task_processing(metadata: Any, route: Any = None) -> str:
+    """A root's carried tier, or ``""`` (the default resolution); a delegated child never reads one.
+
+    A tier confirmed for one destination (the carrier's ``route``: the Main chat's Ultrafast) answers only for a
+    call bound to that destination. ``route`` is the call's own ``(model, use_local, account)`` as its send binds
+    it (``model_slots.route_binding``), or a callable giving it, read only for such a carrier. A call bound to any
+    other destination, and a reader that names none (a helper taking the work's tier), reads the default
+    resolution.
+
+    Work carries its answer from admission. Auto is a pool; a named profile is compared by name alone. API needs
+    the recorded connection's identity too (older carriers without a revision cannot prove it). The actual client
+    checks it on the exact resolved target before building the payload."""
     if not isinstance(metadata, Mapping) or str(metadata.get("delegation_role") or "").lower() == "subagent":
         return ""
     carrier = processing_snapshot(metadata.get(PROCESSING_KEY))
-    return carrier.get("tier", "") if carrier else ""
+    if not carrier:
+        return ""
+    if "route" in carrier:
+        acting = route() if callable(route) else route
+        if acting is None or list(acting) != carrier["route"]:
+            return ""
+        from ouroboros.provider_connections import api_connection_for_model, live_connection_account
+
+        model, local = carrier["route"][:2]
+        if api_connection_for_model(model, local):
+            if not carrier.get("connection") or carrier["connection"] != live_connection_account(model):
+                return ""
+    return carrier.get("tier", "")
 
 
 def task_lead(metadata: Any) -> Optional[dict]:
@@ -354,20 +409,27 @@ def task_lead(metadata: Any) -> Optional[dict]:
 
 
 def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
-                 admitted: bool = False) -> None:
+                 admitted: bool = False, settings: Mapping | None = None) -> None:
     """Stamp new owner roots once, from the canonical room, never an execution copy.
 
-    Queue admission supplies its committed registry row under Q (``admitted=True``, None for Main),
-    so this stamp performs no IO under Q. Conversation admission reads the canonical root.
-    An existing carrier wins, including a recorded follow. Unreadable rooms leave no
-    carrier and follow Main with a warning, so a later door can still stamp the choice.
-    A programming error never masquerades as an unreadable room.
+    Queue admission supplies its committed registry row under Q (``admitted=True``, None for Main)
+    and the settings it read before Q (``settings``: the Main chat's choice is read from them), so
+    this stamp performs no IO under Q. Conversation admission reads the canonical root and the
+    settings document before Q (``worker_chat_lane._stamp_admitted_choice``; the carrier's first
+    step only where that stamped nothing). An existing carrier wins, including a recorded follow.
+    Unreadable rooms leave no carrier and follow Main with a warning, so a later door can still
+    stamp the choice. A programming error never masquerades as an unreadable room.
+
+    Without a room, the owner's work takes the Main chat's own saved model and tier; a schedule
+    born there records its follow of Main as before, whatever the chat chose.
 
     The tier is captured on its own: a root that arrives with its own model (a ``start_task`` model,
     the owner's words) still takes its room's tier, and a root without a room tier records the
     decided Default, so a continuation or a retry never reads a later room tier.
     """
-    from ouroboros.composer_cognition import project_model_choice, project_processing_choice, read_room
+    from ouroboros.composer_cognition import (
+        MAIN_REFERENCE, main_chat_choice, project_model_choice, project_processing_choice, read_room,
+    )
     from ouroboros.extension_late_result import restricted_return
     from ouroboros.settings_integrity import _actor_scope, SettingsIntegrityError
 
@@ -394,8 +456,18 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
     if not isinstance(metadata, dict):
         return
     project_id = str(task.get("project_id") or metadata.get("project_id") or "")
+    copied, bound = False, {}
     try:
         room = project if admitted else read_room(canonical_root, project_id)
+        if room is not None:
+            choice, own = project_model_choice(room), project_processing_choice(room)
+            copied = room.get("model_choice_copied") is True
+        elif actor.get("scheduled"):
+            choice, own = dict(MAIN_REFERENCE), ""
+        else:
+            saved = main_chat_choice(settings)
+            choice, own = saved["model_choice"], saved["processing_choice"]
+            bound = _processing_destination(saved)  # what Ultrafast was confirmed for
     except (OSError, ValueError, SettingsIntegrityError):
         import logging
 
@@ -403,13 +475,33 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
                                             project_id or "Main", exc_info=True)
         return
     if lead:
-        choice = project_model_choice(room) if room is not None else {"kind": "main"}
-        metadata[LEAD_KEY] = ({"source": "room", "model": choice["model"], "use_local": choice["use_local"]}
+        metadata[LEAD_KEY] = ({"source": "room", "model": choice["model"], "use_local": choice["use_local"],
+                               **({"copied": True} if copied else {})}  # a copy is the room's, never called a choice
                               if choice["kind"] == "model" else {"source": "main"})
     if tier:
         # The room's own tier, once: a later change of the room reaches only work admitted after it.
-        own = project_processing_choice(room) if room is not None else ""
-        metadata[PROCESSING_KEY] = {"source": "room", "tier": own} if own else dict(DEFAULT_PROCESSING)
+        metadata[PROCESSING_KEY] = ({"source": "room", "tier": own, **bound}
+                                    if own else dict(DEFAULT_PROCESSING))
+
+
+def _processing_destination(saved: Mapping) -> dict:
+    return {key: saved[f"processing_{key}"] for key in ("route", "connection")
+            if saved.get(f"processing_{key}") is not None}
+
+
+def new_work_carriers(assigned: Any) -> dict:
+    """The lead and tier a message accepted as new work starts on, as its turn's carriers: what its acceptance
+    assigned from the room's saved choice (``message_ingress.new_work_choice``), so ``capture_lead`` adds nothing
+    and a later change of the room reaches only work admitted after it. ``{}`` for anything else."""
+    choice = assigned.get("model_choice") if isinstance(assigned, Mapping) else None
+    if not isinstance(choice, Mapping):
+        return {}
+    lead = lead_snapshot({"source": "room", **choice}) if choice.get("kind") == "model" else {"source": "main"}
+    if lead is None:
+        return {}
+    tier = processing_snapshot({"source": "room", "tier": assigned.get("processing_choice"),
+                                **_processing_destination(assigned)})
+    return {LEAD_KEY: lead, PROCESSING_KEY: tier or dict(DEFAULT_PROCESSING)}
 
 
 def _metadata(ctx: Any) -> dict:

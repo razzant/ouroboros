@@ -109,6 +109,8 @@ def model_effects(monkeypatch):
                         lambda _request, choice, **kw: writes.append(("main", choice)) or {"ok": True})
     monkeypatch.setattr("ouroboros.composer_cognition.update_project_model_choice",
                         lambda root, pid, choice: writes.append((pid, choice)) or ({"kind": "main"}, choice))
+    monkeypatch.setattr("ouroboros.gateway.owner_effort.write_main_chat_model",
+                        lambda _request, choice, **kw: writes.append(("new", choice)) or ({"kind": "main"}, choice))
     monkeypatch.setattr("ouroboros.gateway.ui_preferences.record_model_recent", lambda *a: recents.append(a))
     return writes, recents
 
@@ -138,7 +140,7 @@ def _place_model_registry(focus, monkeypatch, level):
     return reg, task
 
 
-@pytest.mark.parametrize("scope", ["room", "main"])
+@pytest.mark.parametrize("scope", ["room", "new", "main"])  # every scope that writes a saved choice, new work's too
 @pytest.mark.parametrize("level", ["observe", "act", "full"])
 def test_place_cited_settings_choices_require_full_at_dispatch(focus, monkeypatch, model_effects, level, scope):
     reg, _task = _place_model_registry(focus, monkeypatch, level)
@@ -151,7 +153,7 @@ def test_place_cited_settings_choices_require_full_at_dispatch(focus, monkeypatc
     if level == "full":
         assert result.status == "ok", result.text
         assert json.loads(result.text.splitlines()[0])["ok"] is True
-        assert writes == [("alpha" if scope == "room" else "main",
+        assert writes == [("alpha" if scope == "room" else scope,
                            {"kind": "model", "model": "vendor/chosen", "use_local": False})]
         assert len(recents) == 1
     else:
@@ -210,7 +212,7 @@ def test_place_model_start_keeps_the_existing_level_boundary(focus, monkeypatch,
 
 @pytest.mark.parametrize("actor", ["main_chat", "project_chat", "owner_root"])
 @pytest.mark.parametrize("source", ["initial_user", "live_call"])
-@pytest.mark.parametrize("scope", ["work", "room", "main"])
+@pytest.mark.parametrize("scope", ["work", "room", "new", "main"])
 def test_owner_foci_keep_cited_model_choices_at_dispatch(tmp_path, monkeypatch, model_effects, actor, source, scope):
     reg = _registry(tmp_path, {"work_kind": "owner", "client_message_id": "owner-message"})
     ctx = reg._ctx
@@ -232,7 +234,7 @@ def test_owner_foci_keep_cited_model_choices_at_dispatch(tmp_path, monkeypatch, 
         assert not writes and not recents
     else:
         assert not requests and len(recents) == 1
-        assert writes == [("alpha" if scope == "room" else "main",
+        assert writes == [("alpha" if scope == "room" else scope,
                            {"kind": "model", "model": "vendor/chosen", "use_local": False})]
 
 
