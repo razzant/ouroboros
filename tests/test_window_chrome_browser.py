@@ -308,7 +308,9 @@ def test_an_rtl_project_panel_clears_the_lights_only_where_it_reaches_them(subsc
     page.wait_for_selector("#project-panel.open:not([hidden]) .chat-panel-statusbar")
     page.wait_for_function("""() => { const t = getComputedStyle(document.getElementById('project-panel')).transform;
         return t === 'none' || t === 'matrix(1, 0, 0, 1, 0, 0)'; }""")  # the panel's open transition has ended
-    page.wait_for_timeout(100)
+    page.evaluate("document.documentElement.dir = 'rtl'")  # again: the app may have re-applied its language's direction
+    page.wait_for_timeout(150)
+    assert page.evaluate("document.documentElement.dir") == "rtl"
     panel = box(page, "#project-panel")
     close, panic = box(page, "#project-panel-close"), box(page, "#project-panel .project-panel-bar [data-chat-command='panic']")
     facts = page.evaluate("""() => ({ dir: document.documentElement.dir, layout: document.documentElement.dataset.layout,
