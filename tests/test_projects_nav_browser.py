@@ -1031,6 +1031,39 @@ SHOWS = """(el) => {
 }"""
 
 
+FIRST_MATCH = """() => {
+    const side = document.getElementById('primary-sidebar'), head = side.querySelector('.sidebar-head').getBoundingClientRect();
+    const first = document.querySelector('#nav-projects-list > .nav-project-item'), r = first.getBoundingClientRect();
+    return {id: first.dataset.navProjectId, top: r.top, bottom: r.bottom, headBottom: head.bottom, height: innerHeight};
+}"""
+
+
+@pytest.mark.parametrize("height", [480, 900])  # the whole column scrolls / the list scrolls
+def test_a_new_find_starts_at_its_first_match_in_view_and_enter_opens_that_one(pins_ui, height):
+    """Starting a find deep in a browse shows its first match where the owner can see it, under the pinned head, in
+    whatever scrolls (a short window scrolls the whole column, a tall one the list), even when the row being read is
+    a match too; Enter then opens the match on screen."""
+    ui, page = pins_ui, pins_ui["page"]
+    page.set_viewport_size({"width": ui["width"], "height": height})
+    seed_archive(ui["root"])
+    refresh(page)
+    find = page.locator('#primary-sidebar .nav-find-input')
+    find.fill("no such name")
+    page.locator('#nav-projects-list > .nav-projects-more', has_text="Show all projects").click()
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
+    row(page, "archive-250").scroll_into_view_if_needed()  # the owner reads deep in the browse, a future match
+    find.click()
+    page.keyboard.type("archive")
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(51)
+    first = page.evaluate(FIRST_MATCH)
+    assert first["top"] >= first["headBottom"] - 1 and first["bottom"] <= first["height"], first
+    page.evaluate("""() => document.addEventListener('click', (event) => {
+        const item = event.target.closest('.nav-project-item'); if (item) window.__opened = item.dataset.navProjectId;
+    }, {capture: true})""")
+    page.keyboard.press("Enter")
+    assert page.evaluate("window.__opened") == first["id"]
+
+
 @pytest.mark.parametrize("how", ["escape", "clear-button", "clear-command"])
 def test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_focus(pins_ui, how):
     """Real presses in a short window, where the whole column scrolls (480 px: a desk's zones fit from 500). The find
