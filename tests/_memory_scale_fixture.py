@@ -187,14 +187,16 @@ def _page(store, room, i, size):
 def install(drive, shape='fresh'):
     """A synthetic drive the ordinary build reads over the real checkout: authored identity, scratchpad and overview,
     knowledge notes, an activated chronicle whose marks the views keep, Main and other rooms with their rows and
-    accounts. ``fresh``: a new install after a few days of use; ``mature``: ``MATURE``'s shape. Not built here: MCP
-    servers with their instructions and running works with open questions (they reach the request through the tool
-    registry and the task store, which this drive does not carry)."""
+    accounts. ``fresh``: a new install after a few days of use; ``mature``: ``MATURE``'s shape; ``rich``: ``mature``
+    plus the 39 running works of ``tests._live_works_fixture`` (owner questions, Pauses, waits, holds, dated foci) in
+    the task store and queue. MCP servers with their instructions reach the request through the tool registry, not
+    the drive: ``mcp_registry`` (twelve servers), passed to the build as ``tool_registry``. ``fresh`` and ``mature``
+    carry neither, so their numbers stay as they were."""
     from ouroboros import dialogue_store as ds
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.projects_registry import create_project
 
-    sizes = MATURE if shape == 'mature' else FRESH
+    sizes = MATURE if shape in ('mature', 'rich') else FRESH
     memory = drive / 'memory'
     (memory / 'knowledge').mkdir(parents=True, exist_ok=True)
     (drive / 'logs').mkdir(exist_ok=True)
@@ -233,6 +235,10 @@ def install(drive, shape='fresh'):
                           scope='global' if i < sizes['global'] else 'room',
                           quote=text(f'Quote {i}', 120) if i < sizes['quoted'] else None,
                           anchor={'tool': 'read_file'} if i < sizes['anchored'] else None).ok
+    if shape == 'rich':
+        from tests import _live_works_fixture
+
+        _live_works_fixture.build(drive)
     return drive
 
 
@@ -282,3 +288,48 @@ def route_resolver(window, basis, working_reserve, *, provider='synthetic', call
             calls.append(allow_fetch)
         return {'provider': provider, 'model': provider}, evidence
     return resolve
+
+
+# The owner install's connections shape (measured 26.11): twelve remote MCP servers whose own instructions hold about
+# 33,400 characters together, 387 tool names. Synthetic names and text only.
+MCP_SHAPE = {'servers': 12, 'tools': 387, 'instructions': 33_400}
+
+
+def mcp_registry(root, monkeypatch, *, servers=MCP_SHAPE['servers'], tools=MCP_SHAPE['tools'],
+                 instructions=MCP_SHAPE['instructions']):
+    """``(ToolRegistry, {server id: its instruction text})`` over ``servers`` remote MCP servers listed through the real
+    manager with a stub transport (no process, no network), ``tools`` tool names spread over them and ``instructions``
+    characters of server instructions of uneven lengths (multilingual prose with line breaks and quotes, as servers
+    write them). The manager and the settings file are this test's own (``monkeypatch`` restores both)."""
+    from ouroboros import config, mcp_client
+    from ouroboros.tools.registry import ToolRegistry
+
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, 'SETTINGS_PATH', root / 'mcp-settings.json')
+    monkeypatch.setattr(mcp_client, '_manager', mcp_client.MCPManager())
+    weights = [1 + (i % 4) for i in range(servers)]  # uneven: one guide is four times another
+    guides, listing = {}, {}
+    for i in range(servers):
+        server = f'srv{i:02d}'
+        size = instructions * weights[i] // sum(weights)
+        guide = f'"{server}" usage:\n' + '\n'.join(prose(f'{server} guide {n}', 200) for n in range(max(1, size // 200)))
+        guides[server] = guide
+        count = tools // servers + (i < tools % servers)
+        listing[server] = [{'_server_instructions': guide}] + [
+            {'name': f'tool_{n:02d}', 'description': text(f'{server} tool {n}.', 140),
+             'input_schema': {'type': 'object', 'properties': {'id': {'type': 'string', 'description': 'An id'}}}}
+            for n in range(count)]
+
+    async def list_tools(cfg, timeout):
+        return [dict(row) for row in listing[cfg.id]]
+
+    manager = mcp_client.get_manager()
+    manager._async_list_tools = list_tools
+    rows = [{'id': server, 'name': server.upper(), 'enabled': True, 'transport': 'streamable_http',
+             'url': f'https://{server}.example/mcp'} for server in listing]
+    settings = {'MCP_ENABLED': True, 'MCP_SERVERS': rows}
+    config.SETTINGS_PATH.write_text(json.dumps(settings), encoding='utf-8')
+    mcp_client.reconfigure_from_settings(settings)
+    for row in rows:
+        manager.refresh_server(row['id'])
+    return ToolRegistry(repo_dir=root, drive_root=root), guides

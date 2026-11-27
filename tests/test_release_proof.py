@@ -134,6 +134,20 @@ def _fixture_release(
                     "files": _signed_zip(tmp_path / "signed-fixture.zip"),
                     "pythonUpstream": CATALOG["pythonUpstream"],
                 }
+        if proof_id == release_proof.INSTALLER_AUTHENTICODE_PROOF_ID:
+            receipt["authenticode"] = {"status": "unsigned"}
+            if signer:
+                receipt["checks"] = sorted(
+                    {*receipt["checks"], *release_proof.INSTALLER_AUTHENTICODE_SMOKE_CHECKS}
+                )
+                receipt["authenticode"] = {
+                    "status": "signed", "signerThumbprint": signer, "publisher": "Example Publisher",
+                    "installer": {
+                        "name": artifact.name,
+                        "unsignedSha256": "d" * 64,
+                        "sha256": _digest(artifact),
+                    },
+                }
         if proof_id == release_proof.NOTARIZATION_PROOF_ID:
             receipt["notarization"] = {"status": "not_notarized"}
             if notarized:
@@ -166,18 +180,21 @@ def test_locate_artifact_requires_exactly_one_archive(tmp_path: Path):
         release_proof.locate_artifact(tmp_path)
 
 
-def test_locate_artifact_ignores_companion_linux_assets(tmp_path: Path):
+def test_locate_artifact_ignores_companion_linux_and_windows_installer_assets(tmp_path: Path):
     archive = tmp_path / "Ouroboros-1.0.0-linux-x86_64.tar.gz"
     archive.write_bytes(b"archive")
     (tmp_path / "ouroboros_1.0.0_amd64.deb").write_bytes(b"deb")
     (tmp_path / "ouroboros-1.0.0-1.x86_64.rpm").write_bytes(b"rpm")
     (tmp_path / "ouroboros-1.0.0-1.red80.x86_64.rpm").write_bytes(b"rpm")
     (tmp_path / "Ouroboros-1.0.0-linux-x86_64.AppImage").write_bytes(b"appimage")
+    setup = tmp_path / "Ouroboros-Setup-1.0.0-windows-x64.exe"
+    setup.write_bytes(b"setup")
     assert release_proof.locate_artifact(tmp_path) == archive
+    assert release_proof.locate_artifact(tmp_path, suffixes=(".exe",)) == setup
 
 
 def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
-    release_dir, version_file, readme = _fixture_release(tmp_path)
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER)
     notes = tmp_path / "notes.md"
     args = argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir,
@@ -191,7 +208,7 @@ def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
         generated_at="2026-08-02T00:00:00+00:00",
         android_build_result="success",
         android_attestation_result="success",
-        gate_result=GREEN_GATES, windows_signer_thumbprint="",
+        gate_result=GREEN_GATES, windows_signer_thumbprint=SIGNER,
         github_output=tmp_path / "github-output",
         notes_output=notes,
     )
@@ -199,10 +216,10 @@ def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
 
     evidence = json.loads((release_dir / "release-evidence.json").read_text())
     assert evidence["source"]["commit"] == "a" * 40
-    assert len(evidence["artifacts"]) == 9
+    assert len(evidence["artifacts"]) == 10
     assert evidence["experimentalAndroid"]["status"] == "verified"
     upload = json.loads(args.github_output.read_text(encoding="utf-8").split("=", 1)[1]).splitlines()
-    assert len(upload) == 31
+    assert len(upload) == 34
     assert {row["name"] for row in evidence["gitSources"]} == {"git-sources-macos-linux-9.9.tar", WINDOWS_GIT_SOURCE_NAME}
     assert {(release_dir / row["name"]).as_posix() for row in evidence["gitSources"]} <= set(upload)
     assert {Path(path).name for path in upload} >= {row["name"] for row in evidence["artifacts"]}
@@ -214,6 +231,7 @@ def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
         "ouroboros-6.87.5-1.x86_64.rpm",
         "ouroboros-6.87.5-1.red80.x86_64.rpm",
         "Ouroboros-6.87.5-linux-x86_64.AppImage",
+        "Ouroboros-Setup-6.87.5-windows-x64.exe",
     }
     # One archive + one smoke receipt + one SBOM per proof id, plus both Git source archives.
     checksum_lines = (release_dir / "SHA256SUMS").read_text().splitlines()
@@ -247,7 +265,7 @@ def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
 
 def test_prerelease_notes_link_to_the_exact_prerelease_assets(tmp_path: Path):
     version = "6.87.5-rc.1"
-    release_dir, version_file, readme = _fixture_release(tmp_path, version=version)
+    release_dir, version_file, readme = _fixture_release(tmp_path, version=version, signer=SIGNER)
     notes = tmp_path / "notes.md"
     args = argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir,
@@ -261,7 +279,7 @@ def test_prerelease_notes_link_to_the_exact_prerelease_assets(tmp_path: Path):
         generated_at="2026-08-02T00:00:00+00:00",
         android_build_result="success",
         android_attestation_result="success",
-        gate_result=GREEN_GATES, windows_signer_thumbprint="",
+        gate_result=GREEN_GATES, windows_signer_thumbprint=SIGNER,
         github_output=None,
         notes_output=notes,
     )
@@ -274,7 +292,7 @@ def test_prerelease_notes_link_to_the_exact_prerelease_assets(tmp_path: Path):
 
 
 def test_assemble_rejects_smoke_digest_drift(tmp_path: Path):
-    release_dir, version_file, readme = _fixture_release(tmp_path)
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER)
     receipt_path = release_dir / "release-smoke-macos-arm64.json"
     receipt = json.loads(receipt_path.read_text())
     receipt["sha256"] = "0" * 64
@@ -291,7 +309,7 @@ def test_assemble_rejects_smoke_digest_drift(tmp_path: Path):
         generated_at="2026-08-02T00:00:00+00:00",
         android_build_result="success",
         android_attestation_result="success",
-        gate_result=GREEN_GATES, windows_signer_thumbprint="",
+        gate_result=GREEN_GATES, windows_signer_thumbprint=SIGNER,
         github_output=None,
         notes_output=tmp_path / "notes.md",
     )
@@ -301,7 +319,7 @@ def test_assemble_rejects_smoke_digest_drift(tmp_path: Path):
 
 @pytest.mark.parametrize("failure", ["failure", "cancelled", "skipped", "missing", "partial", "digest", "smoke", "sbom", "attestation"])
 def test_unavailable_android_pair_keeps_verified_desktop_release(tmp_path, failure):
-    release_dir, version_file, readme = _fixture_release(tmp_path)
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER)
     build_result = failure if failure in {"failure", "cancelled", "skipped"} else "success"
     attestation_result = "failure" if failure == "attestation" else "success"
     apk = release_dir / release_proof.release_asset_name("android-apk", "6.87.5")
@@ -328,7 +346,7 @@ def test_unavailable_android_pair_keeps_verified_desktop_release(tmp_path, failu
         run_url="https://example.test/failed-run", previous_tag=None, generated_at=None,
         notes_output=notes, android_build_result=build_result,
         android_attestation_result=attestation_result,
-        gate_result=GREEN_GATES, windows_signer_thumbprint="", github_output=output)
+        gate_result=GREEN_GATES, windows_signer_thumbprint=SIGNER, github_output=output)
     release_proof.command_assemble(args)
     evidence = json.loads((release_dir / "release-evidence.json").read_text(encoding="utf-8"))
     assert {row["proofId"] for row in evidence["artifacts"]} == set(release_proof.DESKTOP_DOWNLOAD_IDS)
@@ -336,9 +354,9 @@ def test_unavailable_android_pair_keeps_verified_desktop_release(tmp_path, failu
     assert evidence["experimentalAndroid"]["buildResult"] == build_result
     assert evidence["experimentalAndroid"]["reason"]
     assert next(row for row in evidence["workflow"]["gates"] if row["name"] == "android-build")["status"] == build_result
-    assert len((release_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()) == 23  # includes both source sets
+    assert len((release_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()) == 26  # includes both source sets
     upload = json.loads(output.read_text(encoding="utf-8").split("=", 1)[1]).splitlines()
-    assert len(upload) == 25
+    assert len(upload) == 28
     assert not any("android" in Path(path).name for path in upload)
     text = notes.read_text(encoding="utf-8")
     assert "Android artifacts are unavailable" in text and args.run_url in text
@@ -367,7 +385,7 @@ def test_unavailable_android_pair_keeps_verified_desktop_release(tmp_path, failu
 def test_assemble_rejects_unbound_or_incomplete_smoke_receipt(
     tmp_path: Path, field: str, value: object, message: str
 ):
-    release_dir, version_file, readme = _fixture_release(tmp_path)
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER)
     receipt_path = release_dir / "release-smoke-macos-arm64.json"
     receipt = json.loads(receipt_path.read_text())
     receipt[field] = value
@@ -384,7 +402,7 @@ def test_assemble_rejects_unbound_or_incomplete_smoke_receipt(
         generated_at="2026-08-02T00:00:00+00:00",
         android_build_result="success",
         android_attestation_result="success",
-        gate_result=GREEN_GATES, windows_signer_thumbprint="",
+        gate_result=GREEN_GATES, windows_signer_thumbprint=SIGNER,
         github_output=None,
         notes_output=tmp_path / "notes.md",
     )
@@ -415,7 +433,7 @@ def test_assemble_rejects_tag_version_mismatch(tmp_path: Path):
 
 
 def test_verify_uploaded_requires_exact_names_sizes_and_digests(tmp_path: Path):
-    release_dir, version_file, readme = _fixture_release(tmp_path)
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER)
     release_proof.command_assemble(argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir, version_file=version_file, readme=readme,
         git_pin=_git_pin(tmp_path),
@@ -423,7 +441,7 @@ def test_verify_uploaded_requires_exact_names_sizes_and_digests(tmp_path: Path):
         run_url="https://example.test/run", previous_tag=None, generated_at=None,
         notes_output=tmp_path / "notes.md", android_build_result="success",
         android_attestation_result="success",
-        gate_result=GREEN_GATES, windows_signer_thumbprint="", github_output=None))
+        gate_result=GREEN_GATES, windows_signer_thumbprint=SIGNER, github_output=None))
     metadata = tmp_path / "remote.json"
     metadata.write_text(json.dumps({"assets": [
         {"name": path.name, "size": path.stat().st_size, "digest": "sha256:" + _digest(path)}
@@ -448,8 +466,8 @@ def test_verify_uploaded_requires_exact_names_sizes_and_digests(tmp_path: Path):
 
 
 def test_release_publishes_the_pinned_git_sources_and_refuses_other_bytes(tmp_path: Path):
-    release_dir, version_file, readme = _fixture_release(tmp_path)
-    _, notes = _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER)
+    _, notes = _assemble_windows(tmp_path, release_dir, version_file, readme, signer=SIGNER)
     evidence = json.loads((release_dir / "release-evidence.json").read_text(encoding="utf-8"))
     assert evidence["schemaVersion"] == 4 and evidence["gitSources"] == [{
         "name": "git-sources-macos-linux-9.9.tar", "size": len(GIT_SOURCES), "layout": "dugite",
@@ -463,16 +481,16 @@ def test_release_publishes_the_pinned_git_sources_and_refuses_other_bytes(tmp_pa
         good = archive.read_bytes()
         archive.write_bytes(good[:-1] + b"!")
         with pytest.raises(ValueError, match=f"{re.escape(archive.name)} is not the archive .* pins"):
-            _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+            _assemble_windows(tmp_path, release_dir, version_file, readme, signer=SIGNER)
         archive.unlink()
         with pytest.raises(ValueError, match=f"missing the Git source archive {re.escape(archive.name)}"):
-            _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+            _assemble_windows(tmp_path, release_dir, version_file, readme, signer=SIGNER)
         archive.write_bytes(good)
     pin = json.loads(_git_pin(tmp_path).read_text(encoding="utf-8"))
     pin["sources"]["mingit"].update(size_bytes=None, sha256=None)  # no archive can satisfy an unpinned source set
     _git_pin(tmp_path).write_text(json.dumps(pin), encoding="utf-8")
     with pytest.raises(ValueError, match=f"{re.escape(WINDOWS_GIT_SOURCE_NAME)} is not the archive"):
-        _assemble_windows(tmp_path, release_dir, version_file, readme, signer="")
+        _assemble_windows(tmp_path, release_dir, version_file, readme, signer=SIGNER)
 
 
 def test_git_sources_have_one_producer_per_archive_and_stay_out_of_windows_packaging():
@@ -661,6 +679,10 @@ def test_future_final_artifact_lanes_smoke_betterleaks_from_the_artifact():
     assert "betterleaks-standalone/bin/betterleaks" in build_job
     assert "codesign --verify --strict" in build_job
     assert "--check embedded_betterleaks_runtime" in build_job
+
+    setup_smoke = (REPO / "scripts" / "smoke_windows_setup.ps1").read_text(encoding="utf-8")
+    assert "scripts\\betterleaks_platform_smoke.py" in setup_smoke
+    assert "--bundle-root (Join-Path $InstallDir '_internal')" in setup_smoke
 
     package_smoke = (REPO / "scripts" / "smoke_linux_packages.sh").read_text(
         encoding="utf-8"
@@ -1029,13 +1051,13 @@ def test_optional_android_does_not_waive_missing_desktop_asset(tmp_path):
 
 
 def _assemble_windows(tmp_path: Path, release_dir: Path, version_file: Path, readme: Path,
-                      signer: str) -> tuple[dict, str]:
+                      signer: str, *, repository: str = "razzant/ouroboros") -> tuple[dict, str]:
     """Run the release consumer with one Windows signing configuration."""
     notes = tmp_path / "notes.md"
     release_proof.command_assemble(argparse.Namespace(
         test_verdict=_verdict(tmp_path), directory=release_dir, version_file=version_file, readme=readme,
         git_pin=_git_pin(tmp_path),
-        repository="razzant/ouroboros", tag="v6.87.5", commit="a" * 40,
+        repository=repository, tag="v6.87.5", commit="a" * 40,
         run_url="https://example.test/run", previous_tag=None, generated_at=None,
         notes_output=notes, android_build_result="success",
         android_attestation_result="success", gate_result=GREEN_GATES, windows_signer_thumbprint=signer,
@@ -1045,34 +1067,62 @@ def _assemble_windows(tmp_path: Path, release_dir: Path, version_file: Path, rea
     return windows, notes.read_text(encoding="utf-8")
 
 
-def test_unconfigured_signing_publishes_an_explicitly_unsigned_windows_zip(tmp_path: Path):
-    windows, notes = _assemble_windows(tmp_path, *_fixture_release(tmp_path), signer="")
+@pytest.mark.parametrize("repository", ["razzant/ouroboros", "Razzant/Ouroboros", "RAZZANT/OUROBOROS"])
+def test_official_repository_refuses_unsigned_windows_setup(tmp_path: Path, repository: str):
+    release_dir, version_file, readme = _fixture_release(tmp_path)
+    with pytest.raises(ValueError, match="official razzant/ouroboros releases require a signed Windows Setup installer"):
+        _assemble_windows(tmp_path, release_dir, version_file, readme, signer="", repository=repository)
+    assert not (release_dir / "release-evidence.json").exists()
+    assert not (release_dir / "SHA256SUMS").exists()
+    assert not (tmp_path / "notes.md").exists()
+
+
+def test_unconfigured_signing_publishes_an_explicitly_unsigned_windows_zip_and_installer(tmp_path: Path):
+    release_dir, version_file, readme = _fixture_release(tmp_path)
+    windows, notes = _assemble_windows(
+        tmp_path, release_dir, version_file, readme, signer="", repository="fork-owner/ouroboros",
+    )
+    evidence = json.loads((release_dir / "release-evidence.json").read_text(encoding="utf-8"))
+    setup = next(row for row in evidence["artifacts"] if row["proofId"] == "windows-setup-x64")
 
     assert windows["authenticode"] == {"status": "unsigned"}
-    assert "Windows: this ZIP is unsigned." in notes
+    assert setup["authenticode"] == {"status": "unsigned"}
+    assert "Windows: this installer and portable ZIP are unsigned." in notes
     assert "unknown publisher" in notes
     assert "Authenticode signature" not in notes
 
 
 def test_configured_signing_publishes_the_verified_signer(tmp_path: Path):
     # Configuration case and receipt case may differ; the published value is canonical.
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=SIGNER)
     windows, notes = _assemble_windows(
-        tmp_path, *_fixture_release(tmp_path, signer=SIGNER), signer=SIGNER.lower()
+        tmp_path, release_dir, version_file, readme, signer=SIGNER.lower()
     )
+    evidence = json.loads((release_dir / "release-evidence.json").read_text(encoding="utf-8"))
+    setup = next(row for row in evidence["artifacts"] if row["proofId"] == "windows-setup-x64")
 
     assert windows["authenticode"] == {
         "status": "signed", "signerThumbprint": SIGNER, "publisher": "Example Publisher",
         "files": _signed_zip(tmp_path / "expected.zip"), "pythonUpstream": CATALOG["pythonUpstream"],
     }
+    assert setup["authenticode"] == {
+        "status": "signed", "signerThumbprint": SIGNER, "publisher": "Example Publisher",
+        "installer": {
+            "name": "Ouroboros-Setup-6.87.5-windows-x64.exe",
+            "unsignedSha256": "d" * 64,
+            "sha256": setup["sha256"],
+        },
+    }
     assert f"from **Example Publisher** (certificate SHA-1 `{SIGNER}`)" in notes
-    assert "`Ouroboros.exe` and the bundled interpreter's `python.exe` and `pythonw.exe`" in notes
+    assert "the Setup installer (`Ouroboros-Setup-6.87.5-windows-x64.exe`), `Ouroboros.exe`, and the bundled interpreter's `python.exe` and `pythonw.exe`" in notes
     upstream = CATALOG["pythonUpstream"]
     assert f"(CPython {upstream['pythonVersion']} from python-build-standalone {upstream['release']})" in notes
     assert "timestamped Authenticode signatures" in notes and "before and after signing" in notes
-    # The scope boundary: nothing else in the ZIP, no later environment or Git update.
-    assert "signs no other file in the ZIP" in notes and "later created from that interpreter" in notes
+    assert "The installer and portable ZIP ship the exact same payload files." in notes
+    # The scope boundary: nothing else in the payload, no later environment or Git update.
+    assert "signs no other file in the payload" in notes and "later created from that interpreter" in notes
     assert "later Git updates" in notes and "SmartScreen or antivirus may still warn" in notes
-    assert "this ZIP is unsigned" not in notes
+    assert "are unsigned" not in notes
 
 
 @pytest.mark.parametrize(
@@ -1110,6 +1160,22 @@ def test_windows_signing_state_must_match_the_configuration(
     tmp_path: Path, receipt_signer: str, configured: str, mutate: str | None, message: str
 ):
     release_dir, version_file, readme = _fixture_release(tmp_path, signer=receipt_signer)
+    # Keep the companion installer receipt valid for `configured` so these rows
+    # exercise the windows-x64 archive gate regardless of RELEASE_ASSET_TEMPLATES order.
+    if configured in {"", SIGNER} and receipt_signer != configured:
+        setup_path = release_dir / "release-smoke-windows-setup-x64.json"
+        setup_receipt = json.loads(setup_path.read_text(encoding="utf-8"))
+        setup_checks = sorted(release_proof.REQUIRED_SMOKE_CHECKS["windows-setup-x64"])
+        if configured:
+            setup_receipt["checks"] = sorted({*setup_checks, *release_proof.INSTALLER_AUTHENTICODE_SMOKE_CHECKS})
+            setup_receipt["authenticode"] = {
+                "status": "signed", "signerThumbprint": configured, "publisher": "Example Publisher",
+                "installer": {"name": setup_receipt["artifact"], "unsignedSha256": "d" * 64, "sha256": setup_receipt["sha256"]},
+            }
+        else:
+            setup_receipt["checks"] = setup_checks
+            setup_receipt["authenticode"] = {"status": "unsigned"}
+        setup_path.write_text(json.dumps(setup_receipt), encoding="utf-8")
     path = release_dir / "release-smoke-windows-x64.json"
     receipt = json.loads(path.read_text(encoding="utf-8"))
     if mutate == "drop-timestamp":
@@ -1148,7 +1214,61 @@ def test_windows_signing_state_must_match_the_configuration(
     path.write_text(json.dumps(receipt), encoding="utf-8")
 
     with pytest.raises(ValueError, match=message):
-        _assemble_windows(tmp_path, release_dir, version_file, readme, signer=configured)
+        _assemble_windows(
+            tmp_path, release_dir, version_file, readme, signer=configured,
+            repository="fork-owner/ouroboros" if not configured else "razzant/ouroboros",
+        )
+    assert not (release_dir / "release-evidence.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("receipt_signer", "configured", "mutate", "message"),
+    [
+        (SIGNER, SIGNER, "drop-timestamp", "missing signing checks"),
+        (SIGNER, SIGNER, "drop-installed-sigs", "missing signing checks"),
+        (SIGNER, SIGNER, "wrong-thumbprint", "configured certificate"),
+        (SIGNER, SIGNER, "other-publisher", "publisher mismatch"),
+        (SIGNER, SIGNER, "drop-installer", "name, unsignedSha256 and sha256"),
+        (SIGNER, SIGNER, "wrong-name", "names 'other.exe'"),
+        (SIGNER, SIGNER, "wrong-sha", "not the signed"),
+        (SIGNER, SIGNER, "unchanged-hash", "lacks distinct SHA-256"),
+        ("", "", "claim-timestamp", "does not record an unsigned installer"),
+        ("", "", "claim-signed", "does not record an unsigned installer"),
+    ],
+)
+def test_windows_installer_signing_state_must_match_configuration_and_artifact(
+    tmp_path: Path, receipt_signer: str, configured: str, mutate: str, message: str
+):
+    release_dir, version_file, readme = _fixture_release(tmp_path, signer=receipt_signer)
+    path = release_dir / "release-smoke-windows-setup-x64.json"
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    if mutate == "drop-timestamp":
+        receipt["checks"].remove("timestamp")
+    elif mutate == "drop-installed-sigs":
+        receipt["checks"].remove("installed_payload_signatures")
+    elif mutate == "wrong-thumbprint":
+        receipt["authenticode"]["signerThumbprint"] = "F" * 40
+    elif mutate == "other-publisher":
+        receipt["authenticode"]["publisher"] = "Different Publisher"
+    elif mutate == "drop-installer":
+        del receipt["authenticode"]["installer"]
+    elif mutate == "wrong-name":
+        receipt["authenticode"]["installer"]["name"] = "other.exe"
+    elif mutate == "wrong-sha":
+        receipt["authenticode"]["installer"]["sha256"] = "0" * 64
+    elif mutate == "unchanged-hash":
+        receipt["authenticode"]["installer"]["unsignedSha256"] = receipt["authenticode"]["installer"]["sha256"]
+    elif mutate == "claim-timestamp":
+        receipt["checks"].append("timestamp")
+    elif mutate == "claim-signed":
+        receipt["authenticode"] = {"status": "signed"}
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        _assemble_windows(
+            tmp_path, release_dir, version_file, readme, signer=configured,
+            repository="fork-owner/ouroboros" if not configured else "razzant/ouroboros",
+        )
     assert not (release_dir / "release-evidence.json").exists()
 
 
@@ -1185,6 +1305,19 @@ def test_handoff_archive_digest_is_checked_before_extraction(tmp_path: Path):
         assert refused.returncode != 0
         assert "digest its producer job recorded" in refused.stderr
         assert not (tmp_path / "refused-output").exists()
+
+
+    # Locate also supports --suffix .exe for the Windows Setup installer alongside the ZIP.
+    setup = tmp_path / "Ouroboros-Setup-6.87.5-windows-x64.exe"
+    setup.write_bytes(b"final setup bytes")
+    setup_out = tmp_path / "setup-github-output"
+    ok_setup = _run_cli("locate", "--directory", str(tmp_path), "--suffix", ".exe",
+                        "--expect-sha256", _digest(setup), "--github-output", str(setup_out))
+    assert ok_setup.returncode == 0, ok_setup.stderr
+    assert f"sha256={_digest(setup)}" in setup_out.read_text(encoding="utf-8")
+    # Default archive locate still ignores the companion .exe.
+    ok_zip_again = _run_cli("locate", "--directory", str(tmp_path), "--expect-sha256", _digest(archive))
+    assert ok_zip_again.returncode == 0, ok_zip_again.stderr
 
 
 def test_windows_receipt_records_signing_state_and_android_callers_stay_compatible(tmp_path: Path):
@@ -1224,6 +1357,31 @@ def test_windows_receipt_records_signing_state_and_android_callers_stay_compatib
                        "--authenticode-files", json.dumps(record))
     assert refused.returncode != 0 and "does not hold every catalogued executable" in refused.stderr
     assert not (tmp_path / "refused.json").exists()
+
+    # The Setup installer receipt binds signed_installer to the exact Setup .exe bytes.
+    setup = tmp_path / "Ouroboros-Setup-6.87.5-windows-x64.exe"
+    setup.write_bytes(b"signed setup payload")
+    setup_record = {"name": setup.name, "unsignedSha256": "c" * 64, "sha256": _digest(setup)}
+    setup_common = ["record-smoke", "--proof-id", "windows-setup-x64", "--artifact", str(setup),
+                    "--commit", "a" * 40, "--tag", "v6.87.5", "--check", "packaged_cli_help"]
+    setup_unsigned, setup_signed = tmp_path / "setup-unsigned.json", tmp_path / "setup-signed.json"
+    assert _run_cli(*setup_common, "--output", str(setup_unsigned)).returncode == 0
+    assert json.loads(setup_unsigned.read_text())["authenticode"] == {"status": "unsigned"}
+    setup_ok = _run_cli(*setup_common, "--output", str(setup_signed), *signer,
+                        "--authenticode-installer", json.dumps(setup_record))
+    assert setup_ok.returncode == 0, setup_ok.stderr
+    assert json.loads(setup_signed.read_text())["authenticode"] == {
+        "status": "signed", "signerThumbprint": SIGNER, "publisher": "Example Publisher",
+        "installer": setup_record,
+    }
+    for args, message in (
+        ([*signer, "--authenticode-installer", json.dumps({**setup_record, "sha256": "0" * 64})], "not the signed"),
+        ([*signer], "name, unsignedSha256 and sha256"),
+        (["--authenticode-installer", json.dumps(setup_record)], "need the verified signer"),
+    ):
+        refused = _run_cli(*setup_common, "--output", str(tmp_path / "refused-setup.json"), *args)
+        assert refused.returncode != 0 and message in refused.stderr, refused.stderr
+    assert not (tmp_path / "refused-setup.json").exists()
 
     # scripts/build_android_release.py builds its own Namespace without these fields.
     apk = tmp_path / "Ouroboros-6.87.5-android.apk"
@@ -1270,17 +1428,25 @@ def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, ver
     dist.mkdir()
     name = release_proof.release_asset_name("windows-x64", version)
     archive = dist / name
+    setup_name = release_proof.release_asset_name("windows-setup-x64", version)
+    setup = dist / setup_name
     if signer:
         signed_files = _signed_zip(archive)
+        setup.write_bytes(b"final signed Setup .exe")
+        signed_installer = {"name": setup_name, "unsignedSha256": "d" * 64, "sha256": _digest(setup)}
     else:
         archive.write_bytes(b"final unsigned ZIP")
+        setup.write_bytes(b"final unsigned Setup .exe")
     output = tmp_path / "output"
     env = dict(os.environ, GITHUB_OUTPUT=str(output), WINDOWS_SIGNER_THUMBPRINT=signer,
                SIGNED_SHA256=_digest(archive) if signer else "wrong-unused-signed-digest",
                UNSIGNED_SHA256="wrong-unused-unsigned-digest" if signer else _digest(archive),
+               SIGNED_INSTALLER_SHA256=_digest(setup) if signer else "",
+               INSTALLER_PATH=setup.as_posix(),
                SIGNER_THUMBPRINT=signer, SIGNER_PUBLISHER="Example Publisher" if signer else "",
-               # The windows-sign job output; unset jobs yield an empty string.
+               # The windows-sign job outputs; unset jobs yield empty strings.
                SIGNED_FILES=json.dumps(signed_files) if signer else "",
+               SIGNED_INSTALLER=json.dumps(signed_installer) if signer else "",
                GITHUB_REF_NAME=f"v{version}", GITHUB_SHA="a" * 40, GITHUB_REPOSITORY="example/project",
                GITHUB_SERVER_URL="https://example.test", GITHUB_RUN_ID="123",
                ANDROID_BUILD_RESULT="skipped", ANDROID_ATTESTATION_RESULT="not_run",
@@ -1309,10 +1475,24 @@ def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, ver
     assert not output.exists()
     env[selected] = _digest(archive)
 
+    if signer:
+        check_setup = run_step("windows-proof", "Check final installer digest before execution")
+        assert check_setup.returncode == 0, check_setup.stderr
+        assert f"sha256={_digest(setup)}" in output.read_text()
+        output.unlink()
+        env["SIGNED_INSTALLER_SHA256"] = "0" * 64
+        refused_setup = run_step("windows-proof", "Check final installer digest before execution")
+        assert refused_setup.returncode != 0 and "digest its producer job recorded" in refused_setup.stderr
+        assert not output.exists()
+        env["SIGNED_INSTALLER_SHA256"] = _digest(setup)
+
     recorded = run_step("windows-proof", "Record packaged artifact smoke")
     assert recorded.returncode == 0, recorded.stderr
+    recorded_setup = run_step("windows-proof", "Record Windows installer smoke")
+    assert recorded_setup.returncode == 0, recorded_setup.stderr
     _verdict(tmp_path)
-    for path in (archive, dist / "release-smoke-windows-x64.json"):
+    for path in (archive, setup, dist / "release-smoke-windows-x64.json",
+                 dist / "release-smoke-windows-setup-x64.json"):
         shutil.copyfile(path, release_dir / path.name)
     assert not windows_sources.exists()
     captured = run_step("release", "Capture the Windows Git sources")
@@ -1327,18 +1507,27 @@ def test_workflow_shell_handoff_receipt_and_release_consumer(tmp_path: Path, ver
     assert next(row for row in evidence["gitSources"] if row["layout"] == "mingit")["sha256"] == _digest(windows_sources)
     assert {row["proofId"] for row in evidence["artifacts"]} == set(release_proof.DESKTOP_DOWNLOAD_IDS)
     windows = next(row for row in evidence["artifacts"] if row["proofId"] == "windows-x64")
+    windows_setup = next(row for row in evidence["artifacts"] if row["proofId"] == "windows-setup-x64")
     assert windows["sha256"] == _digest(archive)
+    assert windows_setup["sha256"] == _digest(setup)
     assert windows["authenticode"] == ({"status": "signed", "signerThumbprint": signer,
                                         "publisher": "Example Publisher", "files": signed_files,
                                         "pythonUpstream": CATALOG["pythonUpstream"]}
                                        if signer else {"status": "unsigned"})
+    assert windows_setup["authenticode"] == ({"status": "signed", "signerThumbprint": signer,
+                                              "publisher": "Example Publisher", "installer": signed_installer}
+                                             if signer else {"status": "unsigned"})
     notes = (tmp_path / "release-notes.md").read_text()
     assert f"[Compare {previous_tag}...v{version}]" in notes
-    assert ("timestamped Authenticode signature" if signer else "this ZIP is unsigned") in notes
+    assert ("timestamped Authenticode signature" if signer else "this installer and portable ZIP are unsigned") in notes
     # The assembly consumer also rejects bytes changed after proof generation.
     (release_dir / archive.name).write_bytes(b"replaced ZIP")
     refused = run_step("release", "Assemble release proof capsule and notes")
     assert refused.returncode != 0 and "receipt is not bound" in refused.stderr
+    shutil.copyfile(archive, release_dir / archive.name)
+    (release_dir / setup.name).write_bytes(b"replaced Setup .exe")
+    refused_setup_drift = run_step("release", "Assemble release proof capsule and notes")
+    assert refused_setup_drift.returncode != 0 and "receipt is not bound" in refused_setup_drift.stderr
 
 
 def _gate_env(jobs, results=None):

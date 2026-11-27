@@ -780,12 +780,41 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
         return False, note, f"conflict inventory unreadable: {u_error}"
     unmerged = {ln.strip() for ln in unmerged_out.splitlines() if ln.strip()}
     try:
-        from ouroboros.tools.release_sync import published_download_version, sync_release_metadata
+        import pathlib as _pl
+        from ouroboros.tools.release_sync import (
+            download_links_include_windows_installer,
+            is_development_marker,
+            is_release_version,
+            published_download_version,
+            resolve_release_windows_installer,
+            sync_release_metadata,
+        )
 
-        # A marker target's links are not derived from VERSION: they stay its published release.
-        rc_r, target_readme, _re = _git_run(["git", "show", f"{target_sha}:README.md"], cwd=workdir)
+        root = _pl.Path(workdir)
+        version_str = (root / "VERSION").read_text(encoding="utf-8").strip()
+        target_published = ""
+        target_windows_installer = None
+        if is_development_marker(version_str):
+            # A marker target's links stay its published release; consult the shared tag rule
+            # first, falling back to the target README when that tag is absent locally.
+            rc_r, target_readme, _re = _git_run(["git", "show", f"{target_sha}:README.md"], cwd=workdir)
+            target_published = published_download_version(target_readme) if rc_r == 0 else ""
+            target_windows_installer = resolve_release_windows_installer(
+                workdir, version_str, published_version=target_published,
+            )
+            if target_windows_installer is None and rc_r == 0 and target_published:
+                target_windows_installer = download_links_include_windows_installer(
+                    target_readme, version=target_published,
+                )
+        elif is_release_version(version_str):
+            target_windows_installer = resolve_release_windows_installer(
+                workdir, version_str, target_ref=target_sha,
+            )
         changed_carriers = list(sync_release_metadata(
-            workdir, published_version=published_download_version(target_readme) if rc_r == 0 else "") or [])
+            workdir,
+            published_version=target_published,
+            windows_installer=target_windows_installer,
+        ) or [])
     except Exception as exc:
         return False, note, f"carrier token sync failed: {type(exc).__name__}: {exc}"
     addable = [p for p in changed_carriers if p not in unmerged]
@@ -801,16 +830,9 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
     try:
         from ouroboros.tools.release_sync import version_carrier_desyncs
 
-        import pathlib as _pl
-
-        root = _pl.Path(workdir)
-
         def _read(rel: str) -> str:
             path = root / rel
             return path.read_text(encoding="utf-8") if path.exists() and rel not in unmerged else ""
-
-        version_str = (root / "VERSION").read_text(encoding="utf-8").strip()
-        from ouroboros.tools.release_sync import is_release_version
 
         if not is_release_version(version_str):
             # Nothing enforceable for a non-release version string; the sync
@@ -829,6 +851,7 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
             download_readme_text=readme_text,
             site_install_text=_read("site/install/index.html"),
             docs_install_text=_read("docs/install/index.html"),
+            windows_installer=target_windows_installer,
             detailed=True,
         )
     except Exception as exc:

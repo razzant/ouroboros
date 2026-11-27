@@ -7,7 +7,6 @@ wire shapes; ``supervisor.message_bus`` re-validates through the same functions.
 from __future__ import annotations
 
 import base64
-import ipaddress
 import mimetypes
 import pathlib
 import uuid
@@ -241,84 +240,9 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{path_for_prose(fp.name)}'", shown)
 
 
-_MAX_LINK_ACTIONS = 12
-
-
-class LinkActionsValidationError(ValueError):
-    """Typed atomic refusal from the shared link-action validator."""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
-def validate_link_actions(actions: Any) -> List[Dict[str, str]]:
-    """Return one cleaned HTTP(S) action batch, or refuse the entire batch."""
-    from urllib.parse import urlparse
-
-    if not isinstance(actions, list) or not actions:
-        raise LinkActionsValidationError(
-            "SEND_LINKS_ARG_ERROR", "provide a non-empty links array."
-        )
-    if len(actions) > _MAX_LINK_ACTIONS:
-        raise LinkActionsValidationError(
-            "SEND_LINKS_TOO_MANY", f"maximum {_MAX_LINK_ACTIONS} links."
-        )
-    cleaned: List[Dict[str, str]] = []
-    for item in actions:
-        if not isinstance(item, dict):
-            raise LinkActionsValidationError(
-                "SEND_LINKS_ARG_ERROR", "each link must contain label and url."
-            )
-        label = str(item.get("label") or "")
-        url = str(item.get("url") or "")
-        invalid_url_char = any(
-            ord(char) < 0x20 or ord(char) == 0x7F or char.isspace() for char in url
-        )
-        invalid_label_char = any(
-            ord(char) < 0x20 or ord(char) == 0x7F
-            or (char.isspace() and char != " ") for char in label
-        )
-        label = label.strip()
-        if len(url) > 2048 or invalid_url_char:
-            raise LinkActionsValidationError(
-                "SEND_LINKS_URL_BLOCKED",
-                "URL contains disallowed characters or exceeds 2048 characters.",
-            )
-        try:
-            parsed = urlparse(url)
-            hostname = parsed.hostname
-            port = parsed.port
-            if "[" in parsed.netloc:
-                ipaddress.ip_address(hostname or "")
-        except ValueError as exc:
-            raise LinkActionsValidationError(
-                "SEND_LINKS_URL_BLOCKED", "URL has an invalid authority."
-            ) from exc
-        if parsed.scheme not in {"http", "https"}:
-            raise LinkActionsValidationError(
-                "SEND_LINKS_URL_BLOCKED", "only http:// and https:// URLs are allowed."
-            )
-        if not hostname or (port is not None and not 0 <= port <= 65535):
-            raise LinkActionsValidationError(
-                "SEND_LINKS_URL_BLOCKED", "URL has an invalid authority."
-            )
-        if "\\" in parsed.netloc:
-            raise LinkActionsValidationError("SEND_LINKS_URL_BLOCKED", "URL has an invalid authority.")
-        invalid_reg_name = "[" not in parsed.netloc and any(
-            not ((char.isascii() and (char.isalnum() or char in "._~-")) or
-                 (not char.isascii() and char.isalpha())) for char in hostname
-        )
-        if "%" in hostname or invalid_reg_name:
-            raise LinkActionsValidationError(
-                "SEND_LINKS_URL_BLOCKED", "URL has an invalid authority."
-            )
-        if not label or invalid_label_char:
-            raise LinkActionsValidationError(
-                "SEND_LINKS_ARG_ERROR", "each link requires a label and absolute URL."
-            )
-        cleaned.append({"label": label[:120], "url": url})
-    return cleaned
+from ouroboros.link_actions import (  # noqa: E402,F401 — the tool and the bus import them from here too
+    _MAX_LINK_ACTIONS, LinkActionsValidationError, validate_link_actions,
+)
 
 
 _MAX_QUIZ_OPTIONS = 6
@@ -530,6 +454,18 @@ def _validate_wait_bound(max_wait_minutes: Any, *, wait_for_answer: bool, task: 
     return int(max_wait_minutes)
 
 
+def _known_sign_in_places(actions: list) -> None:
+    """A sign-in place names a skill that declares that service: a typo would draw a button to no card, and the
+    mind would hear it was delivered. The host's sign-in answers name the exact place."""
+    from ouroboros.link_actions import sign_in_place
+    from ouroboros.service_sign_in import declared_service
+
+    for skill, service in filter(None, (sign_in_place(action.get("place")) for action in actions)):
+        if declared_service(skill, service) is None:
+            raise LinkActionsValidationError("SEND_LINKS_ARG_ERROR", f"skill {skill} declares no sign-in service "
+                                             f"{service}; offer the place the host's sign-in answer names.")
+
+
 def _send_links(
     ctx: ToolContext,
     links: list | None = None,
@@ -541,6 +477,7 @@ def _send_links(
         return "⚠️ SEND_LINKS_NO_CHAT: no active chat."
     try:
         actions = validate_link_actions(links)
+        _known_sign_in_places(actions)
     except LinkActionsValidationError as exc:
         # Validation rejects the whole batch before delivery. The adapter keeps
         # URL policy denials distinct from bad arguments, including TOO_MANY;

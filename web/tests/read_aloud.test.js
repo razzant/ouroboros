@@ -123,6 +123,31 @@ test('Read aloud speaks one reply at a time, shows Stop on it, and stops on a se
     } finally { env.restore(); }
 });
 
+test('a reply corrected while it is read stays the one being read: Stop shows on it and a press stops it', async () => {
+    const env = installDomDouble();
+    try {
+        const registry = createMessageActions();
+        const { impl, said } = engine();
+        const off = registerReadAloud({ speech: hub({ key: 'device_voice:device_voice', available: true,
+            destination: 'device', impl }), registry });
+        const action = registry.actionsFor(row('a')).find((item) => item.key === READ_ALOUD);
+        const spoken = row('row:1@t#v1', 'We meet at ten.');
+        // A correction rewrites the same words element in place and gives the row its new version's address.
+        const corrected = { ...spoken, address: 'row:1@t#v2', text: 'We meet on Friday at ten.' };
+        const reading = action.run(spoken);
+        assert.equal(action.state(corrected)?.label, 'Stop', 'the corrected row still shows Stop');
+        await action.run(corrected);
+        assert.equal(off.speaking(), '', 'the press stops the reading');
+        assert.equal(said.length, 1, 'nothing is read again');
+        assert.equal(impl.stops, 1);
+        said[0].finish();
+        await reading;
+        void action.run(row('row:1@u#v1', 'Other.'));
+        assert.equal(off.speaking(), 'row:1@u#v1', 'another reply still starts reading');
+        off();
+    } finally { env.restore(); }
+});
+
 test('a chosen engine that cannot run says why; none at all offers no action', async () => {
     const env = installDomDouble();
     try {

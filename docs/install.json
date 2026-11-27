@@ -64,6 +64,13 @@
     {
       "platform": "windows",
       "architecture": "x64",
+      "format": "exe",
+      "availability": "per-release",
+      "nameTemplate": "Ouroboros-Setup-{version}-windows-x64.exe"
+    },
+    {
+      "platform": "windows",
+      "architecture": "x64",
       "format": "zip",
       "nameTemplate": "Ouroboros-{version}-windows-x64.zip"
     }

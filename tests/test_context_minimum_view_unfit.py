@@ -15,8 +15,9 @@ FACTS = RouteFacts(conversation_window_tokens=92_000, working_reserve_tokens=10_
                    source="synthetic retention measurement")
 
 
-def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None, held=()):
-    """Real common fit over synthetic protected words; no provider or owner data. ``held``: held-note heads."""
+def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None, held=(), window_source=None):
+    """Real common fit over synthetic protected words; no provider or owner data. ``held``: held-note heads.
+    ``window_source``: ``(source, ts)`` the route's window evidence names instead of the catalogue's."""
     words = {**syn.spoken(1, "human", 340_000 if shape == "memory" else 100),
              "owner_side": True, "immune": True}
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=[words]))
@@ -29,6 +30,8 @@ def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None, held=(
     monkeypatch.setattr(fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
     evidence = SimpleNamespace(route_fp="synthetic-account", status="confirmed", stale=False,
                                window_tokens=92_000, route_facts=asdict(FACTS), source=FACTS.source)
+    if window_source is not None:
+        evidence.source, evidence.ts = window_source
     return fit.build_context_fit_plan(SimpleNamespace(drive_root=root), core,
         task or {"id": "minimum-view", "_is_direct_chat": True}, preferred_mode="nano", tool_schemas=[],
         route_resolver=lambda *_a, **_kw: ({"provider": "synthetic", "model": "synthetic"}, evidence))
@@ -213,3 +216,31 @@ def test_a_child_on_an_ollama_that_cannot_keep_history_ends_with_its_own_upgrade
     assert result["result"] == sentence
     assert result["outcome_axes"]["execution"]["status"] == "infra_failed"
     assert result["loop_outcome"]["usage"]["total_rounds"] is None  # no loop ran: its evidence is absent, never a zero
+
+
+def _refused_call_window_line(unfit, facts):
+    """The Window line of the Details a call refused at preparation shows (``realtime_setup.preparation_refusal_notice``)."""
+    from ouroboros.realtime_setup import preparation_refusal_notice
+
+    turn = SimpleNamespace(engine="Voice", native_model="voice-1", spec=SimpleNamespace(model="voice-1"),
+                           catalog_model=SimpleNamespace(facts=facts))
+    details = preparation_refusal_notice(turn, unfit)["notice"]["details"]
+    return next(line for line in details.splitlines() if line.startswith("Window"))
+
+
+def test_the_fits_refusal_names_the_window_in_effect_with_its_own_source_and_date(tmp_path, monkeypatch):
+    """Both directions on the fit's raise site: the refusal carries the window projection of the route it refused on;
+    a call whose catalogue declares that number credits the catalogue, and one whose catalogue declares none names the
+    window's own source and date, never "not recorded"."""
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path, monkeypatch, "fixed", window_source=("refusal", "2026-11-25T10:02:00+00:00"))
+    unfit = raised.value
+    assert (unfit.window["tokens"], unfit.window["source"], unfit.window["observed_at"]) == (
+        92_000, "refusal", "2026-11-25T10:02:00+00:00")
+    custom = _refused_call_window_line(unfit, RouteFacts(None, None, 10_000, "estimator", "No published window", "2026-10-21"))
+    assert "source: refusal" in custom and "2026-11-25 10:02" in custom and "declares no window" in custom
+    assert "not recorded" not in custom and "No published window" not in custom
+    shipped = _refused_call_window_line(unfit, RouteFacts(92_000, None, 10_000, "estimator", "the engine's catalogue",
+                                                          "2026-11-26"))
+    assert shipped == ("Window: 92,000 estimated tokens (characters / 4); source: the engine's catalogue; "
+                       "observed: 2026-11-26.")

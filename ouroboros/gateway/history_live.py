@@ -20,7 +20,6 @@ def capture(root, selectors):
     from ouroboros.review_operation import controller_identity, live_review_owner_ids
     from ouroboros.skill_lifecycle_queue import queue_snapshot
     from ouroboros.utils import utc_now_iso
-    from supervisor import message_bus
     from supervisor.active_activity import get_direct_activity_registry
 
     # Addressable registry rows do not prove liveness for another drive (or an
@@ -46,5 +45,4 @@ def capture(root, selectors):
             "skill": active if isinstance(active, dict) and active.get("status") == "running" else None,
             "presence": snapshot_local_presence_tasks(), "direct": direct, "synthesis": synthesis,
             "epoch": time.time(), "observed_at": utc_now_iso(), "language": current_language(),
-            "managed_roles": sorted(managed_model_roles()),
-            "message_bus_root": str(message_bus.DATA_DIR) if message_bus.DATA_DIR is not None else None}
+            "managed_roles": sorted(managed_model_roles())}

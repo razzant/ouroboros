@@ -37,12 +37,25 @@ def test_invalid_id_is_refused(tmp_path, value):
     assert not ctx.pending_events
 
 
-def test_unreadable_binding_is_unknown_not_permission_to_move(tmp_path, monkeypatch):
+def test_unreadable_binding_is_unknown_not_permission_to_move(tmp_path):
+    """The binding store itself is damaged (torn, or a file that cannot be opened), whichever reader placement uses:
+    refused, nothing emitted. The same move over a store that reads and names no binding for this work proceeds to
+    its routing event."""
+    from ouroboros.projects_registry import _bindings_path, create_project
+
+    create_project(tmp_path, "room")  # a registry that reads: only the binding store differs between the moves
     ctx = context(tmp_path)
-    monkeypatch.setattr("ouroboros.projects_registry.project_id_for_task",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable")))
+    store = _bindings_path(tmp_path)
+    store.write_text("{torn", encoding="utf-8")
+    assert "SCOPE_REJECTED" in _move_to_project(ctx, project_name="Room")
+    store.unlink()
+    store.mkdir()  # a directory where the store belongs: opening it fails with an OSError on every platform
     assert "SCOPE_REJECTED" in _move_to_project(ctx, project_name="Room")
     assert not ctx.pending_events and ctx.project_id == "old"
+    store.rmdir()
+    store.write_text('{"bindings": {}}', encoding="utf-8")
+    assert _move_to_project(ctx, project_name="Room").startswith("SCOPE_UNCONFIRMED")
+    assert [event["type"] for event in ctx.pending_events] == ["ensure_project_scope"] and ctx.project_id == "old"
 
 
 def test_rejected_move_does_not_change_execution_scope(tmp_path, monkeypatch):

@@ -52,7 +52,13 @@ async def _step(body: Dict[str, Any], return_base: str) -> Dict[str, Any]:
     if action == "complete":
         returned = oauth_engine.parse_return(body["returned_url"]) if body.get("returned_url") else {
             key: body[key] for key in ("state", "code", "error", "error_description", "iss") if key in body}
-        return await sign_in.complete(returned, attempt_id=body.get("attempt_id") or "")
+        from ouroboros.sign_in_offers import announce, open_attempt
+
+        begun = open_attempt(returned)  # read before filing: a replayed receipt (None) says nothing
+        done = await sign_in.complete(returned, attempt_id=body.get("attempt_id") or "")
+        if begun is not None and done.get("state") == "signed_in":  # the conversation that offered it before it began
+            announce(sign_in._sign_in_data_dir(), done["skill"], done["service"], str(done.get("label") or ""), begun)
+        return done
     if action == "cancel":
         return await sign_in.cancel(skill, service, attempt_id=body.get("attempt_id") or "")
     if action in ("disconnect", "revoke"):

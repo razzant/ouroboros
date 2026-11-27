@@ -303,6 +303,12 @@ class HistoryReader:
     def _read_reply(self, stream):
         reply, length = _receive_metadata(stream)
         request_id, failed, status, kind = reply.get("id"), reply.get("failed"), reply.get("status"), reply.get("cursor_kind")
+        repairs = reply.get("repairs")
+        if repairs is not None:
+            from ouroboros.gateway.history_paging import REPAIR_SETTLED
+
+            if failed is not None or status != 200 or kind != "after" or repairs != REPAIR_SETTLED:
+                raise ValueError("invalid history reader repair attribution")
         if (type(request_id) is not int or request_id <= 0 or
                 (failed is not None and (failed is not True or length or status is not None or kind is not None)) or
                 (failed is None and (type(status) is not int or not 100 <= status <= 599 or kind not in _CURSOR_KINDS))):
@@ -314,10 +320,12 @@ class HistoryReader:
         body = _receive_body(stream, length)
         with self._lock:
             if entry := self._requests.pop(request_id, None):
-                future, _ = entry
+                future, decoded = entry
                 if failed:
                     future.set_exception(ReaderUnavailable("worker_assembly_failed"))
                 else:
+                    if repairs is not None and decoded is not None:
+                        decoded["repairs"] = repairs  # only a complete matching frame
                     future.set_result((status, body, kind))
             # An abandoned dispatch may already have left the table. Drain its
             # frame to keep the next reply readable; do not invent a broken pipe.
@@ -496,19 +504,26 @@ def begin_generation(root):
 
 def _responses(source, output, data_root):
     from ouroboros.gateway import history  # complete imports before READY
+    from ouroboros.gateway.history_paging import DECODED_CURSOR, REPAIR_SETTLED
     from ouroboros.gateway.history_response import assemble
     from ouroboros.store import thread_read_connections
 
     write_lock = threading.Lock()
 
     def respond(request):
+        decoded = {}
+        cursor_token = DECODED_CURSOR.set(decoded)
         try:
             with thread_read_connections():
                 status, body, kind = assemble(history._assemble_history_response, data_root,
                                               **request["selectors"], live=request["live"])
             meta = {"id": request["id"], "status": status, "cursor_kind": kind}
+            if status == 200 and kind == "after" and decoded.get("repairs") == REPAIR_SETTLED:
+                meta["repairs"] = REPAIR_SETTLED
         except Exception:
             meta, body = {"id": request["id"], "failed": True}, b""
+        finally:
+            DECODED_CURSOR.reset(cursor_token)
         try:
             with write_lock:
                 _frame(output, meta, body)

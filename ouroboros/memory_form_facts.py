@@ -699,7 +699,7 @@ def _hold_conversations(snapshot, gone, hold, price, counts):
             rows("untold in other conversations", "untold", lambda w: w["line"])
             if not form:
                 rows("replies of completed works", "told", lambda w: w["line"], lambda w: w["id"] not in words)
-            rows("owner words in other rooms", "owner", lambda w: mv._row_pointer(w, "words") if w["id"] in owners else w["line"])
+            rows("owner words in other rooms", "owner", lambda w: conv.owner_pointer(w) if w["id"] in owners else w["line"])
             for remote in group["rooms"]:
                 for note in remote["notes"] if form < 2 else ():
                     add("notes", mv._note_pointer(note) if form else "\n".join(mv._note_lines([note])),

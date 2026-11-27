@@ -1524,14 +1524,16 @@ def get_tools() -> List[ToolEntry]:
         }, _send_file),
         ToolEntry("send_links", {
             "name": "send_links",
-            "description": "Send one or more HTTP(S) links as prominent clickable buttons in this work's room (Presence-bound: local, not the place conversation).",
+            "description": "Send one or more HTTP(S) links as prominent clickable buttons in this work's room (Presence-bound: local, not the place conversation). "
+                           "A link may give `place` instead of `url`: `skill-sign-in/<skill>/<service>` opens that skill's card where the owner signs in to the service (no address, account or code goes into chat).",
             "parameters": {"type": "object", "properties": {
                 "title": {"type": "string", "description": "Optional heading above the buttons"},
                 "links": {"type": "array", "minItems": 1, "maxItems": _MAX_LINK_ACTIONS, "items": {
                     "type": "object", "properties": {
                         "label": {"type": "string"},
                         "url": {"type": "string"},
-                    }, "required": ["label", "url"]}},
+                        "place": {"type": "string"},
+                    }, "required": ["label"]}},
             }, "required": ["links"]},
         }, _send_links),
         ToolEntry("show_card", copy.deepcopy(SHOW_CARD_TOOL_SCHEMA), _show_card,

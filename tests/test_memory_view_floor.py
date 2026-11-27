@@ -5,6 +5,7 @@ import pytest
 from ouroboros import context_budget as cb, memory_floor as mf, memory_view as mv
 from tests import _memory_view_synthetic as syn
 from tests import _memory_inventory_shared as shared
+from ouroboros.memory_view_conversation_forms import OWNER_ADDRESSES, owner_pointer
 
 
 def tokens(snapshot, level=mv.FULL_VIEW):
@@ -650,7 +651,8 @@ def test_my_humans_words_of_other_conversations_keep_the_work_room_while_this_ro
     assert len(calls) < 30, len(calls)
     words = tuple(word["id"] for word in owner[0]["rooms"][0]["words"])  # a group's line still saves once its owner
     lined = mv.FloorLevel((("F6g", ("all:" + owner[0]["key"],)), ("F7", words)))
-    assert all(mv._row_pointer(w, "words") in mv.render_room(snapshot, lined) for w in owner[0]["rooms"][0]["words"])
+    shown = mv.render_room(snapshot, lined)  # each by its own address line, how they read said once for the block
+    assert all(owner_pointer(w) in shown for w in owner[0]["rooms"][0]["words"]) and shown.count(OWNER_ADDRESSES) == 1
     paid = mf.fit_memory_view(snapshot, {"margin": None, "physical": full + 10, "budget": None}, saving=full // 2)
     assert dict(paid.addressed).get("F7") and tokens(snapshot, paid) <= full - full // 2  # a refusal's saving
     rows = [{**syn.spoken(i, "human", 4_000), "owner_side": True} for i in range(3)]
@@ -676,9 +678,10 @@ def test_the_last_rung_keeps_my_humans_folded_words_of_other_conversations_by_th
     level = mf.fit_memory_view(snapshot, {"margin": tokens(snapshot, counted) - 1, "physical": full + 10, "budget": None})
     text = mv.render_room(snapshot, level)
     assert dict(level.steps).get("F6a") and len(dict(level.addressed)["F7"]) == len(words)  # the last rung was taken
-    assert all(mv._row_pointer(word, "words") in text for word in words)  # every folded word keeps its address
+    assert all(owner_pointer(word) in text for word in words)  # every folded word keeps its address line
+    assert text.count(OWNER_ADDRESSES) == 1  # and how such a line reads, once
     assert tokens(snapshot, counted) - 1 < tokens(snapshot, level) <= full + 10  # above the margin, in the window
     half = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words[:24])), ("F6a", keys)))
     shown = mv.render_room(snapshot, half)
-    assert all(mv._row_pointer(word, "words") in shown for word in words[:24])
+    assert all(owner_pointer(word) in shown for word in words[:24]) and shown.count(OWNER_ADDRESSES) == 1
     assert all(word["line"] in shown for word in words[24:])  # one F7 did not fold stays whole

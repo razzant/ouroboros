@@ -94,11 +94,11 @@ def test_a_cards_placed_row_is_a_progress_note_here(tmp_path, monkeypatch, mirro
     asyncio.run(handle(child))  # its root's outcome is unreadable: the row waits
     assert [sent[1] for sent in _Rec.sent] == ([row["text"]] if mirror == "on" else [])
     # Once the root has finished, a child's late row goes as it always did, toggle or not.
-    from ouroboros.task_results import task_result_path
+    from tests._store_shared import seed_result
 
     data = tmp_path / "data"
     api.get_runtime_info = lambda: {"data_dir": str(data)}
-    task_result_path(data, "root-done").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    seed_result(data, "root-done", {"status": "completed"})
     _Rec.sent = []
     asyncio.run(handle(child))
     assert [sent[1] for sent in _Rec.sent] == [row["text"]]

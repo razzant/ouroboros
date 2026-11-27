@@ -885,7 +885,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     from ouroboros.context_anchor import refused_input
     refused = refused_input(usage, getattr(ctx, "context_fit_plan", None)) if measured else None
     from ouroboros.lead_fact import model_fact_words
-    from ouroboros.context_view_facts import memory_facts, mode_words, window_fact
+    from ouroboros.context_view_facts import largest_parts, largest_parts_text, memory_facts, mode_words, window_fact
     mode = mode_words(getattr(ctx, "context_fit_plan", None), ctx.active_context_mode)  # Low for the window, by name
     parts = [_round_fact(ctx, tool_ctx), f"mode {mode}", model_fact_words(tool_ctx, ctx.active_model)]
     notes = [note for note in (f"largest accepted input {int(accepted):,}" if accepted else "",
@@ -918,9 +918,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
             excess = int(estimate) + floor - int(target) - book
             parts.append((f"over target {excess:,}" if excess > 0 else f"target room {-excess:,}")
                          + (f" (reply floor {floor:,})" if floor != int(reserve or 0) else ""))
-    components = _context_components(ctx, measured=measured)
-    if components:
-        parts.append("largest " + ", ".join(f"{label} ~{tokens:,}" for label, tokens in components))
+    parts.append("largest by kind " + largest_parts_text(largest_parts(ctx, measured=measured)))
     from ouroboros.context_compaction import _capsule_metadata
     # The mind's own folds stay countable to it (17.10.2026: after 42 folds it told the owner it never folded).
     parts.append(f"own notes in view {sum(1 for row in ctx.messages if (_capsule_metadata(row)[1] or {}).get('authorship') == 'actor')}")
@@ -1051,30 +1049,6 @@ def _tool_results_fact(usage: Dict[str, Any]) -> str:
     calls = sum(int(row.get("calls") or 0) for row in rows)
     errors = sum(int(row.get("error_calls") or 0) for row in rows)
     return f"observed tool results {calls} ({errors} errored)"
-
-
-def _context_components(ctx: Any, *, measured: bool) -> list:
-    """Largest blocks, complete units and schema segment, calibrated for the current request shape."""
-    from ouroboros.context_compaction import context_units
-    from ouroboros.context_fit import estimate_context_prompt_tokens, tool_schema_tokens
-    from ouroboros.context_view_facts import block_label
-
-    density = float(ctx.accumulated_usage.get("_context_measurement_density") or 1.0) if measured else 1.0
-    units = context_units(ctx.messages, scope="dialogue", measurement_density=density)
-    covered = {i for unit in units for i in range(unit.start, unit.end + 1)}
-    sizes = [(unit.unit_id, unit.context_size_tokens) for unit in units]
-    for i, message in enumerate(ctx.messages):
-        if i in covered:
-            continue
-        content = message.get("content")
-        chunks = [{**message, "content": [block]} for block in content] if message.get("role") == "system" and isinstance(content, list) else [message]
-        for j, chunk in enumerate(chunks):
-            block = chunk.get("content")
-            label = block_label(message, i, block[0] if isinstance(block, list) and block else block, ctx.context_fit_plan)
-            sizes.append((label, int(estimate_context_prompt_tokens([chunk]) * density)))
-    sizes.append(("tool schemas", int(tool_schema_tokens(ctx.tool_schemas,
-        provider=getattr(ctx.context_fit_plan, "provider", ""), reasoning_effort=getattr(ctx, "active_effort", "")) * density)))
-    return sorted(sizes, key=lambda item: item[1], reverse=True)[:3]
 
 
 def cached_tariff_text(model: str, provider: str, prompt: Optional[int], *, unknown: str = "tariff unknown") -> str:

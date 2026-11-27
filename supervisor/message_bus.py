@@ -875,7 +875,7 @@ class LocalChatBridge:
         title: str = "",
         task_id: str = "",
     ) -> Tuple[bool, str]:
-        """Send validated HTTP(S) actions to UI and host event subscribers."""
+        """Send validated HTTP(S) and place actions to UI and host event subscribers."""
         safe_title = str(title or "")[:240]
         if is_a2a_chat_id(chat_id):
             return True, "ok"
@@ -899,6 +899,9 @@ class LocalChatBridge:
             actions=validated, title=safe_title,
         )
         from ouroboros.chat_references import delivery_transport, projection_fields
+        from ouroboros.sign_in_offers import note as note_sign_in_offers
+        # Noted at the row's own time before anyone sees it: a sign-in begun from its button always begins after it.
+        note_sign_in_offers(DATA_DIR, int(chat_id or 0), validated, at=ts)
         if stored:
             msg.update(projection_fields(stored))
         stamp_project_thread(DATA_DIR, msg)
