@@ -93,10 +93,12 @@ def _transport(page):
                              project_admission_hold={"label": "Waiting for Project access"})])
 
 
-def _open(ui, *, width, height, theme, room, **page_options):
+def _open(ui, *, width, height, theme, room, history_fails=False, **page_options):
     """The app in its own page (its window, theme and motion preference are the test's), the room's list still closed."""
     page = ui["new_page"](viewport={"width": width, "height": height}, color_scheme=theme, **page_options)
     transport = _transport(page)
+    if history_fails:  # registered last, so it answers first: the room's saved history cannot be read
+        page.route("**/api/chat/history*", lambda route: route.fulfill(status=503, json={"error": "History unavailable"}))
     origin = urlparse(ui["url"]).netloc
     page.route("**/*", lambda route: route.fallback() if urlparse(route.request.url).netloc == origin else route.abort())
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
@@ -441,3 +443,23 @@ def test_escape_outside_press_and_reduced_motion(room_ui, room, reduced):
     page.mouse.click(700 if room == "main" else 900, 520)
     wait_facts(page, room, lambda f: f["surfaceHidden"], "an outside press closed it")
     assert transport.posts == [], "closing a list posts nothing: no decision, no task control"
+
+
+@pytest.mark.parametrize("room", ["main", "project"])
+def test_a_rooms_history_notice_leaves_its_open_work_list_reachable(room_ui, room):
+    """A room whose history failed has told it by the page's notice; its own work list opening covers the room, so the
+    notice leaves and every row's main action under it takes the press (a phone's tap once landed on the notice)."""
+    page, _transport = _open(room_ui, width=390, height=844, theme="dark", room=room, has_touch=True, history_fails=True)
+    page.locator("#toast-stack .toast").filter(has_text="Some saved history could not be loaded.").wait_for()
+    facts = _open_list(page, room)
+    page.wait_for_function("() => !document.querySelector('#toast-stack .toast:not(.is-hiding)')")
+    hits = page.evaluate("""room => {
+        const root = room === 'main' ? document.querySelector('#page-chat') : document.querySelector('#project-panel');
+        return [...root.querySelectorAll('.rw-shade:not(.cx-shade) .rw-row .rw-main')].filter(el => el.getClientRects().length)
+            .map(el => { const b = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(b.left + b.width / 2,
+                b.top + b.height / 2)); });
+    }""", room)
+    assert hits and all(hits), (hits, facts)
+    page.keyboard.press("Escape")
+    wait_facts(page, room, lambda f: f["surfaceHidden"], "closed")
+    assert page.locator("#toast-stack .toast:not(.is-hiding)").count() == 0, "told once: closing the list says it no more"

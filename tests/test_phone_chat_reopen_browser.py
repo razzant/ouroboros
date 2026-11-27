@@ -151,6 +151,11 @@ def test_a_new_document_shows_saved_text_before_history_and_reconciles(shell_ui,
             assert other.locator('#chat-input').input_value() == 'Unsent draft'
             shot(other, f'reopen-failed-keeps-preview-{ui["engine"]}')
             other.route('**/api/chat/history**', lambda route: route.fulfill(json=initial))
+            # The failure was told by the page's notice; closed (or timed out), the edge's durable Retry is the way on.
+            notice = other.locator('#toast-stack .toast').filter(has_text='Some saved history could not be loaded.')
+            if notice.count():
+                notice.get_by_role('button', name='Dismiss notice').click()
+                notice.wait_for(state='detached')
             other.get_by_role('button', name='Retry loading messages').click()
             other.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
             assert preview.count() == 0

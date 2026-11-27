@@ -62,7 +62,8 @@ FACTS = """(pid) => {
     const rows = [...feed.querySelectorAll('.chat-bubble')].map((b) => b.getBoundingClientRect())
         .filter((b) => b.width && b.bottom > r.top && b.top < r.bottom);
     return {...facts, focusVisible: feed.matches(':focus-visible'), outline: s.outlineStyle,
-        note: Boolean(document.querySelector('#toast-stack .toast')),
+        note: [...document.querySelectorAll('#toast-stack .toast-words')]
+            .some((words) => words.textContent.includes('Some saved history could not be loaded.')),
         feed: {x: r.x, y: r.y, width: r.width, height: r.height, clientWidth: feed.clientWidth,
                offsetWidth: feed.offsetWidth, padTop: parseFloat(s.paddingTop), padLeft: parseFloat(s.paddingLeft),
                padRight: parseFloat(s.paddingRight),
@@ -345,7 +346,8 @@ def test_the_corners_keep_to_the_gutters(cue_ui, case):
         assert outer_left + 8 + 3 <= facts['rowsLeft'] and facts['rowsRight'] <= outer_right - 8 - 3, (
             'rows pass beside the corners', facts)
     if case == 'notice':
-        assert facts['note'] and feed['padTop'] == 8, ('the note above the feed, the corners under it', facts)
+        # The Project's failed read is the page's notice; the feed keeps the header clearance of a room without one.
+        assert facts['note'] and feed['padTop'] >= 50, ('the failure told, the feed under the bar alone', facts)
     if phone:
         assert page.evaluate("document.documentElement.dataset.layout") == 'stack'
 

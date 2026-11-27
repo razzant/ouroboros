@@ -273,7 +273,7 @@ def subscription_ui():
         elif path == "/api/projects":
             body = {"projects": []}
         elif path == "/api/chat/history":
-            body = {"messages": [], "progress": []}
+            body = {"profile_scope": PREVIEW_SCOPE, "messages": [], "progress": []}
         elif path == "/api/health":
             body = {"ok": True, "version": "fixture"}
         route.fulfill(content_type="application/json", body=json.dumps(body))

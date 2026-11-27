@@ -18,6 +18,12 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 pytestmark = [pytest.mark.ui_browser]
 
 
+
+def _history_words(page, feed):
+    """What the room says of its history: its edge (inside the feed's parent) and the page's notices."""
+    return page.locator(feed).locator('..').inner_text() + page.evaluate(
+        "() => [...document.querySelectorAll('#toast-stack .toast-words')].map(node => node.textContent).join(' ')")
+
 def _new_page(page):
     page.reload(wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_function("() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)")
@@ -78,7 +84,7 @@ def test_a_deep_place_with_an_open_review_and_line_returns_as_it_was_left(direct
             detail.wait_for(state='visible')
             assert line.get_attribute('data-expanded') == '1', 'its disclosures stay open'
             assert abs(detail.evaluate(_OFFSET) - offset) <= 3, 'on the passage it was left at'
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             _screenshot(page, tmp_path, f'reopen-deep-after-{browser_engine}')
         finally:
             browser.close()
@@ -356,7 +362,7 @@ def test_a_card_line_arrives_with_its_source_page_and_a_return_reads_no_older_pa
                 'source': source, 'recent': recent, 'supplying': supplying, 'reopen': reads}, indent=2))
             assert not [read['cursor'] for read in reads if read['cursor']], 'the return reads no older page'
             assert abs(line.evaluate(_OFFSET) - offset) <= 3, 'it is on the passage it was left at'
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             _screenshot(page, tmp_path, f'source-page-{line_kind}-after-{browser_engine}')
             _down_to_newest(page, feed, 'Reading context 299')
         finally:
@@ -414,7 +420,7 @@ def test_a_moved_newest_window_leaves_a_reader_in_history_in_place_and_a_return_
             cursors = page.evaluate('n => window.__historyReads.slice(n).filter(r => r.cursor).map(r => r.cursor)', before)
             assert cursors == [], cursors
             assert abs(target.evaluate(_OFFSET) - offset) <= 8, 'on the passage it was left at'
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             _screenshot(page, tmp_path, f'composed-rebase-after-{browser_engine}')
             _down_to_newest(page, feed, 'Rebase retained message 0449')
             (tmp_path / f'composed-rebase-reads-{browser_engine}.json').write_text(json.dumps(page.evaluate('() => window.__historyReads'), indent=2))
@@ -497,7 +503,7 @@ def test_a_live_line_keeps_its_node_through_history_adoption_and_reopens_from_it
             feed = _open_project(page, project)
             _idle(page, feed)
             _assert_at_newest(page, feed, 'Live line context 59')
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             for card in (parent, owner):
                 if card.get_attribute('data-expanded') != '1':
                     card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
@@ -578,7 +584,7 @@ def test_a_live_receipt_survives_equal_replay_and_a_reopened_one_takes_only_newe
             feed = _open_project(page, project)
             _idle(page, feed)
             _assert_at_newest(page, feed, 'Receipt context 59')
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            assert 'could not be restored exactly' not in _history_words(page, feed)
             if card.get_attribute('data-expanded') != '1':
                 card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
             assert lines.count() == 2

@@ -77,7 +77,7 @@ warning | web/style.css | .model-fallback | color
 warning | web/style.css | .msg-attachment-outcome | color
 warning | web/style.css | .new-project-trust-note | background, color
 warning | web/style.css | .skills-skip-glyph | color
-warning | web/style.css | .toast-warn | border-color, color
+warning | web/style.css | .toast-warn | color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-metric[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-table-status[data-tone="warn"] | color
@@ -105,6 +105,7 @@ warning | web/onboarding.css | .wizard-test-result[data-tone="warn"] | border-co
 # The System voice: its bubble, sender and text (chat and the Place reader), quotes of a System message, the skill review it shows.
 system | web/style.css | .chat-bubble.system | background
 system | web/style.css | .chat-bubble.system .message | color
+system | web/style.css | .chat-bubble.system .owner-action-reason:not([data-panic-summary]) | color
 system | web/style.css | .chat-bubble.system .sender | color
 system | web/style.css | .chat-field > .chat-quote--composer | background
 system | web/style.css | .chat-quote | background
