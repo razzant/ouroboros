@@ -58,7 +58,6 @@ Subject identity fixes before seat budgeting so changed sources invalidate it, a
 Approaches rejected or retired that have no file of their own to carry the reason. Each states the road and why it stays closed; a line leaves when its fork ceases to exist.
 
 - **Not the architecture book only for work on my own body in owner-Max**, because it is the map through which I understand my capabilities, tools and accesses and so work effectively on any task (BIBLE P1 keeps it resident while it fits).
-- **Not a hand-kept module tree in §1**, because its rows restated module docstrings and drifted from the code; addresses and leads come from `module_map` and the manifest, and §1 keeps only what code cannot state.
 - **Not tracked generated maps of the code**, such as the domain map and the facade, data-layout and frozen-contract inventories, because their sources answer on demand (`query_code` architecture facts, `scripts/check_domains.py --map`) and a tracked copy must be regenerated in every change touching its source.
 - **Not grant files or per-chapter byte budgets for the books**, because one pairwise rule per book, paid in the same book in the same change, needs no stored number or reserve (`tests/test_reference_book_budgets.py`).
 - **Not a resident Pattern Register or host-written execution reflections as a privileged learning organ**, because a lesson is a change in what I understand, keep in view or can do, put where it acts; such notes are ordinary knowledge.

@@ -432,7 +432,7 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
                               checklist_section: str, api_models: list, api_slots: list,
                               *, delivery: str = "packet", governance_root=None,
                               layer: str = "body", subject_root: Optional[pathlib.Path] = None,
-                              review_words=None, frozen=None, subject=None, change_root=None):
+                              review_words=None):
     """The triad's shared governance tiers for either delivery class.
 
     ``governance_root`` is the installed body (a frozen subject names it; the
@@ -444,10 +444,8 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
     receives BIBLE.md inline from this shared builder. Core layer (the subject
     is not the Ouroboros body): neither document is owed, so nothing is
     declared already inline; ``subject_root`` is the reviewed repository whose
-    own documents the navigation names. A body packet's owner rows read the reviewed change's
-    path set from ``frozen`` / ``subject`` / the staged index of ``change_root`` (``subject_changes``)."""
+    own documents the navigation names."""
     from ouroboros.tools.governance_context import GovernanceContext, governance_context
-    from ouroboros.tools.review_subject import subject_changes
 
     if not api_models:
         return GovernanceContext()
@@ -467,8 +465,6 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
         layer=layer,
         subject_root=subject_root,
         review_words=review_words,
-        changes=subject_changes(change_root, frozen=frozen, managed=subject)
-        if delivery == "packet" and layer == "body" and touched_paths else None,
     )
 
 
@@ -517,16 +513,10 @@ def _subject_changed_paths(frozen: Any, target_repo) -> tuple[str, str]:
         changed = "\n".join(path for _status, path in frozen.name_status)
         return changed, format_name_status_for_preflight(
             "\n".join(f"{status}\t{path}" for status, path in frozen.name_status), fallback=changed)
-    from ouroboros.tools.review_subject import subject_changes
-
-    # The structured, NUL-decoded set the owner rows read: a display-quoted name (a UTF-8 rename on default Git)
-    # would not open in the touched-file pack. Git's display form is for the preflight's text alone.
-    changed = "\n".join(path for _status, path, _source in subject_changes(target_repo))
-    if not changed:
-        try:
-            changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=target_repo)
-        except Exception:
-            changed = ""
+    try:
+        changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=target_repo)
+    except Exception:
+        changed = ""
     return changed, _build_preflight_staged(target_repo, fallback=changed)
 
 
@@ -673,8 +663,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     words_section = words.render(section_budget(_triad_governance_usable_window(api_models, api_slots))) if api_models else ""
     governance = _triad_governance_context(
         ctx, touched_paths, checklist_section, api_models, api_slots,
-        governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words,
-        frozen=frozen, subject=subject, change_root=target_repo)
+        governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words)
 
     # Build touched-file pack for full current context (managed: the reviewed
     # resolution set; binary rows carry the M0 baseline identity). A plain
@@ -730,16 +719,12 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
             words_section=words_section,
         )
 
-    def _yield_rows():
-        nonlocal governance
-        from ouroboros.tools.governance_context import yield_module_rows
-        governance = yield_module_rows(governance)
-
     def _compact_task_evidence():
         nonlocal task_evidence_compact, words_section
         task_evidence_compact = True
-        words_section = words.omission() if words_section else ""
-    _assemble_prompt.optional_evidence = (_yield_rows, _compact_task_evidence)
+        words_section = words.omission()
+    if task_evidence or words_section:
+        _assemble_prompt.compact_optional_evidence = _compact_task_evidence
 
     # P3 stays one-pass. The api pack, its fit ladder and the fixed_overflow
     # gate exist ONLY for the api rows (5.2/5.7): a retrieving row reads with

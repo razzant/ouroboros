@@ -44,7 +44,7 @@ Enforcement: CHECKLISTS item 14(a); `tests/test_typed_tool_refusals.py` (shrink-
 
 `docs/ARCHITECTURE.md` is the present-tense BIBLE P6 map (what/where, flows, why); `docs/DEVELOPMENT.md` states one rule per change class, naming its invariant home (home test or owner, never one test file per rule), gate/CI lane or review-only. Cite ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` instead of restating them; ARCHITECTURE's settings and endpoint tables are test-checked registries, not second authorities.
 
-Keep prose that locates mechanisms, preserves cross-code invariants or gives WHY; `§1` keeps group purposes and relations code cannot state (module leads: `module_map`). Replace touched descriptions, keep chapter H1 intros (Low/Nano view) accurate, and place other material by kind:
+Keep prose that locates mechanisms, preserves cross-code invariants or gives WHY: `§1.1` module-directory rows stay one line (address, capability, cross-module grep targets, `(§N)` pointer) while subsections hold rationales. Replace touched descriptions, keep chapter H1 intros (Low/Nano view) accurate, and place other material by kind:
 
 - Code, docstrings, tests: internal call/guard order, locks, fields, edge cases, typed refusals.
 - Git/README: release history; commits/PRs: decision codes, batch answers, reviewer-round labels.

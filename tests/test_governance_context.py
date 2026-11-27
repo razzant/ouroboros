@@ -324,7 +324,7 @@ def test_the_architecture_map_is_never_inlined_whole(repo):
                   if path.startswith("docs/architecture/") and "#" not in path]
     assert whole_arch == []
     assert "docs/ARCHITECTURE.md" in _paths(context, "navigation", tier=3)
-    assert "Chapters in `docs/architecture/`:" in context.navigation and "\n02-web.md" in context.navigation
+    assert "docs/architecture/02-web.md" in context.navigation
 
 
 def test_a_packet_row_receives_the_sections_that_name_a_touched_file(repo):
@@ -456,133 +456,6 @@ def test_retrieving_triad_receives_shared_tiers_in_its_actual_task(repo, monkeyp
     assert 'read_file(root="system_repo"' in task
 
 
-# --- owner rows of the touched paths (the book keeps no module tree) ----------------------------------------
-
-def _with_manifest(repo: pathlib.Path) -> pathlib.Path:
-    (repo / "ouroboros").mkdir(exist_ok=True)
-    for name in ("project_dialogue", "other"):
-        (repo / "ouroboros" / f"{name}.py").write_text(f'"""{name} lead."""\n', encoding="utf-8")
-    (repo / "ouroboros" / "domains.toml").write_text(
-        '[domains]\nD01 = "Agent core"\n\n[references]\nD01 = ["docs/architecture/01-core.md"]\n'
-        '"web/" = ["docs/web.md"]\n\n[modules]\n"ouroboros/project_dialogue.py" = "D01"\n"ouroboros/other.py" = "D01"\n',
-        encoding="utf-8", newline="\n")
-    return repo
-
-
-ROW = ("- ouroboros/project_dialogue.py (touched in this change; domain D01: Agent core; "
-       "manuals: docs/architecture/01-core.md)")
-SECTION = "The loop mentions ouroboros/project_dialogue.py."
-
-
-def test_one_owner_row_per_touched_path_precedes_the_sections_and_names_no_other_module(repo):
-    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH
-
-    context = _context(_with_manifest(repo))
-    text = context.selected_inline
-    assert text.count(ROW) == 1 and text.index(ROW) < text.index(SECTION)
-    assert "ouroboros/other.py" not in text and "other lead." not in text  # no other module of the domain
-    assert text.index(ROW) < text.index("  installed description: project_dialogue lead.")  # the touched file's own lead
-    assert [row["disposition"] for row in context.manifest if row["path"] == MODULE_ROWS_PATH] == ["inline"]
-    starved = _context(repo, usable_window_tokens=0)  # the share does not decide the rows: the fit ladder does
-    assert ROW in starved.selected_inline and SECTION not in starved.selected_inline
-    retrieving = _context(repo, delivery="retrieving")  # a reviewer with tools calls the lookup itself
-    assert MODULE_ROWS_PATH not in _paths(retrieving)
-
-
-def test_each_row_carries_its_git_change_both_sides_of_a_rename_and_a_non_ascii_name(repo):
-    from ouroboros.tools.governance_module_rows import module_rows
-
-    _with_manifest(repo)
-    rows = module_rows(repo, ["anchor.png", "ouroboros/project_dialogue.py"], [
-        ("M", "ouroboros/project_dialogue.py", ""), ("R091", "ouroboros/renamed.py", "ouroboros/other.py"),
-        ("A", "web/caf\u00e9.js", ""), ("D", "docs/gone.md", ""), ("R100", "docs/moved.js", "web/moved.js")])
-    assert rows.count == 6 and rows.text.splitlines()[1:] == [
-        "- anchor.png (touched in this change; the installed map has no owner for it)",  # a path outside the delta
-        "  installed description: none (only Python and JS/TS/CSS files carry one)",
-        "- docs/gone.md (deleted in this change; the installed map has no owner for it)",
-        "  installed description: none (only Python and JS/TS/CSS files carry one)",
-        "- docs/moved.js (renamed from web/moved.js in this change; surface web/; manuals: docs/web.md)",
-        "  installed description: none (no such file in the installed tree)",
-        "- ouroboros/project_dialogue.py (modified in this change; domain D01: Agent core; "
-        "manuals: docs/architecture/01-core.md)",
-        "  installed description: project_dialogue lead.",
-        "- ouroboros/renamed.py (renamed from ouroboros/other.py in this change; domain D01: Agent core; "
-        "manuals: docs/architecture/01-core.md)",
-        "  installed description: other lead.",  # described where its source was installed
-        "- web/caf\u00e9.js (added in this change; surface web/; manuals: docs/web.md)",
-        "  installed description: none (new in this change)"]
-
-
-def test_a_domain_id_the_installed_map_does_not_define_still_gives_the_row(repo):
-    from ouroboros.tools.governance_module_rows import UNDEFINED_TITLE, module_rows
-
-    _with_manifest(repo)
-    manifest = repo / "ouroboros" / "domains.toml"
-    manifest.write_text(manifest.read_text(encoding="utf-8").replace('"ouroboros/other.py" = "D01"',
-                                                                     '"ouroboros/other.py" = "D60"'), encoding="utf-8")
-    rows = module_rows(repo, [], [("M", "ouroboros/other.py", "")])
-    assert rows.text.splitlines()[1:] == [
-        f"- ouroboros/other.py (modified in this change; domain D60: {UNDEFINED_TITLE}; manuals: none named)",
-        "  installed description: other lead."]
-    assert ROW in _context(repo).selected_inline  # the packet is prepared, the defined owner still answers
-
-
-def test_an_unreadable_installed_manifest_is_a_typed_notice_not_an_error_text(repo):
-    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, UNAVAILABLE
-
-    context = _context(repo)
-    rows = [row for row in context.manifest if row["path"] == MODULE_ROWS_PATH]
-    assert [row["disposition"] for row in rows] == ["navigation"] and "owner rows unavailable" in rows[0]["reason"]
-    assert UNAVAILABLE in context.navigation and "Errno" not in context.navigation
-    (repo / "ouroboros").mkdir(exist_ok=True)
-    for wrong in ("modules = []\n", "[graph]\nallowed = 7\n"):  # wrong container types, valid TOML
-        (repo / "ouroboros" / "domains.toml").write_text(wrong, encoding="utf-8")
-        assert UNAVAILABLE in _context(repo).navigation
-
-
-def test_yielded_rows_leave_every_other_byte_and_say_so_in_counted_words_and_in_the_manifest(repo):
-    from ouroboros.tools.governance_context import _render, yield_module_rows
-    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, YIELD_REASON, YIELDED
-
-    context = _context(_with_manifest(repo))
-    rows_block = next(_render(t, x) for t, x in context.inline_sections if t == MODULE_ROWS_PATH)
-    given = yield_module_rows(context)
-    assert ROW not in given.selected_inline and SECTION in given.selected_inline
-    assert given.selected_inline == context.selected_inline.replace(rows_block + "\n\n", "")
-    assert given.navigation == context.navigation + "\n\n" + YIELDED.format(count=1)
-    assert [(r["disposition"], r["reason"]) for r in given.manifest if r["path"] == MODULE_ROWS_PATH] == [
-        ("navigation", YIELD_REASON)]
-    assert context.manifest != given.manifest and ROW in context.selected_inline  # the original is not mutated
-    assert yield_module_rows(given) is given and given.stable_inline == context.stable_inline
-
-
-def test_no_fixed_text_of_a_rendered_row_lives_outside_the_packet_contract(repo):
-    """The contract material is the renderer's own output over placeholder rows, under the section title: every line
-    a real block renders (each row kind and change word, two manuals, none, an undefined id) matches a contract line
-    with only its placeholders varying. A pool with no packet seat counts none of it."""
-    import re
-
-    from ouroboros.tools import governance_module_rows as gmr
-    from ouroboros.tools.governance_context import (BODY_LAYER, PACKET_DELIVERY, RETRIEVING_DELIVERY, _render,
-                                                    navigation_material)
-
-    packet = navigation_material(BODY_LAYER, PACKET_DELIVERY)
-    shapes = {re.compile("^" + ".+".join(re.escape(part) for part in re.split(r"⟨[^⟩]*⟩", line)) + "$")
-              for text in packet for line in text.splitlines() if line}
-    _with_manifest(repo)
-    manifest = repo / "ouroboros" / "domains.toml"
-    manifest.write_text(manifest.read_text(encoding="utf-8").replace(
-        '"web/" = ["docs/web.md"]', '"web/" = ["docs/web.md", "docs/second.md"]\n"skills/" = []').replace(
-        '"ouroboros/other.py" = "D01"', '"ouroboros/other.py" = "D60"'), encoding="utf-8")
-    entries = [(letter, path, "web/a.js") for letter in [*gmr.CHANGES, ""]
-               for path in ("ouroboros/project_dialogue.py", "ouroboros/other.py", "web/b.js", "skills/c.js", "x.py")]
-    lines = _render(gmr.MODULE_ROWS_PATH, gmr.module_rows(repo, [], entries).text).splitlines()
-    assert len(lines) > 30 and all(any(shape.match(line) for shape in shapes) for line in lines if line), [
-        line for line in lines if line and not any(shape.match(line) for shape in shapes)]
-    retrieving = "\n".join(navigation_material(BODY_LAYER, RETRIEVING_DELIVERY))
-    assert gmr.HEADING not in retrieving and gmr.MODULE_ROWS_PATH not in retrieving
-
-
 # --- the body's cross-cutting invariants and chapter openings -------------------
 
 INVARIANTS = ("# 10. Key Invariants\n\nCross-cutting owners.\n\n1. **One owner per store.** Never two writers.\n"
@@ -640,7 +513,7 @@ def test_missing_invariants_are_disclosed_and_a_broken_sibling_does_not_hide_the
 
 def test_a_chapter_opening_is_selectable_and_a_listing_gives_only_its_matching_lines(repo):
     """Text before a chapter's first subheading was beyond selection; each opening block now is a unit, and a
-    code listing gives only its lines that name a touched file, not all of itself."""
+    code listing (the module tree) gives only its lines that name a touched file, not all of itself."""
     (repo / "docs" / "architecture" / "01-core.md").write_text(
         "# 1. Core\n\nThe opening names ouroboros/project_dialogue.py before any heading.\n\n"
         "```\nouroboros/project_dialogue.py — the dialogue owner\nouroboros/other.py — unrelated\n```\n\n"
