@@ -5019,7 +5019,8 @@ html[data-layout="stack"] .chat-page-header > .app-page-actions {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 24px 14px max(16px, var(--inset-bottom));
+    --composer-air: 24px;  /* above the capsule row: the room's bottom edge clears at its end */
+    padding: var(--composer-air) 14px max(16px, var(--inset-bottom));
     align-items: stretch;
     position: absolute;
     bottom: 0;
@@ -10247,7 +10248,7 @@ html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .chat-pan
    (anchored to the position:relative panel), the SAME room edge (chat.js
    mounts it in every composer area) and the pointer-events pass-through. */
 .chat-instance-panel .chat-input-area {
-    padding: 24px 14px max(16px, var(--inset-bottom));
+    padding: var(--composer-air) 14px max(16px, var(--inset-bottom));
 }
 
 /* Docked, the panel lies beside Main at its own width (its handle resizes it apart from the sidebar's), over the
@@ -12860,6 +12861,10 @@ html[data-telegram-fullscreen][data-layout="docked"] .app-page-header {
 }
 html[data-telegram-fullscreen][data-layout="docked"] .app-page-header[data-lead] { padding-top: var(--inset-top); }
 html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { padding-top: calc(10px + var(--inset-top)); }
+/* Their capsules stand centred below the inset, so a room's edge ends that much lower (A room's edges). */
+html[data-telegram-fullscreen][data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
+    --edge-chips-end: var(--edge-chips-measured, calc(50% + var(--inset-top) / 2 + var(--control-h-float) / 2));
+}
 html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar { --sidebar-top: calc(var(--space-4) + var(--inset-top)); }
 
 @property --edge-reach { syntax: '<length>'; inherits: true; initial-value: 0px; }
@@ -12867,23 +12872,13 @@ html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar { --sideba
 
 /* ---- A room's edges and Telegram's shared row (DESIGN: A room's edges) ----
    Keep scrolling card actions from reading as header controls. Only the edge material is masked; the transcript
-   stays sharp outside it. Layout and read tracking use the same reach (the shared edge's length). */
+   stays sharp outside it. The edge ends at the capsules' far side, inside the bar and the composer's area: it reaches no
+   further into the feed (--edge-reach 0), so layout and read tracking keep the whole feed below the bar. */
 :is(#page-chat, .project-panel) {
-    --edge-reach: var(--edge-length);
-}
-/* What floats right under the bar lies over its edge, as its capsules do: a room's search sheet comes after the bar at
-   its own level, so it paints over it, never blurred. A Project's status bar, while it holds the room's status, stands in
-   its flow below the edge (its top reserve counts the edge, --chat-top-reserve below). Outside Telegram the keyboard puts
-   both bars in flow. */
-:where(html:not([data-telegram-fullscreen])) body.keyboard-open :is(#page-chat.active, .project-panel) {
     --edge-reach: 0px;
 }
-/* A low typing viewport gives the reading band priority over the extension. */
-html[data-telegram-fullscreen] body.keyboard-open :is(#page-chat.active, .project-panel) {
-    --edge-reach: clamp(0px, var(--vvh) - var(--inset-top) - 250px, var(--edge-length));
-}
-/* The transcript's first row and a Project's status bar stand below the bar and its edge: the room's measured reserve
-   (the bar, chat.js) or the bar and its edge, whichever ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears the edge of a
+/* The transcript's first row and a Project's status bar stand below the bar: the room's measured reserve (the bar,
+   chat.js) or the bar and its reach, whichever ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears a
    bar that tall from the first frame (Telegram's taller row is reserved once measured); a room mounted without a bar has
    no edge (room_work.js), and its measured reserve stands alone. */
 :is(#page-chat, .chat-instance-panel) {
@@ -12935,18 +12930,24 @@ html[data-telegram-fullscreen] body.keyboard-open :is(#page-chat.active, .projec
         --edge-tint: .9;
     }
 }
-/* The top: from the window's edge to one reach below the bar, the taper starting under the bar's lower part. */
+/* The top: from the window's edge to the capsules' lower side (chat.js measures it; until then they stand centred in
+   the bar, --control-h-float tall). All three layers are full from the window's top through the clock or the window's
+   lights, down to the capsules' upper side, and clear through the capsules' band (its height, a length, never a share
+   of a box): the deep blur over its upper half, the soft one and the tint over the band; nothing shows below it. */
 :is(.chat-page-header, .project-panel-bar) {
-    --edge-taper: calc(var(--edge-reach) + var(--space-5));
+    --edge-taper: var(--control-h-float);
+    --edge-chips-end: var(--edge-chips-measured, calc(50% + var(--control-h-float) / 2));
 }
+:is(.chat-page-header, .project-panel-bar) > .room-edge[data-edge="tint"] { --edge-run: var(--edge-taper); }
 :is(.chat-page-header, .project-panel-bar) > .room-edge {
     --edge-to: to bottom;
     --edge-ends: 0 100%, 0 0;
     top: 0;
-    height: calc(100% + var(--edge-reach) - var(--edge-shorten, 0px));
+    height: calc(var(--edge-chips-end) + var(--edge-reach) - var(--edge-shorten, 0px));
 }
 /* The bottom, the same edge mirrored inside the composer's area while it floats over the feed (in Telegram also while
-   typing); in flow it has no feed under it. */
+   typing; in flow it has no feed under it): from the capsule row's upper side down, wherever the row stands in the
+   area (chat.js measures it: a staged attachment or reply above it; until then the area's top air). */
 :is(#chat-input-area, .chat-input-area) {
     --edge-taper: var(--edge-length);
 }
@@ -12954,7 +12955,7 @@ html[data-telegram-fullscreen] body.keyboard-open :is(#page-chat.active, .projec
     --edge-to: to top;
     --edge-ends: 0 0, 0 100%;
     bottom: 0;
-    height: calc(100% - var(--edge-shorten, 0px));
+    height: calc(100% - var(--edge-row-measured, var(--composer-air, 24px)) - var(--edge-shorten, 0px));
 }
 :where(html:not([data-telegram-fullscreen])) body.keyboard-open :is(#chat-input-area, .chat-input-area) > .room-edge { display: none; }
 /* A room bar's capsules are the composer chips' glass in the dark theme (the capsule's veil over a blur of what passes
@@ -12990,6 +12991,7 @@ html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-head
     box-sizing: border-box;
     min-height: calc(var(--tg-row-top) + var(--tg-row-h));
     padding: var(--tg-row-top) var(--tg-row-end) 0 var(--tg-row-start);
+    --edge-chips-end: var(--edge-chips-measured, calc(var(--tg-row-top) + (100% - var(--tg-row-top)) / 2 + var(--control-h-float) / 2));
     column-gap: var(--space-2);
 }
 html[data-telegram-fullscreen="active"][data-layout="stack"] :is(.chat-page-header, .project-panel-bar) :is(.chat-header-btn, .cx-chip, .rw-trigger, .shell-icon-control) {
@@ -13018,7 +13020,8 @@ html[data-telegram-fullscreen="active"][data-layout="stack"] .project-panel-clos
 html[data-telegram-fullscreen="active"][data-layout="stack"] .nav-drawer-close { display: none; }
 /* While typing in Telegram the composer drops its reading air and the feed's end clears the measured composer. */
 html[data-telegram-fullscreen][data-layout="stack"] body.keyboard-open :is(#chat-input-area, .chat-input-area) {
-    padding-top: var(--composer-typing-pad, var(--space-2));
+    --composer-air: var(--composer-typing-pad, var(--space-2));
+    padding-top: var(--composer-air);
     padding-bottom: var(--composer-typing-pad, var(--space-2));
 }
 html[data-telegram-fullscreen][data-layout="stack"] body.keyboard-open :is(#chat-messages, .chat-messages)::after {
