@@ -281,6 +281,11 @@
     --space-3: 12px;
     --space-4: 16px;
     --space-5: 24px;
+    /* The check box (DESIGN "Controls and editable choices"): one glyph size and its one shape (round; 4px here makes
+       every box square at once). */
+    --checkbox-size: 16px;
+    --checkbox-radius: 50%;
+    --checkbox-gap: var(--space-2);  /* box to its words: the focus ring keeps air on both sides */
     /* Smallest result measure before a neighbouring action wraps below it. */
     --result-copy-min-width: 12rem;
     /* Bounded scroll region for the Updates restore list (DESIGN section 5:
@@ -906,7 +911,11 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
    - .ui-model-chooser .ui-model-options .ui-model-option .ui-model-option-name .ui-model-option-meta
      .ui-model-option-priced .ui-model-empty — the editable model chooser (model_chooser.js): its suggestions never
      become an allowlist.
-   - .ui-checkbox — a choice its form's own Save applies.
+   - .ui-checkbox .is-checked — tick any: a choice its form's own Save applies, every check box in the product, one
+     drawn glyph (--checkbox-size, --checkbox-radius, its tick a mask in the crimson ink) on a real input; a drawn box that is not an
+     input (a task list's mark, a share part's own) wears the class too, .is-checked or aria-checked its state.
+   - .ui-radio — pick one: the same glyph, always a circle, a dot when chosen. No page sizes, recolours or reshapes
+     either.
    - .ui-switch .ui-switch-track .ui-switch-thumb .is-locked — a change that acts at once: a label around an input
      with role="switch", then its track and thumb. Green when on; locked or disabled, it loses its colour, never its
      size; a write in flight is disabled and aria-busy, in its value's colour, dimmed. A page never draws a switch of
@@ -1491,12 +1500,16 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
     line-height: var(--line-meta);
 }
 .ui-field-inline { flex-direction: row; align-items: center; flex-wrap: wrap; }
-label.ui-field-inline:has(> input.ui-checkbox[type="radio"]) {
+/* A box or radio and its words: the words wrap beside the box, which sits on their first line (--checkbox-line). */
+label.ui-field-inline:has(> :is(input.ui-radio, input.ui-checkbox)) {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
+    column-gap: var(--checkbox-gap);
     align-items: start;
     overflow-wrap: anywhere;
+    --checkbox-line: 1lh;
 }
+label.ui-field-inline > :not(input) { grid-column: 2; }  /* placed only where the label is that grid */
 .ui-field-help { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .ui-control {
     box-sizing: border-box;
@@ -1605,17 +1618,88 @@ textarea.ui-control { resize: vertical; }
         box-shadow: 0 0 0 3px var(--focus-accent-ring);
     }
 }
-.ui-checkbox {
+.ui-checkbox, .ui-radio {
     box-sizing: border-box;
-    width: 14px;
-    height: 14px;
-    min-width: 14px;
-    margin: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    display: inline-block;
+    width: var(--checkbox-size);
+    height: var(--checkbox-size);
+    min-width: var(--checkbox-size);
+    margin: max(0px, calc((var(--checkbox-line) - var(--checkbox-size)) / 2)) 0 0;
     padding: 0;
     flex: 0 0 auto;
-    accent-color: var(--accent);
+    vertical-align: middle;
+    border: 1.5px solid var(--text-secondary);
+    border-radius: var(--checkbox-radius);
+    background: transparent center / 100% 100% no-repeat;
+    color: transparent;
+    font-size: 0;
+    cursor: pointer;
+    position: relative;
 }
-.ui-checkbox:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* The mark: the crimson ink cut by a tick, shown when ticked; it never mirrors in a right-to-left interface. */
+.ui-checkbox::before {
+    content: "";
+    position: absolute;
+    inset: -1.5px;
+    visibility: hidden;
+    background: var(--tone-crimson-ink);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.3 7 10.8l4.6-5.3' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% 100% no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.3 7 10.8l4.6-5.3' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% 100% no-repeat;
+}
+.ui-radio { border-radius: 50%; }
+.ui-checkbox:is(:checked, [aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox {
+    border-color: var(--accent);
+    background-color: var(--accent);
+}
+:is(.ui-checkbox:is(:checked, [aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox):not(:indeterminate)::before {
+    visibility: visible;
+}
+/* On a dark voice's own material the accent fill alone is too close to it: a ticked box keeps the voice's ink edge
+   (with the app's own palette only; forced colours have their own recipe below). */
+@media (forced-colors: none) {
+    :root:not([data-theme="light"]) :is(.chat-bubble.assistant, .chat-live-card, .settings-voice)
+        :is(.ui-checkbox:is(:checked, [aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox) {
+        border-color: var(--text-primary);
+    }
+}
+.ui-checkbox:is(:indeterminate, [aria-checked="mixed"]) {
+    border-color: var(--accent);
+    background-color: var(--accent);
+    background-image: linear-gradient(var(--tone-crimson-ink), var(--tone-crimson-ink));
+    background-size: 50% 2px;
+}
+.ui-radio:checked { border-color: var(--accent); background-image: radial-gradient(var(--accent) 0 34%, transparent 40%); }
+:is(.ui-checkbox, .ui-radio):disabled { opacity: var(--control-disabled-opacity); cursor: not-allowed; }
+:is(.ui-checkbox, .ui-radio):focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* Under a finger the glyph keeps its size and the target is allocated, never borrowed from a neighbour: a label
+   holding a box or radio is the touch minimum tall (the whole label is the input's), and a box that is a control on
+   its own (a share part's button) keeps the touch minimum around it as margin its reach fills. */
+@media (pointer: coarse) {
+    label:has(> :is(input.ui-checkbox, input.ui-radio)) { min-height: var(--touch-target-min); align-content: center; }
+    button.ui-checkbox { margin: calc((var(--touch-target-min) - var(--checkbox-size)) / 2); }
+    button.ui-checkbox::after {
+        content: "";
+        position: absolute;
+        inset: calc((var(--checkbox-size) - var(--touch-target-min)) / 2 - 1.5px);  /* from inside the 1.5px edge */
+    }
+}
+/* Forced colours: an input is the system's own box; a drawn mark that is not an input (a share part's, a task's) is
+   painted in the system's colours, its edge in the text colour, a ticked one filled with the highlight and its tick
+   in the highlight's text, so both states show on any palette. */
+@media (forced-colors: active) {
+    input:is(.ui-checkbox, .ui-radio) { -webkit-appearance: auto; appearance: auto; }
+    input.ui-checkbox::before { content: none; }
+    .ui-checkbox:not(input) { forced-color-adjust: none; border-color: CanvasText; background-color: Canvas; }
+    .ui-checkbox:not(input):is([aria-checked="true"], [aria-checked="mixed"], .is-checked),
+    [aria-checked="true"] > .ui-checkbox:not(input) {
+        border-color: Highlight;
+        background-color: Highlight;
+    }
+    .ui-checkbox:not(input)[aria-checked="mixed"] { background-image: linear-gradient(HighlightText, HighlightText); }
+    .ui-checkbox:not(input)::before { background: HighlightText; }
+}
 /* The switch: a label holding a checkbox with role="switch" and aria-checked, then its track and thumb, for a change
    that acts at once (a .ui-checkbox belongs to a form with its own Save). Green when on. One that cannot be used now
    (disabled, or .is-locked) loses its colour, never its size; one whose write is in flight is disabled with
@@ -1676,6 +1760,12 @@ textarea.ui-control { resize: vertical; }
    belongs to the popup itself, so a menu, a dialog and a listbox are one backed sheet on
    the float shadow: a role below chooses layout, never paint. The screen's top inset (--inset-top, Telegram's band in
    fullscreen) is never a popup's: registered as a length, so bindPopoverPosition (ui_interactions.js) reads it resolved. */
+/* The line a box sits on, resolved where its words are (a label, a task's item) so the box can read it. */
+@property --checkbox-line {
+    syntax: '<length>';
+    inherits: true;
+    initial-value: 0px;
+}
 @property --ui-popup-inset-top {
     syntax: '<length>';
     inherits: false;
