@@ -2429,3 +2429,78 @@ def test_case_variants_correlate_on_case_insensitive_volume_without_conflating_d
         assert material["issues"] == [], material["issues"]
         [row] = [item for item in material["files"] if pathlib.Path(item["path"]).parent.resolve() == live_shelf]
         assert row["sha256"] == hashlib.sha256(b"Section 1 updated\n").hexdigest()
+
+
+def test_non_repo_write_file_batch_preserves_receipts_from_item_outcomes(tmp_path, monkeypatch):
+    """#4354: non-repo ``write_file`` batches preserve failure and partial receipts from
+    per-item outcomes rather than scanning warning prefixes in display text."""
+    import hashlib
+    import pathlib
+
+    from ouroboros.artifacts import copy_file_to_task_artifacts, task_artifact_dir_path
+    from ouroboros.tools import core as core_tools
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    monkeypatch.delenv("OUROBOROS_BOOT_RUNTIME_MODE", raising=False)
+    shelf = task_artifact_dir_path(ctx.drive_root, ctx.task_id, create=True).resolve()
+
+    # Mixed unchanged + shrink-rejected ordinary documents on artifact_store:
+    # the batch fails (never collapses into completed_no_effect) and keeps unchanged_paths.
+    notes_body = "notes line\n"
+    long_summary = "Summary finding.\n" * 20
+    (shelf / "notes.md").write_bytes(notes_body.encode("utf-8"))
+    (shelf / "summary.md").write_bytes(long_summary.encode("utf-8"))
+
+    unchanged_and_rejected = _native_write(ctx, "write_file", {
+        "root": "artifact_store",
+        "files": [
+            {"path": "notes.md", "content": notes_body},
+            {"path": "summary.md", "content": "short\n"},
+        ],
+    })
+    assert unchanged_and_rejected["is_error"] is True, unchanged_and_rejected
+    assert unchanged_and_rejected["result"].startswith("⚠️ WRITE_FILE_BATCH_PARTIAL_FAILURE"), unchanged_and_rejected
+    assert "WRITE_BLOCKED" in unchanged_and_rejected["result"], unchanged_and_rejected
+    assert (shelf / "summary.md").read_bytes() == long_summary.encode("utf-8")
+    shelf_meta = unchanged_and_rejected["tool_result_meta"]
+    assert shelf_meta.get("operation_outcome") != "completed_no_effect", shelf_meta
+    assert shelf_meta.get("resolved_root") == str(shelf), shelf_meta
+    assert shelf_meta.get("logical_root") == "artifact_store", shelf_meta
+    assert shelf_meta.get("changed_paths") == [], shelf_meta
+    assert shelf_meta.get("unchanged_paths") == ["notes.md"], shelf_meta
+
+    # user_files batch under a deterministic temporary root: first item's capture fails and
+    # second succeeds -> failure stands and receipts keep both landed paths and the second digest.
+    user_root = (tmp_path / "user_files").resolve()
+    user_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(user_root))
+    monkeypatch.delenv("OUROBOROS_DELIVERABLES_ROOT", raising=False)
+
+    first_body, second_body = "first document\n", "second document\n"
+    sha_second = "sha256:" + hashlib.sha256(second_body.encode("utf-8")).hexdigest()
+
+    def flaky_capture(call_ctx, target, *, kind="user_file"):
+        if pathlib.Path(target).name == "first.md":
+            raise OSError("fixture: first capture failed")
+        return copy_file_to_task_artifacts(call_ctx, target, kind=kind)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(core_tools, "copy_file_to_task_artifacts", flaky_capture)
+        capture_partial = _native_write(ctx, "write_file", {
+            "root": "user_files",
+            "files": [
+                {"path": "notes/first.md", "content": first_body},
+                {"path": "notes/second.md", "content": second_body},
+            ],
+        })
+    assert capture_partial["is_error"] is True, capture_partial
+    assert capture_partial["result"].startswith("⚠️ WRITE_FILE_BATCH_PARTIAL_FAILURE"), capture_partial
+    assert "ARTIFACT_OUTPUT_ERROR" in capture_partial["result"] and "ARTIFACT_OUTPUTS:" in capture_partial["result"]
+    assert (user_root / "notes" / "first.md").read_bytes() == first_body.encode("utf-8")
+    assert (user_root / "notes" / "second.md").read_bytes() == second_body.encode("utf-8")
+    user_meta = capture_partial["tool_result_meta"]
+    assert user_meta.get("resolved_root") == str(user_root), user_meta
+    assert user_meta.get("logical_root") == "user_files", user_meta
+    assert user_meta.get("changed_paths") == ["notes/first.md", "notes/second.md"], user_meta
+    assert user_meta.get("changed_versions") == ["", sha_second], user_meta
