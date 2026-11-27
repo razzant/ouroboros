@@ -419,19 +419,23 @@ changing the alignment of neighboring controls and their actions.
 
 **Three choices, three controls.** Pick one is `.ui-radio`, tick any is
 `.ui-checkbox`, an on/off that acts at once is `.ui-switch`. Every check box is
-`.ui-checkbox`, and it is round (owner decision 27.11.2026: «Надо определиться
-квадратные везде или круглые везде»): a real input the product draws, with one
-size per pointer (`--checkbox-size`), one shape (`--checkbox-radius`, the single
-value that would make every box square), one white mark on the accent (a bar
-when mixed), an edge that holds 3:1 on its surface, one focus ring and one
-disabled look; under forced colours it is the system's own. A form's boxes, a
-menu row's, the Panic list's, setup's, a share part's own and an authored task
-list's inert mark all wear it. A radio is the same glyph, always a circle, a
-dot when chosen. A page places a box and its words (the gap, the first line it
-sits on), never sizes, recolours or reshapes it, and no style sheet styles a
-checkbox or radio input of its own. What a choice will do, beyond its name, is
-a help line under it, readable before the choice on every surface, not a hover
-title.
+`.ui-checkbox`, and it is round: an input the product draws, with one size
+(`--checkbox-size`), one shape (`--checkbox-radius`, the single value that
+would make every box square), one white mark on the accent (a white bar on the
+accent when mixed), an edge that holds 3:1 on its surface, one focus ring and
+one disabled look. Under a finger the glyph keeps its size and gains the touch
+minimum as an invisible reach around it. A box stands one `--checkbox-gap` from
+its words, which wrap beside it, and sits on their first line. A form's boxes,
+a menu row's, the Panic list's and setup's are inputs; a share part's box and
+an authored task's mark, in the chat and in Share's part picker, are drawn
+marks wearing the same class, the task's state apart from the part's
+inclusion. The exported share card draws a task as document content. Under
+forced colours an input is the system's own box and a drawn mark takes the
+system's colours. A radio is the same glyph, always a circle, a dot when
+chosen. A page places a box and its words, never sizes, recolours or reshapes
+it, and no style sheet styles a checkbox or radio input of its own. New
+project's Initialize Git says what it does in a help line under the box,
+readable before the choice on every surface.
 
 **A search field has one look across the app**: a capsule a row high in the composer field's material, the search
 glyph at its start and a placeholder that names what it searches (`Find a project`, `Search settings`, `Find an
