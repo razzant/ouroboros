@@ -77,8 +77,10 @@ _SIDEWAYS = """async ({feed, mark, left}) => {
 
 _HOLD_TOAST = """async (text) => {
     const { showToast } = await import('/static/modules/toast.js');
-    // The page's one stack (top right): a notice there covers the feed's last lines like any notice does.
+    // The page's one stack stands at the top right; this check needs a notice over the conversation's LAST lines, so the
+    // stimulus lowers that stack to the reading band's lower part (its geometry is measured below, not assumed).
     window.__heldToast = showToast(text, 'info', { ttl: 0, haptic: false, dismissLabel: 'Dismiss held notice' });
+    document.getElementById('toast-stack').style.setProperty('--toast-top', `${Math.round(innerHeight * 0.55)}px`);
     return Boolean(window.__heldToast?.isConnected);
 }"""
 
