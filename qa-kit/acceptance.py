@@ -1059,22 +1059,39 @@ class AcceptanceRun(sc.QualificationRun):
             return "unread"
         return "mirror" if same_address(lines[0], self.args.mirror_url) else "other"
 
-    def old_profile_port(self, pid: int) -> int:
-        """Bind writes to this freshly created profile, known old checkout and its own live loopback process."""
-        port = 0
-        try:
-            raw = (self.data / "state" / "server_port").read_text(encoding="utf-8").strip()
-            port = int(raw) if raw.isdigit() else int(json.loads(raw)["port"])
-        except (OSError, ValueError, TypeError, KeyError):
-            pass
-        image = hw.image_path(pid)
-        if (not image or not same_address(image, self.exe) or not hw.loopback_listener_owned(port, pid)
-                or pb.read_git_head(self.app_root / "repo" / ".git") != self.old["source_sha"]):
-            raise sc.Unconfirmed(self.step, "old_profile_loopback_or_revision_unverified")
-        code, health = profile_http(port, "/api/health")
-        if code != 200 or health.get("runtime_version") != self.old["version"]:
-            raise sc.Unconfirmed(self.step, "old_profile_loopback_or_revision_unverified")
-        return port
+    def old_profile_port(self, pid: int, wait: float = 90.0) -> int:
+        """Bind writes to this freshly created profile, known old checkout and its own live loopback process. The old app may
+        write its port and answer health a little after its first window, so the same conditions are polled for a bounded
+        time; the stop names the last unmet one in one fixed word (no path or value leaves)."""
+        state = {"port": 0, "why": "port_file_unread"}
+
+        def bound() -> bool:
+            try:
+                raw = (self.data / "state" / "server_port").read_text(encoding="utf-8").strip()
+                port = int(raw) if raw.isdigit() else int(json.loads(raw)["port"])
+            except (OSError, ValueError, TypeError, KeyError):
+                state["why"] = "port_file_unread"
+                return False
+            image = hw.image_path(pid)
+            if not image or not same_address(image, self.exe):
+                state["why"] = "process_not_the_old_exe"
+                return False
+            if not hw.loopback_listener_owned(port, pid):
+                state["why"] = "loopback_listener_not_owned"
+                return False
+            if pb.read_git_head(self.app_root / "repo" / ".git") != self.old["source_sha"]:
+                state["why"] = "checkout_not_the_old_revision"
+                return False
+            code, health = profile_http(port, "/api/health")
+            if code != 200 or health.get("runtime_version") != self.old["version"]:
+                state["why"] = "health_not_the_old_release"
+                return False
+            state["port"] = port
+            return True
+
+        if not sc.poll_until(wait, bound, interval=1.0):
+            raise sc.Unconfirmed(self.step, f"old_profile_unverified_{state['why']}")
+        return state["port"]
 
     def old_complete(self, port: int) -> None:
         """The v7.12.0 public completion contract. Save once; a lost answer only reads back that attempt."""
