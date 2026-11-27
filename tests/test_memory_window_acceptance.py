@@ -269,12 +269,13 @@ def _map_band(probe, window, cause, *, target=1_500):
 
 class _FirstSendGap(AssertionError):
     """The first real send of a start the window lowered outside the Map's band keeps less than its reply reserve and
-    work room: the start fit does not price the loop's own first-send host rows (roster snapshot, context facts)."""
+    work room: the start fit does not price the loop's own first-send host rows (context facts, and the roster
+    snapshot where the head's list of running works lacks something)."""
 
 
 FIRST_SEND_GAP = ("razzant/ouroboros#4351: a request-tipped Low start's first real send overruns the reply "
-                  "reserve and the work room by about 630 tokens, because the start fit does not price the loop's own "
-                  "first-send host rows (roster snapshot, context facts); strict, so the fix turns this case red")
+                  "reserve and the work room by some hundreds of tokens (490 here), because the start fit does not price "
+                  "the loop's own first-send host rows (context facts, a roster snapshot); strict, so the fix turns this red")
 
 
 @pytest.mark.parametrize("replies,window_of,start", [
@@ -337,8 +338,9 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
     else:  # the known gap (FIRST_SEND_GAP) is asserted last; what the start itself priced and the rows it misses hold
         planned = cf.estimate_context_prompt_tokens(plan.messages_for(plan.initial_mode), first["tools"], provider="openai")
         assert planned + plan.output_reserve_tokens + room <= window  # what the start itself priced keeps them
-        assert {row.get("_host_context_kind") for row in first["messages"][len(plan.messages_for(plan.initial_mode)):]} == {
-            "ouroboros_roster_snapshot", "ouroboros_context_facts"}  # all the send adds are the loop's own rows
+        added = {row.get("_host_context_kind") for row in first["messages"][len(plan.messages_for(plan.initial_mode)):]}
+        # all the send adds are the loop's own rows (the roster only where the head's list of works lacks something)
+        assert {"ouroboros_context_facts"} <= added <= {"ouroboros_roster_snapshot", "ouroboros_context_facts"}
     if start[0] == "low":
         shown = plan.projection("low").memory_facts
         assert "body_map" in {row["section_id"] for row in shown.get("host_sections_addressed", ())}  # Map at its parts
