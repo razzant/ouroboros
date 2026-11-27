@@ -134,10 +134,28 @@ _STAGES = {"task_preparation": "Stage: before the engine was reached, while this
                                 "session opened."}
 
 
-def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fixed=None, parts=(), extra="", model=""):
+def _limit_credit(limit):
+    """Where the window in effect came from (``context_view_facts.window_projection``'s source, basis and date), in a
+    person's words, and whether its number is an input limit (the window is then that input plus the reserve) or a
+    total."""
+    from ouroboros.context_view_facts import _REFUSAL_BASES, WINDOW_SOURCES
+
+    if not isinstance(limit, dict) or limit.get("source") in (None, "", "unknown"):
+        return "its source is not recorded with this refusal"
+    basis = f" ({_REFUSAL_BASES.get(limit.get('basis'), limit.get('basis'))})" if limit.get("basis") else ""
+    number = (f"an input limit of {limit['tokens']:,} plus the reserve" if limit.get("kind") == "input"
+              and isinstance(limit.get("tokens"), int) else "a total")
+    return (f"{number}; source: {WINDOW_SOURCES.get(limit['source'], limit['source'])}{basis}; "
+            f"observed: {str(limit.get('observed_at') or 'not stated').replace('T', ' ')[:16]}")
+
+
+def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fixed=None, parts=(), extra="", model="",
+                    limit=None):
     """The one System line a call that could not start for lack of room leaves, with its step and Details.
 
     ``engine`` is the engine's name as the call's opening row says it; ``model`` the model id, named in Details.
+    ``limit`` is the window in effect as its projection names it (source, basis, date): the catalogue is credited only
+    with its own declared number; any other number is credited to ``limit``'s source, or said to be unrecorded.
 
     ``need`` is the input this room needs (a lower bound when ``measured`` is false: memory was not priced); what the
     engine takes is the window minus the reserve, in the same units. ``facts`` are the route's ``RouteFacts`` (or
@@ -153,9 +171,9 @@ def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fi
                    else ("tokens in the provider's units", "Input this room needs (an estimate in those units)"))
     credit = f"source: {fact('source') or 'not stated'}; observed: {fact('observed') or 'not stated'}"
     lines = [_STAGES.get(stage, f"Stage: {stage}."), *([f"Model: {model}."] if model else []),
-             f"Window: {window:,} {unit}; {credit}." if declared in (None, window) else
-             f"Window: {window:,} {unit}, the window in effect on this route; the catalogue declares {declared:,} "
-             f"({credit}).",
+             f"Window: {window:,} {unit}; {credit}." if declared == window else
+             f"Window: {window:,} {unit}, the window in effect on this route ({_limit_credit(limit)}); the catalogue "
+             + (f"declares {declared:,} ({credit})." if declared is not None else "declares no window."),
              f"Reserve for the reply and the call's working room: {reserve:,} tokens.",
              f"The selected model takes {takes:,} tokens of input on this route today: the window minus the reserve.",
              (f"{needs}: {need:,} tokens" + (f" (fixed part {fixed:,}, memory {need - fixed:,})."
@@ -171,7 +189,8 @@ def capacity_notice(engine, facts, *, stage, need, measured, reserve, window, fi
 
 
 def preparation_refusal_notice(turn, unfit):
-    """Path 1: the ordinary build refused (``MinimumViewUnfit``) before any call host existed."""
+    """Path 1: the ordinary build refused (``MinimumViewUnfit``) before any call host existed; the window in effect
+    is the one the refusal carries (``context_view_facts.refusal_route``: the fit's and the early bound's alike)."""
     measured = getattr(unfit, "memory_measured", True)
     book = getattr(unfit, "required_book_tokens", 0)
     model = getattr(turn, "native_model", "") or turn.spec.model
@@ -179,7 +198,8 @@ def preparation_refusal_notice(turn, unfit):
         stage="task_preparation", need=unfit.estimated_input_tokens, measured=measured,
         reserve=unfit.response_reserve_tokens, window=unfit.window_tokens,
         fixed=unfit.fixed_input_tokens if measured else None, parts=tuple(getattr(unfit, "parts", ()) or ()),
-        extra=f"This task directly requires the development handbook: {book:,} tokens of the input." if book else "")
+        extra=f"This task directly requires the development handbook: {book:,} tokens of the input." if book else "",
+        limit=getattr(unfit, "window", None))
 
 
 def session_refusal_notice(host):
@@ -191,7 +211,7 @@ def session_refusal_notice(host):
     return capacity_notice(getattr(host.turn, "engine", "") or host.turn.native_model, refusal.get("route_facts") or {},
         model=host.turn.native_model, stage="session_candidate",
         need=measurement["estimated_input_tokens"], measured=True, reserve=measurement["response_reserve_tokens"],
-        window=measurement["capacity_total_tokens"], extra=str(refusal.get("detail") or ""))
+        window=measurement["capacity_total_tokens"], extra=str(refusal.get("detail") or ""), limit=measurement.get("window"))
 
 
 def call_ending(reason, status, detail="", notice=None, *, opened=True):

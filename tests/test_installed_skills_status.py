@@ -6,7 +6,7 @@ import json
 import pathlib
 from types import SimpleNamespace
 
-from ouroboros.context_sections import _build_installed_skills_section
+from ouroboros.context_sections import _MANIFEST_READ, _build_installed_skills_section
 from ouroboros.skill_catalogue import list_skills_payload, off_state, skill_status
 from ouroboros.skill_loader import discover_skills, save_enabled, summarize_skills
 
@@ -376,8 +376,8 @@ def test_a_long_off_purpose_is_cut_as_the_cards_cut_it_and_names_where_it_is_who
     [line] = [line for line in full.splitlines() if line.startswith("- long-off: ")]
     assert line.startswith("- long-off: " + description[:260])
     assert "OMISSION NOTE: truncated at 260 chars" in line
-    assert line.endswith("Whole text: read_file(root='skill_payload', bucket='external', skill_name='long-off', "
-                         "path='SKILL.md'). (Off: never turned on)")
+    assert line.endswith("Whole text: bucket='external', skill_name='long-off', path='SKILL.md'. (Off: never turned on)")
+    assert _MANIFEST_READ in full  # the read those arguments complete (consensus v3, K7(d))
     [short] = [line for line in full.splitlines() if line.startswith("- short-off: ")]
     assert short == "- short-off: Purpose of short-off."
 
@@ -494,14 +494,12 @@ def test_a_work_bound_to_one_skill_is_pointed_to_list_skills_for_another_skills_
     _long_off(tmp_path, "design-off")
     _long_off(tmp_path, "alpha")
     env = SimpleNamespace(drive_root=tmp_path)
-    reader = ("Whole text: read_file(root='skill_payload', bucket='external', skill_name='design-off', "
-              "path='SKILL.md').")
+    reader = "Whole text: bucket='external', skill_name='design-off', path='SKILL.md'."
     ordinary = _build_installed_skills_section(env).full_text
     bound = _build_installed_skills_section(env, selected_skill="alpha").full_text
     assert reader in ordinary and "list_skills(name='design-off')" not in ordinary
     assert "Whole text: list_skills(name='design-off')." in bound and reader not in bound
-    assert ("Whole text: read_file(root='skill_payload', bucket='external', skill_name='alpha', path='SKILL.md')."
-            in bound)  # the bound skill's own manifest stays readable there
+    assert "Whole text: bucket='external', skill_name='alpha', path='SKILL.md'." in bound  # the bound skill's own manifest stays readable there
 
 
 def test_the_context_build_passes_the_bound_skill_to_the_catalog(tmp_path):
@@ -518,7 +516,7 @@ def test_the_context_build_passes_the_bound_skill_to_the_catalog(tmp_path):
         texts[label] = "\n".join(block.get("text", "") for block in messages[0]["content"] if isinstance(block, dict))
     assert "Whole text: list_skills(name='design-off')." in texts["bound"]
     assert "Whole text: list_skills(name='design-off')." not in texts["ordinary"]
-    assert "skill_name='design-off', path='SKILL.md')." in texts["ordinary"]
+    assert "skill_name='design-off', path='SKILL.md'." in texts["ordinary"]
 
 
 def test_a_package_that_cannot_be_checked_fails_strict_readers_and_is_a_named_gap_of_the_soft_walk(tmp_path):
