@@ -255,6 +255,32 @@ def test_no_arrived_answer_and_an_unknown_window_never_refuse_early(drive, monke
     assert seen
 
 
+def test_a_start_without_a_usable_window_reads_nothing_for_the_bound(drive, monkeypatch):
+    """The bound asks the route first: without a window (a resolver naming none, a question whose answer has not
+    arrived) the start's view spec is read once, by the capture. The other direction:
+    ``test_a_frame_the_window_cannot_hold_is_refused_before_the_memory_capture``."""
+    reads, real = [], context._view_spec
+
+    def counting(*args, **kwargs):
+        reads.append(1)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(context, "_view_spec", counting)
+    build(drive, resolver(None))
+    assert len(reads) == 1
+    release = threading.Event()
+    held = resolver(1_000_000)
+
+    def waiting(task, *, allow_fetch):
+        assert release.wait(30)
+        return held(task, allow_fetch=allow_fetch)
+    monkeypatch.setattr(fit, "_route_key", lambda _task: "synthetic-question")
+    question = fit.RouteQuestion({"id": "start", "chat_id": 1}, waiting)
+    reads.clear()
+    capture_spy(monkeypatch, before=release.set)  # the answer arrives once the capture runs
+    build(drive, question)
+    assert len(reads) == 1
+
+
 @pytest.mark.parametrize("start", ["child", "declared", "nanny", "held_note"])
 def test_a_child_a_declared_start_a_nanny_and_a_held_note_resume_get_no_early_bound(drive, monkeypatch, start):
     from ouroboros.memory import Memory

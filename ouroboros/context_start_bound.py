@@ -74,15 +74,15 @@ def _refusal(task, ctx, spec, frame_texts, resolver, *, tool_schemas, nano_base,
     if (task_input_sources(task) == "declared" or getattr(ctx, "_held_note_capture", None) is not None
             or str(task.get("delegation_role") or metadata.get("delegation_role") or "") == "subagent"):
         return None
-    view = spec()
-    if view.role in DELEGATED_FOCUS_ROLES:
-        return None
     preferred = str(preferred or "max").strip().lower()
     preferred = preferred if preferred in {"low", "max", "nano"} else "max"
     peek = getattr(resolver, "peek", None)
     first = _route_frame(peek() if callable(peek) else resolver(task, allow_fetch=False), task, tool_schemas=tool_schemas,
                          nano_base=nano_base, effort=effort, preferred=preferred)
-    if first is None:
+    if first is None:  # no known window: nothing of the start is read here
+        return None
+    view = spec()
+    if view.role in DELEGATED_FOCUS_ROLES:
         return None
     texts = frame_texts(view)
     chars = sum(json_chars(text) for _name, text in texts)
