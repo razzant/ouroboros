@@ -122,6 +122,14 @@ def _plugin_catalog(skill):
     return module.CATALOG
 
 
+def test_openai_states_its_measured_accepted_input_reserve_and_raise():
+    """27.11.2026: the window is a whole spoken call's size; the larger accepted input, the working reserve and the
+    route's ability to raise its record on a larger accepted input are their own facts."""
+    facts = _plugin_catalog("openai_realtime").model("gpt-realtime-2.1").facts
+    assert facts.accepted_input_tokens == 493_554
+    assert facts.working_reserve_tokens == 10_000 and facts.acceptance_can_raise is True and facts.basis == "provider"
+
+
 @pytest.mark.parametrize("skill,window,credential", [
     ("gemini_live", 92_000, "GEMINI_API_KEY"),
     ("grok_realtime", 80_000, "XAI_API_KEY"),
