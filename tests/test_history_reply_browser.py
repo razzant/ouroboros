@@ -2382,7 +2382,8 @@ def test_selected_passage_round_trip(direct_server_with_data, room, direction):
             accepted = ds.accepted_row(root, chat, cmid)
             assert accepted and accepted.row["text"] == new_words
             excerpt = {"text": passage, "start_utf16": len(opening.encode("utf-16-le")) // 2}
-            ref = {**reference_from_row(row), "excerpt": excerpt}
+            # The host stamps its own verdict at acceptance: the quoted row is no work (chat_references `_with_reply_work`).
+            ref = {**reference_from_row(row), "excerpt": excerpt, "ordinary": True}
             assert accepted.row["reply_to"] == ref
             page.reload(wait_until="domcontentloaded")
             if project and not feed.is_visible():
