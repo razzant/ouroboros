@@ -480,8 +480,10 @@ html[data-layout="docked"] #primary-sidebar {
     padding-block: max(0px, calc(var(--window-chrome-mid, 28px) - 22px));
 }
 /* The lights stay on the window's physical left in an RTL page too, over the room's or a page's header there, so that
-   header starts past them; the sidebar's row is clear on the right. */
-:root[data-window-chrome="integrated"][data-layout="docked"][dir="rtl"] :is(.chat-page-header, .project-panel-bar, #content > .page > .app-page-header) {
+   header starts past them; the sidebar's row is clear on the right, and a Project panel beside Main is clear of them
+   unless it fills the content column (a finger's docked Project). */
+:root[data-window-chrome="integrated"][data-layout="docked"][dir="rtl"] :is(.chat-page-header, #content > .page > .app-page-header),
+:root[data-window-chrome="integrated"][data-layout="docked"][data-pointer="coarse"][dir="rtl"] .project-panel-bar {
     padding-left: max(var(--page-header-padding-x), var(--window-chrome-clearance));
 }
 
