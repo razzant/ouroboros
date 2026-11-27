@@ -104,6 +104,43 @@ def test_a_raised_cap_is_the_works_total_and_admits_the_next_request(data_root):
     assert {(row["billing_group_limit_usd"], row["root_limit_usd"]) for row in ledger_rows(data_root)} == {(10.0, 10.0)}
 
 
+def test_a_dispatch_claim_runs_no_statement_after_its_zero_wait_commit_yet_stashes_the_raised_cap(
+        data_root, monkeypatch):
+    """The dispatch claim commits with no busy wait (``Txn.commit(wait_sec=0)``) and its connection keeps that wait,
+    so any later statement of the transition is refused at once while another writer commits under the rollback
+    journal, after the attempt is already durable (the 64-writer convoy in ``test_usage_projection_contention.py``
+    on the ``journal-persist`` lane). The statements are the same in every journal mode, so this holds everywhere:
+    nothing runs on the claim's connection after its COMMIT, and the process-local snapshots it refreshes still
+    carry the work's raised cap."""
+    from ouroboros import usage_store
+
+    _work(data_root, "work-a")
+    scope = _scope(data_root, "work-a", "work-a", "work-a")
+    _spend(scope, 1.0)
+    assert _raise(data_root, "work-a", 15.0)["ok"]
+    original_commit, claims, after = usage_store.Txn.commit, [], []
+
+    def commit(txn, **kwargs):
+        original_commit(txn, **kwargs)
+        if kwargs.get("wait_sec") == 0:
+            claims.append(txn.conn)
+            txn.conn.set_trace_callback(after.append)
+
+    with ua.usage_scope(scope):
+        reservation = ua.reserve_attempt(ua.AttemptRequest(model="openai/gpt-5.2", provider="openai",
+                                                           reservation_usd=1.0))
+        monkeypatch.setattr(ua, "_ROOT_ACCOUNTING_TELEMETRY", {})  # only the dispatch refreshes what is read below
+        monkeypatch.setattr(usage_store.Txn, "commit", commit)
+        try:
+            ua.mark_dispatched(reservation)
+        finally:
+            for conn in claims:
+                conn.set_trace_callback(None)
+    assert len(claims) == 1 and after == []
+    assert ua.last_root_accounting("work-a")["root_limit_usd"] == 15.0
+    assert ua.last_root_accounting("group:work-a")["root_limit_usd"] == 15.0
+
+
 def test_only_up_the_same_amount_reads_back_and_my_humans_words_stay_theirs(data_root):
     from ouroboros import usage_store
     from ouroboros.usage_admission import work_cap

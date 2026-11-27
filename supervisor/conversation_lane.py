@@ -703,8 +703,8 @@ BOUND_FACTS = ("_project_admission", "project_id")  # the carrier's first-step f
 
 
 def handle_direct_turn_bound(evt: Dict[str, Any], ctx: Any) -> None:
-    """The carrier bound its turn (the Project basis of a room turn, its admitted tier): the RUNNING row's task learns
-    the facts everything rebuilt from the row needs — the snapshot's running rows, the pooled park, restore."""
+    """The carrier bound its turn (the Project basis of a room turn, its admitted model and tier): the RUNNING row's task
+    learns the facts everything rebuilt from the row needs — the snapshot's running rows, the pooled park, restore."""
     from supervisor.queue_snapshot import persist_queue_snapshot
 
     task_id, facts = str(evt.get("task_id") or ""), evt.get("facts")
@@ -722,11 +722,16 @@ def handle_direct_turn_bound(evt: Dict[str, Any], ctx: Any) -> None:
         for key in BOUND_FACTS:
             if key in facts and facts[key] is not None:
                 meta["task"][key] = facts[key]
-        from ouroboros.route_choice import PROCESSING_KEY, processing_snapshot
+        from ouroboros.route_choice import LEAD_KEY, PROCESSING_KEY, lead_snapshot, processing_snapshot
 
         # The admitted tier, for its card; an owner tier act already on the row is newer than any admission frame.
         if (carrier := processing_snapshot(facts.get(PROCESSING_KEY))) and not meta["task"].get("owner_processing"):
             meta["task"]["metadata"] = {**(meta["task"].get("metadata") or {}), PROCESSING_KEY: carrier}
+        # The admitted model likewise, so the row's next step never reads its room's or the Main chat's later choice;
+        # a carrier the row already holds (new work's own, an owner's model act) is newer than any admission frame.
+        held = meta["task"].get("metadata") if isinstance(meta["task"].get("metadata"), dict) else {}
+        if (lead := lead_snapshot(facts.get(LEAD_KEY))) and LEAD_KEY not in held:
+            meta["task"]["metadata"] = {**held, LEAD_KEY: lead}
         if meta["task"].get("_project_admission") is not None:
             meta["task"].pop("_project_scope_none", None)  # a real basis replaces attested absence
         persist_queue_snapshot(reason="conversation_turn_bound")

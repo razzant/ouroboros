@@ -927,7 +927,7 @@ def test_outer_chat_entry_waits_on_global_money_and_runs_the_original_input_once
     monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     usage_store.migrate_from_journal(lane.root)
     host = _host(lane.root, lambda task: lane.body.append(task) or [])
-    monkeypatch.setattr(worker_chat_lane, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="S")))
+    monkeypatch.setattr("ouroboros.task_results.new_task_id", lambda: "S")
     monkeypatch.setattr(worker_chat_lane, "owner_conversation_admitted", lambda *_a: True)
     _hold(lane, lane.root / usage_store.STORE_REL)
     def on_sleep(count):
@@ -1172,7 +1172,7 @@ def test_inline_image_prestart_pause_survives_real_queue_consumers(lane, monkeyp
     metadata = {"client_message_id": "m-image", "origin_message_ref": {"kind": "test", "id": "m-image"},
                 "origin_message_text": original["text"]}
     host = _host(lane.root, lambda task: lane.body.append(task) or [])
-    monkeypatch.setattr(worker_chat_lane, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="S")))
+    monkeypatch.setattr("ouroboros.task_results.new_task_id", lambda: "S")
     monkeypatch.setattr(worker_chat_lane, "owner_conversation_admitted", lambda *_a: True)
     write_task_result(lane.root, "S", "requested", billing_group=BINDING, chat_id=7)
     usage_store.migrate_from_journal(lane.root)

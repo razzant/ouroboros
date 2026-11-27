@@ -29,7 +29,7 @@ STATE_FIELDS = {
     "active_chat_activities_complete", "current_questions", "current_questions_complete", "current_questions_gaps",
     "main_attention", "main_attention_complete", "main_attention_gaps", "works", "rooms", "work_summary",
     "works_complete", "works_gaps", "served_ui",
-} | {"main_route", "processing_tiers", "panic_recovery", "panic_recovery_complete"}
+} | {"main_route", "processing_tiers", "main_chat", "panic_recovery", "panic_recovery_complete"}
 
 
 @pytest.fixture

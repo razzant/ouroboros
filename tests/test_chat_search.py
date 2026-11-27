@@ -615,7 +615,8 @@ def test_media_files_links_and_questions_carry_what_their_bubble_draws_from_neve
     _say(tmp_path, 3, "📎 heron.pdf", direction="out", type="document", caption="", filename="heron.pdf",
          download_url="/api/files/download?path=heron.pdf")
     _say(tmp_path, 4, "links", direction="out", type="links", title="Heron sites",
-         actions=[{"label": "Weir", "url": "https://example.org/weir", "extra": "x"}])
+         actions=[{"label": "Weir", "url": "https://example.org/weir", "extra": "x"},
+                  {"label": "Sign in", "place": "skill-sign-in/calendar/google"}])
     # A question row as the host writes it (supervisor/message_bus.py send_quiz): the question is its text.
     _say(tmp_path, 5, "Which **heron**?", direction="out", type="quiz", task_id="asker",
          quiz={"quiz_id": "q", "options": [{"label": "Weir", "detail": "Below the mill", "recommended": True},
@@ -631,7 +632,8 @@ def test_media_files_links_and_questions_carry_what_their_bubble_draws_from_neve
         "its card shows the name (the file itself is never read)"
     assert "download_url" not in document and "mime" not in document
     assert (links["msg_type"], links["title"], links["actions"]) == (
-        "links", "Heron sites", [{"label": "Weir", "url": "https://example.org/weir"}])
+        "links", "Heron sites", [{"label": "Weir", "url": "https://example.org/weir"},
+                                 {"label": "Sign in", "place": "skill-sign-in/calendar/google"}])
     # Its card's words (chat_search_words.js draws them as the card does): never its lifecycle, assumption or
     # recommendation; an option of another shape stays one the card refuses.
     assert (quiz["msg_type"], quiz["text"], quiz["quiz"]) == ("quiz", "Which **heron**?", {

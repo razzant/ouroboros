@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 from tests.settings_browser_helpers import open_settings
-from tests.test_subscription_setup_browser import capture, subscription_ui as _subscription_ui
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, PROFILE_FRAME, capture, subscription_ui as _subscription_ui
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
 
@@ -51,7 +51,11 @@ class TestSocket {
         this.url = url;
         this.readyState = 1;
         window.__sockets.push(this);
-        setTimeout(() => this.onopen && this.onopen({}), 0);
+        setTimeout(() => {
+            if (this.onopen) this.onopen({});
+            // The serving socket's first frame proves the document's data profile (gateway/ws.py).
+            if (this.onmessage) this.onmessage({ data: PROFILE_FRAME });
+        }, 0);
     }
     send() {}
     close() { this.readyState = 3; if (this.onclose) this.onclose({ code: 1000 }); }
@@ -62,7 +66,7 @@ window.__deliver = (frame) => {
     const socket = window.__sockets[window.__sockets.length - 1];
     socket.onmessage({ data: JSON.stringify(frame) });
 };
-"""
+""".replace("PROFILE_FRAME", json.dumps(PROFILE_FRAME))
 
 CATEGORY_ENABLED = "() => !document.querySelector('[data-notify-pref=task_done]').disabled"
 SHOW_TEXT_SAVED = (
@@ -288,7 +292,7 @@ def test_choices_survive_reload_and_reload_itself_never_notifies(subscription_ui
             {'role': 'assistant', 'text': 'Done.', 'ts': '2026-09-19T10:00:01Z', 'task_id': 't-hist'},
             {'role': 'system', 'system_type': 'task_summary', 'task_id': 't-hist',
              'text': 'Task finished', 'ts': '2026-09-19T10:00:02Z'},
-        ], 'progress': []})))
+        ], 'progress': [], 'profile_scope': PREVIEW_SCOPE})))
     boot(page, ui)
     enable(page)
     set_pref(page, 'show_text', True)

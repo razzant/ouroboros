@@ -90,8 +90,8 @@ def test_nothing_the_composer_opens_moves_the_composer(direct_server_with_data, 
                         steps["choose"] = page.evaluate(WHERE, OPENERS)
                         _still(rest, steps["choose"], i, f"{availability}, choosing in {name}")
                     if name == "model":
-                        # The press opened the Model sheet over the page; a model typed there is Main's choice, which
-                        # closes the sheet and asks in Main's confirming sheet before writing Main itself.
+                        # The press opened the Model sheet over the page; a model typed there is the Main chat's own
+                        # choice for new work.
                         page.wait_for_selector(".ui-popup.model-sheet .chat-model-row", timeout=20_000)
                         steps["model_sheet"] = page.evaluate(WHERE, OPENERS)
                         _still(rest, steps["model_sheet"], i, f"{availability}, the Model sheet")
@@ -100,16 +100,14 @@ def test_nothing_the_composer_opens_moves_the_composer(direct_server_with_data, 
                         page.wait_for_selector(".ui-popup.model-sheet .chat-model-typed", timeout=10_000)
                         steps["typed"] = page.evaluate(WHERE, OPENERS)
                         _still(rest, steps["typed"], i, f"{availability}, typing in the Model sheet")
-                        press(page.locator(".ui-popup.model-sheet .chat-model-typed"))
-                        page.wait_for_selector(".confirm-dialog [data-confirm-ok]")
-                        steps["sheet"] = page.evaluate(WHERE, OPENERS)
-                        _still(rest, steps["sheet"], i, f"{availability}, Main's sheet")
+                        # A pick saves at once: the Main chat's capsule asks nothing.
                         with page.expect_response(lambda r: r.url.endswith("/api/owner/chat-model") and r.status == 200, timeout=30_000):
-                            press(page.locator(".confirm-dialog [data-confirm-ok]"))
+                            press(page.locator(".ui-popup.model-sheet .chat-model-typed"))
                         page.wait_for_function("word => document.querySelector('#chat-model-mode .chat-capsule-value').textContent === word", arg=chosen)
+                        assert not page.query_selector(".confirm-dialog"), "the Main chat's pick asks nothing"
                         _settle(page)
                         steps["choose"] = page.evaluate(WHERE, OPENERS)
-                        _still(rest, steps["choose"], i, f"{availability}, choosing Main")
+                        _still(rest, steps["choose"], i, f"{availability}, choosing the Main chat's model")
                     page.keyboard.press("Escape")
                     expanded(i, "false")
                     steps["closed"] = page.evaluate(WHERE, OPENERS)

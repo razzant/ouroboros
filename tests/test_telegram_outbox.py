@@ -301,6 +301,23 @@ def test_a_long_reply_resumes_at_its_first_unsent_part(tmp_path):
     _run(scenario)
 
 
+def test_a_links_row_with_only_a_sign_in_place_reaches_the_phone_as_its_line(tmp_path):
+    """A conversation's sign-in button alone (no address beside it) is admitted and sent as the line saying where to
+    finish it (lib/telegram_places.py), through the real subscription and outbox."""
+    async def scenario():
+        bridge = _Bridge(tmp_path / "state", _closed_base())
+        await bridge.publish("chat.links", {"title": "Calendar needs Google", "transport": {},
+                                            "actions": [{"label": "Sign in to Google", "place": "skill-sign-in/calendar/google"}]})
+        async with _Origin() as origin:
+            bridge.serve(origin.base)
+            await bridge.drain()
+        [line] = origin.sent()
+        assert line["text"].startswith("Sign in to Google: finish this on the computer running Ouroboros")
+        assert "reply_markup" not in line and bridge.records() == []
+        await bridge.stop()
+    _run(scenario)
+
+
 def test_media_links_and_a_quiz_card_wait_in_order_and_arrive_once(tmp_path):
     quiz = {"quiz_id": "q1", "task_id": "task-1", "question": "Which db?", "transport": {},
             "options": [{"label": "sqlite"}, {"label": "postgres"}]}

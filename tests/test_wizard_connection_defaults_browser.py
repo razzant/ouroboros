@@ -351,6 +351,10 @@ def test_a_connected_subscription_proposes_only_the_model_slots_the_wizard_owns(
     saved = onboarding.saved()
     if document is not None and not keyed:  # the saved Main has no key here: the wizard says so, writes nothing
         assert body is None and error.startswith("Main uses OpenRouter"), error
+        # The assignments (Light among them) sit in the summary's own disclosure: open it as the owner does.
+        assignments = page.locator(".summary-card [data-summary-assignments]")
+        if assignments.get_attribute("open") is None:
+            assignments.locator(":scope > summary").click()
         summary = page.locator(".summary-card").inner_text()
         assert "OpenRouter · google/gemini-4-hydrogen" in summary
         assert "Uses Main · OpenRouter · google/gemini-4-hydrogen" in summary  # Light: the saved blank

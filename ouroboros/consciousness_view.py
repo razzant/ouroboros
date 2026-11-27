@@ -273,8 +273,9 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
     the state line's live wake and own tasks). ``{"to", "lines", "places"}``: one sentence a line and every place the
     turn concerns with its people, for the dialog's details (``None`` when the places could not be read: the app still
     asks, with these lines). ``letters``: a linked Ouroboros's letters start work here, Off or not. ``after_panic``
-    (turning on; ``supervisor.panic_choice.preview_start``): this Start needs my human's desktop native confirmation.
-    The answer then says why, what the turn means for the work Panic stopped, and carries ``after_panic``.
+    (turning on; ``supervisor.panic_choice.preview_start``): Panic's or an unknown stop, or Panic-stopped work my
+    human's desktop confirmation may hand over. The answer then says what the turn means for that work, and carries
+    ``after_panic``.
     A fact absent says nothing."""
     if to == "off":
         hearing = None if places is None else _ranked([p for p in places if _place_fact(p)["state"] != "paused"],
@@ -320,21 +321,21 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
 
 
 def after_panic_lines(shown: dict) -> list:
-    """What a desktop confirmation after Panic means, one sentence a line, from ``preview_start``'s facts."""
+    """What a Turn on after Panic means, one sentence a line, from ``preview_start``'s facts: true of the desktop
+    confirmation and of a plain Start elsewhere (which hands over no choice; the app's switch says so)."""
     why, held = shown.get("why"), shown.get("held")
     lines = ["Consciousness is already on; tasks stopped by Panic still wait for your decision in this run."
-             if why == "held" else
-             "Panic turned consciousness off: it stays off until you turn it on in the desktop app."
-             if why == "panic" else
-             "How consciousness was stopped could not be read: it stays off until you turn it on in the desktop app."]
+             if why == "held" else "Panic turned consciousness off." if why == "panic" else
+             "How consciousness was stopped could not be read."]
     if held is None and why == "panic":
         lines.append("Nothing starts right now: whether Panic stopped any task could not be read, so this turn hands "
                      "over no choice to resume tasks.")
     elif held and shown.get("choice"):
         lines += [f"Nothing starts right now: {_count(held, 'task')} stopped by Panic "
                   f"{'stays' if held == 1 else 'stay'} stopped at this press.",
-                  f"On its later wakes Ouroboros may decide {'whether to resume it' if held == 1 else 'which of them to resume'}"
-                  ", even one the Panic was pressed for.",
+                  "Confirmed in the desktop app, Ouroboros may on its later wakes decide "
+                  f"{'whether to resume it' if held == 1 else 'which of them to resume'}, "
+                  "even one the Panic was pressed for.",
                   "A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits "
                   "stay in force.",
                   "Turning consciousness off, or restarting Ouroboros, ends that choice."]

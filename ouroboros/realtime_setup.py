@@ -309,14 +309,13 @@ def measure_session_wire(host, plan, messages, schemas, factory, options, *, _ro
         from ouroboros.context_source_view import fresh_room_rows
         messages, source = fresh_room_rows(messages, drive_root=host.ctx.drive_root, task_id=host.ctx.task_id)
         from ouroboros.context_measurement import room_fact
-        from ouroboros.context_view_facts import memory_facts
-        from ouroboros.loop_messages import _context_components
+        from ouroboros.context_view_facts import largest_parts, memory_facts
         from types import SimpleNamespace
         _, _, measured, _ = measure_session_wire(host, plan, messages, schemas, factory, options, _room_fact=False,
                                                  opening_allowance_tokens=opening_allowance_tokens)
-        parts = _context_components(SimpleNamespace(messages=messages, tool_schemas=schemas,
+        parts = largest_parts(SimpleNamespace(messages=messages, tool_schemas=schemas,
             accumulated_usage={'_context_measurement_density': measured['fit']['measurement']['measurement_density']},
-            context_fit_plan=plan), measured=True)
+            context_fit_plan=plan, active_effort=host.effort), measured=True)
         rows = [*messages, room_fact(measured['fit']['measurement'], parts, source=source,
             memory=memory_facts(plan, plan.initial_mode, messages))]
         session, request, evidence, window = measure_session_wire(host, plan, rows, schemas, factory, options,

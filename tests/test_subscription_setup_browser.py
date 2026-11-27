@@ -27,6 +27,10 @@ WEB = Path(__file__).resolve().parents[1] / "web"
 # before the app's scripts run; a document without it is no profile proof and opens on the canonical history.
 PREVIEW_SCOPE = "0123456789abcdef"
 PREVIEW_META = f'<meta name="ouroboros-chat-preview-scope" content="{PREVIEW_SCOPE}">'
+# The serving socket's first frame (ouroboros/gateway/ws.py `_register`): it proves the same profile. A page whose
+# document names a scope drops every frame until this proof arrives (web/modules/ws.js), and reads only history pages
+# that carry the same `profile_scope` (web/modules/api_client.js `chatHistory`).
+PROFILE_FRAME = json.dumps({"type": "connection_profile", "profile_scope": PREVIEW_SCOPE})
 
 
 def passive_status(status):
@@ -806,7 +810,7 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
     page.wait_for_selector('.summary-card')
     page.wait_for_selector('#skip-presets-btn:not([hidden])')
     page.click('#skip-presets-btn')
-    page.wait_for_function("() => document.querySelector('.wizard-inline-note')?.textContent.includes('Reviewers were assigned to Main')")
+    page.wait_for_function("() => document.querySelector('[data-recovery-note]')?.textContent.includes('Reviewers were assigned to Main')")
     assert not any(path == '/api/onboarding/complete' for path, _ in ui['posts']), 'Recovery is a preview, not a write'
     assert not onboarding.settings_path.exists()
     reviewers = page.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
@@ -818,7 +822,7 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
         walk(page, 'models', 'summary')
         page.wait_for_selector('#skip-presets-btn:not([hidden])')
         assert page.locator('#next-btn').is_enabled()
-        assert 'Main changed; reviewers keep the assignments shown above' in page.locator('.wizard-inline-note').inner_text()
+        assert 'Main changed; reviewers keep the assignments shown above' in page.locator('[data-recovery-note]').inner_text()
         assert 'owner-main' in reviewers.inner_text() and 'new-main' not in reviewers.inner_text()
     elif edit_after_recovery:
         # The reviewers are rows of the Models step's catalog: edit one there.
@@ -873,7 +877,7 @@ def test_failed_main_reviewer_recovery_does_not_latch_finish(subscription_ui):
     assert not any(path == '/api/onboarding/complete' for path, _ in ui['posts'])
     ui['backend'].pop('recovery_error')
     page.click('#skip-presets-btn')
-    page.wait_for_function("() => document.querySelector('.wizard-inline-note')?.textContent.includes('Reviewers were assigned to Main')")
+    page.wait_for_function("() => document.querySelector('[data-recovery-note]')?.textContent.includes('Reviewers were assigned to Main')")
     page.click('#next-btn')
     page.wait_for_url(ui['url'] + '/')
     bodies = [body for path, body in ui['posts'] if path == '/api/onboarding/complete']

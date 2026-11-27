@@ -427,7 +427,9 @@ def record_depth_limit_refusal(
     if not parent_contract and isinstance(getattr(ctx, "task_contract", None), dict):
         parent_contract = getattr(ctx, "task_contract")
     parent_id = str(getattr(ctx, "task_id", "") or metadata.get("parent_task_id") or "")
-    task_id = uuid.uuid4().hex[:8]
+    from ouroboros.task_results import new_task_id
+
+    task_id = new_task_id()
     root_id = str(metadata.get("root_task_id") or parent_id or task_id)
     session_id = str(metadata.get("session_id") or "")
     status_root = pathlib.Path(str(

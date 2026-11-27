@@ -1,4 +1,4 @@
-"""Cited model choices: local suggestions and the existing work, room and Main writers."""
+"""Cited model choices: local suggestions and the existing work, room, new-work and Main writers."""
 from __future__ import annotations
 
 import hashlib
@@ -6,7 +6,9 @@ import json
 import time
 import uuid
 
-from ouroboros.composer_cognition import normalize_model_choice, read_model_choice
+from ouroboros.composer_cognition import (
+    main_chat_choice, model_choice_binds, normalize_model_choice, project_model_choice, read_room,
+)
 from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.tools.tool_result import ToolResult, publish_no_effect, _publish_tool_result
 
@@ -125,11 +127,18 @@ def start_choice(ctx, model: str, basis: dict | None, project_id: str, *, model_
     choice, note = resolve_model(model, model_as_typed=model_as_typed)
     if basis:
         return {"lead": {**_cited_choice(basis), "model": choice["model"], "use_local": choice["use_local"]}}, note
-    room = read_model_choice(canonical_data_root(ctx), project_id)
-    if room["kind"] == "model":
-        if (room["model"], room["use_local"]) != (choice["model"], choice["use_local"]):
-            raise ValueError("Your human's model choice for this room binds. Cite their words to change it for this work.")
-        return {"lead": {"source": "room", "model": room["model"], "use_local": room["use_local"]}}, note
+    project = read_room(canonical_data_root(ctx), project_id)  # an unknown or inactive room refuses the start
+    # Without a room the work starts in the Main chat. A model saved for that chat is my human's own choice there
+    # (never a copy, and never Main the role's model): it binds like a room's. A Main chat that follows Main binds
+    # nothing, as before.
+    room = project_model_choice(project) if project is not None else main_chat_choice()["model_choice"]
+    chosen = model_choice_binds(project) if project is not None else room["kind"] == "model"
+    if room["kind"] == "model" and (room["model"], room["use_local"]) == (choice["model"], choice["use_local"]):
+        return {"lead": {"source": "room", "model": room["model"], "use_local": room["use_local"],
+                         **({} if chosen else {"copied": True})}}, note
+    if chosen:  # a model the room only copied at registration is not their choice for it
+        where = "this room" if project is not None else "the Main chat"
+        raise ValueError(f"Your human's model choice for {where} binds. Cite their words to change it for this work.")
     return {"lead": {"source": "mind", "model": choice["model"], "use_local": choice["use_local"]}}, note
 
 
@@ -176,27 +185,29 @@ def request_work_model(ctx, choice: dict) -> tuple[str, bool]:
 
 def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: str, effort: str = "",
                  model_as_typed: bool = False) -> str:
-    """Only an integrating focus can carry the owner's room or Main choice.
+    """Only an integrating focus can carry the owner's room, new-work or Main choice.
 
-    Presence is an integrating focus too: at Full autonomy its confirmed place-owner
-    cite may choose either scope. Dispatch enforces the level before this handler.
+    ``new`` saves the model new work starts on in the Main chat, which a new room copies: the composer
+    capsule's own writer, so words about everything new and a pick there are one choice. ``main`` stays the
+    separate, explicit write of Main the role. Presence is an integrating focus too: at Full autonomy its
+    confirmed place-owner cite may choose any scope. Dispatch enforces the level before this handler.
     Delegated actors keep their own acting model and effort controls.
     """
     from ouroboros.lead_fact import is_integrating_focus
     from ouroboros.owner_words import cited_owner_basis
     from ouroboros.gateway.ui_preferences import record_model_recent
-    from ouroboros.gateway.owner_effort import BindingRefused, _write_main_route
+    from ouroboros.gateway.owner_effort import BindingRefused, _write_main_route, write_main_chat_model
     from ouroboros.gateway.owner_settings import settings_document_mutation
     from ouroboros.composer_cognition import update_project_model_choice
     from ouroboros.tools.control_routing import _inherited_project_scope
     from ouroboros.deployment_policy import DeploymentPolicyRefusal
 
-    if scope in {"room", "main"} and not is_integrating_focus(ctx):
-        return refuse(ctx, "Only an integrating work can set a room's model or Main. Ask the work that delegated you to carry your human's choice.")
+    if scope in {"room", "new", "main"} and not is_integrating_focus(ctx):
+        return refuse(ctx, "Only an integrating work can set a room's model, new work's or Main. Ask the work that delegated you to carry your human's choice.")
     basis, error = cited_owner_basis(ctx, owner_words, call_speech=True)
     if error or not basis:
         hint = (" In Cyber Pro you may make your own room or Main change through its existing writer; this tool carries your human's words."
-                if cyber_pro(ctx) and scope in {"room", "main"} else "")
+                if cyber_pro(ctx) and scope in {"room", "new", "main"} else "")
         return refuse(ctx, "This model choice requires verified owner_words. Cite your human's exact words or the complete label they pressed." + hint)
     def finished(text):
         if effort:
@@ -210,25 +221,30 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
 
     root = canonical_data_root(ctx)
     try:
-        choice, note = (({"kind": "main"}, "") if scope == "room" and str(model).strip() in {"", "main"}
+        choice, note = (({"kind": "main"}, "") if scope in {"room", "new"} and str(model).strip() in {"", "main"}
                         else resolve_model(model, model_as_typed=model_as_typed))
         if scope == "room":
             project_id = project_id or _inherited_project_scope(ctx)
             if not project_id:
-                return refuse(ctx, "This work has no room. Name project_id, or use scope='main' for Main itself.")
+                return refuse(ctx, "This work has no room. Name project_id, use scope='new' for new work in Main "
+                                   "and new rooms, or scope='main' for Main itself.")
     except ValueError as exc:
         return refuse(ctx, str(exc))
     if scope == "work":
         text, accepted = request_work_model(ctx, {**choice, **_cited_choice(basis)})
         return finished(text + "\n" + note) if accepted else text
     result = None
+    origin = {"surface": "tool", "actor": "ouroboros", "actor_task_id": ctx.task_id}
     try:
         with settings_document_mutation():
             if scope == "room":
                 previous, saved = update_project_model_choice(root, project_id, choice)
                 result = {"ok": True, "project_id": project_id, "model_choice": saved, "previous_model_choice": previous}
+            elif scope == "new":
+                previous, saved = write_main_chat_model(None, choice, origin=origin)
+                result = {"ok": True, "scope": "new", "model_choice": saved, "previous_model_choice": previous}
             else:
-                result = _write_main_route(None, choice, origin={"surface": "tool", "actor": "ouroboros", "actor_task_id": ctx.task_id})
+                result = _write_main_route(None, choice, origin=origin)
             if choice["kind"] == "model":
                 record_model_recent(root, choice["model"], choice["use_local"])
     except BindingRefused as exc:

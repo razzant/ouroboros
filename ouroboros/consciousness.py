@@ -169,10 +169,8 @@ class _StopHolds(Exception):
 
 def held_stop_text(source: Any) -> str:
     who = _STOPPED_BY.get(str(source or ""), "who turned it off is not recorded")
-    door = ("Turn on in the desktop app (Dashboard › Consciousness)" if str(source or "") in (PANIC_STOP, UNKNOWN_STOP)
-            else "/bg start (Start in the app or in Telegram)")
     return (f"Background consciousness stayed off: {who}, and that stop holds against toggle_consciousness. "
-            f"Only the owner's {door} turns it back on.")
+            "Only the owner's /bg start (Start in the app or in Telegram) turns it back on.")
 
 
 # The primary copy written, its backup not (``StateUnavailable.primary_written``): the change stands and the next tick
@@ -181,23 +179,21 @@ _BACKUP_UNSAVED = " Saved, but the state's backup copy was not written ({})."
 
 
 def _persist_start(source: str, shown: Optional[dict] = None, *, stopped_here: bool = False) -> Tuple[str, str]:
-    """Save an enable; the right to it is decided inside the same locked write: the mind's, and after Panic the
-    owner's, which needs what their confirmed press was shown (``shown``, ``panic_choice.confirm_start``). Only that
-    press records a choice in this run's controller memory (``note_start``); ``(refusal, note)`` says why nothing
-    changed or what lacks."""
-    from supervisor.panic_choice import NOT_AS_SHOWN, STOP_STANDS, note_start, start_needs_proof, still_valid_at_write
+    """Save an enable; the mind's right to it is decided inside the same locked write. The owner's Start turns on
+    from every door, after Panic or an unreadable stop too (the owner 27.11: as in 7.12.1); only their desktop
+    confirmation's ``shown`` (``panic_choice.confirm_start``), still valid here, also records a choice of
+    Panic-stopped work in this run's controller memory (``note_start``). ``(refusal, note)`` says why nothing changed
+    or what lacks."""
+    from supervisor.panic_choice import NOT_AS_SHOWN, note_start, still_valid_at_write
     from supervisor.state import StateUnavailable, control_value, update_state
 
     def enable(live: Dict[str, Any]) -> None:
         known, enabled = control_value(live, "bg_consciousness_enabled")
         source_known, stopped_by = control_value(live, STOP_SOURCE_KEY)
         if source != OWNER_STOP and not (known and (enabled is True or (source_known and stopped_by == AGENT_STOP))):
-            raise _StopHolds(stopped_by if known and source_known else "")
-        why = start_needs_proof(live)
+            raise _StopHolds(stopped_by if known and source_known else "")  # Panic's, the owner's or an unknown stop
         if shown is not None and ((stopped_here and shown.get("why") == "held") or not still_valid_at_write(live, shown)):
             raise _StopHolds(NOT_AS_SHOWN)
-        if why and (source != OWNER_STOP or not shown):
-            raise _StopHolds(STOP_STANDS)
         live["bg_consciousness_enabled"] = True
         live.pop(STOP_SOURCE_KEY, None)
         own_time_seed.accept(live)  # a fresh install's first accepted Start owes its seed in this same write
@@ -206,7 +202,7 @@ def _persist_start(source: str, shown: Optional[dict] = None, *, stopped_here: b
         update_state(enable, confirm=("bg_consciousness_enabled", STOP_SOURCE_KEY))
         note_start(shown)
     except _StopHolds as held:
-        return (held.args[0] if held.args[0] in (STOP_STANDS, NOT_AS_SHOWN) else held_stop_text(held.args[0])), ""
+        return (NOT_AS_SHOWN if held.args[0] == NOT_AS_SHOWN else held_stop_text(held.args[0])), ""
     except StateUnavailable as exc:
         if exc.primary_written:
             note_start(shown)

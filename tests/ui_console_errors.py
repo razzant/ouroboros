@@ -2,7 +2,7 @@
 
 The direct-mode UI fixture runs no Claudexor engine. Since #1670 the Accounts section reads
 the engine's program inventory once at boot (`web/modules/harness_accounts.js` `_init`), and
-the host answers with its typed refusal, 503 (docs/architecture/06-agent-core.md "Vendor
+the host answers with its typed refusal, 503 (docs/architecture/06-3-delegation-and-subagents.md "Vendor
 program maintenance": inspection never starts an engine). The page shows "Program inspection
 unavailable"; only the browser's own network line reaches the console. Nothing else is set aside,
 apart from the one WebKit page error ``PageErrors`` names.

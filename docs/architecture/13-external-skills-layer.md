@@ -1,6 +1,6 @@
 # 13. External Skills Layer
 
-Discovery/review/grants/dependencies/enablement are separate; toggles grant no authority. Snapshots: §6; protocol: CREATING_SKILLS.
+This part gives me skills and extensions: installed skills, companions, widgets and UI contributions. I author a skill by its protocol ([CREATING_SKILLS](../CREATING_SKILLS.md); widgets: [WIDGET_HOST_PROTOCOL](../WIDGET_HOST_PROTOCOL.md)) and review it with `skill_review`. Discovery/review/grants/dependencies/enablement are separate; toggles grant no authority. Snapshots: §6.
 
 ### Skill gates
 

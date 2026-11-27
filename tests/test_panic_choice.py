@@ -1,5 +1,6 @@
-"""The owner's Turn on of consciousness after Panic (``supervisor/panic_choice.py``): the one decision that turns
-the background back on, and the choice over stopped work it may hand to Ouroboros's own wakes.
+"""The owner's Turn on of consciousness after Panic (``supervisor/panic_choice.py``): their plain Start from any door
+turns the background back on with no choice, and only the desktop's confirmed press hands Ouroboros's own wakes the
+choice over stopped work.
 
 Real queue rows and their published snapshot, the real clock's ``start`` and ``stop``, the real switch preview and
 the mind's control door over isolated state with invented works. Nothing is dispatched and no worker, process or
@@ -11,19 +12,19 @@ import time
 
 import pytest
 
-from ouroboros.consciousness import BackgroundConsciousness
+from ouroboros.consciousness import AGENT_STOP, BackgroundConsciousness, held_stop_text
 from ouroboros.control_actor import host_control, panic_release
 from ouroboros.installation_stop import PANIC_RECEIPT
 from ouroboros.task_results import write_task_result
 from ouroboros.work_stop import panic_hold_id, release_refusal
 from supervisor import events_budget as eb
 from supervisor import panic_choice
-from supervisor.panic_choice import (NOT_AS_SHOWN, STOP_STANDS, active_choice, bind_launcher_start, choice_decision,
-                                     last_panic, start_needs_proof, withdraw, worker_view)
+from supervisor.panic_choice import (NOT_AS_SHOWN, active_choice, bind_launcher_start, choice_decision, last_panic,
+                                     start_needs_proof, withdraw, worker_view)
 from tests._queue_state import gateway as _gateway
 
 gateway = _gateway
-PANIC_LINE = "Panic turned consciousness off: it stays off until you turn it on in the desktop app."
+PANIC_LINE = "Panic turned consciousness off."
 
 
 def _held(world, task_id, title, **facts):
@@ -118,15 +119,30 @@ def _named(row, title):
     return f"«{title}» (task_id {row['id']}, chosen_hold {panic_hold_id(row)})"
 
 
-# --- the one decision: after Panic the background turns on only by the switch's confirmed press ------------------
+# --- after Panic the owner's plain Start turns it on; only the switch's confirmed press hands over a choice -------
 
-def test_after_panic_a_start_without_the_confirmed_press_changes_nothing(stopped):
+def test_after_panic_the_owners_plain_start_turns_it_on_and_hands_over_no_choice(stopped):
+    """Every owner door's ``/bg start`` (app, browser, phone, Telegram, POST /api/command, headless) is this call: as
+    in 7.12.1 it turns consciousness on, returns no work and records no choice (the owner 27.11). The mind's own Start
+    stays refused, and the desktop's confirmed press can still hand the choice over afterwards."""
     before = (copy.deepcopy(stopped.pending), _state(stopped))
-
-    assert stopped.clock.start() == STOP_STANDS
-    assert STOP_STANDS.startswith("This Turn on was not applied: ")
-    assert "desktop app" in STOP_STANDS and "Dashboard › Consciousness" in STOP_STANDS
+    assert stopped.clock.start(source=AGENT_STOP) == held_stop_text("panic")  # never the mind's to lift
     assert _on(stopped) is False and _state(stopped) == before[1] and stopped.pending == before[0]
+
+    assert stopped.clock.start().startswith("Consciousness on")
+    assert _on(stopped) is True and "bg_consciousness_stop_source" not in _state(stopped)
+    assert active_choice() is None and "bg_consciousness_panic_choice" not in _state(stopped)
+    assert stopped.pending == before[0] and not stopped.running, "the Start returns no work"
+    _wake(stopped)
+    assert _wake_resumes("report")["error"] == "panic_requires_owner_resume"  # a wake has no choice to stand on
+
+    stopped.publish()  # the supervisor's refresh of its queue certificate, as a live run keeps it fresh
+    preview = _shown(stopped)  # the holds still wait: the desktop's press hands the choice over, as at the turn
+    assert preview["after_panic"]["why"] == "held" and preview["after_panic"]["choice"] is True
+    assert _press(stopped, preview).startswith("Consciousness is on. No task was started")
+    assert active_choice() == {
+        "panic": last_panic(_state(stopped)),
+        "holds": {"report": panic_hold_id(stopped.report), "digest": panic_hold_id(stopped.digest)}}
 
 
 @pytest.mark.parametrize("state, why", [
@@ -149,7 +165,8 @@ def test_the_switch_says_before_the_press_what_turning_on_means(stopped):
     assert preview["lines"][-5:] == [
         PANIC_LINE,
         "Nothing starts right now: 2 tasks stopped by Panic stay stopped at this press.",
-        "On its later wakes Ouroboros may decide which of them to resume, even one the Panic was pressed for.",
+        "Confirmed in the desktop app, Ouroboros may on its later wakes decide which of them to resume, even one the "
+        "Panic was pressed for.",
         "A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits stay in force.",
         "Turning consciousness off, or restarting Ouroboros, ends that choice."]
     assert "panic_start" not in preview
@@ -233,8 +250,8 @@ def test_without_panic_the_start_is_the_ordinary_one(after_panic):
 
 
 def test_manual_owner_resume_works_while_consciousness_stays_off_after_panic(stopped):
-    """In browser, mobile, headless or an older desktop shell consciousness stays off, while per-task Resume works:
-    my human's own press, through the door ``api_task_resume`` binds, and never a call that names no door."""
+    """Before any Turn on, per-task Resume works on every surface: my human's own press, through the door
+    ``api_task_resume`` binds, and never a call that names no door."""
     from ouroboros.control_actor import owner_door
     from supervisor.queue_transitions import resume_budget_paused_task
 
@@ -333,10 +350,11 @@ def test_an_off_of_a_clock_stopped_in_an_unknown_way_keeps_that_reason(after_pan
 
     saved = _state(after_panic)
     assert saved["bg_consciousness_stop_source"] == "unknown" and start_needs_proof(saved) == "unknown"
-    assert after_panic.clock.start() == STOP_STANDS and _on(after_panic) is False
+    refused = after_panic.clock.start(source=AGENT_STOP)  # never the mind's to lift
+    assert refused.startswith("Background consciousness stayed off: ") and _on(after_panic) is False
     preview = _shown(after_panic)
     assert preview["lines"][-2:] == [
-        "How consciousness was stopped could not be read: it stays off until you turn it on in the desktop app.",
+        "How consciousness was stopped could not be read.",
         "Nothing starts right now, and this turn hands over no choice to resume Panic-stopped tasks."]
     assert _press(after_panic, preview).startswith("Consciousness on")
     assert _on(after_panic) is True and "bg_consciousness_stop_source" not in _state(after_panic)
@@ -344,7 +362,10 @@ def test_an_off_of_a_clock_stopped_in_an_unknown_way_keeps_that_reason(after_pan
 
 def test_an_off_after_panic_stays_panics_stop(stopped):
     stopped.clock.stop(source="owner")
-    assert _state(stopped)["bg_consciousness_stop_source"] == "panic" and stopped.clock.start() == STOP_STANDS
+    assert _state(stopped)["bg_consciousness_stop_source"] == "panic"
+    refused = stopped.clock.start(source=AGENT_STOP)  # never the mind's to lift
+    assert refused.startswith("Background consciousness stayed off: ") and _on(stopped) is False
+    assert stopped.clock.start().startswith("Consciousness on") and active_choice() is None  # the owner's, no choice
 
 
 @pytest.mark.parametrize("saved", [True, False])
@@ -436,7 +457,8 @@ def test_choice_lasts_only_until_restart_and_already_on_consciousness_can_hand_o
     assert preview["lines"] == [
         "Consciousness is already on; tasks stopped by Panic still wait for your decision in this run.",
         "Nothing starts right now: 1 task stopped by Panic stays stopped at this press.",
-        "On its later wakes Ouroboros may decide whether to resume it, even one the Panic was pressed for.",
+        "Confirmed in the desktop app, Ouroboros may on its later wakes decide whether to resume it, even one the "
+        "Panic was pressed for.",
         "A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits stay in force.",
         "Turning consciousness off, or restarting Ouroboros, ends that choice."]
 

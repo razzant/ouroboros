@@ -1,9 +1,11 @@
 """Private settings authority shared by the Telegram extension and companion."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Optional
 
@@ -280,6 +282,21 @@ _SETTINGS_FORM_KEYS = (
     "TELEGRAM_API_BASE", "TELEGRAM_API_FILES_DIR",
 )
 
+# The setup wizard's one-time link (lib/telegram_pairing.py): its code arrives once, from this server's own post of the
+# owner's consent, and is kept only as a digest; the form never shows or sends it. Same form as the wizard mints.
+_PAIRING_CODE_FIELD, _PAIRING_DIGEST_KEY = "TELEGRAM_PAIRING_CODE", "TELEGRAM_PAIRING_DIGEST"
+_PAIRING_CODE = re.compile(r"[A-Za-z0-9_-]{22,64}")
+
+
+def _pairing_digest(code: Any, stored: dict) -> str | None:
+    """The digest a posted code arms, or None: no code, or an owner chat already bound (the link was scanned before
+    this post, or the owner wrote first where no link waited), so nothing waits any more."""
+    code = str(code or "").strip()
+    if not _PAIRING_CODE.fullmatch(code) or str(stored.get("TELEGRAM_CHAT_ID") or "").strip():
+        return None
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
 def make_settings_save(api):
     async def _settings_save(request):
         if str(getattr(request, "method", "POST") or "POST").upper() == "GET":
@@ -347,6 +364,11 @@ def make_settings_save(api):
         except ValueError:
             saved_files_dir = None
         owner_ignored = server_ignored = False
+        if _PAIRING_CODE_FIELD in data:  # names who becomes the owner: the local session only, like the chat ID
+            armed = _pairing_digest(data.get(_PAIRING_CODE_FIELD), stored) if request_may_change_owner(request) else None
+            owner_ignored |= not request_may_change_owner(request)
+            if armed:
+                payload[_PAIRING_DIGEST_KEY] = armed
         if not request_may_change_owner(request):
             if "TELEGRAM_CHAT_ID" in payload:
                 payload.pop("TELEGRAM_CHAT_ID", None)

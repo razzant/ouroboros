@@ -981,6 +981,9 @@ def _provider_terminal_text(
         if unknown:
             text += _unknown_terminal_recovery_hint(accumulated_usage) + UNKNOWN_ATTEMPT_COST_NOTE
         return text + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True)
+    withheld = accumulated_usage.get("_last_llm_route_withheld")
+    if withheld and not unknown:  # the host sent nothing: its own words, with the one way out, are the whole reason
+        return f"⚠️ {withheld} Any files written so far are preserved in the workspace."
     released = accumulated_usage.get("_last_llm_attempt_custody") == "released" and not unknown
     return (
         ("⚠️ The model request did not start generation." if released else "⚠️ The model provider returned no usable response.")
@@ -1224,6 +1227,16 @@ def take_route_facts(usage: Dict[str, Any], accumulated_usage: Dict[str, Any]) -
         if notice != previous:
             accumulated_usage["_route_notice"] = notice
     note_route_caution(accumulated_usage, usage.get("route_caution"), route=usage.get("route_caution_key", ""))
+    accumulated_usage.pop("_last_llm_route_withheld", None)  # an answer came: no withheld send ends this turn
+
+
+def note_withheld_route(accumulated_usage: Dict[str, Any], route_caution: tuple) -> None:
+    """The last failure's own words when the host withheld the send (``llm_ollama_guard``): the turn's terminal text
+    says them instead of the provider-failure frame (``_provider_terminal_text``); a later failure replaces or clears
+    them, an answer clears them (``take_route_facts``)."""
+    accumulated_usage.pop("_last_llm_route_withheld", None)
+    if route_caution[1] and route_caution[0]:
+        accumulated_usage["_last_llm_route_withheld"] = route_caution[0]
 
 
 def emit_route_notice(accumulated_usage: Dict[str, Any], emit_progress: Optional[Callable[..., None]]) -> None:

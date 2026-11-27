@@ -388,3 +388,23 @@ def test_a_usable_response_clears_the_released_attempt_fact():
     usage = {"_last_llm_attempt_custody": "released", "_last_llm_error_kind": "transport_unavailable"}
     _take_response_facts({}, {"role": "assistant", "content": "ok"}, usage)
     assert "_last_llm_attempt_custody" not in usage and "_last_llm_error_kind" not in usage
+
+
+def test_a_withheld_route_ends_the_turn_in_the_guards_own_words():
+    """A send the host withheld (``UnidentifiedRouteWithheld``) never reached a provider: the lasting text is the guard's
+    sentence with its one way out, not the provider-failure frame; a later answer or failure no longer carries it."""
+    from ouroboros.llm_ollama_guard import UnidentifiedRouteWithheld
+    from ouroboros.loop_transport import provider_terminal_fallback_text
+
+    flags = dict(is_context_overflow=False, is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False)
+    words = UnidentifiedRouteWithheld("ollama_guard_consent", "The server at http://10.0.0.5:8000 does not show which "
+                                      "program it runs; nothing was sent. To allow it, turn on the consent in Settings.").route_caution
+    withheld = provider_terminal_fallback_text(
+        {"_last_llm_error_kind": "bad_request", "_last_llm_route_withheld": words}, **flags)
+    assert words in withheld and "nothing was sent" in withheld
+    assert "returned no usable response" not in withheld and "classified the failure" not in withheld
+    ordinary = provider_terminal_fallback_text({"_last_llm_error_kind": "bad_request"}, **flags)
+    assert ordinary.startswith("⚠️ The model provider returned no usable response.") and words not in ordinary
+    usage = {"_last_llm_route_withheld": words, "_last_llm_error_kind": "bad_request"}
+    loop_llm_call._take_response_facts({}, {"tool_calls": []}, usage)
+    assert "_last_llm_route_withheld" not in usage

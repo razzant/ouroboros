@@ -429,7 +429,7 @@ def _initialization_notice(client_message_id: str = "", chat_id: int = 1, *, rea
                            reason_code: str = "") -> str:
     """The refusal of this socket's frame; it names that frame so only its Sending settles.
     ``reason`` says why the frame was not accepted, without exposing internal errors; ``reason_code``, given only for
-    a refusal a page must tell apart (``_RoomWordLapsed``), is that typed cause."""
+    a refusal a page must tell apart (``_RoomWordLapsed``, ``message_ingress.ModelChoiceChanged``), is that typed cause."""
     return json.dumps({
         "type": "chat", "chat_id": chat_id,
         "role": "system", "system_type": "initialization_notice",
@@ -466,7 +466,7 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
     except Exception as exc:
         from ouroboros.chat_references import ReplyExcerptNotAuthored, ReplyExcerptUnavailable
         from ouroboros.store import StoreBusy
-        from supervisor.message_ingress import ClientMessageIdConflict
+        from supervisor.message_ingress import ClientMessageIdConflict, ModelChoiceChanged
 
         busy = isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy)
         reason = "⚠️ Your message was not saved: the dialogue store is busy. Please send it again." if busy else ""
@@ -477,6 +477,8 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
             reason = "This message has no text you can quote. Clear the quote or select another passage."
         elif isinstance(exc, ClientMessageIdConflict):
             reason = "This send already belongs to a different message. Send these words as a new message."
+        elif isinstance(exc, ModelChoiceChanged):
+            reason, code = str(exc), exc.reason_code
         elif isinstance(exc, _RoomWordLapsed):
             reason = ("⚠️ Your message was not saved: Ouroboros could not confirm this room just now. "
                       "This tab keeps it.")
@@ -579,6 +581,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         task_metadata: dict[str, Any] = {
                             "reply_to": msg.get("reply_to", ""),
                             **({"reply_excerpt": msg["reply_excerpt"]} if "reply_excerpt" in msg else {}),
+                            # Sent as new work: only the condition its acceptance compares, never a model.
+                            **({"new_work_token": msg["new_work"]} if msg.get("new_work") else {}),
                         }
                         # Attachment inspection belongs to the ordered acceptance
                         # worker, so this socket can receive Panic during disk I/O.

@@ -26,6 +26,12 @@ def cited_fields(carrier: Any) -> dict:
     return {"cited": {"text": span[:MAX_CITED_CHARS], "clipped": len(span) > MAX_CITED_CHARS}} if isinstance(span, str) and span else {}
 
 
+def copied_fields(carrier: Any) -> dict:
+    """A room's model it only copied from the Main chat at registration, said on the fact as on its carrier."""
+    return {"copied": True} if (isinstance(carrier, Mapping) and carrier.get("source") == "room"
+                                and carrier.get("copied") is True) else {}
+
+
 def primary_basis(ctx: Any) -> str:
     """Who chose the primary, independently of the route currently acting."""
     choice = route_choice.opening_choice(ctx)
@@ -85,6 +91,8 @@ def lead_fact(ctx: Any, *, model: str | None = None, use_local: bool | None = No
         fact["primary"] = {"model": home[0], "use_local": home[1], "basis": basis}
     if basis in route_choice.CITED_LEAD_SOURCES and (departed or fact["basis"] == basis):
         (fact["primary"] if departed else fact).update(cited_fields((getattr(ctx, "task_metadata", None) or {}).get("lead")))
+    if basis == "room" and (departed or fact["basis"] == basis):
+        (fact["primary"] if departed else fact).update(copied_fields((getattr(ctx, "task_metadata", None) or {}).get("lead")))
     if source in {"fallback", "switch_model", "wait_card"} and departed:
         identity = [model, local, fact["basis"], role, list(acting)]
         episode = getattr(ctx, "_lead_episode", None) or {}
@@ -192,7 +200,8 @@ def project_lead(fact: Any = None, task: Mapping | None = None, *, queued: bool 
         if carrier["source"] == "main":
             model, local = route_choice.following_route("main")
             return {"model": model, "use_local": local, "basis": "main"}
-        return {"model": carrier["model"], "use_local": carrier["use_local"], "basis": carrier["source"], **cited_fields(carrier)}
+        return {"model": carrier["model"], "use_local": carrier["use_local"], "basis": carrier["source"],
+                **cited_fields(carrier), **copied_fields(carrier)}
     if not isinstance(fact, dict) or not fact.get("model"):
         return {}
     result = copy.deepcopy(fact)
@@ -241,11 +250,19 @@ def lead_fields(fact: Any = None, task: Mapping | None = None, *, queued: bool =
     return {"lead": lead} if lead else {}
 
 
-def processing_fact(metadata: Any, last: Any = None) -> dict:
+def processing_fact(metadata: Any, last: Any = None, route: Any = None) -> dict:
     """The work's own tier as its card says it: the choice and who made it (``""``: the default resolution),
-    and the newest receipt of its own calls when this host saw one, so a choice never reads as what ran."""
+    and the newest receipt of its own calls when this host saw one, so a choice never reads as what ran.
+    A tier confirmed for one destination is the work's own only for calls bound to it (``route``, as
+    ``route_choice.task_processing`` reads it), and the fact says so (``bound``): its helpers and its calls elsewhere
+    take the default. While its calls go to another model or profile, or the confirmation a destination without a
+    named profile needs no longer stands, the card says no choice and names the tier as ``withheld``, so its words
+    can say why those calls take the default."""
     carrier = route_choice.processing_snapshot(metadata.get(route_choice.PROCESSING_KEY)) if isinstance(metadata, Mapping) else None
     fact: dict = {"choice": carrier["tier"], "source": carrier["source"]} if carrier and carrier.get("tier") else {"choice": ""}
+    if carrier and "route" in carrier:
+        fact = ({**fact, "bound": True} if route_choice.task_processing(metadata, route)
+                else {"choice": "", "withheld": carrier["tier"]})
     if isinstance(last, Mapping) and last.get("observed"):
         fact["last"] = {key: last.get(key) for key in RECEIPT_FIELDS if key in last}
     return fact
@@ -259,15 +276,22 @@ RECEIPT_FIELDS = ("requested", "submitted", "submittedNative", "observed", "obse
 def processing_fields(task: Mapping | None, lead: Mapping | None = None) -> dict:
     """The card's tier fact of a root (``/api/state`` only: the model's routing context does not carry it)."""
     task = task if isinstance(task, Mapping) else {}
-    from ouroboros.model_slots import task_processing_preference
+    from ouroboros.model_slots import route_binding, task_model_binding, task_processing_preference
 
     task = dict(task)
     lead = lead or task.get("lead") or {}
     control = task.get("owner_model") or {}
     changing = control.get("request_id") and control["request_id"] != task.get("_lead_request_id")
     role = str(lead.get("role") or "") if lead.get("basis") == "fallback" and not changing else ""
-    fact = processing_fact(task.get("metadata"), task.get("processing_last"))
-    fact["resolved"] = task_processing_preference(task, model_role=role)
+    # The destination these calls are bound to, as their sends bind it: the acting route, or the primary an accepted
+    # act hands over to at the next step. Read only for a tier confirmed for one destination.
+    shown = lead.get("pending") if changing and isinstance(lead.get("pending"), Mapping) else lead
+
+    def acting():
+        return route_binding(str(shown.get("model") or ""), bool(shown.get("use_local")), role or task_model_binding(task)[0])
+
+    fact = processing_fact(task.get("metadata"), task.get("processing_last"), acting)
+    fact["resolved"] = task_processing_preference(task, model_role=role, route=acting)
     return {"processing": fact}
 
 
@@ -283,6 +307,8 @@ def chooser_words(basis: str, carrier: Any = None) -> str:
             "owner_press": "selected by my human's press", "owner_words": "set by my human's words", "place": "set for this place",
             "circle": "inherited from this circle", "mind": "chosen by me",
             "fallback": "fallback from Settings"}.get(basis, "")
+    if basis == "room" and copied_fields(carrier):
+        words = "copied from the Main chat's model when this chat was made"
     cited = cited_fields(carrier).get("cited") if basis in route_choice.CITED_LEAD_SOURCES else None
     return words + (f": «{cited['text']}»" + (" [quote clipped]" if cited["clipped"] else "") if cited else "")
 

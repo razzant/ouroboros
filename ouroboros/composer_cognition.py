@@ -7,16 +7,32 @@ Main's. Reads stay read-only; every settings writer freezes legacy rooms before 
 Registry writers take their Main snapshot before the registry lock, never acquiring settings under it.
 Actor lifetimes and room resolution belong to the task-settings owner.
 
-The model choice is the room's alone and is never copied: absent, a room follows the configured
-Main. A Project keeps its choice on its registry row (``model_choice``); Main chat writes
-Main itself. Admission and the work's lead belong to ``route_choice``. The room's processing tier
-(``processing_choice``: standard, fast or economy) is an independent axis on the same row, also never
-copied; absent, the room's work keeps the default resolution (Main's tier for work that follows Main,
-the default tier for a model of the room's own).
+The model new work starts on is each room's own. A Project keeps it on its registry row (``model_choice``;
+absent, the room follows the configured Main), the Main chat in two settings of its own (``MAIN_CHAT_MODEL_KEY``,
+``MAIN_CHAT_PROCESSING_KEY``) that no role reads. A new Project copies the Main chat's model and tier once
+(``new_room_choice``). A copied model is the room's from then on and is marked ``model_choice_copied`` until its
+owner chooses there: a copy is not their choice for that room. While the Main chat follows Main the copy
+follows too, so nothing turns Main's own binding (its account, window and tier) into a carried route unasked.
+Admission and the work's lead belong to ``route_choice``. The processing tier (``processing_choice``) is an
+independent axis beside the model; absent, work keeps the default resolution (Main's tier for work that follows
+Main, the default tier for a model of the room's own).
+
+The Main chat's Ultrafast is its owner's consent to one destination's price, named as they were shown it: the
+model, its locality and the subscription profile its new work is pinned to (``""``: Auto, an API connection or the
+local model). Only the chat's confirmed write saves it (``gateway.owner_effort``), with one word for that
+destination (no key and nothing made from one). A settings write that moves the destination or its API connection
+lands with the tier Default (``keep_chat_ultrafast``), and a read finds it in force only while the word names where
+new work would run now (``chat_ultrafast_route``): otherwise new work takes the ordinary mode, said as withheld.
+Work admitted on it carries both the destination and, for API, the settings writer's random connection revision.
+Only its own calls to that destination ask Ultrafast (``route_choice.task_processing``), independently of later
+chip picks. A named profile follows its name and Auto its source's pool; neither identifies an individual account.
+A changed or unproven API connection takes the ordinary tier without inheriting old consent.
+A new room copies every other tier and never Ultrafast.
 """
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -27,6 +43,8 @@ from ouroboros.context_mode_compat import normalize_context_mode, owner_declared
 from ouroboros.settings_scales import EFFORT_RANGE_KEYS, effort_range, normalize_subagents_mode
 
 COGNITION_KEYS = ("OUROBOROS_CONTEXT_MODE", *EFFORT_RANGE_KEYS, "OUROBOROS_SUBAGENTS_MODE")
+# The Main chat's own model (a route label, blank: follows Main) and tier (blank: Default) for new work there.
+MAIN_CHAT_MODEL_KEY, MAIN_CHAT_PROCESSING_KEY = "OUROBOROS_MAIN_CHAT_MODEL", "OUROBOROS_MAIN_CHAT_PROCESSING"
 # A room follows Main (the default and reset) or chooses one route; a reference is never a pin.
 MAIN_REFERENCE = {"kind": "main"}
 MODEL_CHOICE_KINDS = ("main", "model")
@@ -84,22 +102,127 @@ def _tolerant_choice(raw: Any, where: str) -> dict:
         return dict(MAIN_REFERENCE)
 
 
+def _tolerant_tier(raw: Any, where: str) -> str:
+    from ouroboros.model_slots import normalize_call_tier
+
+    try:
+        return normalize_call_tier(raw)
+    except ValueError:
+        import logging
+
+        logging.getLogger(__name__).warning("Unreadable processing choice in %s; Default", where)
+        return ""
+
+
 def project_model_choice(project: Mapping[str, Any]) -> dict:
-    """A Project's saved choice; a row without one follows Main (it was never copied)."""
+    """A Project's saved choice; a row without one follows Main."""
     return _tolerant_choice(project.get("model_choice"), f"Project {project.get('id')!r}")
 
 
 def project_processing_choice(project: Mapping[str, Any]) -> str:
     """A Project's own processing tier, or ``""`` (Default) for a row without a readable one."""
-    from ouroboros.model_slots import normalize_call_tier
+    return _tolerant_tier(project.get("processing_choice"), f"Project {project.get('id')!r}")
 
-    try:
-        return normalize_call_tier(project.get("processing_choice"))
-    except ValueError:
-        import logging
 
-        logging.getLogger(__name__).warning("Unreadable processing choice in Project %r; Default", project.get("id"))
-        return ""
+def main_chat_saved(settings: Mapping[str, Any]) -> tuple[dict, str, str]:
+    """The Main chat's settings as saved: its model choice, its tier's word and the consent word an Ultrafast was
+    saved with (``""`` for any other tier). Whether that Ultrafast is in force is ``main_chat_choice``'s answer."""
+    route = str(settings.get(MAIN_CHAT_MODEL_KEY) or "").strip()
+    # The stored local label is the choice's locality (``main_chat_route_setting``): read as such before the grammar's
+    # length rule, so a local model whose name fills that rule reads back as it was saved.
+    local = route.endswith(" (local)")
+    choice = (_tolerant_choice({"kind": "model", "model": route.removesuffix(" (local)"), "use_local": local},
+                               "the Main chat") if route else dict(MAIN_REFERENCE))
+    saved = settings.get(MAIN_CHAT_PROCESSING_KEY)
+    word, _, consent = saved.partition("@") if isinstance(saved, str) else (saved, "", "")
+    tier = _tolerant_tier(word, "the Main chat")
+    return choice, (tier if tier == "ultrafast" or not consent else ""), consent  # only Ultrafast is saved with a word
+
+
+def main_chat_choice(settings: Mapping[str, Any] | None = None, *, withheld: bool = False) -> dict:
+    """The Main chat's ``model_choice`` and ``processing_choice`` for new work there, read from the settings document
+    as it is now (or from ``settings``, a read of it the caller already holds). Never Main the role's own binding.
+
+    A saved Ultrafast answers only while its consent names where that work would run now
+    (``gateway.owner_effort.chat_ultrafast_route``: the same model, locality and profile), and then names that
+    destination (``processing_route``: ``[model, use_local, account]``) for the work's carrier; otherwise the tier
+    reads Default, and ``withheld`` adds ``processing_withheld: "ultrafast"`` so the page can say why."""
+    if settings is None:
+        from ouroboros import config
+
+        settings = config.load_settings()
+    choice, tier, consent = main_chat_saved(settings)
+    bound = None
+    if tier == "ultrafast":
+        from ouroboros.gateway.owner_effort import chat_ultrafast_route
+
+        bound = chat_ultrafast_route(settings, choice, consent)
+        if bound is None:
+            return {"model_choice": choice, "processing_choice": "",
+                    **({"processing_withheld": "ultrafast"} if withheld else {})}
+    result = {"model_choice": choice, "processing_choice": tier}
+    if bound:
+        result["processing_route"], connection = bound
+        if connection:
+            result["processing_connection"] = connection
+    return result
+
+
+def chat_consent_word(destination: list, connection: str = "") -> str:
+    """What Main chat Ultrafast was confirmed for, by name and (API only) random saved revision.
+
+    Neither a credential, a credential derivative nor the account signed into a profile is part of the word."""
+    names = list(destination[:3])
+    if connection:
+        names.append(connection)
+    said = json.dumps(names, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(said.encode("utf-8")).hexdigest()[:24]
+
+
+def main_chat_route_setting(choice: Mapping[str, Any]) -> str:
+    """A normalized choice as ``MAIN_CHAT_MODEL_KEY`` stores it: its route labelled local, blank for Main's reference."""
+    from ouroboros.model_slots import local_lane_label
+
+    return local_lane_label(choice["model"], choice["use_local"]) if choice.get("kind") == "model" else ""
+
+
+def new_room_choice(settings: Mapping[str, Any] | None = None) -> dict:
+    """The row fields a new Project copies from the Main chat, once: its model (marked a copy) and its tier.
+    A Main chat that follows Main adds none, so the new room follows Main as it always did. Ultrafast is never
+    copied: it was confirmed for the Main chat's route, and a room's own tier names none."""
+    saved = main_chat_choice(settings)
+    choice, tier = saved["model_choice"], saved["processing_choice"]
+    return {**({"model_choice": choice, "model_choice_copied": True} if choice["kind"] == "model" else {}),
+            **({"processing_choice": tier} if tier and tier != "ultrafast" else {})}
+
+
+def model_choice_binds(project: Mapping[str, Any] | None) -> bool:
+    """Whether the room's model is its owner's choice for that room: a copy made at registration is not."""
+    return (project is not None and project_model_choice(project)["kind"] == "model"
+            and project.get("model_choice_copied") is not True)
+
+
+def model_choice_token(project_id: str, choice: Mapping[str, Any]) -> str:
+    """A saved model choice as one opaque word: its writer answers with it, and a message sent as new work names
+    it as the condition its acceptance compares (``saved_choice``). It says nothing of the tier."""
+    said = [str(project_id or ""), choice.get("kind"), choice.get("model", ""), bool(choice.get("use_local"))]
+    return hashlib.sha256(json.dumps(said, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+
+
+def saved_choice(drive_root: Any, project_id: str = "", *, project: Mapping[str, Any] | None = None) -> dict:
+    """The model and tier new work starts on in the named Project, or in the Main chat, as saved now, with the
+    model's token. ``ValueError`` when the Project is unavailable. ``project``: its strict registry row where the
+    caller's own read already holds it, so the registry is not read a second time; it meets the same rule."""
+    if project is None:
+        project = read_room(drive_root, project_id)
+    else:
+        from ouroboros.projects_registry import PROJECT_ACTIVE
+
+        if project.get("id") != project_id or project.get("lifecycle") != PROJECT_ACTIVE:
+            raise ValueError(f"Project {project_id!r} is unavailable")
+    saved = (main_chat_choice() if project is None else
+             {"model_choice": project_model_choice(project), "processing_choice": project_processing_choice(project)})
+    return {**saved, "choice_token": model_choice_token(project_id, saved["model_choice"])}
 
 
 def read_room(drive_root: Any, project_id: str = "") -> Mapping[str, Any] | None:
@@ -141,6 +264,7 @@ def update_project_model_choice(drive_root: Any, project_id: str, choice: Mappin
 
     def change(project: dict) -> tuple[dict, dict]:
         previous = project_model_choice(project)
+        project.pop("model_choice_copied", None)  # every write here is a choice made for this room
         if current == MAIN_REFERENCE:
             project.pop("model_choice", None)
         else:
