@@ -78,19 +78,20 @@ def test_floor_size_depends_on_protected_items_not_history_count():
 
 
 @pytest.mark.parametrize('route', [pytest.param(route, id=f'{route[0]}:{route[1]}') for route in scale.call_routes()
-                                   if route[0] not in ('openai_realtime', 'gemini_live')]
+                                   if route[0] != 'openai_realtime']
                          + [pytest.param(('text', '85k', None), id='text:85k')])
 def test_the_mature_fixture_is_refused_typed_before_any_socket_on_every_route(tmp_path, monkeypatch, route):
     """A mature install's call start (and a hard 85k text start) ends in a typed ``MinimumViewUnfit`` today, with no
     model call; on the estimator-basis route (Grok) the frame alone already exceeds the window, so the memory capture
-    is never reached. Expected to turn into starts by later changes: Grok when host forms (the connections text's and
-    lossless memory forms) shrink the always-whole frame below its window; the 85k text route when the owner-chosen
-    narrowings (the accounts' temporary view; the owner's words of other rooms stay one line per message) land. This
-    prices the ordinary builder with the fixture's synthetic schemas, a lower bound (the mature drive holds no MCP
-    servers, running works, nested account changes or gist-bearing finished works, ``install``). OpenAI (290,666) and
-    Gemini (118,000) are asserted on their real call path instead, through each adapter's own session candidate with
-    the call's tools (``tests/test_live_call_start_fit.py``): there OpenAI admits the mature and the rich install and
-    Gemini refuses both, while this lower bound fits Gemini's window."""
+    is never reached. Expected to turn into starts by later changes: Grok and Gemini when host forms (the connections
+    text's and lossless memory forms) shrink the always-whole frame below their windows; the 85k text route when the
+    owner-chosen narrowings (the accounts' temporary view; the owner's words of other rooms stay one line per message)
+    land. The positive assertion is added per route by the pull request that makes it true. This prices the ordinary
+    builder with the fixture's synthetic schemas; the adapters' own session candidates are driven on the fresh drive
+    (``tests/test_live_call_start_fit.py``). The mature drive holds no MCP servers, running works, nested account
+    changes or gist-bearing finished works (``install``), so its numbers are a lower bound. OpenAI's route is asserted
+    on its real call path instead, through its own session candidate with the call's tools, where it admits the mature
+    and the rich install (``tests/test_live_call_start_fit.py``)."""
     from ouroboros import context, llm
 
     skill, _model, facts = route

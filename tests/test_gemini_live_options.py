@@ -65,7 +65,7 @@ def test_basic_model_and_defaults_do_not_claim_unsupported_controls(gemini):
     assert setup["tools"] == []
     assert "interleaved" in gemini.CATALOG.model().note("thinking")
     assert len(gemini.CATALOG.model().voices) == 30
-    assert "two sessions" in gemini.CATALOG.model("gemini-3.8-live-extended-thinking").facts.source  # measured, thinly
+    assert "hypothesis" in gemini.CATALOG.model("gemini-3.8-live-extended-thinking").facts.source
 
 
 def test_greeting_is_a_host_fact_and_waits_for_active_generation(gemini):

@@ -150,11 +150,10 @@ def test_fresh_default_max_connects_with_real_gemini_envelope_and_allowance(tmp_
         assert wire.closed and len(wire.sent) == 1
         prepared, = [event for event in host_events(host) if event['type'] == 'call.prepared']
         assert not any(event['type'] == 'call.fit_refused' for event in host_events(host))
-        window = CATALOG.model('').facts.conversation_window_tokens  # the shipped Gemini catalogue's own window
-        assert prepared['route_facts']['conversation_window_tokens'] == window
+        assert prepared['route_facts']['conversation_window_tokens'] == 92000
         assert prepared['route_facts']['working_reserve_tokens'] == 10000
         assert prepared['units'] == 'provider'
         measured = prepared['fit']['measurement']
         assert measured['response_reserve_tokens'] == sessions[-1].output_bound_tokens
-        assert measured['estimated_input_tokens'] + measured['response_reserve_tokens'] < window
+        assert measured['estimated_input_tokens'] + measured['response_reserve_tokens'] < 92000
         assert measured['profile'] == 'task_local_nano'

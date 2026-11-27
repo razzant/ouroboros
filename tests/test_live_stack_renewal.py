@@ -78,12 +78,12 @@ def test_full_stack_gemini_retention_or_resume_preserves_conversation(host_world
                 if reason == 'compression':
                     # Intermediate provider sample crosses compression trigger;
                     # settled prompt is small, so the host itself need not renew.
-                    run.wire.put({'usageMetadata': {'promptTokenCount': 128000}})
+                    run.wire.put({'usageMetadata': {'promptTokenCount': 92000}})
                 run.wire.say('Synthetic before token fall.')
                 await run.wait(lambda: run.call.session.held_audio == 300)
                 await run.quiet()
                 if reason == 'compression':
-                    run.wire.put({'usageMetadata': {'promptTokenCount': 128000}})
+                    run.wire.put({'usageMetadata': {'promptTokenCount': 92000}})
                 run.wire.audio_tokens = 50
                 run.wire.say('Synthetic after token fall.')
                 if reason == 'compression':

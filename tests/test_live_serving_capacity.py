@@ -302,7 +302,7 @@ def test_a_native_resume_serves_with_the_catalog_its_opening_declared(host_world
         handle = await host.session(call.consume, LiveOptions())
         assert handle == 'test-resume-handle' and host.plan.initial_mode == 'low'
         if narrowed:
-            host.model = replace(host.model, facts=gemini.FACTS)  # the route's own catalogue window
+            host.model = replace(host.model, facts=gemini.FACTS)  # the route's own 92,000-token window
         call.peers = resumed
         await host.session(call.consume, LiveOptions(resume_handle=handle))
 

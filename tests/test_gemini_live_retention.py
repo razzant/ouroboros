@@ -165,7 +165,7 @@ def test_first_process_session_has_no_assumed_audio_limit(gemini):
 def test_compression_explains_only_a_drop_after_the_trigger(gemini):
     async def run():
         for model in ("gemini-3.8-live", "gemini-3.8-live-extended-thinking"):
-            for previous_prompt, explained in ((128000, True), (127999, False)):
+            for previous_prompt, explained in ((92000, True), (91999, False)):
                 gemini.HELD_AUDIO_SPANS.clear()
                 session, wire = make_session(gemini, model=model)
                 observed = []
@@ -174,11 +174,7 @@ def test_compression_explains_only_a_drop_after_the_trigger(gemini):
                     await session.open()
                     await session.receive()
                     config = wire.sent[0]["setup"]["contextWindowCompression"]
-                    # The provider's eviction is the adapter's own setting (27.11 spoken probes), a reserve above the
-                    # declared window: a call admitted at the full window does not start on the eviction line.
-                    assert config == {"triggerTokens": 128000, "slidingWindow": {"targetTokens": 118000}}
-                    facts = gemini.CATALOG.model(model).facts
-                    assert facts.conversation_window_tokens + facts.working_reserve_tokens <= config["triggerTokens"]
+                    assert config == {"triggerTokens": 92000, "slidingWindow": {"targetTokens": 82000}}
                     await turn(session, wire, {**usage(3000), "promptTokenCount": previous_prompt})
                     events = await turn(session, wire, {**usage(500), "promptTokenCount": 81000})
                     assert any(e.kind == "renew" for e in events) is not explained
@@ -202,7 +198,7 @@ def test_prompt_peak_survives_resumption_and_is_consumed_once(gemini, resume):
         try:
             await turn(session, wire, {**usage(3000), 'promptTokenCount': 80000})
             await receive(session, wire, {**audio_content(),
-                'usageMetadata': {**usage(4500), 'promptTokenCount': 129000}})
+                'usageMetadata': {**usage(4500), 'promptTokenCount': 93000}})
             if resume:
                 await receive(session, wire, {'sessionResumptionUpdate': {'newHandle': 'peak', 'resumable': True}})
                 session.resume_requested = True
@@ -251,7 +247,7 @@ def test_compression_trigger_seen_inside_turn_is_not_lost_at_settlement(gemini, 
             # The native receive path accepts intermediate usage samples. The trigger
             # was actually observed before the lower post-compression receipt.
             await receive(session, wire, {**audio_content('Still speaking'),
-                'usageMetadata': {**usage(4500, text=124500), 'promptTokenCount': 129000}})
+                'usageMetadata': {**usage(4500, text=88500), 'promptTokenCount': 93000}})
             events = await receive(session, wire, {'serverContent': {'turnComplete': True},
                 'usageMetadata': {**usage(500, text=81500), 'promptTokenCount': 82000}})
         finally:

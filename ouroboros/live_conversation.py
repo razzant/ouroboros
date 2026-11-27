@@ -21,7 +21,7 @@ from dataclasses import replace
 from ouroboros.contracts.live_conversation import LiveConfig, LiveOptions
 from ouroboros.contracts.realtime import RealtimeSetupError, canonical_json
 from ouroboros.realtime_setup import (CALL_ENDED_UNSTARTED, _LoopWork, call_ending, loaded_provider, rows_for_engine,
-                                      ending_notice)
+                                      session_refusal_notice)
 from ouroboros.realtime_session import joined
 from ouroboros.realtime_turn import RealtimeTurn
 
@@ -231,8 +231,8 @@ class LiveConversationTurn(RealtimeTurn):
             if (reason == "context_capacity" and not (host is not None and host._session_opened)
                     and hub is not None and hub.ended_by_owner):  # the owner's End came first: it stays the owner's
                 reason, status, detail = "finished", "ok", ""
-            elif host is not None and (notice := ending_notice(host, reason, detail)):
-                detail = notice["text"]  # a refusal's one line, not "Call ended"
+            elif reason == "context_capacity" and host is not None and (notice := session_refusal_notice(host)):
+                detail = notice["text"]  # never opened: the refusal's one line, not "Call ended"
             if host is not None:
                 if failure is not None:
                     host.trace["failure"] = failure
