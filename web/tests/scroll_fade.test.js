@@ -312,9 +312,9 @@ test('a release reaches the binding live on a rebound element, not the spent dis
 // edge and every painted fade. A sheet may say where and how long an edge is, never draw one of its own.
 const SHEETS = readdirSync(new URL('..', import.meta.url)).filter((name) => name.endsWith('.css'));
 const SHARED_EDGE_IMAGES = new Set(['--scroll-fade-y-image', '--scroll-fade-x-image']);
-function gradientsIn(value) {
+function gradientsIn(value, kinds = 'linear|radial|conic') {
     const found = [];
-    for (const match of value.matchAll(/(?:repeating-)?(?:linear|radial|conic)-gradient\(/g)) {
+    for (const match of value.matchAll(new RegExp(`(?:repeating-)?(?:${kinds})-gradient\\(`, 'g'))) {
         let depth = 1, at = match.index + match[0].length;
         while (depth && at < value.length) depth += { '(': 1, ')': -1 }[value[at++]] || 0;
         found.push(value.slice(match.index + match[0].length, at - 1).trim());
@@ -363,7 +363,8 @@ function edgeRecipes(css, sheet) {
                     && !/^#000, ?#000$/.test(stops));
                 if (own.length) found.push(`${rule} ${prop}`);
             }
-            if (/^background(-image)?$/.test(prop) && gradientsIn(value).some((stops) => fades(stops)
+            // A painted edge fades along an axis (a linear gradient); a radial one draws a shape (a radio's dot).
+            if (/^background(-image)?$/.test(prop) && gradientsIn(value, 'linear').some((stops) => fades(stops)
                 && new Set(stops.split(/,(?![^(]*\))/).map((part) => part.trim())).size > 1)) found.push(`${rule} ${prop}`);
             // A blur on anything a sheet masks is an edge: it reads the edge's tokens, in whichever rule it stands.
             if (/^(-webkit-)?backdrop-filter$/.test(prop) && value !== 'none' && !/^var\(--edge-blur-(soft|deep)\)$/.test(value)
@@ -399,6 +400,7 @@ test('every edge in every sheet is the one shared edge', () => {
         .chip { background: linear-gradient(var(--surface-capsule), var(--surface-capsule)), rgba(var(--shell-rgb), 0.98); }
         .glass { backdrop-filter: var(--glass); }
         .bar-meter { background: linear-gradient(to right, var(--accent) 40%, var(--neutral) 40%); }
+        .ui-radio:checked { background-image: radial-gradient(var(--accent) 0 34%, transparent 40%); }
         .list.scroll-fade-y[data-scroll-below] { --scroll-fade-edge: 24px; }
         .opaque { background: linear-gradient(rgba(var(--shell-rgb), 1), rgba(var(--shell-rgb), 1)); }
         .room-edge[data-edge="soft"] { backdrop-filter: var(--edge-blur-soft); }
