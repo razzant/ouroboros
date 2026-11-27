@@ -1075,7 +1075,7 @@ def test_main_offers_a_read_only_archive_of_what_evidence_places(direct_server_w
             page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
             page.add_init_script(f"({_RECORD_FETCHES})()")
             _open(page, url)
-            # A state of the place: said at the feed's own edge, beside Retry and the door (owner decision 27.11.2026).
+            # A state of the place: said at the feed's own edge, beside Retry and the door.
             page.wait_for_function(f"() => document.querySelector('{MAIN} .chat-load-older-note')?.textContent.includes('project list')")
             note = page.locator(f"{MAIN} .chat-load-older-note").first.inner_text()
             assert "The project list can’t be read, so Main’s saved history isn’t shown." in note

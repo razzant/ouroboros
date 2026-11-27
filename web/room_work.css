@@ -209,7 +209,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-extras .chat-budget-word { display: inline; }
 .rw-extras .chat-budget-text { font-size: var(--type-body); color: var(--text-meta); }
 .rw-extras .chat-budget-bar { display: none; }
-/* The Project status bar keeps the room's history note; without one it takes no room (`:empty`, see style.css). */
+/* The Project status bar holds the room's status until this list adopts it; empty, it takes no room (`:empty`). */
 .chat-panel-statusbar:empty { display: none; }
 
 /* ---- the list and its rows ------------------------------------------------------------------------- */

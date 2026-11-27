@@ -94,7 +94,7 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     assert paint["fade"].startswith(("linear-gradient(rgb(", "linear-gradient(180deg,")) and paint["fade"].endswith(clear_end), paint
     assert "0.5" in paint["fade"] and "0.14" in paint["fade"], paint
     # The edge reaches one compact length below the bar on every layout, the desk included. Nothing hangs under the
-    # bar: a failed history read is the page's notice (owner decision 27.11.2026).
+    # bar: a failed history read is the page's notice.
     reach = 32
     assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
     # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.

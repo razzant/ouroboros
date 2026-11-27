@@ -5,7 +5,7 @@ import { normalizeTone } from './ui_helpers.js';
 
 const stackObservers = new WeakMap();
 
-// One place for every notice: the page's stack at the top right (owner 27.11.2026: «Правая верхняя позиция это стандартно»).
+// One place for every notice: the page's stack at the room's top corner (top right in a left-to-right interface).
 function getStack() {
     let stack = document.getElementById('toast-stack');
     if (!stack) {

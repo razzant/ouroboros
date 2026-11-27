@@ -418,7 +418,7 @@ def test_toast_focus_timeout_and_disposal(shell_ui):
     }""")
     page.wait_for_timeout(250)
     assert page.get_by_label("Close test notice").count() == 1
-    # The close is a small plain × in the toast's corner, not the shell's round capsule (owner decision 27.11.2026).
+    # The close is a small plain × in the toast's corner, not the shell's round capsule.
     assert page.get_by_label("Close test notice").get_attribute("class") == "toast-dismiss ui-hit-area"
     page.locator("#chat-input").focus()
     page.wait_for_selector("[aria-label='Close test notice']", state="detached")
