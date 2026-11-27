@@ -69,10 +69,10 @@ D20 = "Presence"
 
 [references]
 # HUMAN section: the manuals that own each domain and non-Python surface, for the
-# `module_map` lookup, review packets and plan seats, and for the addresses the host
-# names where the body is read or changed (`body_candidate.read_contact`, the diff
-# pulse's ownership rows); `scripts/check_domains.py` requires a row per domain and
-# existing files. `--write` leaves it untouched. A path with no row gets no address.
+# `module_map` lookup (a seat with tools) and for the addresses the host names where
+# the body is read or changed (`body_candidate.read_contact`, the diff pulse's
+# ownership rows); `scripts/check_domains.py` requires a row per domain and existing
+# files. `--write` leaves it untouched. A path with no row gets no address.
 D01 = ["docs/architecture/06-1-loop-tools-and-safety.md"]
 D02 = ["docs/architecture/06-2-model-calls-and-budget.md", "docs/MODEL_SEND_OBSERVABILITY.md", "docs/IMAGE_GENERATION.md"]
 D03 = ["docs/architecture/06-1-loop-tools-and-safety.md", "docs/architecture/06-5-planning-memory-and-skills.md"]
@@ -143,6 +143,8 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "ouroboros/gateway/peer_letters_api.py" = "D11"
 "ouroboros/gateway/host_service_places.py" = "D11"
 "ouroboros/places_migration.py" = "D20"
+"ouroboros/telegram_owner_bot.py" = "D20"
+"ouroboros/gateway/host_telegram_feed.py" = "D11"
 "ouroboros/panic_source.py" = "D18"
 "ouroboros/platform_peer.py" = "D18"
 "ouroboros/route_choice.py" = "D12"
@@ -311,6 +313,7 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "ouroboros/arrival_notes.py" = "D03"  # the working-view notes in view, named when the owner's words or press arrive
 "ouroboros/context_source_view.py" = "D03"
 "ouroboros/context_fit.py" = "D03"
+"ouroboros/context_start_bound.py" = "D03"  # the lower bound of a start, refused before the memory capture
 "ouroboros/context_anchor.py" = "D03"  # this conversation's own size anchor and accepted-input floor
 "ouroboros/context_window.py" = "D03"  # typed route/account limits, acceptance and refusal observations
 "ouroboros/context_view_facts.py" = "D03"  # named window and largest selected view elements
@@ -603,6 +606,7 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "ouroboros/oauth_engine.py" = "D05"  # the provider-neutral OAuth client remote MCP sign-ins run on
 "ouroboros/service_sign_in.py" = "D05"  # skills' sign-ins to the services they declare, on the same engine
 "ouroboros/service_sign_in_declaration.py" = "D05"
+"ouroboros/sign_in_offers.py" = "D05"  # where a skill's sign-in was offered in a conversation, and its "connected" row
 "ouroboros/mcp_import.py" = "D05"
 "ouroboros/mcp_result_images.py" = "D05"
 "ouroboros/mcp_task_session.py" = "D05"
@@ -947,6 +951,7 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "ouroboros/tools/control_delegation.py" = "D07"
 "ouroboros/tools/core.py" = "D05"
 "ouroboros/tools/core_artifacts.py" = "D05"
+"ouroboros/link_actions.py" = "D05"  # the send_links action shape: a web address or a sign-in place
 "ouroboros/tools/cards.py" = "D05"
 "ouroboros/card_store.py" = "D05"
 "ouroboros/tools/secret_hitl.py" = "D05"
@@ -1024,7 +1029,6 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "ouroboros/tools/review_collection.py" = "D06"
 "ouroboros/tools/review_checklist.py" = "D06"
 "ouroboros/tools/governance_context.py" = "D06"
-"ouroboros/tools/governance_module_rows.py" = "D06"
 "ouroboros/tools/review_context_atlas.py" = "D06"
 "ouroboros/tools/review_helpers.py" = "D06"
 "ouroboros/tools/review_file_pack.py" = "D06"
@@ -1165,6 +1169,7 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "supervisor/restart_retention.py" = "D08"
 "supervisor/owner_pause_control.py" = "D08"
 "supervisor/owner_pause_resume.py" = "D08"
+"supervisor/panic_choice.py" = "D08"  # the owner's Turn on after Panic that lets a wake return work that Panic stopped
 "supervisor/work_stop_migration.py" = "D08"
 "supervisor/continuation_admission.py" = "D08"
 "supervisor/tree_census.py" = "D08"  # one tree's writer census, its inputs read once per change of its rows

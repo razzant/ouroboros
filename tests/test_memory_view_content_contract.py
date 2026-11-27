@@ -307,7 +307,9 @@ def test_physical_window_replaces_words_with_resolvable_addresses(world, reply_t
         assert row["text"] not in text
         if row["direction"] == "in" or reply_task == "untold-beta":
             assert format_address(row_address(row)) in text
-    assert "read by address" in text
+    from ouroboros.memory_view_conversation_forms import OWNER_ADDRESSES
+
+    assert text.count(OWNER_ADDRESSES) == 1  # my human's message by its address, the reading instruction once (K10b)
     # The room still accounts for the two original and two long rows.
     other = section(text, "## Other conversations")
     room_line = next(line for line in other.splitlines() if f"memory_read(room_id='{chat}', rows=true)" in line)

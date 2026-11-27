@@ -5,6 +5,11 @@ a browser on a computer (the slider gives way to the browser's own zoom keys), t
 for its bridge: the slider and ⌘ + − 0 set the window's size there) and a phone (mobile Chromium honours the viewport
 meta, so the page is laid out at another width). The engines' own page zoom was measured on a real WKWebView for the
 design, not here.
+
+One thing a size other than 100 % must not do is tested here as well: an empty field draws no scroll bar. WebKit lays
+a textarea's placeholder out zoom times as wide as the field (measured in the desktop app's WKWebView under its page
+zoom, and the same under CSS zoom in the WebKit this lane runs), which drew a sideways bar under an empty field; and an
+example of several lines that wrapped past its field's rows drew one down its side (MCP's Arguments, one per line).
 """
 from __future__ import annotations
 
@@ -413,5 +418,95 @@ def test_a_size_is_the_windows_only_once_the_window_takes_it(subscription_ui, th
         forbidden = {'/api/settings', '/api/update/prepare', '/api/update/apply', '/api/command'}
         assert not any(path in forbidden for path, _ in subscription_ui['posts']), \
             'the window facts must not submit settings or update work'
+    finally:
+        page.close()
+
+
+# The multiline fields the product builds, as their builders write them (question_presentation.js, ui_primitives.js,
+# place_connect.js, files.js), each empty with its placeholder, in a box of its own on the real page.
+EMPTY_FIELDS = """() => {
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;inset:0;z-index:9999;overflow:auto;padding:16px;background:var(--bg-primary)';
+    const field = (name, classes, placeholder) => `<textarea data-field="${name}" class="${classes}" rows="3"`
+        + ` placeholder="${placeholder}" style="display:block;flex:none;width:420px;height:96px;min-height:0;margin:0 0 12px"></textarea>`;
+    host.innerHTML = field('answer', 'chat-quiz-comment', 'Your answer or comment…')
+        + field('plain', 'ui-control', 'When should Ouroboros use this?')
+        + field('words', 'ui-control consciousness-owner-words', 'Who am I here? What may I do?')
+        + field('code', 'files-editor ui-control ui-control-code', 'Start typing file contents...');
+    document.body.append(host);
+    return true;
+}"""
+# A bar takes its room out of the field's box: the room between the border box and the client box is the bar (the
+# product's bar is 6 px; a pixel either way is the zoomed box's rounding). `sidewaysScroll` is whether a person can
+# scroll the field sideways at all, `wider` how much there is to scroll.
+BARS = """() => Object.fromEntries([...document.querySelectorAll('[data-field]')].map((field) => {
+    const style = getComputedStyle(field), px = (value) => parseFloat(value) || 0;
+    return [field.dataset.field, {
+        sideways: Math.round(field.offsetHeight - field.clientHeight - px(style.borderTopWidth) - px(style.borderBottomWidth)),
+        down: Math.round(field.offsetWidth - field.clientWidth - px(style.borderLeftWidth) - px(style.borderRightWidth)),
+        sidewaysScroll: ['auto', 'scroll'].includes(style.overflowX), wider: field.scrollWidth - field.clientWidth}];
+}))"""
+
+
+@pytest.mark.parametrize('zoom', ['1', '1.25', '1.5'])
+def test_an_empty_field_draws_no_scroll_bar_at_a_larger_size(size_ui, zoom):
+    page = seed_page(size_ui, 1280, 860)
+    try:
+        page.goto(size_ui['url'])
+        settle(page)
+        assert page.evaluate(EMPTY_FIELDS)
+        # The window's page zoom is the engine's; CSS zoom on the root gives its fields the same layout here.
+        page.evaluate("(zoom) => { document.documentElement.style.zoom = zoom; }", zoom)
+        settle(page)
+        empty = page.evaluate(BARS)
+        assert set(empty) == {'answer', 'plain', 'words', 'code'}, empty
+        assert all(bars['sideways'] < 3 and bars['down'] < 3 for bars in empty.values()), (size_ui['engine'], zoom, empty)
+        # With words in it a field scrolls what it holds: a code field's long line sideways, wrapping words never.
+        page.locator('[data-field="code"]').fill('x' * 400)
+        page.locator('[data-field="answer"]').fill('word ' * 12)
+        settle(page)
+        filled = page.evaluate(BARS)
+        assert filled['code']['sidewaysScroll'] and filled['code']['wider'] > 100, (size_ui['engine'], zoom, filled)
+        assert filled['answer']['sideways'] < 3 and filled['answer']['wider'] <= 1, (size_ui['engine'], zoom, filled)
+    finally:
+        page.close()
+
+
+ARGS = """() => { const field = document.querySelector('[data-mcp-card] [data-mcp-field="args"]');
+    const style = getComputedStyle(field), px = (value) => parseFloat(value) || 0;
+    return {empty: field.matches(':placeholder-shown'), lines: field.placeholder.split('\\n').length, rows: field.rows,
+        sideways: Math.round(field.offsetHeight - field.clientHeight - px(style.borderTopWidth) - px(style.borderBottomWidth)),
+        down: Math.round(field.offsetWidth - field.clientWidth - px(style.borderLeftWidth) - px(style.borderRightWidth)),
+        taller: field.scrollHeight - field.clientHeight, wider: field.scrollWidth - field.clientWidth,
+        sidewaysScroll: ['auto', 'scroll'].includes(style.overflowX)}; }"""
+
+
+def test_a_field_of_one_value_per_line_keeps_its_example_inside_its_rows(size_ui):
+    """MCP's Arguments take one argument per line (mcp_settings.js): no line wraps into what reads as two, so the
+    three-line example stands in the field's three rows at every width and size, and a long argument scrolls sideways."""
+    page = seed_page(size_ui, 1280, 860)
+    try:
+        page.goto(size_ui['url'])
+        open_nav(page, 'settings')
+        level = open_settings(page, 'tools')
+        level.locator('[data-tools-add]').click()
+        card = page.locator('[data-mcp-card]:visible')
+        card.locator('[data-mcp-field="transport"]').select_option('stdio')
+        card.locator('[data-mcp-more] summary').click()
+        seen = {}
+        for width in (1280, 800, 440):
+            page.set_viewport_size({'width': width, 'height': 860})
+            for zoom in ('1', '1.25', '0.5'):
+                page.evaluate("(zoom) => { document.documentElement.style.zoom = zoom; }", zoom)
+                settle(page)
+                seen[(width, zoom)] = page.evaluate(ARGS)
+        assert all(field['empty'] and field['lines'] == field['rows'] == 3 for field in seen.values()), seen
+        assert all(field['sideways'] < 3 and field['down'] < 3 and field['taller'] <= 1 for field in seen.values()), (
+            size_ui['engine'], seen)
+        page.evaluate("() => { document.documentElement.style.zoom = '1'; }")
+        card.locator('[data-mcp-field="args"]').fill('--header=' + 'x' * 300)
+        settle(page)
+        long = page.evaluate(ARGS)
+        assert long['sidewaysScroll'] and long['wider'] > 100 and long['taller'] <= 1, (size_ui['engine'], long)
     finally:
         page.close()

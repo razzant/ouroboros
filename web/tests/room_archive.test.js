@@ -53,15 +53,15 @@ test('only the refusal for the Project registry offers the archive', () => {
 test('the history edge offers the archive for its effective typed refusal, not generic failure or partial history', (t) => {
     const { doc, el } = domDouble();
     const messages = el('div');
-    const statusHost = el('div');
-    doc.body.append(statusHost, messages);
+    doc.body.append(messages);
     const openers = [];
     const archive = archiveDoor({ open: () => { openers.push(doc.activeElement); } });
-    const controls = createHistoryControls(messages, statusHost, { archive });
+    const controls = createHistoryControls(messages, { archive });
     t.after(controls.destroy);
     controls.endRecent(refusal());
     let state = controls.render({ initialized: false, canOlder: false }, {});
     assert.equal(state.note, 'The project list can’t be read, so Main’s saved history isn’t shown.');
+    assert.equal(messages.querySelector('.chat-load-older-note').textContent, state.note, 'a state of the place, at its edge');
     const edge = controls.olderButton;
     assert.equal(edge.textContent, 'Retry loading messages');
     const offered = edge.nextElementSibling;
@@ -251,30 +251,42 @@ test('closing while a read is in flight drops its answer', async (t) => {
     assert.equal(r.restored(), 0);
 });
 
-test('the restoration hint is announced once and sits beside independent partial-page and gap notes', (t) => {
+test('the restoration is told once, only while Main is the room shown, beside independent partial-page and gap facts', (t) => {
     const { doc, el } = domDouble();
     const messages = el('div');
-    const statusHost = el('div');
-    doc.body.append(statusHost, messages);
-    const archive = archiveDoor({ notes: statusHost });
-    const controls = createHistoryControls(messages, statusHost, { archive });
+    doc.body.append(messages);
+    const told = [];
+    const notify = (text, kind) => {
+        const notice = { text, kind, disposed: false, dispose() { this.disposed = true; } };
+        told.push(notice);
+        return notice;
+    };
+    let shown = false;
+    const archive = archiveDoor({ isVisible: () => shown });
+    const controls = createHistoryControls(messages, { archive, notify, isVisible: () => shown });
     t.after(controls.destroy);
-    const line = () => statusHost.querySelector('.chat-registry-restored');
     controls.endRecent(null, false, { project_registry: 'restored' });
-    assert.equal(line()?.textContent, 'Project list restored from its saved copy.');
-    assert.equal(line().hidden, false);
-    const first = line();
+    controls.render({ initialized: true, canOlder: false }, { complete: true });
+    assert.deepEqual(told, [], 'a hidden Main announces nothing: it is owed');
+    shown = true;
+    controls.showNotice();
+    assert.deepEqual(told.map(n => [n.text, n.kind]), [['Project list restored from its saved copy.', 'restored']]);
     controls.endRecent(new Error('Some saved history could not be loaded.'), true, { project_registry: 'restored' });
     const state = controls.render({ initialized: true, canOlder: false }, { gaps: true });
-    assert.equal(state.note, 'Some saved history could not be loaded.', 'the failure note stays');
-    assert.equal(messages.querySelector('.chat-history-gap')?.hidden, false, 'the gap note stays');
-    assert.equal(line().hidden, false, 'and the restore line stands beside both');
+    assert.equal(state.note, 'Some saved history could not be loaded.', 'the failure is the window\'s note');
+    assert.deepEqual(told.map(n => n.text), ['Project list restored from its saved copy.',
+        'Some saved history could not be loaded.'], 'the failure is its own notice');
+    assert.equal(told[0].disposed, false, 'and the restore notice stands beside it');
+    assert.equal(messages.querySelector('.chat-load-older-note').textContent, 'Some saved history could not be loaded.',
+        'the edge says the failure');
     controls.endRecent(null, false, {});
-    assert.equal(line(), first, 'a subsequent page does not restart the one-time hint');
     controls.endRecent(null, false, { project_registry: 'restored' });
+    controls.showNotice();
+    assert.equal(told.filter(n => n.text.startsWith('Project list')).length, 1, 'a later page does not repeat it');
+    controls.hideNotice();
+    assert.equal(told[0].disposed, true, 'Main left or covered: the restore notice leaves with it');
     controls.endRecent(refusal());
     controls.render({ initialized: false });
-    assert.equal(line(), null, 'a newer refusal withdraws the hint');
     assert.equal(controls.olderButton.nextElementSibling?.hidden, false, 'its door stands instead');
 });
 

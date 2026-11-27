@@ -93,7 +93,7 @@ def test_a_routed_message_receipt_reads_the_same_live_and_after_reload(
     bind_task_to_project(tmp_path, "work-1", "blog", project["chat_id"], origin={"absent": "system"})
     write_task_result(tmp_path, "work-1", "running", chat_id=project["chat_id"], title=TITLE, result="working")
     room = dict(id="blog", name="Blog", chat_id=project["chat_id"], lifecycle="active", visible_revision=0)
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
     mounted = mount_sidebar(ui, width, theme, False, [room], [activity("work-1", "blog")])
     if width < 700:  # the narrow layout opened the navigation drawer; choosing Main Chat closes it
         page.locator('#primary-sidebar [data-nav-page="chat"]').click()
@@ -199,7 +199,7 @@ def test_receipt_work_names_show_compact_live_after_reload_and_reconnect(subscri
     page = ui["new_page"](viewport={"width": spec["width"], "height": spec["height"]}, has_touch=spec["touch"])
     history_reads: list = []
     page.on("request", lambda request: history_reads.append(request.url) if "/api/chat/history" in request.url else None)
-    _serve_history(page, tmp_path)
+    _serve_history(page, tmp_path, setup.PREVIEW_SCOPE)
     rooms = [dict(id=p["id"], name=p["name"], chat_id=p["chat_id"], lifecycle="active", visible_revision=0) for p in (blog, watch)]
     mounted = mount_sidebar({**ui, "page": page}, spec["width"], "light", False, rooms, [])
     if spec["width"] < 700:  # the narrow layout opened the navigation drawer; choosing Main Chat closes it

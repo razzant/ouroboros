@@ -218,7 +218,9 @@ def test_maintenance_lost_reply_cancel_and_saved_assignments(subscription_ui, wi
     expect(native_family.get_by_role('button', name='Check latest', exact=True)).to_be_visible()
     assert native_family.locator('[data-maintenance-action="version"]').count() == 0
     assert native_family.locator('[data-maintenance-action="previous"]').count() == 0
-    assert native_family.locator('[data-family-add]').count() == 0
+    # A subscription family (owner's choice A, 26.11.2026) whose program is installed here offers its plain Connect.
+    expect(native_family.locator('[data-family-add]')).to_have_count(1)
+    expect(native_family.locator('[data-family-add]')).not_to_have_text("Install & connect")
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     open_settings(page, "models/role/main")
     expect(model).to_have_value("gpt-test")

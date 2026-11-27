@@ -50,3 +50,8 @@ export function stampNodeTimestamp(node, raw, { anchor = false } = {}) {
     else delete node.dataset.tsTail;
     return order < 0;
 }
+
+// Monotonic causal order across history HTTP read starts and live bubble writes in this document:
+// an HTTP snapshot begun before a live revision never rolls its words back, while one begun after applies.
+let revisionOrderClock = 0;
+export function nextRevisionOrder() { return ++revisionOrderClock; }

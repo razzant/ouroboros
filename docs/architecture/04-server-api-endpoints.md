@@ -6,7 +6,7 @@ This part gives me every route my server answers. Browser/CLI routes: `gateway/r
 
 `server_web.ServedUI` (`server_web.py`) applies `OUROBOROS_UI_DIR` (§7) per generation to `/`, `/static/*`, `onboarding.html` and `auth/index.html`; one record feeds the auth gate, builtin index's response-only owner marker and `StateResponse.served_ui` (source, not digest). Builtin `/onboarding/static/*` and the author kit stay independent; builtin files revalidate `private` (ETag); Telegram phones keep only `GET /static/*`. `GzipText` gzips GET 200 text from 1 KiB (checked against declared `Content-Length`, else the first body chunk, so a stream without `Content-Length` whose first chunk is short passes uncompressed; weak ETag), excluding event streams, downloads and outside stored files (selection, `?builtin=1`, `/auth/*`, fallback: CLIENT_CONTRACT §2–4).
 
-Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity: §11) resolve inside the configured root: in-root symlinks work, while outside links may list (`is_symlink: true`) but are never read, written, downloaded, deleted or traversed. Chat downloads (`?upload=<id>`) use `chat_uploads.open_upload` in `data/uploads`, independent of the Files root. `gateway/host_service.py::create_host_service_app` builds the separate token-authenticated loopback Host Service, not a public owner API (§12).
+Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity: §11) resolve inside the configured root: in-root symlinks work, while outside links may list (`is_symlink: true`) but are never read, written, downloaded, deleted or traversed. Chat downloads (`?upload=<id>`) use `chat_uploads.open_upload` in `data/uploads`, independent of the Files root. `gateway/host_service.py::create_host_service_app` builds the separate token-authenticated loopback Host Service, no public owner API.
 
 | Method | Path | Note |
 |---|---|---|
@@ -252,6 +252,7 @@ Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity:
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/sign-in/token` | caller's own access token (§13) |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/sign-in/handover` | take over caller's earlier sign-ins (§13) |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/notify` | `notify_owner` grant: one signed `skill_notice` System row, no model turn |
+| ANY | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/telegram/feed/{operation}` | `host_telegram_feed.py`, `telegram_owner_bot.py` |
 | WS | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/events` | |
 
 Update-status, log-tail and schedule-list reads run off-loop. `/api/state` adds `current_questions`/`main_attention` and work projections (`works`, `rooms`) with completeness and typed gaps (§3); `active_chat_activities` stays root-only. GET neither scans chat nor writes: requests share one `gateway/state_publication.py` display publication rebuilt only on revision change (never authority), and actions reuse `/api/decisions` and task endpoints.

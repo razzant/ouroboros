@@ -231,9 +231,16 @@ def _build_extensions_index(drive_root, repo_path):
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
 
     live_snapshot = snapshot()
-    from ouroboros.skill_source_catalog import listing_install_fields, listing_snapshots
+    from ouroboros.skill_source_catalog import (
+        add_search_names,
+        listing_install_fields,
+        listing_snapshots,
+        live_widget_titles,
+    )
 
     source_snapshots = listing_snapshots(drive_root)  # cached catalogs only, never a fetch
+    widget_titles = live_widget_titles()  # one registry read: each row binds its own folder's headers
+    local_walk: dict = {}  # each connected folder's packages are enumerated once for the whole listing
     # Scan data plane plus optional external checkout; bootstrap copies native refs.
     skills = discover_skills(drive_root, repo_path=repo_path)
     unique_skills = [
@@ -405,6 +412,7 @@ def _build_extensions_index(drive_root, repo_path):
                 "grants": {},
                 "install": None,
                 "category": [],
+                "catalog_id": None,
                 "removal": "",
             })
             catalog.append(entry)
@@ -417,7 +425,7 @@ def _build_extensions_index(drive_root, repo_path):
             **_review_fields(
                 s, github_token_configured=_gh_token_configured,
             ),
-            **listing_install_fields(drive_root, s, source_snapshots),
+            **listing_install_fields(drive_root, s, source_snapshots, live=widget_titles, local_walk=local_walk),
             "conflict": skill_conflict_status(s, skills),
             "load_error": runtime.get("load_error", s.load_error),
             "desired_live": runtime.get("desired_live", False),
@@ -463,6 +471,8 @@ def _build_extensions_index(drive_root, repo_path):
             if prov:
                 if prov.get("installed_at"):
                     entry["installed_at"] = str(prov.get("installed_at") or "")
+                # The registry's name for people, recorded at install: a search name only, never its identity.
+                add_search_names(entry, prov.get("display_name"))
                 entry["provenance"] = {
                     "slug": prov.get("slug", ""),
                     "version": prov.get("version", ""),

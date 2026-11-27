@@ -239,9 +239,10 @@ def test_real_notification_opens_exact_question_in_project_outside_first_fifty(
                         assert page.locator(f'.nav-project-row[data-project-id="{project["id"]}"]').count() == 0
                         facts["notice_text"] = toast.inner_text()
                         page.screenshot(path=str(evidence / "notice-main-project-closed.png"), animations="disabled")
+                        # The notice's own Open leads to the source; its words and × never do (owner 26.11, A).
                         with page.expect_response(lambda response: "/api/projects?chat_id=" in response.url
                                                   and f"chat_id={project['chat_id']}" in response.url) as addressed:
-                            toast.click()
+                            toast.get_by_role("button", name="Open", exact=True).click()
                         facts["addressed_response"] = addressed.value.json()
                         assert [row["id"] for row in facts["addressed_response"]["projects"]] == [project["id"]]
                         feed = page.locator(f'[id="pchat-{project["id"]}-messages"]')

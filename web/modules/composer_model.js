@@ -1,270 +1,58 @@
 /**
  * The Model capsule (docs/DESIGN.md "Composer owner controls"): the first capsule of the composer's row, before
- * Subagents, Context and Effort, and one of their family closed. A Project room's capsule holds the model new work in
- * that room starts on and saves it for the room; until the room chooses it follows Main and says so: the name word is
- * `Main`, the value Main's model. Changing Main's model or selecting Ultrafast for Main asks for confirmation.
- * Closed, the capsule shows the room's model and its non-Standard tier, never the model of a running work.
+ * Subagents, Context and Effort, and one of their family closed. It holds the model the next work in its room starts
+ * on and keeps it until its owner changes it; the Main chat's own is also what a new room copies. Until a room
+ * chooses it follows Main and says so: the name word is `Main`, the value Main's model. Closed, the capsule shows the
+ * room's model and its non-Standard tier, never the model of a running work. No pick here writes Main the role.
  *
- * A press opens the Model sheet (model_sheet.js; never hover): search, Main, the pinned and recent
- * models, all sources, and at its foot the room's processing tier. The sheet lists only the sources that can lead a
- * work, one row per (source, model) (chat_model_routes.js); the catalog suggests and never admits, so any id can still
- * be typed. A room's pick saves at once through `POST /api/owner/chat-model`, its tier through
- * `POST /api/owner/chat-processing`; Send waits for both. The strip offers what the scope's own route says where it
- * is bound (processing_choice.js): what follows Main runs on Main's account, its pin or Auto, which the settings say
- * (until they do nothing of an account is confirmed: an unread pin is never read as Auto); a room's own model on
- * Auto across its source's accounts.
+ * A press opens the Model sheet (model_sheet.js; never hover): search, the pinned and recent models, all sources, and
+ * at its foot the room's processing tier. The sheet lists only the sources that can lead a work, one row per
+ * (source, model) (chat_model_routes.js); the catalog suggests and never admits, so any id can still be typed. A row
+ * is always that route: the one current now changes nothing, and none follows Main again. A pick saves at once
+ * through `POST /api/owner/chat-model`, its tier through `POST /api/owner/chat-processing`; Send waits for both. The
+ * strip offers what the scope's own route says where it is bound (processing_choice.js): what follows Main runs on
+ * Main's account, its pin or Auto, which the settings say (until they do nothing of an account is confirmed: an
+ * unread pin is never read as Auto); a room's own model on Auto across its source's accounts.
+ *
+ * A pick that leaves the room on another model than it was arms this window: its next message is sent as new work on
+ * that model (`newWork`), whatever work already runs here. The frame names only the saved choice's token; the host
+ * assigns the model and tier from what is saved and says on the echo whether the message was taken so.
  */
-import { apiClient, taskModel } from './api_client.js';
-import { APPLIED_WORDS, basisWords, leadView, refusalWords } from './card_model.js';
-import { openConfirmDialog } from './confirm_dialog.js';
-import { fmt, fmtInto, tr, translateString } from './i18n.js';
-import { routeFacts } from './model_list.js';
+import { apiClient } from './api_client.js';
+import { fmt, tr } from './i18n.js';
 import { haptic } from './haptics.js';
 import { isCoarsePointer, isStackLayout } from './layout.js';
-import { CONNECTION_CONDITION, modelCatalog, revisionIn } from './model_catalog_store.js';
-import { MAIN_FOLLOW_NOTE } from './model_roles.js';
+import { modelCatalog } from './model_catalog_store.js';
 import { openModelSheet } from './model_sheet.js';
 import { sourceMark } from './model_source_mark.js';
-import { MAIN_ULTRAFAST_SCOPE, MAIN_ULTRAFAST_ROLES, MAIN_ULTRAFAST_ROLLBACK, PIN_OBSERVATION, canChooseTier, confirmMainUltrafast, resolvedTier, routeTiers, tierBinding, tierNamed, tierWord } from './processing_choice.js';
-import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
+import { confirmChatUltrafast, resolvedTier, routeTiers, tierNamed, tierWord } from './processing_choice.js';
+import { modalNotice } from './toast.js';
 import { bindPopoverPosition } from './ui_interactions.js';
-import { escapeHtmlAttr as esc } from './ui_primitives.js';
-import { clock, workControls } from './work_status.js';
 import {
-    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, routeSource, sameRoute, shortName, sourceUnlisted,
+    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, routeSource, sameRoute, sourceUnlisted,
 } from './chat_model_routes.js';
 
-// When a pick of Main takes effect, its confirming sheet's rule line.
-export const MAIN_RULE = 'New work starts on it everywhere, unless a room has its own model.';
-/** The sheet's own fact about what follows Main, said where Main is changed (owner 2026-11-15, #3271): a fact, never
- *  a forecast of cost. The catalog's cache-write price follows it when the catalog states one. */
-export const MAIN_CACHE_NOTE = 'Whatever follows Main (running works, child works, a consciousness wake) may write most of its start to the new model\'s cache again at its next call.';
-// How long Main's sheet waits for a state read taken for it before it lists what the page already has.
-const FRESH_STATE_MS = 700;
-const MAIN_TIER_CHANGED = 'Main changed. Check the current model and account, then choose its tier again.';
-const MAIN_MODEL_CHANGED = 'Main changed on another device. Check its model and tier, then choose again: nothing was changed.';
-const SOURCE_CHANGED = 'The key {model} goes through changed on another device. Its tiers were read again: check them, then choose again.';
-let serial = 0;
+/** Whether two saved choices are one: both follow Main, or both name the same route. */
+export const sameChoice = (one, other) => one?.kind === other?.kind
+    && (one?.kind === 'main' || sameRoute(normalizeRoute(one), normalizeRoute(other)));
 
-/**
- * What a change of Main does not move, from the state the page already has (CLIENT_CONTRACT §5 `works[].lead`, §9
- * `projects[].model_choice`): how many running works follow Main, the works that are not on Main, and the rooms that
- * start new work on their own model. `followers` is null when the census is incomplete: an unknown count is never
- * said as zero. A work on a fallback is one that is not on Main, whatever it left, and never one that will switch.
- * A row's `id` is the task or the room its tick acts on; a work the server offers no model control for has none.
- */
-export function mainSheetLists({ works = null, complete = false, projects = [], index = null } = {}) {
-    const rooms = (Array.isArray(projects) ? projects : []).filter((project) => project?.id);
-    const roomOf = (work) => (work.project_id ? rooms.find((project) => project.id === work.project_id)?.name || work.project_id
-        : tr('model.sheet.main_chat', 'Main Chat'));
-    const off = [];
-    let followers = 0;
-    for (const work of Array.isArray(works) ? works : []) {
-        if (!work || work.confirmed === false) continue;
-        const said = leadView(work.lead, { index, since: clock(work.lead?.since) });
-        if (!said) continue;
-        if (said.basis === 'main') { if (work.activity !== 'queued') followers += 1; continue; }
-        off.push({ kind: 'work', id: workControls(work).model, room: roomOf(work),
-            name: String(work.name || '') || tr('model.sheet.unnamed', 'Unnamed work'),
-            model: `${said.said.sourceLabel} · ${said.said.short}`, fallback: said.fallback,
-            why: said.fallback ? (said.since ? fmt('fallback since {time}', { time: said.since }) : basisWords('fallback'))
-                : said.basis === 'room' ? tr('model.basis.room.elsewhere', 'its room\'s model') : basisWords(said.basis) });
-    }
-    const own = rooms.filter((project) => normalizeChoice(project.model_choice).kind === 'model' && !project.closed
-        && !['deleting', 'tombstoned'].includes(project.lifecycle)).map((project) => {
-        const said = describeRoute(index, project.model_choice);
-        return { kind: 'room', id: project.id, name: String(project.name || project.id), model: `${said.sourceLabel} · ${said.short}` };
-    });
-    return { followers: complete && Array.isArray(works) ? followers : null, works: off, rooms: own };
-}
-
-// One row of the sheet's lists: a name over its facts and, where it can be moved, its own tick (a label, so the
-// whole row presses it). After the change the same row says its result instead. The row's model words come back as
-// `modelText`, so a sheet that says them again keeps the row's node and its tick.
-function offRow(doc, entry, { result = null } = {}) {
-    const made = (tag, className, text) => {
-        const node = doc.createElement(tag);
-        node.className = className;
-        if (text !== undefined) node.textContent = text;
-        return node;
-    };
-    const row = made(entry.id && !result ? 'label' : 'div', 'chat-model-off');
-    const name = made('span', 'chat-model-off-name', entry.name);
-    name.dataset.i18nAuthored = '';
-    const meta = made('span', 'chat-model-off-meta');
-    meta.dataset.i18nSkip = '';
-    if (result) {
-        row.dataset.result = result.ok ? 'moved' : 'refused';
-        meta.append(made('span', '', result.words));
-        row.append(name, meta);
-        return { row, input: null };
-    }
-    const modelText = made('span', '', entry.why ? `${entry.model} · ` : entry.model);
-    meta.append(modelText);
-    if (entry.why) meta.append(made('span', entry.fallback ? 'model-fallback' : '', entry.why));
-    if (entry.room) meta.append(made('span', '', ` · ${entry.room}`));
-    let input = null;
-    if (entry.id) {
-        input = made('input', 'ui-checkbox');
-        input.setAttribute('type', 'checkbox');
-        input.dataset.move = `${entry.kind}:${entry.id}`;
-        input.checked = false;  // nothing is ticked until the owner ticks it
-    }
-    row.append(...[name, input, meta].filter(Boolean));
-    return { row, input, modelText };
-}
-function offList(doc, rows) {
-    const list = doc.createElement('ul');
-    list.className = 'chat-model-off-list';
-    for (const { row } of rows) {
-        const item = doc.createElement('li');
-        item.append(row);
-        list.append(item);
-    }
-    return list;
-}
-
-// What a built row's model words say as this catalog has it now: `again` is the row's own entry as the same list
-// builder says it from a fresher index. Only the words move — the row's node, its tick and its target stay the
-// sheet's own — and a row whose fresh entry is not its own keeps the words it was built with.
-function resayRow(made, again) {
-    if (!again || again.id !== made.entry.id) return;
-    const shown = made.entry.why ? `${again.model} · ` : again.model;
-    if (made.modelText.textContent !== shown) made.modelText.textContent = shown;
-}
-
-/**
- * The confirming sheet of a pick in the Main chat, on the shared dialog: what Main becomes and what it was, the new
- * route's facts, what running work does, how many running works follow Main, and in its one sentence what else the
- * change resets. Under them, what is not on Main now (`census`: the page's last state, see mainSheetLists): the works
- * on other models and the rooms with their own, each with a tick to move it too, none ticked beforehand. A catalog
- * read that renames a source reaches these rows like the heading: their model words are said again in place, their
- * nodes, ticks and targets untouched.
- * Resolves false when the owner cancels, else `{ moves }`: the ticked rows, each to be moved by its own act.
- */
-export async function confirmMainChange({ next, previous, census = null, tierNote = '', store = null, dialog = openConfirmDialog, doc = globalThis.document }) {
-    const resets = previous?.lane === 'subscription' && next.source !== previous.source
-        ? 'If Main\'s account is pinned it becomes Auto, and a context window set by hand for Main is cleared.'
-        : 'A context window set by hand for Main is cleared.';
-    const lists = mainSheetLists(census || {});
-    const ticks = [];
-    const confirmed = await dialog({
-        title: 'Change Main',
-        body: resets,
-        confirmLabel: 'Change Main',
-        content: { label: 'Main model', mount(container, sheet) {
-            const line = (text) => {
-                const made = doc.createElement('p');
-                made.className = 'chat-model-sheet-fact';
-                if (text !== undefined) made.textContent = text;
-                return made;
-            };
-            const suffix = previous ? `<span data-i18n-skip>${esc(fmt('was {model}', { model: previous.short }))}</span>` : '';
-            const rowHtml = (mark) => `${mark}<b data-i18n-skip>${esc(next.id)}</b>${suffix}`;
-            let markKey = null;
-            const row = doc.createElement('p');
-            row.className = 'chat-model-sheet-row';
-            const facts = line();
-            facts.dataset.i18nSkip = '';
-            const offWorks = [], offRooms = [];  // the built rows, in their lists' order: their model words are the one
-                                                 // part of a row a catalog read can change
-            const syncSource = () => {
-                const index = store?.index ? store.index() : null;
-                const fresh = next?.route && index ? describeRoute(index, next.route) : null;
-                const mark = sourceMark(fresh || next);
-                if (mark !== markKey) {
-                    markKey = mark;
-                    row.innerHTML = rowHtml(mark);
-                }
-                const shownFacts = `${routeFacts(fresh ? { ...next, sourceLabel: fresh.sourceLabel } : next)}.`;
-                if (facts.textContent !== shownFacts) facts.textContent = shownFacts;
-                if (!index) return;
-                // What is not on Main now says its model as this catalog has it now too: the same census, said again
-                // by the same list builder, rewrites each row's model words in place — a late rename of a source
-                // reaches them like the heading, while their nodes, ticks and whom the confirm moves stay put.
-                const again = mainSheetLists({ ...(census || {}), index });
-                offWorks.forEach((made, at) => resayRow(made, again.works[at]));
-                offRooms.forEach((made, at) => resayRow(made, again.rooms[at]));
-            };
-            syncSource();
-            const count = line();
-            count.dataset.mainFollowers = lists.followers === null ? 'unknown' : String(lists.followers);
-            if (lists.followers === null) count.textContent = 'How many running works follow Main is unknown right now: the list of running work is incomplete.';
-            else if (lists.followers === 0) count.textContent = 'No running work follows Main now.';
-            else if (lists.followers === 1) count.textContent = '1 running work follows Main now.';
-            else fmtInto(count, '{n} running works follow Main now.', { n: lists.followers });
-            const cache = line(next.cacheWrite ? `${translateString(MAIN_CACHE_NOTE)} ${next.cacheWrite}` : MAIN_CACHE_NOTE);
-            if (next.cacheWrite) cache.dataset.i18nFmt = 'main cache note';  // composed: the overlay leaves it alone
-            // Main's own tier goes with it: what the new route says of that tier, said before the write.
-            const tier = tierNote ? line(tierNote) : null;
-            if (tier) tier.dataset.i18nSkip = '';
-            container.append(...[row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), cache, tier, count].filter(Boolean));
-            const sub = (text) => { const made = line(text); made.className = 'chat-model-sheet-sub'; return made; };
-            const section = (entries, heading, into) => {
-                if (!entries.length) return;
-                const rows = entries.map((entry) => ({ entry, ...offRow(doc, entry) }));
-                ticks.push(...rows.filter((made) => made.input));
-                into.push(...rows);
-                container.append(heading, offList(doc, rows));
-            };
-            section(lists.works, sub(lists.works.some((entry) => entry.id) ? 'Not on Main now · tick to move too' : 'Not on Main now'), offWorks);
-            const roomsHead = sub();
-            fmtInto(roomsHead, 'Rooms that start new work on their own model · {n}', { n: lists.rooms.length });
-            section(lists.rooms, roomsHead, offRooms);
-            syncSource();  // the rows say the catalog as it is now, not only as the census met it
-            const unsubStore = typeof store?.subscribe === 'function' ? store.subscribe(syncSource) : null;
-            const onTick = () => {
-                const n = ticks.filter((made) => made.input.checked).length;
-                if (n) sheet?.setConfirmLabel('Change Main and move {n} more', { n });
-                else sheet?.setConfirmLabel('Change Main');
-            };
-            if (ticks.length) {
-                container.append(line('A ticked work follows Main from its next step; a ticked room starts new work on Main.'));
-                container.addEventListener('change', onTick);
-            }
-            if (!unsubStore && !ticks.length) return undefined;
-            return () => {
-                unsubStore?.();
-                if (ticks.length) container.removeEventListener('change', onTick);
-            };
-        } },
-    });
-    return confirmed ? { moves: ticks.filter((made) => made.input.checked).map((made) => made.entry) } : false;
-}
-
-/**
- * What the ticked rows did, each in its own words, on the shared dialog: every tick was one act after Main was
- * written, so every row has its own result (a work's answer says when it switches; a refusal says the server's words).
- */
-export function showMainMoves({ results, dialog = openConfirmDialog, doc = globalThis.document }) {
-    const moved = results.filter((result) => result.ok).length;
-    return dialog({
-        title: 'Main changed',
-        alert: true,
-        body: moved === results.length ? (moved === 1 ? '1 more was moved to Main.' : fmt('{n} more were moved to Main.', { n: moved }))
-            : fmt('{moved} of {n} were moved to Main.', { moved, n: results.length }),
-        content: { label: 'What was moved', mount(container) {
-            container.append(offList(doc, results.map((result) => offRow(doc, result, { result }))));
-        } },
-    });
-}
+/** Said instead of saving when this window is newer than the server it reached: nothing is sent there. */
+export const SERVER_OLDER = 'Ouroboros is running an older version than this window, so nothing was changed here. Finish the update or restart Ouroboros, then reload.';
+export const CHAT_NOT_READ = 'This chat’s model is not read from Ouroboros yet. Try again in a moment.';
 
 /**
  * The capsule in its room's composer row. `save(body)` is the owner write (`apiClient.ownerChatModel`),
- * `saveTier(body)` the room's or Main's own processing tier (`apiClient.ownerChatProcessing`), `openSettings()`
- * Settings › Accounts and keys, `askMain({next, previous, census, tierNote})` the Main chat's confirming sheet,
- * `askTier(facts)` the question before Main takes Ultrafast (processing_choice.js), `moveWork(taskId)`
- * one work's return to Main and `sayMoves({results})` the sheet of what its ticks did, `store` the window's catalog
- * store, `place(sheet, anchor)` the sheet's place above the row.
- * Returns `{ el, capsule, syncState(data), hasPendingSave, pendingSave, pick, chooseTier, open, destroy }`.
+ * `saveTier(body)` the room's own processing tier (`apiClient.ownerChatProcessing`), `openSettings()`
+ * Settings › Accounts and keys, `askTier(facts)` the question before the Main chat takes Ultrafast
+ * (processing_choice.js), `onNewWork()` follows every change of what the next message would be sent as, `store` the
+ * window's catalog store, `place(sheet, anchor)` the sheet's place above the row.
+ * Returns `{ el, capsule, syncState(data), hasPendingSave, pendingSave, pick, chooseTier, newWork, open, destroy }`.
  */
 export function createModelControl({
     el, row, projectId = '', chatId = projectId ? null : 1, save = apiClient.ownerChatModel,
     saveTier = apiClient.ownerChatProcessing, openSettings = () => {},
-    showToast = () => {}, refreshState = () => {}, onLayout, onSettled, askMain = confirmMainChange,
-    askTier = confirmMainUltrafast, store = modelCatalog,
-    moveWork = (taskId) => taskModel(taskId, globalThis.crypto?.randomUUID?.() || `main-sheet-${Date.now()}-${++serial}`, { action: 'follow' }),
-    sayMoves = showMainMoves,
+    showToast = () => {}, refreshState = () => {}, onLayout, onSettled, onNewWork = () => {},
+    askTier = confirmChatUltrafast, store = modelCatalog,
     isStack = () => isStackLayout(), isCoarse = () => isCoarsePointer(),
     // Anchored to the row, as the hint is to its capsule: the composer under it never moves.
     place = (sheet) => bindPopoverPosition(sheet, { anchor: row, align: 'start' }),
@@ -283,23 +71,41 @@ export function createModelControl({
     const value = el.querySelector('.chat-capsule-value');
     const tierWordEl = el.querySelector('.chat-capsule-tier');
 
-    // `main` is what Main is now (the state body's `main_route` field), `choice` the room's own (`projects[].model_choice`),
-    // `tier` its own processing tier (`projects[].processing_choice`, '' = Default); the Main chat's capsule is Main, so
-    // its tier is Main's own (`processing_tiers.main`). `works`, `complete` and `projects` are the last state body's
-    // census, for the sheet's fact lines and Main's confirming sheet.
-    const state = { main: null, choice: { ...MAIN_CHOICE }, tier: '', works: null, complete: false, projects: [],
+    // `main` is what Main the role is now (the state body's `main_route`), `choice` the room's own model for new work
+    // (`projects[].model_choice`; the Main chat's is `main_chat.model_choice`) and `tier` its own processing tier
+    // (`processing_choice`, '' = Default).
+    // `withheld`: the Main chat's saved Ultrafast names another model or account than its new work runs on now
+    // (`main_chat.processing_withheld`), so its tier reads Default and the strip says why. `keepsChat`: whether the running server keeps the Main chat's own model
+    // and tier apart from Main the role, which its state body says by carrying `main_chat` (null until one is read).
+    const state = { main: null, choice: { ...MAIN_CHOICE }, tier: '', withheld: false, keepsChat: null,
         saving: null, tierSaving: null, lastOk: true, destroyed: false };
+    // The scope each save names: a room by its id, the Main chat by `scope` (a body with neither is an older page's
+    // write of Main the role, which the host refuses).
+    const scoped = (body) => (projectId ? { ...body, project_id: projectId } : { ...body, scope: 'main_chat' });
+    // A window newer than its server (an update not finished, or rolled back) never sends the Main chat's choice
+    // there: an older server reads a body without a room as Main the role's own and would change that instead.
+    // `say` is the press's own notice (a tier's, pressed in the sheet it leaves open); a pick's sheet has closed.
+    const serverOlder = (say = showToast) => {
+        if (!isMain || state.keepsChat === true) return false;
+        say(state.keepsChat === false ? tr('chat.model_server_older', SERVER_OLDER) : tr('chat.model_not_read', CHAT_NOT_READ), 'info');
+        return true;
+    };
+    // This window's pick left the room on another model than it was: `token` names the saved choice, `choice` is it,
+    // `baseline` what the room had before. Null: an ordinary message. `flight` is that record once a message went
+    // out naming it (`id`), kept until the host says how it took the message; `freed` when the owner gave the
+    // message's unconfirmed copy up first. A pick made while it waits is another choice with its own record.
+    let armed = null, flight = null;
     let sheet = null, markKey = null, nameWords = null;
     let detailAsked = null;  // the routed value whose own endpoints the open sheet asked for
 
-    const shown = () => (isMain || state.choice.kind === 'main' ? state.main : normalizeRoute(state.choice));
-    const follows = () => isMain || state.choice.kind === 'main';
+    const follows = () => state.choice.kind === 'main';
+    const shown = () => (follows() ? state.main : normalizeRoute(state.choice));
     const tiers = () => store.tiers?.() || null;
-    // The tier this scope's new work takes: its own, else Main's for what follows Main, else the default one.
-    const resolved = () => (isMain ? resolvedTier({ choice: tiers()?.main || '', tiers: tiers() })
-        : resolvedTier({ choice: state.tier, follows: follows(), tiers: tiers() }));
-    // The tier a pick would run on here, for the catalog's price beside it (a catalog price is Standard's).
-    const tierOf = (route, { main = false } = {}) => (isMain ? resolved()
+    // The tier this room's new work takes: its own, else Main's for what follows Main, else the default one.
+    const resolved = () => resolvedTier({ choice: state.tier, follows: follows(), tiers: tiers() });
+    // The tier a pick would run on here, for the catalog's price beside it (a catalog price is Standard's). The row
+    // current now changes nothing when pressed, so it keeps the tier the room's work runs on: Main's while it follows.
+    const tierOf = (route, { main = false, current = false } = {}) => (current ? resolved()
         : state.tier || resolvedTier({ follows: main, tiers: tiers() }));
     const describe = (route) => (route ? describeRoute(store.index(), route, { tier: resolved() }) : null);
     // The account `route` runs on here: Main's own for what follows Main (its pin, '' for Auto, null until the
@@ -316,6 +122,24 @@ export function createModelControl({
         if (!sheet || !route || asking === detailAsked) return;
         detailAsked = asking;
         void store.readDetail?.(route);
+    }
+    function arm(next) {
+        armed = next;
+        if (!state.destroyed) onNewWork();
+    }
+    // The message in flight landed: `spent` (new work started on its choice), `waits` (the host gave it to a work, or
+    // its owner gave its copy up: the choice waits for a message again) or `void` (refused: the choice is not the
+    // room's any more). A pick made meanwhile is its own choice, never this message's: it only learns what the room
+    // stood on before it, which was read as this message's choice while it flew.
+    function land(how) {
+        const { token, choice, baseline } = flight;
+        const read = flight.freed ? baseline : choice, stands = how === 'spent' ? choice : baseline;
+        if (how === 'waits') flight = { ...flight, freed: true };  // a copy given up may still prove taken
+        else flight = null;
+        if (!armed) return void (how === 'waits' && arm({ token, choice, baseline }));
+        if (how === 'void' && armed.token === token) return void arm(null);
+        if (!sameChoice(armed.baseline, read) || sameChoice(read, stands)) return;
+        arm(sameChoice(armed.choice, stands) ? null : { ...armed, baseline: stands });
     }
 
     function render() {
@@ -342,122 +166,113 @@ export function createModelControl({
         if (tierWordEl.textContent !== tierText) tierWordEl.textContent = tierText;
         tierWordEl.hidden = !tierText;
         el.dataset.tier = tier || 'default';
-        const tierSaid = tierText ? `, ${tierText}` : '';
-        head.setAttribute('aria-label', !said ? 'Model for new work: not read yet'
-            : isMain ? fmt('Main model: {model}, {source}.', { model: `${said.short}${tierSaid}`, source: said.sourceLabel })
-                : follows() ? fmt('Model for new work here: {model}, {source}. Follows Main.', { model: `${said.short}${tierSaid}`, source: said.sourceLabel })
-                    : fmt('Model for new work here: {model}, {source}.', { model: `${said.short}${tierSaid}`, source: said.sourceLabel }));
+        const facts = said ? { model: `${said.short}${tierText ? `, ${tierText}` : ''}`, source: said.sourceLabel } : null;
+        head.setAttribute('aria-label', !facts ? 'Model for new work: not read yet'
+            : isMain ? fmt(follows() ? 'Model for new work here and in new rooms: {model}, {source}. Set in Settings › Models.'
+                : 'Model for new work here and in new rooms: {model}, {source}.', facts)
+                : fmt(follows() ? 'Model for new work here: {model}, {source}. Set in Settings › Models.'
+                    : 'Model for new work here: {model}, {source}.', facts));
         // The settings document, read only when it changes a word: why a saved API source this catalog did not list
-        // cannot send, or in Main the cache tier a catalog's cache-write figure is said for (Main's confirming sheet).
-        if (said && store.status().read && !store.status().failed
-            && (sourceUnlisted(store.index(), shown()) || (isMain && store.index().cacheFigures))) void store.readConnections();
+        // cannot send.
+        if (said && store.status().read && !store.status().failed && sourceUnlisted(store.index(), shown())) void store.readConnections();
         syncDetail();
         sheet?.paint();
     }
 
-    /* --- the sheet's words: what the tier strip applies to, and what each tier means on this route --- */
+    /* --- the sheet's words: what a pick leaves behind, what the tier strip applies to --- */
+    // Said above the rows while the room still follows Main, before any pick. It names where that model is set
+    // (Settings › Models: "Main" alone reads as the Main chat's own capsule) and Main's pinned account, then what a
+    // pick does: new tasks take it as every room's own model runs (Auto across its source's accounts, the model's own
+    // window, never Main's binding), and running ones keep theirs.
+    function followNote() {
+        if (!follows() || !state.main) return '';
+        const pin = accountOf(state.main);
+        const picks = tr('model.note.own_route', 'New tasks here take the model you pick, on Auto across its source’s accounts and with its own context window; running tasks keep theirs.');
+        return `${pin ? fmt('This model is set in Settings › Models, on its pinned account {account}.', { account: pin }) : tr('model.note.follows', 'This model is set in Settings › Models.')} ${picks}`;
+    }
     function scopeWords() {
         const tier = resolved();
-        const own = isMain ? tiers()?.main : state.tier;
-        const state_ = own || !tier ? tierWord(tier)
-            : fmt(!isMain && follows() ? 'Default · {tier} as Main' : 'Default · {tier}', { tier: tierWord(tier) });
+        const state_ = state.tier || !tier ? tierWord(tier)
+            : fmt(follows() ? 'Default · {tier} as Main' : 'Default · {tier}', { tier: tierWord(tier) });
         // The tier a work runs on, its own or Default's (Main's included), reaches its new subagents without one
         // (owner 13.11).
-        if (!isMain) return `${state_} · ${tr('processing.scope.room_helpers', 'for new work here and its new subagents without a tier of their own; running work keeps its own')}`;
-        // The model census describes the acting route, not where its tier came from.
-        return `${state_} · ${tr('processing.scope.main_inheritance', 'for Main and work that inherits its tier, even on a fallback model; new subagents without their own tier inherit it too')}`;
+        const scope = !isMain ? tr('processing.scope.room_helpers', 'for new work here and its new subagents without a tier of their own; running work keeps its own')
+            // The Main chat's Ultrafast stands on the one route it was asked for, and no room copies it. On a
+            // work carries it from the first call; API work must still use the same connection.
+            : state.withheld ? tr('processing.scope.chat_ultrafast_withheld', 'The saved Ultrafast no longer matches the destination of new work here. New work takes Default until you confirm again.')
+            : state.tier === 'ultrafast' && profiled() ? tr('processing.scope.chat_ultrafast_profile', 'for new work here, on its own calls to this model and profile from the first one; no new room copies it, running work keeps its own')
+            : state.tier === 'ultrafast' ? tr('processing.scope.chat_ultrafast', 'for new work here, on calls to this model through the confirmed destination; no new room copies it, running work keeps its own')
+                : tr('processing.scope.chat_helpers', 'for new work here and its new subagents without a tier of their own; a new room copies it, running work keeps its own');
+        return `${state_} · ${scope}`;
     }
-    const tierView = () => {
-        const here = tiersOf(shown());
-        return {
-            choice: isMain ? tiers()?.main || '' : state.tier,
-            resolved: resolved(),
-            busy: Boolean(state.tierSaving),
-            scope: scopeWords(),
-            ...here,
-        };
-    };
-    // Main's Ultrafast asks first, for Main as it is bound at the press (its route, its account, and the engine
-    // store and account fingerprint the catalog names): what it reaches, what that route says of it and what it is
-    // listed at where that is told. A Main that moved under the question was not asked about: nothing is written.
-    async function confirmUltrafast() {
+    // Whether new work here runs pinned to a named subscription profile (never while its pin is Auto or not read).
+    const profiled = () => { const route = shown(); return Boolean(route && routeSource(route).startsWith('subscription:') && accountOf(route)); };
+    const tierView = () => ({ choice: state.tier, resolved: resolved(), busy: Boolean(state.tierSaving),
+        scope: scopeWords(), ...tiersOf(shown()) });
+    // The Main chat's Ultrafast asks first: for the route the sheet shows, with what the tier follows there, what
+    // that route says of it and what it is listed at where that is told. The answer is what was asked about, by
+    // name: the model, its locality, the subscription profile its new work is pinned to ('' on Auto and where a
+    // route has none) and on an API route its connection's revision as read. Nothing identifies the account signed
+    // in to a profile: the tier follows its name, and the question says so; Auto is said as its
+    // source's pool. The host saves the tier for that route: on another model, profile or connection new work is
+    // Default again. A route that moved under the question, or a pin or connection not read yet, was not asked
+    // about: nothing is written.
+    // `say` is the press's own notice (toast.js `modalNotice`): the sheet's while it stays open, the page's once it has closed.
+    async function confirmUltrafast(say) {
         const fromSheet = sheet;
-        const bound = () => tierBinding(store.index(), state.main, accountOf(state.main));
-        const route = state.main;
-        const pin = accountOf(route);
-        const tier = tiers()?.main;
-        const shownSource = store.revisionOf?.(route) ?? null;  // the source whose tiers the sheet showed
-        let read;
-        try { read = await store.readMainTierSettings(); } catch (error) {
-            if (!state.destroyed) showToast(error?.message || MAIN_TIER_CHANGED, 'error');
+        const route = shown();
+        if (!route) return null;
+        // This source's endpoints, never another's (the price below is theirs), and the settings that name Main's
+        // account and each connection's revision.
+        await Promise.all([store.readDetail?.(route), store.readConnections?.()]);
+        if (state.destroyed || sheet !== fromSheet || !sameRoute(route, shown())) return null;
+        const said = describe(route);
+        const subscription = routeSource(route).startsWith('subscription:');
+        // The profile's name where the route has accounts (null: its pin is not read), '' where it has none.
+        const bound = () => ({ account: subscription ? accountOf(route) : '', revision: store.revisionOf?.(route) ?? '' });
+        const first = bound();
+        if (first.account === null || store.revisionOf?.(route) === null) {
+            say('Main’s account or this connection is not read yet, so Ultrafast was not set. Try again.', 'info');
             return null;
         }
-        if (state.destroyed || sheet !== fromSheet) return null;
-        // The read is what the question stands on: its source, its pin, its tiers. A pin this page had not read yet
-        // (null) is learnt, never a change; one it had read and that now reads otherwise is one.
-        store.adoptSettings?.(read.settings);
-        const source = revisionIn(read.settings, route);
-        const asked = bound();
-        const stillShown = () => bound() === asked && tiers()?.main === tier && canChooseTier('ultrafast', tiersOf(state.main))
-            && (store.revisionOf?.(route) ?? null) === source;
-        if (!sameRoute(state.main, route) || !sameRoute(read.route, route) || (pin !== null && read.account !== pin) || read.tier !== tier) {
-            showToast(MAIN_TIER_CHANGED, 'info');
-            return null;
-        }
-        if (source === null) {  // an API connection the read gives no revision for: nothing to bind the yes to
-            showToast('Could not verify the key Main uses. Reload, then choose again.', 'error');
-            return null;
-        }
-        if (shownSource && shownSource !== source) {  // another source than the one shown: its own word first
-            await store.readDetail?.(route);
-            if (!state.destroyed) showToast(fmt(SOURCE_CHANGED, { model: describe(route)?.short || '' }), 'info');
-            return null;
-        }
-        await store.readDetail?.(route);  // this source's endpoints, never another's: the price below is theirs
-        // The question stands on what was read before this wait (route, pin, tier, source); a sheet dismissed
-        // meanwhile was not a press anyone still makes: nothing opens.
-        if (state.destroyed || sheet !== fromSheet) return null;
-        if (!stillShown()) {  // the same Main, now known whole: its account does not offer Ultrafast
-            showToast(fmt('Ultrafast is not offered for {model} here. {words}', { model: describe(route)?.short || '',
-                words: tiersOf(route).explain('ultrafast') }), 'info');
-            return null;
-        }
-        const said = describe(read.route);
-        const here = tiersOf(read.route, read.account);
-        const pinned = said?.lane === 'subscription' && Boolean(read.account);
-        closeSheet({ focus: true });  // the sheet stays usable during the read; the question opens alone
-        const yes = await askTier({ model: said?.short || '', source: [said?.sourceLabel, here.accountLabel].filter(Boolean).join(' · '), pinned,
+        const here = tiersOf(route);
+        closeSheet({ focus: true });  // the question opens alone
+        const yes = await askTier({ model: said?.short || '', source: [said?.sourceLabel, here.accountLabel].filter(Boolean).join(' · '),
+            follows: first.account ? 'profile' : subscription ? 'auto' : first.revision ? 'api' : '', account: first.account,
             explain: here.explain('ultrafast'), priceSaid: Boolean(here.priceOf('ultrafast')), doc });
         if (!yes || state.destroyed) return null;
-        if (stillShown()) return { pinned, condition: { ...read.binding, ultrafast: asked, ...(source ? { [CONNECTION_CONDITION]: source } : {}) } };
-        showToast('Main changed while you were asked: Ultrafast was not set.', 'info');
+        const now = bound();
+        if (sameRoute(route, shown()) && now.account === first.account && now.revision === first.revision) {
+            return { model: route.model, use_local: Boolean(route.use_local), account: first.account,
+                ...(first.revision ? { connection: first.revision } : {}) };
+        }
+        say('The model, profile or connection here changed while you were asked: Ultrafast was not set.', 'info');
         return null;
     }
 
-    /* --- saving: a room's pick posts at once; Main's asks first, then writes Main itself --- */
-    function readChangedMain(pinned) {
-        // A pinned confirmation can be refused by the account observation even when none of the settings changed.
-        const settings = store.readConnections({ fresh: true });
-        return pinned ? Promise.all([settings, store.read({ force: true })]) : settings;
-    }
-    function write(body, accept, pinned = false) {
+    /* --- saving: a pick posts at once and answers for itself --- */
+    function saveChoice(choice) {
         if (state.saving || state.destroyed) return state.saving;
+        // What the room had before this window's picks; once another window moved its model, or a message went out
+        // on the pick (the room is read as standing on it until the host says otherwise), what it has now.
+        const baseline = armed && sameChoice(state.choice, armed.choice) ? armed.baseline : { ...state.choice };
         el.dataset.disabled = 'true';
         state.saving = (async () => {
             try {
-                const reply = await save(projectId ? { ...body, project_id: projectId } : body);
+                const reply = await save(scoped(choice));
                 if (state.destroyed) return false;
                 if ((reply?.project_id || '') !== projectId) throw new Error('The answer belongs to another room.');
-                if (reply?.ok !== true) throw new Error('The server did not confirm the model.');
-                accept(reply);
+                const saved = reply?.model_choice;
+                if (reply?.ok !== true || (saved?.kind !== 'main' && !normalizeRoute(saved))) throw new Error('The server did not confirm the model.');
+                state.choice = normalizeChoice(saved);
                 state.lastOk = true;
+                // Back on the model it was, the room is as it was: the next message is an ordinary one again.
+                const token = String(reply.choice_token || '');
+                arm(token && !sameChoice(state.choice, baseline) ? { token, choice: state.choice, baseline } : null);
             } catch (error) {
                 if (state.destroyed) return false;
                 state.lastOk = false;
-                if (error?.body?.code === 'settings_changed_elsewhere') {
-                    showToast(MAIN_MODEL_CHANGED, 'info');
-                    await readChangedMain(pinned);
-                } else showToast(error?.message || 'Could not change the model.', 'error');
+                showToast(error?.message || 'Could not change the model.', 'error');
             } finally {
                 state.saving = null;
                 if (!state.destroyed) {
@@ -471,154 +286,37 @@ export function createModelControl({
         })();
         return state.saving;
     }
-    function saveRoom(choice) {
-        return write(choice, (reply) => {
-            const saved = reply.model_choice;
-            if (saved?.kind !== 'main' && !normalizeRoute(saved)) throw new Error('The server did not confirm the model.');
-            state.choice = normalizeChoice(saved);
-        });
-    }
-    // One act per tick, after Main itself was written (there is no batch endpoint): a work follows Main again, a
-    // room's own model is cleared. Each answers for itself, and a refusal of one stops none of the others.
-    async function moveToMain(moves) {
-        const results = [];
-        for (const move of moves) {
-            try {
-                if (move.kind === 'work') {
-                    const reply = await moveWork(move.id);
-                    results.push({ ...move, ok: true, words: APPLIED_WORDS[reply?.applied] || tr('model.sheet.follows', 'Follows Main now.') });
-                } else {
-                    const reply = await save({ project_id: move.id, kind: 'main' });
-                    if (reply?.ok !== true || reply.model_choice?.kind !== 'main') throw new Error('The server did not confirm it.');
-                    results.push({ ...move, ok: true, words: tr('model.sheet.room_follows', 'New work here starts on Main.') });
-                }
-            } catch (error) {
-                results.push({ ...move, ok: false, words: fmt('Not moved: {reason}', { reason: refusalWords(error).words }) });
-            }
-        }
-        if (state.destroyed) return;
-        refreshState(true);
-        await sayMoves({ results, doc });
-    }
-    async function changeMain(route) {
-        const shownSource = store.revisionOf?.(route) ?? null;  // the picked route's source as this sheet showed it
-        // The sheet lists the works and rooms of the page's last state: read it once more first, so an act made a
-        // moment ago (a card's model, another room's capsule) is in it. A slow read does not hold the sheet back.
-        await Promise.race([Promise.resolve().then(() => refreshState(true)).catch(() => {}),
-            new Promise((resolve) => { setTimeout(resolve, FRESH_STATE_MS); })]);
-        if (state.destroyed) return false;
-        // Main as stored now, and the tokens that bind this change to it: the tier said below is the one the new model
-        // keeps, a tier chosen elsewhere a moment ago included, and a move elsewhere before the write is refused (409).
-        let read;
-        try { read = await store.readMainTierSettings(); } catch (error) {
-            if (!state.destroyed) showToast(error?.message || MAIN_MODEL_CHANGED, 'error');
-            return false;
-        }
-        if (state.destroyed) return false;
-        if (!sameRoute(read.route, state.main)) {
-            showToast(MAIN_MODEL_CHANGED, 'info');
-            refreshState(true);
-            return false;
-        }
-        store.adoptSettings?.(read.settings);  // Main's tier and pin, and the sources, as this read has them
-        // Main's own tier goes to the new route with it: a pinned account stays only within its source.
-        const kept = read.tier;
-        // An Ultrafast carried onto an API connection stands on that connection as shown: the read must name it, and a
-        // source other than the one the sheet showed is read again before anything is asked.
-        const source = kept === 'ultrafast' ? revisionIn(read.settings, route) : '';
-        if (source === null) {
-            showToast(fmt('Could not verify the key {model} goes through. Reload, then choose again.', { model: shortName(route) }), 'error');
-            return false;
-        }
-        const effective = kept || String(read.settings[PROCESSING_PREFERENCE_KEY] || '');
-        if (tierNamed(effective)) await store.readDetail?.(route);
-        if (state.destroyed) return false;
-        if (!sameRoute(read.route, state.main)) { showToast(MAIN_MODEL_CHANGED, 'info'); return false; }
-        const connectionMoved = () => source && (store.revisionOf?.(route) ?? null) !== source;
-        if ((source && shownSource && shownSource !== source) || connectionMoved()) {
-            showToast(fmt(SOURCE_CHANGED, { model: shortName(route) }), 'info');
-            return false;
-        }
-        // Standard's catalog amount and cache write do not describe a premium tier, even when its price is unknown.
-        const next = describeRoute(store.index(), route, { tier: effective });
-        const previous = describe(read.route);
-        const pin = next.lane === 'subscription' && next.source === routeSource(read.route) ? read.account : '';
-        const confirmedTier = () => tierBinding(store.index(), route, pin);
-        const asked = kept === 'ultrafast' ? confirmedTier() : '';
-        const tiers = tiersOf(route, pin);
-        const tierNote = tierNamed(effective) ? fmt('Main keeps its tier, {tier}. {words}', { tier: tierWord(effective),
-            words: [tiers.accountLabel, tiers.explain(effective),
-                asked && !tiers.priceOf(effective) && translateString('What Ultrafast costs on this route is not known here.'),
-                ...(asked ? [MAIN_ULTRAFAST_SCOPE, MAIN_ULTRAFAST_ROLES, MAIN_ULTRAFAST_ROLLBACK, pin && PIN_OBSERVATION]
-                    .filter(Boolean).map((words) => translateString(words)) : [])].filter(Boolean).join(' ') }) : '';
-        const answer = await askMain({ next, previous, doc, tierNote, store,
-            census: { works: state.works, complete: state.complete, projects: state.projects, index: store.index() } });
-        if (!answer || state.destroyed) return false;
-        // A source that moved under the question was not the one asked about: nothing is written.
-        if ((asked && asked !== confirmedTier()) || connectionMoved()) {
-            showToast(fmt(SOURCE_CHANGED, { model: next.short }), 'info');
-            return false;
-        }
-        const written = await writeMain(route, { ...read.binding, ...(asked ? { ultrafast: asked } : {}), ...(source ? { [CONNECTION_CONDITION]: source } : {}) }, Boolean(asked && pin));
-        if (written && answer.moves?.length && !state.destroyed) await moveToMain(answer.moves);
-        return written;
-    }
-    function writeMain(route, binding, pinned) {
-        return write({ kind: 'model', model: route.model, use_local: route.use_local, if_unchanged: binding }, (reply) => {
-            const written = normalizeRoute(reply.main_route);
-            if (!written) throw new Error('The server did not confirm the model.');
-            state.main = written;
-            // What else the write changed, from its own answer: a dropped pin and a cleared manual window.
-            if (reply.account === 'auto') store.adoptMainAccount?.('', written);
-            const also = [reply.account === 'auto' ? 'Main\'s account is Auto now.' : '',
-                reply.window_reset === true ? 'Main\'s context window set by hand was cleared.' : ''].filter(Boolean);
-            if (also.length) showToast(also.join(' '), 'info');
-        }, pinned);
-    }
-    /** One pick from the sheet: null follows Main again (its own row); a route becomes the room's own, even Main's
-     *  model now (a model row is always that route). In the Main chat a pick changes Main itself. */
+    /** One pick from the sheet. A row is always that route, Main's model now included; the row current now changes
+     *  nothing, so the room keeps what it has (a room that follows Main keeps following it). */
     function pick(route) {
-        if (state.saving || state.destroyed) return undefined;
-        if (isMain) {
-            closeSheet();
-            if (!route || sameRoute(route, state.main)) return undefined;  // Main's own row: nothing changes
-            return changeMain(route);
-        }
-        if (route ? state.choice.kind === 'model' && sameRoute(route, normalizeRoute(state.choice)) : state.choice.kind === 'main') return undefined;
+        if (state.saving || state.destroyed || !normalizeRoute(route)) return undefined;
+        if (sameRoute(route, shown()) || serverOlder()) return undefined;
         haptic('tick');  // another model, chosen by a press (haptics.js)
-        return saveRoom(route ? { kind: 'model', model: route.model, use_local: route.use_local } : { kind: 'main' });
+        return saveChoice({ kind: 'model', model: route.model, use_local: route.use_local });
     }
-    /** The scope's own tier ('' = Default): the room's for its new work, or Main's own. It moves nothing else. */
+    /** The room's own tier ('' = Default) for its new work. It moves nothing else and arms no new work. */
     function chooseTier(tier) {
         if (state.tierSaving || state.destroyed) return state.tierSaving;
+        const say = modalNotice(sheet?.el, showToast);  // named at the press: the sheet it was pressed in, never a later one
+        if (serverOlder(say)) return Promise.resolve(false);
         let settle = () => {};
         state.tierSaving = new Promise((resolve) => { settle = resolve; });
         sheet?.paint();  // the strip shows the save in flight before it is sent
         const saving = state.tierSaving;
         void (async () => {
             let ok = false;
-            let pinned = false;
             try {
-                const body = projectId ? { processing: tier, project_id: projectId } : { processing: tier };
-                if (isMain && tier === 'ultrafast') {
-                    const confirmation = await confirmUltrafast();
-                    if (!confirmation || state.destroyed) return;
-                    body.if_unchanged = confirmation.condition;
-                    pinned = confirmation.pinned;
-                }
-                const reply = await saveTier(body);
-                if (state.destroyed) return false;
+                const asked = isMain && tier === 'ultrafast' ? await confirmUltrafast(say) : null;
+                if (isMain && tier === 'ultrafast' && !asked) return;
+                const reply = await saveTier(scoped({ processing: tier, ...(asked ? { confirmed: asked } : {}) }));
+                if (state.destroyed) return;
                 if ((reply?.project_id || '') !== projectId || reply?.ok !== true) throw new Error('The server did not confirm the tier.');
-                if (isMain) store.adoptTiers?.({ main: reply.main_processing, default: reply.processing_default });
-                else state.tier = String(reply.processing_choice || '');
+                state.tier = String(reply.processing_choice || '');
+                state.withheld = false;  // the answer of a save is what stands now
                 haptic('tick');
                 ok = true;
             } catch (error) {
-                if (state.destroyed) return;
-                if (isMain && tier === 'ultrafast' && error?.body?.code === 'settings_changed_elsewhere') {
-                    showToast(MAIN_TIER_CHANGED, 'info');
-                    await readChangedMain(pinned);
-                } else showToast(error?.message || 'Could not change the processing tier.', 'error');
+                if (!state.destroyed) say(error?.message || 'Could not change the processing tier.', 'error');
             } finally {
                 state.tierSaving = null;
                 if (!state.destroyed) { render(); refreshState(true); }
@@ -628,10 +326,11 @@ export function createModelControl({
         return saving;
     }
     async function setPinned(route, pinned) {
+        const say = modalNotice(sheet?.el, showToast);
         try {
             await store.setPinned(route, pinned);
         } catch (error) {
-            if (!state.destroyed) showToast(error?.message || 'Could not change the pinned models.', 'error');
+            if (!state.destroyed) say(error?.message || 'Could not change the pinned models.', 'error');
         }
     }
 
@@ -643,20 +342,13 @@ export function createModelControl({
         el.dataset.sheetOpen = 'true';
         row.dataset.ownerSheet = 'true';
         sheet = openModelSheet({
-            anchor: row, label: isMain ? 'Main model' : 'Model for new work here', doc, place,
+            anchor: row, label: isMain ? 'Model for new work here and in new rooms' : 'Model for new work here', doc, place,
             stack: isStack, coarse: isCoarse, returnFocus: head,
             list: {
-                store, main: () => state.main, current: shown, follows: () => !isMain && follows(),
-                mainRow: isMain ? 'main' : 'follow', tierOf,
-                // The room's own model, then the owner's recent ones: a room keeps its choice in view.
-                recents: () => [...(isMain ? [] : [normalizeRoute(state.choice)].filter(Boolean)), ...store.recents()],
-                mainFacts: () => {
-                    const said = describe(state.main);
-                    if (!said) return '';
-                    const tier = resolvedTier({ follows: true, tiers: tiers() });
-                    return [tr('model.row.follows', 'Follows Main'), said.short, tierNamed(tier) ? tierWord(tier) : ''].filter(Boolean).join(' · ');
-                },
-                onRoute: (route) => { if (!isMain) closeSheet({ focus: true }); pick(route); },
+                store, main: () => state.main, current: shown, mainRow: false, tierOf, lead: followNote,
+                // The room's model now, then the owner's recent ones: the row it stands on is always in view.
+                recents: () => [shown(), ...store.recents()].filter(Boolean),
+                onRoute: (route) => { closeSheet({ focus: true }); pick(route); },
                 onPin: setPinned,
                 onSettings: () => { closeSheet(); openSettings(); },
             },
@@ -697,24 +389,28 @@ export function createModelControl({
     return {
         el,
         capsule: control,
-        /** One `/api/state` body (or a room's own read): what Main is now, this room's choice and tier, and its works'
-         *  models. A save in flight answers for itself; a body without a field keeps what was last read. */
+        /** One `/api/state` body (or a room's own read): what Main is now and this room's own model and tier. A save
+         *  in flight answers for itself; a body without a field keeps what was last read. */
         syncState(data) {
             if (state.destroyed || !data) return;
-            if (Array.isArray(data.works)) {
-                state.works = data.works;
-                state.complete = data.works_complete === true && data.supervisor_ready === true;
-            }
-            if (Array.isArray(data.projects)) state.projects = data.projects;
             if (data.processing_tiers) store.adoptTiers?.(data.processing_tiers);
+            // A whole state body names Main's route; the server that also keeps the Main chat's own choice names it.
+            if (isMain && data.main_route) {
+                state.keepsChat = Boolean(data.main_chat);
+                if (!state.keepsChat && armed) armed = null;  // an older server takes no new task: Send says so again
+            }
             if (!state.saving) {
                 const main = normalizeRoute(data.main_route);
                 if (main) state.main = main;
-                const room = projectId ? data.projects?.find?.((project) => project?.id === projectId) : null;
+                const room = projectId ? data.projects?.find?.((project) => project?.id === projectId) : data.main_chat;
                 if (room) state.choice = normalizeChoice(room.model_choice);
-                if (room && !state.tierSaving) state.tier = String(room.processing_choice || '');
+                if (room && !state.tierSaving) {
+                    state.tier = String(room.processing_choice || '');
+                    state.withheld = !projectId && room.processing_withheld === 'ultrafast';
+                }
             }
             render();
+            onNewWork();  // another window's change of this room's model voids a pick made here (`newWork.armed`)
         },
         hasPendingSave: () => Boolean(state.saving || state.tierSaving),
         /** Resolves once the saves settled: true unless a model save in flight was refused (a refused tier keeps the
@@ -724,9 +420,43 @@ export function createModelControl({
             await state.tierSaving;
             return model ? model : true;
         },
-        /** The capsule's one save path: a route, or null to follow Main again. */
+        /** The capsule's one save path: a route. */
         pick,
         chooseTier,
+        /** What this window's next message is sent as (composer.js). */
+        newWork: {
+            /** Null for an ordinary message; else the saved choice's `token` the frame names, the `model` in the
+             *  owner's word and `changed`: the room's model is no longer the one picked here (another window's
+             *  pick), so nothing may be sent on it. */
+            armed: () => (armed ? { token: armed.token, model: describe(normalizeRoute(armed.choice))?.short || '',
+                changed: !sameChoice(state.choice, armed.choice) } : null),
+            /** The message `id` went out naming the choice `token`: no later message names it too, until the host
+             *  says how it took that one. A pick made since (while the message's files were uploading) is another
+             *  choice: it stays armed, and this message's word never touches it. */
+            sent(id, token) {
+                if (!id || !armed || armed.token !== token) return;
+                flight = { ...armed, id: String(id), freed: false };
+                arm(null);
+            },
+            /** The host's word on that message, by its live echo or by its saved row in history: taken as new work
+             *  (`spent`), the room stands on the choice it named; taken otherwise (a Reply addressed to a work), the
+             *  choice waits for a message again. A word on any other message changes nothing. */
+            settled(id, spent) {
+                if (flight?.id !== String(id || '')) return;
+                if (spent) land('spent');
+                else if (flight.freed) flight = null;  // already waiting again
+                else { land('waits'); flight = null; }
+            },
+            /** The host refused that message because the choice it named is no longer the room's: nothing started
+             *  on it, and it does not wait either. */
+            refused(id) { if (flight?.id === String(id || '')) land('void'); },
+            /** The owner gave up the unconfirmed copy of message `id` (Discard, or its words went back to the
+             *  composer) before the host's word came: the choice it named waits for a message again, as if the
+             *  message had not been taken; a later word that it was still settles it. */
+            released(id) { if (flight?.id === String(id || '') && !flight.freed) land('waits'); },
+            /** The pick made here no longer stands (said to the owner): the next message is an ordinary one. */
+            drop() { if (armed) arm(null); },
+        },
         open: openSheet,
         destroy() {
             state.destroyed = true;

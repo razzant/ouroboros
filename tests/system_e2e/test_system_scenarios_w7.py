@@ -160,9 +160,9 @@ def test_fake_daemon_input_required_run_ends_needing_input(tmp_path):
 # Shared pieces
 # ===========================================================================
 
-_CHILD_RECEIPT_RE = re.compile(r"Subagent request queued ([0-9a-f]{8}): (PEER [ABC])")
-_SIBLING_PREFIX_RE = re.compile(r"\[Message from peer task ([0-9a-f]{8}) \(sibling\)\]\n")
-_CHILD_PREFIX_RE = re.compile(r"\[Message from peer task ([0-9a-f]{8}) \(your child\)\]\n")
+_CHILD_RECEIPT_RE = re.compile(r"Subagent request queued ([0-9a-f]{16}): (PEER [ABC])")
+_SIBLING_PREFIX_RE = re.compile(r"\[Message from peer task ([0-9a-f]{16}) \(sibling\)\]\n")
+_CHILD_PREFIX_RE = re.compile(r"\[Message from peer task ([0-9a-f]{16}) \(your child\)\]\n")
 _HOLD_ROUNDS_MAX = 12
 _AWAIT_SEC = 120
 _PEER_ROWS = {
@@ -419,7 +419,7 @@ def _s28_fixture(n: dict) -> dict:
         return read
 
     def a_opens(body: dict) -> dict:
-        match = re.search(r"SIBLING_B_ID ([0-9a-f]{8})", body_text(body))
+        match = re.search(r"SIBLING_B_ID ([0-9a-f]{16})", body_text(body))
         return _forward(match.group(1), sib_a1) if match else _script_error("no SIBLING_B_ID")
 
     def a_replies(body: dict) -> dict:
@@ -538,7 +538,7 @@ def test_s28_native_peers_exchange_addressed_turns_and_the_planner_receives_sele
                 # (the identity prompt merely names those prefixes; deliveries are anchored).
                 for original in (n["sib_a1"], n["sib_b1"], n["sib_a2"]):
                     assert f"[Message from my human]\n{original}" not in text
-                    assert not re.search(r"\[Message from ancestor task [0-9a-f]{8}\]\n" + re.escape(original), text)
+                    assert not re.search(r"\[Message from ancestor task [A-Za-z0-9_.-]+\]\n" + re.escape(original), text)
 
             # (c) await_messages with no named mode SLEEPS (owner Q2 = A): each row is the sleep's own receipt, armed
             # or answered at once by a source already ready, never a held slot; and mail, not only the clock, ended a

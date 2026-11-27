@@ -2,8 +2,8 @@ import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { tr, fmt } from './i18n.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 import { strokeIcon } from './page_icons.js';
-import { showToast } from './toast.js';
-import { copyTextToClipboard, downloadViaHostBridge, normalizeTone, openViaHostBridge } from './ui_helpers.js';
+import { disposeNotices, showToast } from './toast.js';
+import { copyTextToClipboard, downloadBlobViaHostBridge, downloadViaHostBridge, normalizeTone, openViaHostBridge, openWithNotice, shellBridgeApi } from './ui_helpers.js';
 import { MAX_LINK_ACTIONS } from './api_types.js';
 import { apiFetch, taskArtifactDownloadUrl } from './api_client.js';
 import { bindMenu } from './ui_interactions.js';
@@ -141,6 +141,8 @@ export function linksMessageHtml(msg) {
     const rows = actions.map((item) => {
         const url = safeHttpUrl(item?.url);
         const label = String(item?.label || '').trim().slice(0, 120);
+        const place = signInPlace(item?.place);  // a place inside Ouroboros: the skill's sign-in, never an address
+        if (label && !url && place) return `<a class="chat-link-button" href="#skills" data-sign-in-place="${escapeHtmlAttr(place.skill)}" data-sign-in-service="${escapeHtmlAttr(place.service)}">${escapeHtml(label)}</a>`;
         return url && label
             ? `<a class="chat-link-button" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}<span aria-hidden="true">↗</span></a>`
             : '';
@@ -151,6 +153,13 @@ export function linksMessageHtml(msg) {
             ${title ? `<div class="chat-links-title">${escapeHtml(title)}</div>` : ''}
             <div class="chat-links-list">${rows.join('')}</div>
         </div>`;
+}
+
+/** `{skill, service}` of a `skill-sign-in/<skill>/<service>` place (ouroboros/link_actions.py: a canonical skill name, a
+ *  declared service id), else null. */
+export function signInPlace(place) {
+    const found = /^skill-sign-in\/([\p{L}\p{N}_.-]{1,64})\/([a-z0-9_]{1,40})$/u.exec(String(place || ''));
+    return found && !/^[._]|[._]$/.test(found[1]) ? { skill: found[1], service: found[2] } : null;
 }
 
 export function safeHttpUrl(value) {
@@ -269,7 +278,7 @@ export function createChatMedia({
     const photoGroups = new Map();
     const fileGroups = new Map();
     let fileDialog = null;
-    let dialogFile = null;
+    let dialogOpening = null;  // {file} of the file dialog as it stands; every opening is its own
     let dialogOwner = null;  // the card's item (buildGallery may move it to an earlier group): releasing it or its holder closes the dialog
     // An overlay a row's action opened over the room (Share's sheet): it closes with the room's reader (closeTransient),
     // with its row (release) and with the room (reset, destroy).
@@ -416,13 +425,13 @@ export function createChatMedia({
         return response.blob();
     }
 
-    function downloadBlob(blob, filename) {
+    function downloadBlob(blob, filename, notify) {
         const blobUrl = URL.createObjectURL(blob);
         objectUrls.add(blobUrl);
         const anchor = document.createElement('a');
         Object.assign(anchor, { href: blobUrl, download: filename, rel: 'noopener' });
         document.body.appendChild(anchor);
-        anchor.click();
+        openWithNotice(notify, () => anchor.click());
         anchor.remove();
         later(() => {
             URL.revokeObjectURL(blobUrl);
@@ -430,70 +439,91 @@ export function createChatMedia({
         }, 1000);
     }
 
-    async function downloadSource(source, filename, mime) {
+    async function downloadSource(source, filename, mime, notify = showToast) {
         if (source.durable) {
-            await downloadViaHostBridge(source.bridge || source.durable, filename, { browserUrl: source.durable, streaming: true });
-            return;
+            await downloadViaHostBridge(source.bridge || source.durable, filename,
+                { browserUrl: source.durable, streaming: true, toast: notify });
+            return true;
         }
-        downloadBlob(await sourceBlob(source, mime), filename);
+        const blob = await sourceBlob(source, mime);
+        if (!shellBridgeApi(window)) {
+            downloadBlob(blob, filename, notify);
+            return true;
+        }
+        // The desktop bytes owner answers only when the save settled. A refusal stays with the opening that asked;
+        // the browser keeps its own anchor download above.
+        try {
+            const result = await downloadBlobViaHostBridge(blob, filename);
+            // The bytes owner has no save method: an error of this opening, hosted by its dialog (dialogNotice) so it
+            // is read and dismissed where asked, not a page notice held behind the inert dialog. Nothing saved or retried.
+            if (result.unavailable) { notify(result.error, 'error'); return false; }
+            if (!result.ok) throw new Error(result.error || 'save failed');
+            notify(`Saved to Downloads: ${result.filename}`, 'ok');
+            return true;
+        } catch (error) {
+            notify(`Could not save file: ${error?.message || error}`, 'error');
+            return false;
+        }
     }
 
     // A photo's Open, its menu's and the reader's: a durable photo rides the host-bridge helper
     // with BOTH addresses (bridge form for the launcher gate, canonical for browsers); a data:
-    // display keeps window.open, whose shell interceptor saves the bytes.
-    async function openImage(sourceRef, display, filename) {
+    // display keeps window.open, whose shell interceptor saves the bytes and answers through `notify`.
+    async function openImage(sourceRef, display, filename, notify = showToast) {
         if (!sourceRef.durable) {
-            window.open(display, '_blank', 'noopener');
+            openWithNotice(notify, () => window.open(display, '_blank', 'noopener'));
             return true;
         }
         try {
-            await openViaHostBridge(sourceRef.bridge || sourceRef.durable, filename, { browserUrl: sourceRef.durable });
+            await openViaHostBridge(sourceRef.bridge || sourceRef.durable, filename, { browserUrl: sourceRef.durable, toast: notify });
             return true;
         } catch (error) {
-            showToast(`Could not open image: ${error?.message || error}`, 'error');
+            notify(`Could not open image: ${error?.message || error}`, 'error');
             return false;
         }
     }
 
     // A photo's Copy, its menu's and the reader's: the image itself on the clipboard.
-    async function copyImage(sourceRef, mime) {
+    async function copyImage(sourceRef, mime, notify = showToast) {
         try {
             if (!navigator.clipboard?.write || typeof ClipboardItem !== 'function') {
                 throw new Error('copying images is not available here. Use Open in new tab or Download.');
             }
             const blob = await sourceBlob(sourceRef, mime);
             await navigator.clipboard.write([new ClipboardItem({ [blob.type || mime]: blob })]);
-            showToast('Image copied.', 'ok');
+            notify('Image copied.', 'ok');
             return true;
         } catch (error) {
-            showToast(`Could not copy image: ${error?.message || error}`, 'error');
+            notify(`Could not copy image: ${error?.message || error}`, 'error');
             return false;
         }
     }
 
     // The card's Open and Download, shared by the file dialog and the document reader; a photo
-    // (`display`) keeps its own Open, and an image in the reader the photo's Copy.
+    // (`display`) keeps its own Open, and an image in the reader the photo's Copy. Each answers through `notify`, the
+    // desktop shell's copy-link handoff too: the page's notice by default, the asking modal's own (it makes the page
+    // behind it inert).
     const fileActions = {
-        async open(file) {
-            if (file.display) return openImage(file.source, file.display, file.filename);
+        async open(file, notify = showToast) {
+            if (file.display) return openImage(file.source, file.display, file.filename, notify);
             try {
-                await openViaHostBridge(file.source.bridge || file.source.durable, file.downloadName || file.filename, { browserUrl: file.source.durable });
+                await openViaHostBridge(file.source.bridge || file.source.durable, file.downloadName || file.filename,
+                    { browserUrl: file.source.durable, toast: notify });
                 return true;
             } catch (error) {
-                showToast(`Could not open file: ${error?.message || error}`, 'error');
+                notify(`Could not open file: ${error?.message || error}`, 'error');
                 return false;
             }
         },
-        async download(file) {
+        async download(file, notify = showToast) {
             try {
-                await downloadSource(file.source, file.downloadName || file.filename, file.mime);
-                return true;
+                return await downloadSource(file.source, file.downloadName || file.filename, file.mime, notify);
             } catch (error) {
-                showToast(`Could not download file: ${error?.message || error}`, 'error');
+                notify(`Could not download file: ${error?.message || error}`, 'error');
                 return false;
             }
         },
-        copy: (file) => copyImage(file.source, file.mime),
+        copy: (file, notify) => copyImage(file.source, file.mime, notify),
     };
     const reader = createDocumentReader({ actions: fileActions, formatSize: humanSize });
 
@@ -519,17 +549,38 @@ export function createChatMedia({
         document.body.appendChild(fileDialog);
         listen(fileDialog.querySelector('[data-file-action="close"]'), 'click', closeFileDialog);
         listen(fileDialog, 'cancel', closeFileDialog);
+        // Back closes a bare dialog natively (layers.js): the same teardown. A queued close of a reopened dialog is stale.
+        listen(fileDialog, 'close', () => { if (!fileDialog.open) closeFileDialog(); });
+        // A success closes the dialog it was asked in, never a later opening (of the same file either).
         listen(fileDialog.querySelector('[data-file-action="open"]'), 'click', async () => {
-            if (dialogFile?.source.durable && await fileActions.open(dialogFile)) closeFileDialog();
+            const opening = dialogOpening;
+            if (opening?.file.source.durable && await fileActions.open(opening.file, dialogNotice(opening))
+                && dialogOpening === opening) closeFileDialog();
         });
         listen(fileDialog.querySelector('[data-file-action="download"]'), 'click', async () => {
-            if (dialogFile && await fileActions.download(dialogFile)) closeFileDialog();
+            const opening = dialogOpening;
+            if (opening && await fileActions.download(opening.file, dialogNotice(opening))
+                && dialogOpening === opening) closeFileDialog();
         });
         return fileDialog;
     }
 
+    // A failure keeps the dialog open, so its notice is the dialog's own and leaves with it. A success closes the
+    // dialog, and an answer that outlives its opening has no dialog of its own: both are the page's. A native close
+    // (Back) shuts the dialog before its queued `close` event, so the opening counts only while the dialog is open.
+    function dialogNotice(opening) {
+        return (message, tone) => showToast(message, tone,
+            tone === 'error' && dialogOpening === opening && fileDialog.open ? { host: fileDialog } : {});
+    }
+
+    // Every notice the dialog hosts belongs to its current opening and leaves with it.
+    function endOpening() {
+        disposeNotices(fileDialog);
+        dialogOpening = null;
+    }
+
     function closeFileDialog() {
-        dialogFile = null;
+        endOpening();
         dialogOwner = null;
         if (!fileDialog) return;
         if (typeof fileDialog.close === 'function') fileDialog.close();
@@ -539,7 +590,8 @@ export function createChatMedia({
     function openFileDialog(file, owner = null) {
         reader.close({ restoreFocus: false });
         const dialog = ensureFileDialog();
-        dialogFile = file;
+        endOpening();  // a native close may still owe its event: nothing of that opening stays
+        dialogOpening = { file };
         dialogOwner = owner;
         dialog.querySelector('.chat-file-dialog-title').textContent = file.filename;
         const open = dialog.querySelector('[data-file-action="open"]');
@@ -847,7 +899,14 @@ export function createChatMedia({
     function buildLinksMessage(msg) {
         if (destroyed) return null;
         const body = linksMessageHtml(msg);
-        return body ? bubbleFrame(msg, body) : null;
+        const bubble = body ? bubbleFrame(msg, body) : null;
+        // A sign-in place opens that skill's sign-in in Extensions, where the owner chooses the account and signs in.
+        bubble?.querySelectorAll?.('[data-sign-in-place]').forEach((link) => link.addEventListener('click', (event) => {
+            event.preventDefault();
+            globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-skills', {
+                detail: { skill: link.dataset.signInPlace, service: link.dataset.signInService } }));
+        }));
+        return bubble;
     }
 
     function isFeedTailWrapper(wrapper) {

@@ -120,3 +120,166 @@ test('the dialog keeps a place\'s own name out of the page\'s translator', () =>
         'a host value stays translatable');
 });
 
+
+// After Panic the current desktop shell turns consciousness on through one native OS confirmation dialog that may hand
+// Ouroboros the choice of Panic-stopped tasks, and sends no WebSocket frame. Browsers, mobile/headless surfaces and older
+// desktop shells ask as usual and send the plain `/bg start`, which hands over no choice (owner 27.11: as in 7.12.1);
+// the handover alone (consciousness already on) they explain in an alert.
+test('after Panic every surface turns consciousness on; only the current desktop shell hands over the choice', async () => {
+    const line = 'Nothing starts right now: 2 tasks stopped by Panic stay stopped at this press.';
+    const named = {
+        lines: [
+            'Ouroboros will also wake between your messages.',
+            'Panic turned consciousness off.',
+            line,
+            'Confirmed in the desktop app, Ouroboros may on its later wakes decide which of them to resume, even one the Panic was pressed for.',
+            'A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits stay in force.',
+            'Turning consciousness off, or restarting Ouroboros, ends that choice.',
+        ],
+        places: [],
+        afterPanic: { why: 'panic', choice: true, held: 2, basis: 'a'.repeat(32) },
+    };
+    const dialog = switchDialog('on', named);
+    assert.equal(dialog.body, named.lines.join('\n'));
+    assert.equal(dialog.details, null);
+
+    const sent = [];
+    const alerts = [];
+    const ws = { send: (frame) => sent.push(frame) };
+    const recordAlert = async (shown) => { alerts.push(shown); return false; };
+    const START = { type: 'command', cmd: '/bg start', ui_control: { name: 'consciousness_toggle' } };
+
+    // 1. Current desktop shell: one native bridge call reporting pipe submission, no duplicate HTML dialog, no WS frame.
+    let nativeCalls = 0;
+    const desktopWin = {
+        pywebview: { api: { request_panic_consciousness_start: async () => { nativeCalls += 1; return { submitted: true, confirmed: false }; } } },
+    };
+    assert.equal(await turnConsciousness('on', { ws, win: desktopWin, read: async () => named, ask: recordAlert }), true);
+    assert.equal(nativeCalls, 1);
+    assert.equal(alerts.length, 0, 'no duplicate HTML dialog when native dialog submits');
+    assert.equal(sent.length, 0, 'no WebSocket /bg start frame');
+
+    // Cancelled native dialog: quiet false, no HTML alert, no WS frame.
+    const cancelWin = {
+        pywebview: { api: { request_panic_consciousness_start: async () => ({ submitted: false, cancelled: true }) } },
+    };
+    assert.equal(await turnConsciousness('on', { ws, win: cancelWin, read: async () => named, ask: recordAlert }), false);
+    assert.equal(alerts.length, 0);
+    assert.equal(sent.length, 0);
+
+    // Transmission failure before/at private pipe: surfaces honest error in an alert, returns false.
+    const unsentWin = {
+        pywebview: { api: { request_panic_consciousness_start: async () => ({ submitted: false, error: 'The desktop shell could not send the confirmation to the local server; nothing was sent.' }) } },
+    };
+    assert.equal(await turnConsciousness('on', { ws, win: unsentWin, read: async () => named, ask: recordAlert }), false);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].alert, true);
+    assert.match(alerts[0].body, /nothing was sent/);
+    assert.equal(sent.length, 0);
+
+    // 2. Browser / mobile / headless (no pywebview bridge): the usual question with the host's words and a note that
+    //    this Turn on hands over no choice; a no sends nothing, a yes sends the plain /bg start once.
+    alerts.length = 0;
+    const plainNote = 'Turning it on here hands Ouroboros no choice: the tasks stopped by Panic stay stopped until you resume them.';
+    assert.equal(await turnConsciousness('on', { ws, win: {}, read: async () => named, ask: recordAlert }), false);
+    assert.equal(alerts.length, 1);
+    assert.notEqual(alerts[0].alert, true, 'a question, not an alert');
+    assert.equal(alerts[0].title, 'Turn on consciousness?');
+    assert.deepEqual([alerts[0].confirmLabel, alerts[0].cancelLabel], ['Turn on', 'Keep off']);
+    assert.equal(alerts[0].body, [...named.lines, plainNote].join('\n'));
+    assert.doesNotMatch(alerts[0].body, /open ouroboros in the desktop app/i, 'never sends the owner to the desktop to turn it on');
+    assert.equal(sent.length, 0, 'a no sends nothing');
+    const asked = [];
+    assert.equal(await turnConsciousness('on', { ws, win: {}, read: async () => named, ask: async (shown) => { asked.push(shown); return true; } }), true);
+    assert.equal(asked.length, 1);
+    assert.deepEqual(sent, [START], 'a yes sends the plain /bg start once');
+    sent.length = 0;
+    // With no choice to hand over the host's words already say so: no extra note.
+    const noChoice = { ...named, afterPanic: { ...named.afterPanic, choice: false } };
+    asked.length = 0;
+    assert.equal(await turnConsciousness('on', { ws, win: {}, read: async () => noChoice, ask: async (shown) => { asked.push(shown); return true; } }), true);
+    assert.equal(asked[0].body, named.lines.join('\n'));
+    assert.deepEqual(sent, [START]);
+    sent.length = 0;
+
+    // 3. Older desktop shell (pywebview bridge present, new method absent): the same plain Turn on, its note saying the
+    //    shell is older and never promising that a restart updates an old binary.
+    alerts.length = 0;
+    const olderDesktopWin = { pywebview: { api: { panic_stop: () => ({ status: 'stopping' }) } } };
+    assert.equal(await turnConsciousness('on', { ws, win: olderDesktopWin, read: async () => named, ask: recordAlert }), false);
+    assert.equal(alerts.length, 1);
+    assert.notEqual(alerts[0].alert, true);
+    assert.ok(alerts[0].body.includes(line));
+    assert.match(alerts[0].body, /older than the running version/i);
+    assert.match(alerts[0].body, /update the desktop app/i);
+    assert.doesNotMatch(alerts[0].body.split('\n').at(-1), /restart/i, 'never promise that restarting an old shell updates it');
+    assert.equal(sent.length, 0);
+    assert.equal(await turnConsciousness('on', { ws, win: olderDesktopWin, read: async () => named, ask: async () => true }), true);
+    assert.deepEqual(sent, [START]);
+    sent.length = 0;
+
+    // 4. Already-on consciousness with remaining Panic-stopped tasks (`why: 'held'`): native bridge submits without `/bg start`;
+    //    browser/older shell explain that only the desktop app hands the choice over, and send nothing.
+    const heldPreview = {
+        lines: [
+            'Consciousness is already on; tasks stopped by Panic still wait for your decision in this run.',
+            'Nothing starts right now: 1 task stopped by Panic stays stopped at this press.',
+        ],
+        places: [],
+        afterPanic: { why: 'held', choice: true, held: 1, basis: 'b'.repeat(32) },
+    };
+    assert.equal(await turnConsciousness('on', { ws, win: desktopWin, read: async () => heldPreview, ask: recordAlert }), true);
+    assert.equal(nativeCalls, 2);
+    assert.equal(sent.length, 0);
+    for (const win of [{}, olderDesktopWin]) {
+        alerts.length = 0;
+        assert.equal(await turnConsciousness('on', { ws, win, read: async () => heldPreview, ask: async (shown) => { alerts.push(shown); return true; } }), false);
+        assert.equal(alerts.length, 1);
+        assert.equal(alerts[0].alert, true);
+        assert.equal(alerts[0].title, 'Allow wakes to resume Panic-stopped tasks?');
+        assert.match(alerts[0].body, /resume individual tasks manually/i);
+        assert.equal(sent.length, 0);
+    }
+
+    // 5. Ordinary Turn on (no afterPanic) and Turn off keep working across every surface.
+    assert.equal(await turnConsciousness('on', { ws, win: {}, read: async () => { throw new Error('down'); }, ask: async () => true }), true);
+    assert.equal(sent.pop().cmd, '/bg start');
+    assert.equal(await turnConsciousness('off', { ws, win: {}, read: async () => ({ ...PREVIEW, afterPanic: named.afterPanic }), ask: async () => true }), true);
+    assert.deepEqual(sent.pop(), { type: 'command', cmd: '/bg stop', ui_control: { name: 'consciousness_toggle' } });
+});
+
+test('the preview read validates after_panic facts and never carries a WebSocket offer', async () => {
+    const previous = globalThis.fetch;
+    try {
+        const basis = '0123456789abcdef0123456789abcdef';
+        globalThis.fetch = async () => ({
+            ok: true, status: 200,
+            json: async () => ({ lines: ['x'], places: [], after_panic: { why: 'panic', choice: true, held: 2, basis } }),
+        });
+        const parsed = await readSwitchPreview('on');
+        assert.deepEqual(parsed.afterPanic, { why: 'panic', choice: true, held: 2, basis });
+        assert.equal('panicStart' in parsed, false);
+
+        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [] }) });
+        assert.equal((await readSwitchPreview('on')).afterPanic, null);
+
+        globalThis.fetch = async () => ({
+            ok: true, status: 200,
+            json: async () => ({ lines: ['x'], places: [], after_panic: { why: 'held', choice: true, held: 1, basis } }),
+        });
+        assert.deepEqual((await readSwitchPreview('on')).afterPanic, { why: 'held', choice: true, held: 1, basis });
+
+        globalThis.fetch = async () => ({
+            ok: true, status: 200,
+            json: async () => ({ lines: ['x'], places: [], after_panic: { why: 'unknown', choice: false, held: null, basis: 'not-hex' } }),
+        });
+        assert.deepEqual((await readSwitchPreview('on')).afterPanic, { why: 'unknown', choice: false, held: null, basis: '' });
+
+        for (const bad of [{ why: 'other', choice: false, held: 0 }, { why: 'panic', choice: 'yes', held: 0 }, true]) {
+            globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ lines: ['x'], places: [], after_panic: bad }) });
+            await assert.rejects(readSwitchPreview('on'));
+        }
+    } finally {
+        globalThis.fetch = previous;
+    }
+});

@@ -960,6 +960,13 @@ test('claudexorPreparationLine phases by runtime state and daemon liveness', () 
         'an ownership refusal outranks every positive phase claim, installing included');
     assert.equal(claudexorPreparationLine(null), 'Checking Claudexor…',
         'no snapshot is no phase evidence — the honest generic');
+    // A sign-in that met its program absent installs it first: said where the engine itself is not being prepared.
+    const serving = { daemon: { state: 'running', runtime: { state: 'ready' } } };
+    // Said as a condition, never as a fact: the engine may first ask for an account's name and install nothing yet.
+    assert.equal(claudexorPreparationLine(serving, { installing: 'Antigravity' }),
+        'Connecting Antigravity; if it is still missing where Claudexor runs, it is installed first…');
+    assert.equal(claudexorPreparationLine({ daemon: { state: 'unreachable', runtime: { state: 'installing' } } }, { installing: 'Antigravity' }),
+        'Installing Claudexor…', 'the engine\'s own preparation comes first');
     assert.equal(claudexorPreparationLine({
         daemon: { state: 'running', runtime: {} },
     }), 'Checking Claudexor…');
@@ -996,6 +1003,37 @@ test('raw passive roster keeps the full producer login policy in shared account 
     assert.equal(accountGroups(store.snapshot).some(group => group.harness === 'openrouter'), false,
         'the raw API profile must not create a fake login family');
     assert.equal(raw.profiles.profiles.length, 3, 'the passive envelope stays unchanged');
+    store.dispose();
+});
+
+test('a saved subscription a passive roster lists first keeps its row under an older policy; an API key does not', async () => {
+    const passive = { ...passivePayload(false), profiles: { profiles: [
+        { profile: { harness_id: 'codex', profile_id: 'one', kind: 'native_session', enabled: true } },
+        { profile: { harness_id: 'agy', profile_id: 'work', credential_kind: 'config_dir_login', enabled: true } },
+        { profile: { harness_id: 'agy', profile_id: 'key', credential_kind: 'api_key', enabled: true } },
+    ], accountPools: [] } };
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async url =>
+        okResponse(url.includes('view=quota') ? passive : loginPolicyStatus(['codex'])) });
+    await store.refresh(); await store.observe();
+    assert.deepEqual(accountRows(store.snapshot).map(row => `${row.harness}/${row.profile_id}`), ['codex/one', 'agy/work']);
+    store.dispose();
+});
+
+test('a full roster that still carries an API-key sibling of a saved subscription projects only the subscription', async () => {
+    // The full answer carries both rows of one harness; the browser keeps the
+    // row its own credential kind establishes and drops the API-key neighbour,
+    // even when the passive read that usually carries the raw roster failed.
+    const full = { ...loginPolicyStatus(['codex']), profiles: { profiles: [
+        { profile: { harness_id: 'agy', profile_id: 'work', credential_kind: 'config_dir_login', enabled: true } },
+        { profile: { harness_id: 'agy', profile_id: 'key', credential_kind: 'api_key', enabled: true } },
+    ], accountPools: [], login_capable_harnesses: ['codex'] } };
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async url =>
+        url.includes('view=quota')
+            ? { ok: false, status: 503, json: async () => ({ error: 'daemon starting' }) }
+            : okResponse(full) });
+    await store.refresh(); await store.observe();
+    assert.deepEqual(accountRows(store.snapshot).map(row => `${row.harness}/${row.profile_id}`), ['agy/work'],
+        'the API-key sibling of a saved subscription is not an account');
     store.dispose();
 });
 

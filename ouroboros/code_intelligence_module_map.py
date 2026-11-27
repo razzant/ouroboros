@@ -5,8 +5,8 @@ count and owning manuals from ``ouroboros/domains.toml`` ``[references]``), a do
 (``D06``: its manifest modules), or a repository path prefix (``web/modules/``,
 ``ouroboros/tools/``, one file). A lead is the file's own words, whole: the first
 paragraph of a Python module docstring or of a JS/TS/CSS leading header comment; other
-files are listed by path alone. The map replaces a hand-kept module tree, so it never invents a
-purpose and never ranks or filters by meaning.
+files are listed by path alone. It is a live projection beside the hand-kept module directory
+(ARCHITECTURE §1.1), for a seat with tools; it never invents a purpose and never ranks or filters by meaning.
 
 A prefix is enumerated through the caller's ``list_prefix`` (the tool passes its admitted,
 path-only inventory of exactly that prefix, so nothing else is walked or parsed); leads

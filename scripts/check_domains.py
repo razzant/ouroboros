@@ -215,7 +215,7 @@ def render_domain_map(manifest: Manifest) -> str:
 
 def reference_findings(manifest, root: pathlib.Path) -> list[str]:
     """``[references]``: every domain names its owning manuals, each an existing file; a
-    non-domain key is an existing path prefix. The lookup and review packets read this table."""
+    non-domain key is an existing path prefix. The ``module_map`` lookup reads this table."""
     findings = [f"references: domain {d} has no [references] row" for d in sorted(manifest.domains)
                 if not manifest.references.get(d)]
     for key, paths in sorted(manifest.references.items()):

@@ -87,7 +87,7 @@ function renderCardHtml(tab, contributionVisibility = null) {
         <article class="ui-card widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}"${framed}>
             <div class="widgets-card-head">
                 <div class="widgets-card-title">
-                    <strong>${escapeHtml(title)}</strong>
+                    <strong data-i18n-authored>${escapeHtml(title)}</strong>
                     ${subtitle}
                 </div>
                 <div class="widgets-card-controls">

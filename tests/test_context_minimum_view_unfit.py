@@ -15,19 +15,23 @@ FACTS = RouteFacts(conversation_window_tokens=92_000, working_reserve_tokens=10_
                    source="synthetic retention measurement")
 
 
-def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None):
-    """Real common fit over synthetic protected words; no provider or owner data."""
+def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None, held=(), window_source=None):
+    """Real common fit over synthetic protected words; no provider or owner data. ``held``: held-note heads.
+    ``window_source``: ``(source, ts)`` the route's window evidence names instead of the catalogue's."""
     words = {**syn.spoken(1, "human", 340_000 if shape == "memory" else 100),
              "owner_side": True, "immune": True}
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=[words]))
     core = fit.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", body_map="# Architecture",
-        development_md="# Development", semi_stable_text="IDENTITY " + "x" * {"fixed": 400_000, "work_room": 300_000}.get(shape, 0),
-        dynamic_text="", user_content_json=json.dumps("Open the call."),
+        development_md="# Development",
+        semi_stable_text="IDENTITY " + "x" * {"fixed": 400_000, "work_room": 300_000}.get(shape, 0),
+        dynamic_text="", user_content_json=json.dumps("Open the call."), dynamic_sections=tuple(held),
         memory_view_json=memory_view.snapshot_json(snapshot), section_root=str(root))
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
     monkeypatch.setattr(fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
     evidence = SimpleNamespace(route_fp="synthetic-account", status="confirmed", stale=False,
                                window_tokens=92_000, route_facts=asdict(FACTS), source=FACTS.source)
+    if window_source is not None:
+        evidence.source, evidence.ts = window_source
     return fit.build_context_fit_plan(SimpleNamespace(drive_root=root), core,
         task or {"id": "minimum-view", "_is_direct_chat": True}, preferred_mode="nano", tool_schemas=[],
         route_resolver=lambda *_a, **_kw: ({"provider": "synthetic", "model": "synthetic"}, evidence))
@@ -40,12 +44,15 @@ def test_both_raise_sites_name_their_measured_input_reserve_window_and_deficit(t
     error = raised.value
     assert str(error).startswith("Core, assignment" if shape == "fixed" else "Protected owner words")
     assert error.physical
-    assert error.fixed_input_tokens > 0 and error.memory_view_tokens > 0
+    # A fixed part that alone overflows renders no memory: the refusal says memory was not measured, never a measured 0.
+    assert error.memory_measured is (shape == "memory")
+    assert error.fixed_input_tokens > 0 and (error.memory_view_tokens > 0) is (shape == "memory")
     assert error.estimated_input_tokens == error.fixed_input_tokens + error.memory_view_tokens
     assert error.estimated_input_tokens == math.ceil(error.raw_input_tokens * ratio)
     assert error.response_reserve_tokens == 10_000 and error.window_tokens == 92_000
     assert error.deficit_tokens == error.estimated_input_tokens + 10_000 - 92_000 > 0
-    for label, value in (("fixed input", error.fixed_input_tokens), ("memory view", error.memory_view_tokens),
+    memory = error.memory_view_tokens if error.memory_measured else "not measured"
+    for label, value in (("fixed input", error.fixed_input_tokens), ("memory view", memory),
                          ("reply/working reserve", 10_000), ("window", 92_000), ("deficit", error.deficit_tokens)):
         assert f"{label}={value}" in str(error)
 
@@ -64,8 +71,9 @@ def test_the_refusal_a_person_reads_says_need_limit_and_next_step_without_intern
     assert "Ollama" not in text and "OLLAMA_CONTEXT_LENGTH" not in text
     threshold = error.estimated_input_tokens + error.response_reserve_tokens
     assert threshold > error.window_tokens, "the refusal's own comparison"
-    needs = math.ceil(threshold / 1000) * 1000
-    assert f"needs about {needs:,} tokens" in text and f"the model's limit here is {error.window_tokens:,}" in text
+    # Measured: about, rounded up. A frame refused before memory was priced knows a lower bound: at least, exactly.
+    needs = f"about {math.ceil(threshold / 1000) * 1000:,}" if shape == "memory" else f"at least {threshold:,}"
+    assert f"needs {needs} tokens" in text and f"the model's limit here is {error.window_tokens:,}" in text
     assert "larger window" in text and "send the request again" in text and "Context Length" in text
     # A room's own model outlives the default: the room's control is named first, the default as what it is.
     assert text.index("model button under the message box") < text.index("default for chats that follow Main")
@@ -81,6 +89,67 @@ def test_the_refusal_a_person_reads_says_need_limit_and_next_step_without_intern
     # The room the fitter also wanted is no threshold: named only when it was counted, never added to the need.
     assert ("further room the start wanted" in measured) is bool(error.work_room_tokens)
     assert usage["reason_code"] == "context_capacity" and usage["execution_status"] == "infra_failed"
+
+
+def test_a_hopeless_nano_frame_skips_the_memory_render(tmp_path, monkeypatch):
+    """A cold Nano frame whose fixed part alone overflows is refused without drawing memory; a frame whose memory
+    overflows draws it, and so does a frame with held heads (their rescue renders)."""
+    from ouroboros import held_notes, memory_floor
+
+    calls = []
+    real = memory_floor.render_view_for_mode
+    monkeypatch.setattr(memory_floor, "render_view_for_mode", lambda *a, **kw: calls.append(1) or real(*a, **kw))
+    counts = {}
+    for name, shape, held in (("fixed", "fixed", ()), ("memory", "memory", ()),
+                              ("held", "fixed", (held_notes.HeldNoteSection("held_topic", "## Held note\n\nkept", topic="topic"),))):
+        calls.clear()
+        with pytest.raises(fit.MinimumViewUnfit) as raised:
+            build_minimum_view(tmp_path / name, monkeypatch, shape, held=held)
+        counts[name] = (len(calls), raised.value.memory_measured)
+    assert counts["fixed"] == (0, False)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path / "parts", monkeypatch, "memory")
+    names = [name for name, _size in raised.value.parts]
+    sizes = [size for _name, size in raised.value.parts]
+    assert {"system prompt", "constitution", "other host sections", "room"} <= set(names) and sizes == sorted(sizes, reverse=True)
+    assert counts["memory"][0] >= 1 and counts["memory"][1] is True
+    assert counts["held"][0] >= 1 and counts["held"][1] is True
+
+
+@pytest.mark.parametrize("shape", ["fixed", "memory"])
+def test_the_pooled_refusal_says_at_least_when_memory_was_not_measured(tmp_path, monkeypatch, shape):
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path, monkeypatch, shape)
+    text = _context_capacity_terminal(raised.value)[0]
+    assert ("needs at least" in text and "memory not measured" in text) is (shape == "fixed")
+    assert ("needs about" in text) is (shape == "memory") and ("further memory" in text) is (shape == "memory")
+
+
+def test_an_unmeasured_refusal_never_prints_its_memory_as_a_number(tmp_path, monkeypatch):
+    """The exception's own message (logged, and stored as a counterfactual arm) names an unpriced memory as not
+    measured, never as 0; a measured refusal still prints its number."""
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path / "fixed", monkeypatch, "fixed")
+    assert raised.value.memory_measured is False
+    assert "memory view=0" not in str(raised.value) and "memory view=not measured" in str(raised.value)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path / "memory", monkeypatch, "memory")
+    assert raised.value.memory_measured is True
+    assert f"memory view={raised.value.memory_view_tokens}," in str(raised.value)
+
+
+def test_an_unmeasured_lower_bound_just_over_the_limit_reads_above_the_limit():
+    """A lower bound one token over the limit is never rounded down to the limit itself."""
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+
+    unfit = fit.MinimumViewUnfit("Core, resident tools and reserve cannot fit before memory", fixed_tokens=70_001,
+                                 memory_tokens=0, reserve_tokens=10_000, window_tokens=80_000, ratio=1.0,
+                                 memory_measured=False)
+    text = _context_capacity_terminal(unfit)[0]
+    need = text.split("the start needs at least ", 1)[1].split(" tokens", 1)[0]
+    assert int(need.replace(",", "")) > unfit.window_tokens
 
 
 def test_a_work_room_only_shortfall_starts_with_the_existing_notice(tmp_path, monkeypatch):
@@ -147,3 +216,31 @@ def test_a_child_on_an_ollama_that_cannot_keep_history_ends_with_its_own_upgrade
     assert result["result"] == sentence
     assert result["outcome_axes"]["execution"]["status"] == "infra_failed"
     assert result["loop_outcome"]["usage"]["total_rounds"] is None  # no loop ran: its evidence is absent, never a zero
+
+
+def _refused_call_window_line(unfit, facts):
+    """The Window line of the Details a call refused at preparation shows (``realtime_setup.preparation_refusal_notice``)."""
+    from ouroboros.realtime_setup import preparation_refusal_notice
+
+    turn = SimpleNamespace(engine="Voice", native_model="voice-1", spec=SimpleNamespace(model="voice-1"),
+                           catalog_model=SimpleNamespace(facts=facts))
+    details = preparation_refusal_notice(turn, unfit)["notice"]["details"]
+    return next(line for line in details.splitlines() if line.startswith("Window"))
+
+
+def test_the_fits_refusal_names_the_window_in_effect_with_its_own_source_and_date(tmp_path, monkeypatch):
+    """Both directions on the fit's raise site: the refusal carries the window projection of the route it refused on;
+    a call whose catalogue declares that number credits the catalogue, and one whose catalogue declares none names the
+    window's own source and date, never "not recorded"."""
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path, monkeypatch, "fixed", window_source=("refusal", "2026-11-25T10:02:00+00:00"))
+    unfit = raised.value
+    assert (unfit.window["tokens"], unfit.window["source"], unfit.window["observed_at"]) == (
+        92_000, "refusal", "2026-11-25T10:02:00+00:00")
+    custom = _refused_call_window_line(unfit, RouteFacts(None, None, 10_000, "estimator", "No published window", "2026-10-21"))
+    assert "source: refusal" in custom and "2026-11-25 10:02" in custom and "declares no window" in custom
+    assert "not recorded" not in custom and "No published window" not in custom
+    shipped = _refused_call_window_line(unfit, RouteFacts(92_000, None, 10_000, "estimator", "the engine's catalogue",
+                                                          "2026-11-26"))
+    assert shipped == ("Window: 92,000 estimated tokens (characters / 4); source: the engine's catalogue; "
+                       "observed: 2026-11-26.")

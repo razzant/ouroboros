@@ -150,15 +150,10 @@ def _tree_delta_name_status(repo_dir, m0_tree: str, staged_tree: str) -> Tuple[T
     return tuple((status, path) for status, path, _source in name_status_rows(raw))
 
 
-def subject_changes(repo_dir, *, frozen: Any = None, managed: Any = None) -> Tuple[Tuple[str, str, str], ...]:
-    """The reviewed change as ONE structured, NUL-decoded set of ``(status, path, source path)``, read the way its
-    subject was: a managed resolution's pinned trees, a frozen subject's parent→tree, else the staged index against
-    HEAD. ``()`` when Git cannot answer; a caller then falls back to its touched paths."""
-    managed = getattr(frozen, "managed", None) if frozen is not None else managed
-    root = frozen.spec.root if frozen is not None else repo_dir
-    base, head = ((managed.m0_tree or "HEAD", managed.staged_tree) if managed is not None
-                  else (frozen.parent_sha, frozen.tree_sha) if frozen is not None else ("HEAD", ""))
-    rc, raw, _err = _git_bytes(root, ["diff", "--name-status", "-z", *((base, head) if head else ("--cached", base))])
+def subject_changes(repo_dir) -> Tuple[Tuple[str, str, str], ...]:
+    """The staged index against HEAD as NUL-decoded ``(status, path, source path)`` rows, the synchronous gate's
+    path set (a display-quoted UTF-8 name would not open in its touched-file pack). ``()`` when Git cannot answer."""
+    rc, raw, _err = _git_bytes(repo_dir, ["diff", "--name-status", "-z", "--cached", "HEAD"])
     return name_status_rows(raw) if rc == 0 else ()
 
 

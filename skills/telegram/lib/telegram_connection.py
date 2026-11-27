@@ -113,6 +113,8 @@ def _save_bridge_status(api, state: str, reason_code: str = "", bot: str = "", g
 def poll_failure_reason(exc: BaseException, revalidating: bool) -> str:
     """The degraded reason a retried poll failure records: a webhook or another poller holds the token (409),
     a validation still waits for the network, or Telegram stopped answering a working bridge."""
+    if type(exc).__name__ == "TelegramBotInUse":  # lib/telegram_group_wiring.py: the connector reads it here
+        return "telegram_bot_in_use"
     if getattr(exc, "status_code", None) == 409:
         return "telegram_conflict"
     return "telegram_startup_deferred" if revalidating else "telegram_unreachable"
@@ -163,6 +165,9 @@ _REASON_WORDS = {
     "settings_invalid": "Stopped: fix the Telegram settings below and save",
     "connection_settings_invalid": "Stopped: the proxy or Bot API server below is invalid",
     "telegram_conflict": "Waiting: a webhook or another copy uses this token",
+    # Only a restart moves a bot between its two readers; this bridge's saved token then keeps it (telegram_owner_bot).
+    "telegram_bot_in_use": ("Waiting: the Telegram Bot connector is already reading this bot. Restart Ouroboros "
+                            "to read it here, or save another bot"),
     "telegram_startup_deferred": "Can't reach Telegram yet; retrying",
     "telegram_unreachable": "Can't reach Telegram now; retrying",
 }

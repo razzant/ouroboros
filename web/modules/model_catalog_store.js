@@ -25,7 +25,6 @@ import { MODEL_CATALOG_TIMEOUT_MS, catalogReadFailed, invalidateModelCatalogRead
 import { buildModelIndex, normalizeRoute, routeKey, routeSource, sameRoute } from './chat_model_routes.js';
 
 const CATALOG_FRESH_MS = 5 * 60 * 1000;
-const MAIN_TIER_KEYS = ['OUROBOROS_MODEL', 'USE_LOCAL_MAIN', MODEL_ACCOUNTS_KEY, MODEL_PROCESSING_PREFERENCES_KEY];
 /** The `if_unchanged` condition naming the API connection a write's route was shown on: its `_meta.connections`
  *  revision as displayed (owner_settings.connection_revision), compared with that connection now under the lock. */
 export const CONNECTION_CONDITION = 'connection';
@@ -417,21 +416,6 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
 
     return {
         read, readRecents, readConnections, setPinned, readDetail,
-        /** Main as one GET has it, with the tokens of its binding (`binding`: the four keys) and the document itself
-         *  (`settings`: its connections' revisions say which source a route was shown on). Keep the displayed sheet
-         *  intact for comparison. */
-        async readMainTierSettings() {
-            const settings = await readSettings();
-            const tokens = settings?._meta?.tokens;
-            if (!MAIN_TIER_KEYS.every((key) => Object.hasOwn(settings || {}, key) && typeof tokens?.[key] === 'string' && tokens[key])) {
-                throw new Error('Could not verify Main’s settings. Reload, then choose again.');
-            }
-            return { route: mainRoute(settings), account: mainOption(settings, MODEL_ACCOUNTS_KEY), tier: mainOption(settings, MODEL_PROCESSING_PREFERENCES_KEY),
-                binding: Object.fromEntries(MAIN_TIER_KEYS.map((key) => [key, tokens[key]])), settings };
-        },
-        /** The revision of `route`'s API connection as this window last read the settings ('' for a route without one,
-         *  null before a read or where the read names none). */
-        revisionOf: (route) => (apiConnectionOf(route) ? state.revisions?.get(apiConnectionOf(route)) ?? null : ''),
         /** How many times the held endpoint answers were dropped for another connection: a reader that asked under an
          *  earlier count asks again. */
         detailEpoch: () => state.detailEpoch,
@@ -443,12 +427,9 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
         },
         /** Main's account ('' is Auto). With a route, require that the settings read or write named that exact Main. */
         mainAccount: (route) => (route === undefined || sameRoute(normalizeRoute(route), state.mainAccountRoute) ? state.mainAccount : null),
-        adoptMainAccount(account, route) {
-            state.settingsSeen += 1;  // an older GET cannot undo a confirmed Main write
-            state.mainAccount = String(account || '');
-            state.mainAccountRoute = normalizeRoute(route);
-            notify();
-        },
+        /** The revision of the API connection `route` sends to, as the settings last read named it: '' where the route
+         *  has no such connection, null where none was read (nothing can then be bound to it). */
+        revisionOf: (route) => (apiConnectionOf(route) ? state.revisions?.get(apiConnectionOf(route)) ?? null : ''),
         /** Another reader's `/api/model-catalog` answer (Settings › Models' Refresh). A failed or scoped-unsupported
          *  answer (no items) is still a read outcome: adopt it so its read_state invalidates the held price and keeps
          *  the rows for the chooser; only a body with no read at all is ignored. A failed read leaves the store

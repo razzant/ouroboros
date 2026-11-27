@@ -34,6 +34,7 @@ import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # pytest fixture: the real SPA
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE
 from tests.test_update_letter_browser import WEB
 from tests.test_update_description import BASE, TARGET, _checked, _key, _offer
 from tests.test_update_description import _no_git_for_versions as _no_git_for_versions  # autouse pytest fixture
@@ -56,6 +57,28 @@ dashboard.activateTab('updates');
 </script>"""
 TASK = "d3adb33f"
 INK = "el => [getComputedStyle(el).fontSize, getComputedStyle(el).color]"
+# The letter's head as drawn: the label's and the date's own text widths (their line boxes, whatever width flex gives
+# their elements), the visible actions' widths, the gaps between them, the head's room, and the rectangles of the
+# label, the date and the first action. Nothing on the page is restyled to read it.
+HEAD_FIT = """() => {
+    const head = document.querySelector('.updates-letter-head');
+    const heading = head.querySelector('.updates-letter-heading');
+    const actions = head.querySelector('.updates-letter-actions');
+    const label = head.querySelector('#updates-letter-label'), date = head.querySelector('#updates-letter-meta');
+    const buttons = [...actions.children].filter(el => !el.hidden);
+    const text = el => { const range = document.createRange(); range.selectNodeContents(el);
+        return [...range.getClientRects()].reduce((sum, r) => sum + r.width, 0); };
+    const gap = el => parseFloat(getComputedStyle(el).columnGap) || 0;
+    const rect = el => {
+        const r = el.getBoundingClientRect();
+        return {left: r.left, right: r.right, top: r.top, bottom: r.bottom};
+    };
+    const pair = text(label) + gap(heading) + text(date);
+    const controls = buttons.reduce((sum, el) => sum + el.getBoundingClientRect().width, 0)
+        + gap(actions) * Math.max(0, buttons.length - 1);
+    return {room: head.clientWidth, pair, need: pair + gap(head) + controls,
+            label: rect(label), date: rect(date), action: rect(buttons[0])};
+}"""
 # The host's own line for the large range: two of its merges carry a receipt that observed no bound review.
 OVER_LINE = "Went in over a review FAIL or no verdict: 2 merges."
 PIN = {"action": "keep", "direction": "forward", "serving": {"version": "4.8.0"}, "target": {"version": "4.8.0"}}
@@ -327,11 +350,36 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 assert page.locator("#updates-letter-note").is_hidden()
                 assert page.locator("#updates-letter-task button").count() == 0, "an ended request has no door"
                 assert page.evaluate("document.documentElement.scrollWidth<=document.documentElement.clientWidth")
-                heading, actions = (page.locator(f".updates-letter-{part}").bounding_box() for part in ("heading", "actions"))
+                # The heading and the actions share a row while both fit in the card, else the actions follow; the date
+                # stays on its label's line wherever the two fit. The oracle reads the head as drawn (HEAD_FIT), at this
+                # size by its actual room and, on a desktop, once more at a width where both certainly fit.
+                def head(where):
+                    page.evaluate(FRAMES)
+                    fit = page.evaluate(HEAD_FIT)
+                    print(f"UPDATE_DESCRIPTION_HEAD {engine} {where} {json.dumps(fit)}")
+                    label, date, button = fit["label"], fit["date"], fit["action"]
+                    if fit["pair"] <= fit["room"] - 1:
+                        assert (date["top"] < label["bottom"] and date["bottom"] > label["top"]
+                                and date["left"] >= label["right"] - 1), (
+                            "the date stays beside its label", where, fit)
+                    beside = (button["top"] < label["bottom"] and button["bottom"] > label["top"]
+                              and button["left"] >= date["right"] - 1)
+                    if fit["need"] <= fit["room"] - 1:
+                        assert beside, ("one row while both fit", where, fit)
+                    elif fit["need"] > fit["room"] + 1:
+                        assert not beside and button["top"] >= max(label["bottom"], date["bottom"]) - 1, (
+                            "a row each once they do not fit", where, fit)
+                    return fit, beside
+
+                fit, beside = head(f"{width}x{height}")
                 if width < 500:  # a phone: the actions follow the heading instead of squeezing its date and range
-                    assert actions["y"] >= heading["y"] + heading["height"] - 1, (heading, actions)
+                    assert fit["need"] > fit["room"] + 1 and not beside, fit
                 else:
-                    assert actions["y"] < heading["y"] + heading["height"], "one row while both fit"
+                    page.set_viewport_size({"width": 1440, "height": height})
+                    wide, beside = head(f"1440x{height}")
+                    assert wide["need"] <= wide["room"] - 1 and beside, ("a wide card holds one row", wide)
+                    page.set_viewport_size({"width": width, "height": height})
+                    page.evaluate(FRAMES)
                 shot(page, "03-large")
                 page.locator("#updates-letter-details summary").click()
                 provenance = page.locator("#updates-letter-provenance").inner_text()
@@ -868,6 +916,14 @@ def test_the_headline_check_of_a_current_install_describes_what_it_finds(door, m
         thread.join(timeout=5)
 
 
+def _open_serving_socket(socket):
+    """Open a routed /ws as the serving core does (gateway/ws.py ``_register``): its data-profile proof first, then a
+    heartbeat. ``subscription_ui`` stamps PREVIEW_SCOPE on the page, and a scoped page's ws.js drops every frame until
+    its socket names that profile, so without the proof the server's ``update_progress_changed`` never reaches it."""
+    socket.send(json.dumps({"type": "connection_profile", "profile_scope": PREVIEW_SCOPE}))
+    socket.send(json.dumps({"type": "heartbeat"}))
+
+
 # The owner's window (macOS pywebview, WebKit, 100%) and the frame the server broadcasts once a description is saved
 # (supervisor/events_worker_reports.py): it carries nothing, the status read brings the text.
 OWNER_WINDOW = {"width": 1282, "height": 747}
@@ -944,7 +1000,7 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
 
     def connect(socket):
         sockets.append(socket)
-        socket.send(json.dumps({"type": "heartbeat"}))
+        _open_serving_socket(socket)
 
     page = ui["new_page"](viewport=OWNER_WINDOW, color_scheme="dark")
     page.route_web_socket("**/ws", connect)
@@ -1401,7 +1457,7 @@ def test_applied_update_button_admits_retained_range(subscription_ui, door, tmp_
 
     def connect(socket):
         sockets.append(socket)
-        socket.send(json.dumps({"type": "heartbeat"}))
+        _open_serving_socket(socket)
 
     def saved_shows(text):  # the server's own frame after a save; the status read brings the text
         sockets[-1].send(json.dumps({"type": "update_progress_changed"}))
@@ -1486,7 +1542,7 @@ def test_late_failed_check_keeps_the_writer_or_text_read_through_ws(subscription
 
     def connect(socket):
         sockets.append(socket)
-        socket.send(json.dumps({"type": "heartbeat"}))
+        _open_serving_socket(socket)
 
     page = ui["new_page"](viewport={"width": 1044, "height": 653})
     page.route_web_socket("**/ws", connect)
@@ -1592,7 +1648,7 @@ def test_confirmed_description_reply_survives_a_failed_passive_read(subscription
 
     def connect(socket):
         sockets.append(socket)
-        socket.send(json.dumps({"type": "heartbeat"}))
+        _open_serving_socket(socket)
 
     page = ui["new_page"](viewport={"width": 1044, "height": 653})
     page.route_web_socket("**/ws", connect)
@@ -1744,7 +1800,7 @@ def test_named_description_keeps_admission_and_text_when_status_read_fails(subsc
 
     def connect(socket):
         sockets.append(socket)
-        socket.send(json.dumps({"type": "heartbeat"}))
+        _open_serving_socket(socket)
 
     page = ui["new_page"](viewport={"width": 1044, "height": 653})
     page.route_web_socket("**/ws", connect)
@@ -1824,7 +1880,7 @@ def test_named_description_says_an_unknown_outcome_when_its_answer_is_unreadable
 
     def connect(socket):
         sockets.append(socket)
-        socket.send(json.dumps({"type": "heartbeat"}))
+        _open_serving_socket(socket)
 
     page = ui["new_page"](viewport={"width": 1044, "height": 653})
     page.route_web_socket("**/ws", connect)

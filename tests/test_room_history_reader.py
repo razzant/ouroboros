@@ -367,6 +367,53 @@ def test_ingress_witnesses_are_the_same_in_the_reader_and_server(isolated_runtim
     asyncio.run(exercise())
 
 
+def test_history_observes_owed_dispatch_before_message_bus_init(isolated_runtime, reader, monkeypatch):  # noqa: F811
+    from ouroboros.process_custody import current_custody_session_id
+    from supervisor import message_bus, message_ingress
+
+    root = isolated_runtime
+    confirm_first_use(root)
+    import_all(root)
+    monkeypatch.setattr(message_bus, "DATA_DIR", None)
+    session = current_custody_session_id()
+    names = ("pending", "completed", "previous", "previous-entered")
+    for index, name in enumerate(names, start=1):
+        dialogue_store.append(root, "chat", {"direction": "in", "chat_id": 1, "text": name,
+                                              "client_message_id": name, "ingress_accepted": True,
+                                              "ingress_process": session if name == "completed" else "previous-generation",
+                                              "ts": f"2026-11-25T19:00:0{index}Z"},
+                              dispatch=message_ingress.obligation("bus", name, {"chat_id": 1, "client_message_id": name}))
+        if name != "pending":
+            witness = session if name == "completed" else "previous-generation"
+            assert dialogue_store.claim_dispatch(root, 1, name, process=witness)
+            if name != "previous-entered":
+                assert dialogue_store.complete_dispatch(root, 1, name)
+    endpoint = make_chat_history_endpoint(root)
+    request = SimpleNamespace(query_params={})
+
+    async def exercise():
+        baseline = await endpoint(request)
+        assert baseline.status_code == 200
+        rows = {row["text"]: row for row in json.loads(baseline.body)["messages"]}
+        assert set(rows) == set(names) and all(row.get("ingress_accepted") is True for row in rows.values())
+        for key, item in (("ingress_pending", "pending"), ("ingress_dispatched", "completed")):
+            assert {name for name, row in rows.items() if row.get(key)} == {item}
+        reader.start(root, Path(__file__).resolve().parents[1])
+        assert await asyncio.to_thread(reader.ready.wait, 8)
+        paths = []
+        token = history_reader.READ_PATH.set(paths.append)
+        try:
+            replay = await endpoint(request)
+            assert (replay.status_code, replay.body, paths) == (200, baseline.body, ["child"])
+        finally:
+            history_reader.READ_PATH.reset(token)
+        assert [dialogue_store.dispatch_state(root, 1, name) for name in names] == [
+            "pending", "completed", "completed", "dispatched",
+        ], "both GET paths observe without taking or replaying the dispatch"
+
+    asyncio.run(exercise())
+
+
 def test_two_dispatched_reads_hold_slots_even_after_caller_cancelled(tmp_path, reader, monkeypatch):
     reader.bind(tmp_path)
     reader.ready.set()

@@ -357,7 +357,10 @@ def test_retelling_instructions_and_authored_account_reach_next_send(main_loop, 
                         "\n".join(b.get("text", "") for b in (m.get("content") or []) if isinstance(b, dict))
                         for m in after["messages"])
     assert note in visible and f.source.splitlines()[-1] in visible
-    assert first["messages"][:2] == after["messages"][:2]
+    # The head is unchanged by the fold; only the seal's host-only mark moves on (with no roster note after an
+    # unchanged head, the first send's seal sits on the assignment row itself).
+    unmarked = lambda rows: [{k: v for k, v in m.items() if k != "cache_control"} for m in rows]  # noqa: E731
+    assert unmarked(first["messages"][:2]) == unmarked(after["messages"][:2])
 
 
 def test_explicit_recent_count_compacts_older_units_with_authored_note(main_loop):

@@ -145,6 +145,81 @@ def test_renewal_is_not_attempted_when_it_cannot_help_or_the_failure_is_not_size
     assert renew_after_refusal(ctx(only_host), tools) is False and only_host == before  # nothing substantive leaves
 
 
+def _review_row(n):
+    """A current review-decisions row of its own copy, as the review producer writes it."""
+    from ouroboros.review_history_view import _index_message
+
+    return _index_message({"open": "e" * 12000}, "commit", f"/copy-{n}")
+
+
+def _refused(tmp_path, messages):
+    """The size terminal's usage after a refusal no renewal could help: what ``_cannot_help`` captured."""
+    usage = {"_last_llm_error_kind": "context_overflow", "_context_refusal_round": 3}
+    limit = SimpleNamespace(messages=messages, accumulated_usage=usage, drive_root=tmp_path, drive_logs=tmp_path / "logs",
+                            task_id="renewal", round_idx=3, event_queue=None, tool_schemas=[])
+    assert renew_after_refusal(limit, SimpleNamespace(_ctx=SimpleNamespace())) is False
+    return usage
+
+
+def test_the_size_terminal_names_the_kinds_and_the_largest_unit_once(tmp_path):
+    """When renewal cannot help, the terminal names what fills the view by kind and its largest single unit by id,
+    as the facts row does (Astra rev1 C1, 27.11: the kinds alone dropped the unit base had named). Review decisions
+    never leave the window, so nothing here can leave; raw estimates, each part said once: after the kinds while its
+    kind holds other parts, beside its kind when it is the only one, and a uniquely named block not repeated."""
+    from ouroboros import loop_transport
+
+    def terminal(messages):
+        return loop_transport.provider_terminal_fallback_text(_refused(tmp_path, messages), round_idx=3, is_context_overflow=True,
+                                                              is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False)
+
+    head = [{"role": "system", "content": "S"}, {"role": "user", "content": "go"}, *(_review_row(n) for n in range(4))]
+    long_reply, short = {"role": "assistant", "content": "My long analysis. " * 1500}, {"role": "assistant", "content": "Short."}
+    unit = next(u for u in cc.context_units([*head, long_reply], scope="dialogue") if u.start == len(head))
+    text = terminal([*head, long_reply, short, _owner(OWNER_LATER)])
+    assert "could not make it fit (largest parts: review decisions ×4 ~" in text and ", my replies ×2 ~" in text
+    assert f"; largest single {unit.unit_id} ~{unit.context_size_tokens:,} by raw estimate of the current view)" in text
+    text = terminal([*head, long_reply, _owner(OWNER_LATER)])
+    assert f", my replies ({unit.unit_id}) ~{unit.context_size_tokens:,}" in text and "largest single" not in text
+    core = [{"role": "system", "content": "Complete required core. " * 6000}, *head[1:], _owner(OWNER_LATER)]
+    text = terminal(core)
+    assert "(largest parts: core and books ~" in text and "largest single" not in text and text.count("core and books") == 1
+
+
+# The size terminal's frame as f4cd41056 wrote it: a same-task working checkpoint carries it across an Update or a rollback.
+BASE_REFUSAL_FRAME = [["unit:2:2:47f4248f4c33a6e7", 890], ["core and books", 16], ["assignment", 16]]
+
+
+def _base_refusal_frame_facts(usage, round_idx):
+    """f4cd41056's ``context_view_facts.refusal_frame_facts``, frozen: the reader a rollback brings back."""
+    from ouroboros.context_anchor import REFUSED_INPUTS_KEY
+    from ouroboros.context_view_facts import size_refusal
+
+    slot = size_refusal(usage, round_idx)
+    refused = int((usage.get(REFUSED_INPUTS_KEY) or {}).get(slot.get("key") or "") or 0) if slot else 0
+    parts = ", ".join(f"{label} ~{int(tokens):,}" for label, tokens in usage.get("_context_refusal_frame") or [])
+    return "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
+                                       f"largest parts: {parts} by raw estimate of the current view" if parts else "") if fact)
+
+
+def test_the_size_terminal_frame_reads_across_an_update_and_a_rollback(tmp_path):
+    """The refusal frame rides a same-task working checkpoint (Astra rev3 C4, 27.11), so it stays the [label, tokens]
+    pairs both versions read: the base's frame reads here, and a frame written here, restored as a checkpoint restores
+    it, reads through the base's own reader with its largest single unit as one more labelled pair."""
+    from ouroboros.context_view_facts import refusal_frame_facts
+
+    assert refusal_frame_facts({"_context_refusal_frame": BASE_REFUSAL_FRAME}, 3) == (
+        "largest parts: unit:2:2:47f4248f4c33a6e7 ~890, core and books ~16, assignment ~16 by raw estimate of the current view")
+    head = [{"role": "system", "content": "S"}, {"role": "user", "content": "go"}, *(_review_row(n) for n in range(4))]
+    long_reply = {"role": "assistant", "content": "My long analysis. " * 1500}
+    unit = next(u for u in cc.context_units([*head, long_reply], scope="dialogue") if u.start == len(head))
+    restored = json.loads(json.dumps(_refused(tmp_path, [*head, long_reply, {"role": "assistant", "content": "Short."}])))
+    assert all(type(pair) is list and len(pair) == 2 for pair in restored["_context_refusal_frame"])
+    single = f"largest single {unit.unit_id} ~{unit.context_size_tokens:,} by raw estimate of the current view"
+    base = _base_refusal_frame_facts(restored, 3)
+    assert base.startswith("largest parts: review decisions ×4 ~") and base.endswith(f", {single}")
+    assert refusal_frame_facts(restored, 3).endswith(f"; {single}")
+
+
 def test_a_source_the_mind_restored_stays_whole_across_renewal(tmp_path):
     """Chosen sources stay, before or after a note; unasked work can still leave."""
     messages = _transcript()
@@ -191,7 +266,8 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
     from ouroboros.context_renewal import renewal_view
     from ouroboros.context_window import WindowLimit, WindowRecord
     from ouroboros.loop_model_call import _measure_round_main_fit
-    from ouroboros.loop_messages import _context_components
+    from ouroboros.context_view_facts import largest_parts, largest_parts_text, refusal_frame_facts
+    from ouroboros.loop_round_limits import _RoundLimitContext
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
@@ -229,17 +305,18 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
     assert renew_after_refusal(ctx, tools)
     after = _measure_round_main_fit(ctx, automatic_pass_used=True).measurement
     cut = any(row.get(HOST_CONTEXT_KIND_KEY) == "context_physical_cut" for row in messages)
-    schema_fact = dict(_context_components(ctx, measured=True))["tool schemas"]
+    parts = largest_parts_text(largest_parts(ctx, measured=True))
     schema_shape = cf.tool_schema_tokens(schemas, provider=provider, reasoning_effort=effort)
     print("RENEWAL_PRESEND_SHAPE", {"provider": provider, "effort": effort,
         "canonical_seed": canonical(seed), "usable": usable, "actual_after": after.estimated_input_tokens,
         "deficit_after": after.capacity_deficit_tokens, "cut": cut,
-        "schema_fact": schema_fact, "schema_shape": schema_shape})
+        "parts": parts, "schema_shape": schema_shape})
     assert after.capacity_total_tokens == before.capacity_total_tokens
     assert after.response_reserve_tokens == before.response_reserve_tokens
     assert after.measurement_density == before.measurement_density == 1.0
     assert after.capacity_deficit_tokens == 0
-    assert schema_fact == schema_shape  # the diagnostic names only the catalog segment, in the same shape
+    import re  # the diagnostic names only the catalog segment, in the same shape
+    assert re.search(rf"tool schemas ~{schema_shape:,}(?!,?\d)", parts), parts
     assert cut is (provider == "openai" and effort == "high")
     assert [r["content"] for r in messages[:2]] == [r["content"] for r in original[:2]]
     assert original[-1]["content"] in [r.get("content") for r in messages]
@@ -247,6 +324,18 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
         assert [(r["role"], r.get("content")) for r in messages] == [
             (r["role"], r.get("content")) for r in seed]  # publication also seals the last row
     assert json.loads(read_actor_source_bytes(tmp_path, "renewal", events[0]["source"])) == original
+    # The size terminal prices the same catalog in the same shape (Astra rev3 C6, 27.11): through the real wrapper, with
+    # the plan the renewal measured with and the round's effort, a reply sized between the two shapes ranks after the
+    # schemas exactly where this route's effort lengthens them.
+    reply = {"role": "assistant", "content": "Earlier evidence. " * 1000}
+    reply_tokens = cf.estimate_context_prompt_tokens([reply])
+    assert cf.tool_schema_tokens(schemas) < reply_tokens < cf.tool_schema_tokens(schemas, provider="openai", reasoning_effort="high")
+    limit = _RoundLimitContext([*original[:2], reply], None, plan.model, effort, 0, tmp_path / "logs", "renewal", 12, None,
+                               {"_context_refusal_round": 12}, "task", False, None, drive_root=tmp_path, tool_schemas=schemas)
+    assert renew_after_refusal(limit, SimpleNamespace(_ctx=SimpleNamespace(context_fit_plan=plan))) is False
+    frame = refusal_frame_facts(limit.accumulated_usage, 12)
+    assert re.search(rf"tool schemas ~{schema_shape:,}(?!,?\d)", frame), frame
+    assert frame.startswith("largest parts: tool schemas") is (schema_shape > reply_tokens), frame
 
 
 def test_content_blocks_beside_a_call_show_their_words_and_public_parts_never_their_route_reasoning():

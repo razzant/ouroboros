@@ -18,9 +18,14 @@ import yaml
 from ouroboros.tools.release_sync import (
     RELEASE_ASSET_TEMPLATES,
     DESKTOP_DOWNLOAD_IDS,
+    WINDOWS_SETUP_PROOF_ID,
+    WINDOWS_ZIP_PROOF_ID,
+    desktop_download_ids,
+    download_links_include_windows_installer,
     is_development_marker,
     published_download_version,
     release_asset_download_url,
+    resolve_release_windows_installer,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -123,6 +128,7 @@ def test_install_manifest_discovers_releases_without_future_asset_hashes():
         "ouroboros_{version}_amd64.deb": ("linux", "x86_64"),
         "ouroboros-{version}-1.x86_64.rpm": ("linux", "x86_64"),
         "ouroboros-{version}-1.red80.x86_64.rpm": ("linux", "x86_64"),
+        "Ouroboros-Setup-{version}-windows-x64.exe": ("windows", "x64"),
         "Ouroboros-{version}-windows-x64.zip": ("windows", "x64"),
     }
     artifacts = {
@@ -136,6 +142,9 @@ def test_install_manifest_discovers_releases_without_future_asset_hashes():
     for row in manifest["artifacts"]:
         assert "sha256" not in row
         assert "url" not in row
+    windows_rows = [row for row in manifest["artifacts"] if row["platform"] == "windows"]
+    assert [row["format"] for row in windows_rows] == ["exe", "zip"]
+    assert windows_rows[0]["availability"] == "per-release"
     native_packages = [
         row for row in manifest["artifacts"] if row["format"] in {"deb", "rpm"}
     ]
@@ -157,25 +166,53 @@ def test_install_manifest_discovers_releases_without_future_asset_hashes():
 
 def test_install_page_has_version_bound_direct_downloads_before_advanced_setup():
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
     source = (SITE / "install" / "index.html").read_text(encoding="utf-8")
     generated = (DOCS / "install" / "index.html").read_text(encoding="utf-8")
+    assert source.split("<body", 1)[1] == generated.split("<body", 1)[1]
+    published = published_download_version(source) if is_development_marker(version) else version
+    has_setup = resolve_release_windows_installer(REPO, version, published_version=published)
+    if has_setup is None:
+        has_setup = download_links_include_windows_installer(readme, source, generated, version=published)
+    assert has_setup is not None
+
+    for home in (
+        (SITE / "index.html").read_text(encoding="utf-8"),
+        (DOCS / "index.html").read_text(encoding="utf-8"),
+    ):
+        assert '<a class="os-card" href="/install/#windows"><b>Windows</b><span>x64 · desktop</span></a>' in home
+        assert "<b>Windows</b><span>x64 · .zip</span>" not in home
 
     for html in (source, generated):
         downloads = html.split('class="download-grid platform-downloads"', 1)[1].split(
-            "</div>", 1
+            'class="download-proof-note"', 1
         )[0]
+        assert '<article id="windows">' in downloads
         assert "/releases/latest" not in downloads
-        # A development marker's links stay on the release they name; a release names itself.
-        published = published_download_version(html) if is_development_marker(version) else version
-        for proof_id in DESKTOP_DOWNLOAD_IDS:
+        windows_card = downloads.split('<article id="windows">', 1)[1].split("</article>", 1)[0]
+        active_ids = desktop_download_ids(windows_installer=has_setup)
+        for proof_id in active_ids:
             expected = release_asset_download_url(proof_id, published)
             assert f'data-release-download="{proof_id}"' in html
             assert expected in html
+        if has_setup:
+            assert downloads.index(f'data-release-download="{WINDOWS_SETUP_PROOF_ID}"') < downloads.index(
+                f'data-release-download="{WINDOWS_ZIP_PROOF_ID}"'
+            )
+            assert "Run the signed per-user installer" in windows_card
+        else:
+            assert f'data-release-download="{WINDOWS_SETUP_PROOF_ID}"' not in html
+            assert "Ouroboros-Setup-" not in html
+            assert "Extract the ZIP to a permanent folder" in windows_card
+            assert "installer" not in windows_card.lower() and "<code>.exe</code>" not in windows_card
         assert html.index("platform-downloads") < html.index(
             "Advanced: headless CLI with uv"
         ) < html.index("Develop or run from source")
         assert "verification evidence, not additional installers" in html
         assert "usr/lib/ouroboros/_internal/python-standalone/bin/python3" in html
+        assert "remove the old ZIP folder" not in html
+        assert "re-enable sign-in startup in Settings in the installed copy" in html
+        assert "install-ouroboros-cli.cmd --force" in html
 
 
 def test_generated_public_files_match_source():

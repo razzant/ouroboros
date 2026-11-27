@@ -58,12 +58,13 @@ def _patch_clawhub_install_pipeline(monkeypatch, tmp_path, *, auto_specs):
     monkeypatch.setattr(
         install_mod,
         "_registry_info",
-        lambda slug: ClawHubSkillSummary(slug=slug, latest_version="1.0.0"),
+        lambda slug, *, registry_url=None: ClawHubSkillSummary(slug=slug, latest_version="1.0.0"),
     )
     monkeypatch.setattr(
         install_mod,
         "_registry_download",
-        lambda slug, *, version=None: ClawHubArchive(slug=slug, version=version or "1.0.0", content=b"archive", sha256="sha"),
+        lambda slug, *, version=None, registry_url=None: ClawHubArchive(
+            slug=slug, version=version or "1.0.0", content=b"archive", sha256="sha"),
     )
 
     def _fake_stage(_content, *, slug, version, expected_sha256, staging_root):
@@ -462,8 +463,12 @@ def test_clawhub_retry_accepts_existing_valid_dependency_fingerprint(monkeypatch
     deps = tmp_path / "state" / "skills" / "demo" / "deps.json"
     deps.parent.mkdir(parents=True)
     deps.write_text(json.dumps({"status": "failed", "specs_hash": specs_hash}), encoding="utf-8")
+    from ouroboros.skill_sources import effective_registry_url
+
+    # As the real installer records it: the registry, version and archive this retry selects again.
     (tmp_path / "state" / "skills" / "demo" / "clawhub.json").write_text(
-        json.dumps({"source": "clawhub", "slug": "demo", "sanitized_name": "demo"}),
+        json.dumps({"source": "clawhub", "slug": "demo", "sanitized_name": "demo", "version": "1.0.0",
+                    "sha256": "sha", "registry_url": effective_registry_url(None)}),
         encoding="utf-8",
     )
     called = {"deps": 0}

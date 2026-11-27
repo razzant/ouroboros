@@ -416,6 +416,14 @@ function valueWords(row, value) {
     return words === '' ? control.empty || 'empty' : words;
 }
 
+/** A former free-text setting belongs to raw Details, not to a sentence sent for translation. */
+function rawValueWords(row, value) {
+    const control = controlOf(row);
+    if (control.kind !== 'text' || value == null || value === '' || optionRank(row, value) >= 0
+            || (control.noLimit && isUnlimited(value))) return null;
+    return valueWords(row, value);
+}
+
 /** The changes that ask first. Each answers whether to go on; a change that needs no question answers true at once. */
 export const CONFIRMS = {
     async raiseAccess(row, next, current, ask = openConfirmDialog) {
@@ -616,10 +624,18 @@ export function outcomeLine(row, outcome) {
     const parts = ['Saved'];
     // A restart is why the line takes the warning's ink: it says so even without a receipt.
     if ((known || outcome.withheld || outcome.effect === 'restart') && EFFECT_WORDS[outcome.effect]) parts.push(EFFECT_WORDS[outcome.effect]);
-    // A switch has one other value and a restart row says both values in its meta: neither repeats it here.
-    if (known && row.control?.kind !== 'switch' && outcome.effect !== 'restart') parts.push(`was ${valueWords(row, outcome.old)}`);
     const undo = known && !outcome.withheld && Boolean(outcome.token) && GUARDED_WRITERS.has(row.writer || 'generic');
-    return say(parts.join(' · '), outcome.message || outcome.effect === 'restart' ? 'warn' : 'ok', { undo, note: outcome.message || '' });
+    const tone = outcome.message || outcome.effect === 'restart' ? 'warn' : 'ok';
+    // A switch has one other value and a restart row says both values in its meta: neither repeats it here. Never spell a secret.
+    if (known && !['switch', 'secret'].includes(controlOf(row).kind) && outcome.effect !== 'restart') {
+        const raw = rawValueWords(row, outcome.old);
+        if (raw !== null) {
+            // Details is a pre the overlay never walks. Undo reads the original receipt, not the displayed value.
+            return say(parts.join(' · '), tone, { undo, note: outcome.message || '', details: [outcome.details, raw].filter(Boolean).join('\n') });
+        }
+        parts.push(`was ${valueWords(row, outcome.old)}`);
+    }
+    return say(parts.join(' · '), tone, { undo, note: outcome.message || '' });
 }
 
 const rowDomId = (row) => `setting-${row.id}`;
@@ -726,8 +742,9 @@ function paintResult(result, line) {
     undo.className = 'consciousness-inline-link ui-hit-area';
     undo.setAttribute('data-setting-undo', '');
     undo.textContent = 'Undo';
-    result.append(undo);
-    if (tail) result.append(doc.createTextNode(tail));
+    const disclosure = result.querySelector('details');
+    result.insertBefore(undo, disclosure);
+    if (tail) result.insertBefore(doc.createTextNode(tail), disclosure);
 }
 
 function paintRow(node, row, ctx) {

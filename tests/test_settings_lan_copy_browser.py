@@ -125,7 +125,7 @@ def test_the_address_row_has_one_copy_button_that_copies_the_current_address(sub
 
     # A phone: the action stays inside the row and nothing scrolls sideways.
     page.set_viewport_size({"width": 320, "height": 640})
-    page.evaluate("() => document.querySelectorAll('#toast-stack .toast').forEach((toast) => toast.click())")
+    page.evaluate("() => document.querySelectorAll('#toast-stack .toast-dismiss').forEach((close) => close.click())")
     fit("phone")
     capture(page, f"settings-lan-copy-{engine}-phone")
     page.set_viewport_size({"width": 1360, "height": 900})

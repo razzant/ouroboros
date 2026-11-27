@@ -378,5 +378,175 @@ def test_stale_prepared_successor_then_replacement_open(host_world, monkeypatch,
             assert not any(native_output(wire, 'finishes-after-fit') for wire in live.provider.connections)
             assert slow.effects == ['list_available_tools']
         assert live.result[1]['reason_code'] == ('finished' if failure == 'none' else 'reconnect_failed')
+        if failure == 'none':  # the owner ended a call that opened: its transcript is in the room
+            assert live.result[0] == 'Call ended. Its transcript is in this room.'
+            assert live.host.hub._state['reason'] == 'finished' and not live.host.hub._state.get('detail')
 
     asyncio.run(scenario())
+
+
+def _run_call(host_world, monkeypatch, handler, *, window=None):
+    """Run the admitted call's real terminal (``LiveConversationTurn.run``) with ``handler`` as the feature's body."""
+    from dataclasses import replace
+    from ouroboros import call_peers
+
+    host = host_world.host
+    turn = host.turn
+    if window is not None:
+        facts = replace(turn.catalog_model.facts, conversation_window_tokens=window)
+        monkeypatch.setattr(turn, 'catalog_model', replace(turn.catalog_model, facts=facts))
+    monkeypatch.setitem(call_peers._HUBS, turn.spec.call_id, host.hub)
+    monkeypatch.setitem(turn.feature, 'handler', handler)
+    seen = {}
+    real = turn.run.__globals__['ConversationHost']
+
+    class Observed(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            seen['host'] = self
+
+    monkeypatch.setitem(turn.run.__globals__, 'ConversationHost', Observed)
+    words, usage, _trace = turn.run(host.ctx, list(host.messages), host.tools, task=host.task, initial_effort='')
+    return words, usage, seen['host'], dict(host.hub._state)
+
+
+def _refusing_handler(host_world, *, opened):
+    async def handler(port):
+        from ouroboros.realtime_setup import session_candidate
+        from skills.live_conversation.driver import session_options
+        port._session_opened = opened  # True: the refusal of a renewal of a call that is already serving
+        await asyncio.to_thread(session_candidate, port, host_world.provider['session'], session_options(port))
+    return handler
+
+
+def test_a_session_setup_refusal_before_the_first_connection_says_the_call_did_not_start(host_world, monkeypatch):
+    """Path 2: the ordinary build fitted and the call's own instructions and tools did not. The room's row is the same
+    notice path 1 leaves (code, step), with the measured numbers of the refused candidate, and claims no transcript."""
+    words, usage, host, state = _run_call(host_world, monkeypatch, _refusing_handler(host_world, opened=False),
+                                          window=11_000)
+    measured = host.trace['fit_refusal']['fit']['measurement']
+    row = usage['host_notice_row']
+    assert usage['reason_code'] == 'context_capacity' and usage['execution_status'] == 'infra_failed'
+    assert row['notice']['code'] == 'context_capacity' and row['notice']['step'] == 'open_calls'
+    assert words == row['record'] and 'transcript' not in words and 'context_capacity' not in words
+    # The engine as the call's opening row names it, once; the model id in Details.
+    assert row['notice']['values']['engine'] == host.turn.engine and f'Engine: {host.turn.engine},' in host.turn.opening
+    assert row['text'].count(host.turn.engine) == 1 and host.turn.native_model in row['notice']['details']
+    takes = measured['capacity_total_tokens'] - measured['response_reserve_tokens']
+    assert row['notice']['values']['need'] == f"{measured['estimated_input_tokens']:,}"
+    assert row['notice']['values']['takes'] == f'{takes:,}'
+    for fact in (f"{measured['capacity_total_tokens']:,}", f"{measured['response_reserve_tokens']:,}", 'fixture'):
+        assert fact in row['notice']['details'], fact
+    assert state['reason'] == 'context_capacity' and state['action'] == 'settings' and state['detail'] == row['text']
+
+
+def test_a_capacity_refusal_after_the_session_opened_keeps_the_call_ended_words(host_world, monkeypatch):
+    """A call that served and then could not renew ended a real call: its words keep the transcript pointer."""
+    from ouroboros.realtime_setup import CONTEXT_CAPACITY_DETAIL, call_ending
+
+    words, usage, _host, state = _run_call(host_world, monkeypatch, _refusing_handler(host_world, opened=True),
+                                           window=11_000)
+    assert (words, usage) == call_ending('context_capacity', 'infra_failed', CONTEXT_CAPACITY_DETAIL)
+    assert 'host_notice_row' not in usage and 'action' not in state
+
+
+@pytest.mark.parametrize('opened', [False, True])
+def test_the_owners_end_says_whether_the_call_ever_opened(opened):
+    """The one home of a call's ending words (owner 26.11): an End before the call opened has no transcript to point
+    at; an End of a call that opened keeps today's words. Both are the owner's ordinary End (``finished``, ``ok``)."""
+    from ouroboros.realtime_setup import call_ending
+
+    words, usage = call_ending('finished', 'ok', opened=opened)
+    assert words == ('Call ended. Its transcript is in this room.' if opened else 'Call ended before it started.')
+    assert usage == {'terminal_origin': 'host_notice', 'execution_status': 'ok', 'reason_code': 'finished'}
+
+
+def test_end_pressed_before_the_engine_opened_is_the_ordinary_ending(host_world, monkeypatch):
+    """The owner's bye reached the hub while the call prepared: the real driver never opens the engine and the call
+    ends with the owner's ordinary End, worded for a call that never started, the one a preparation refused after
+    that bye also takes (``tests/test_live_preparation_fit_refusal.py``)."""
+    from ouroboros.realtime_setup import call_ending
+    from skills.live_conversation.driver import run as drive
+
+    hub = host_world.host.hub
+    hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
+    hub.receive_control('owner', {'type': 'bye'})
+    words, usage, host, state = _run_call(host_world, monkeypatch, drive)
+    assert (words, usage) == call_ending('finished', 'ok', opened=False) and state['reason'] == 'finished'
+    assert words == 'Call ended before it started.'
+    assert state['detail'] == words and not state.get('action')  # every connected sheet reads the same ending
+    assert not host._session_opened and not host_world.sessions
+
+
+def test_end_during_the_session_candidate_stays_the_owners_end(host_world, monkeypatch):
+    """Path 2 with the owner's bye delivered while the refusing candidate is measured: the owner's End stands, as on
+    path 1 (``tests/test_live_preparation_fit_refusal.py``); the refusal's measurement stays in the journal. The other
+    direction (no bye: the refusal) is ``test_a_session_setup_refusal_before_the_first_connection_...``."""
+    from ouroboros import realtime_setup
+    from ouroboros.realtime_setup import call_ending
+
+    hub = host_world.host.hub
+    hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
+    original = realtime_setup.measure_session_wire
+
+    def bye_while_measuring(*args, **kwargs):
+        if not hub.ended_by_owner:
+            hub.receive_control('owner', {'type': 'bye'})
+        return original(*args, **kwargs)
+    monkeypatch.setattr(realtime_setup, 'measure_session_wire', bye_while_measuring)
+    words, usage, host, state = _run_call(host_world, monkeypatch, _refusing_handler(host_world, opened=False),
+                                          window=11_000)
+    assert hub.ended_by_owner and not host._session_opened
+    assert (words, usage) == call_ending('finished', 'ok', opened=False) and 'host_notice_row' not in usage
+    assert state['reason'] == 'finished' and state['detail'] == 'Call ended before it started.'
+    assert not state.get('action')
+    assert 'fit_refusal' in host.trace
+
+
+@pytest.mark.parametrize('bye_at', ['fit', 'open'])
+def test_an_end_during_an_admitted_first_fit_never_opens_the_engine(host_world, monkeypatch, bye_at):
+    """The owner's bye reaches the hub while the first native session is measured, and that fit is admitted: the
+    engine is never opened and the call ends as the owner's End of a call that never started. The other direction
+    (``open``: the bye arrives only once the engine opened) opens it once and keeps the ended-call words."""
+    from ouroboros import realtime_setup
+    from ouroboros.realtime_setup import call_ending
+    from skills.live_conversation.driver import run as drive
+    from tests._live_world import FakeSession
+
+    hub = host_world.host.hub
+    hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
+    measure, opened_engine, opens = realtime_setup.measure_session_wire, FakeSession.open, []
+
+    def bye():
+        if not hub.ended_by_owner:
+            hub.receive_control('owner', {'type': 'bye'})
+
+    def measured(*args, **kwargs):
+        if bye_at == 'fit':
+            bye()
+        return measure(*args, **kwargs)
+
+    async def opened(self):
+        opens.append(hub.ended_by_owner)
+        await opened_engine(self)
+        if bye_at == 'open':
+            bye()
+
+    async def silent(self, *args, **kwargs):
+        return None
+    monkeypatch.setattr(realtime_setup, 'measure_session_wire', measured)
+    monkeypatch.setattr(FakeSession, 'open', opened)
+    monkeypatch.setattr(FakeSession, 'send', silent, raising=False)
+    monkeypatch.setattr(FakeSession, 'final_captions', lambda self: (), raising=False)
+
+    async def bounded(port):
+        await asyncio.wait_for(drive(port), timeout=30)
+    words, usage, host, state = _run_call(host_world, monkeypatch, bounded)
+    assert hub.ended_by_owner and state['reason'] == 'finished' and 'host_notice_row' not in usage
+    if bye_at == 'fit':
+        assert opens == [] and not host._session_opened
+        assert (words, usage) == call_ending('finished', 'ok', opened=False)
+        assert state['detail'] == 'Call ended before it started.' and not state.get('action')
+    else:
+        assert opens == [False] and host._session_opened
+        assert (words, usage) == call_ending('finished', 'ok', opened=True)

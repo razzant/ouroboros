@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-    createHarnessMaintenanceController, harnessMaintenanceMarkup,
-    maintenanceOperationLine, maintenanceOperationPending, maintenanceVersionLine,
+    byHandHtml, createHarnessMaintenanceController, currentMissing, harnessMaintenanceMarkup, maintenanceLatestLine,
+    maintenanceOperationLine, maintenanceOperationPending, maintenanceVersionLine, missingProgram,
 } from '../modules/harness_maintenance.js';
 import { harnessFamilyMarkup, serviceBannerLine } from '../modules/harness_accounts.js';
 import {
@@ -49,8 +49,301 @@ test('selected version is the answering program, including overrides and absence
     assert.match(maintenanceVersionLine(entry(), {inspectionError: 'offline'}), /Last known/);
     const missing = entry({selection: {path: null, version: null}});
     assert.equal(maintenanceVersionLine(missing), 'Not installed');
-    assert.match(harnessMaintenanceMarkup(missing), /action="latest"[^>]*>Install</);
+    assert.match(harnessMaintenanceMarkup(missing), /action="install"[^>]*>Install</);
     assert.equal(maintenanceOperationLine({state: 'failed'}, {missing: true}), 'Install failed');
+    // Beside "Not installed" only a newest release that was read is said; "Latest unknown" says nothing there.
+    assert.equal(maintenanceLatestLine(missing), '');
+    assert.equal(maintenanceLatestLine({...missing, newest: {status: 'available', version: '1.11.3'}}), '1.11.3 available');
+});
+
+test('an absent program is installed where the engine can, and read again after an install by hand', () => {
+    const absent = (install = allowed, operation = null) => entry({selection: {path: null, version: null}, operation,
+        actions: {install, update: {available: false, reason: 'No program is selected; use Install.', commands: []}, exactVersion: allowed}});
+    const refused = {available: false, reason: 'npm is not available on this machine; install it before running this vendor command.', commands: []};
+    assert.equal(missingProgram(entry()), null, 'an installed program is not missing');
+    assert.equal(missingProgram(null), null, 'an unread one is not either');
+    assert.deepEqual(missingProgram(absent()), {installable: true, failed: false, byHand: false});
+    assert.deepEqual(missingProgram(absent(refused)), {installable: false, failed: false, byHand: true});
+    assert.deepEqual(missingProgram(absent(allowed, operation({state: 'failed', termination: 'confirmed'}))), {installable: true, failed: true, byHand: true});
+    assert.equal(missingProgram(absent(allowed, operation({state: 'cancelled', termination: 'confirmed'}))).byHand, false, 'a cancel is the owner\'s own choice');
+    assert.equal(missingProgram(absent(allowed, operation({state: 'failed', termination: 'unconfirmed'}))).failed, false, 'an installer that may still run has not ended');
+
+    const plain = harnessMaintenanceMarkup(absent());
+    assert.match(plain, /action="install"[^>]*>Install</);
+    assert.doesNotMatch(plain, /action="latest"|>Check again<|Install it yourself/, 'an Install is never the Update\'s press');
+    assert.doesNotMatch(harnessMaintenanceMarkup(entry()), /action="install"/, 'an installed program offers no Install');
+    assert.match(harnessMaintenanceMarkup(absent(), {operation: operation({state: 'running'})}), /action="install" disabled>Install</, 'under way: the same press, disabled');
+    assert.match(plain, /action="inspect"[^>]*>Check latest</, 'an ordinary absent program keeps Check latest in Details');
+    // The engine cannot install it here: its own reason, no Install, and the read again beside it instead of in Details.
+    const html = harnessMaintenanceMarkup(absent(refused));
+    assert.match(html, /npm is not available on this machine/);
+    assert.doesNotMatch(html, /action="(latest|install)"|Install it yourself|Check latest/);
+    assert.match(html, /<div class="harness-maintenance-actions"><button[^>]*action="inspect"[^>]*>Check again</);
+    // An install that ended without the program: Install again and Check again. A release-notes page is no install guide
+    // (OpenCode's leads to an incompatible line) and what the engine ran, its environment included, never runs again.
+    const lost = operation({state: 'failed', termination: 'confirmed', commands: [{binary: 'bash', args: [], env: {HOME: '/tmp/x'},
+        script: {url: 'https://vendor.invalid/install.sh', size: 9, sha256: 'x'}}]});
+    const failed = harnessMaintenanceMarkup({...absent(allowed, lost), releaseNotesUrl: 'https://vendor.invalid/releases'});
+    assert.match(failed, /Install failed/);
+    assert.match(failed, /action="install"[^>]*>Install<\/button><button[^>]*action="inspect"[^>]*>Check again</);
+    assert.equal(byHandHtml(absent(allowed, lost)), '', 'no verified step: nothing composed, Install and Check again stand');
+    assert.doesNotMatch(failed.split('harness-maintenance-details')[0], /install\.sh|HOME=|vendor\.invalid\/releases/);
+    // The one verified step, for the line the engine runs: OpenCode 1.x from npm, on any system (claudexor #668).
+    const opencode = (install, op) => ({...absent(install, op), harness: 'opencode'});
+    const step = 'To install it by hand where Claudexor runs, run <code>npm install -g opencode-ai@1</code> (the 1.x line Claudexor runs), then press Check again.';
+    assert.equal(byHandHtml(opencode(allowed, lost)), step);
+    const windows = {available: false, reason: 'OpenCode 1.x has no supported unattended Windows installer (#668).', commands: []};
+    assert.equal(byHandHtml(opencode(windows)), step, 'refused here for want of an installer, it still runs here when installed by hand');
+    assert.match(harnessMaintenanceMarkup(opencode(windows)), /no supported unattended Windows installer[\s\S]*npm install -g opencode-ai@1/);
+    // Any other refusal (Cursor on Windows: this engine cannot run it, #667): its reason and the way out, never a call to
+    // install what may not run here.
+    assert.equal(byHandHtml(absent(refused)), 'If this system cannot run it, choose another program or run Ouroboros on a system that supports it.');
+    assert.match(harnessMaintenanceMarkup(absent(refused)), /npm is not available[\s\S]*If this system cannot run it/);
+    // An Update that failed before the program went is no failed install: nothing by hand is said of it.
+    const update = operation({state: 'failed', termination: 'confirmed', before: {path: '/vendor/program', version: '1.0.0'}});
+    assert.deepEqual(missingProgram(absent(allowed, update)), {installable: true, failed: false, byHand: false});
+    assert.equal(byHandHtml({...absent(allowed, update), harness: 'opencode'}), '');
+});
+
+// A read that failed leaves the row without a current fact: the manual way out is advice that fact can no
+// longer support (the rule model_program keeps for the same program), while the way back stays.
+test('a failed read withholds the manual way out but keeps the way back', () => {
+    const refused = {available: false, reason: 'OpenCode 1.x has no supported unattended Windows installer (#668).', commands: []};
+    const opencode = entry({harness: 'opencode', selection: {path: null, version: null},
+        actions: {install: refused, update: refused, exactVersion: refused}});
+    const step = /npm install -g opencode-ai@1/;
+    assert.match(harnessMaintenanceMarkup(opencode), step, 'without a failed read the step stands');
+    const failed = harnessMaintenanceMarkup(opencode,
+        {inspectionError: 'Program inspection unavailable: synthetic inspection refused'});
+    assert.doesNotMatch(failed, step, 'a failed read withholds the advice');
+    assert.match(failed, /Program inspection unavailable/, 'the reason stays');
+    assert.match(failed, /action="inspect"[^>]*>Check again</, 'the way back stays');
+});
+
+// An absent program as the engine reports it (no installed path, `install` offered), and the shape of an Install's calls.
+const absentEntry = (extra = {}) => entry({selection: {path: null, version: null},
+    actions: {install: allowed, update: {available: false, reason: 'No program is selected; use Install.', commands: []}, exactVersion: allowed}, ...extra});
+const shape = (calls) => calls.map(([kind, body]) => (kind === 'start' ? [kind, body] : [kind, body?.fresh]));
+const START = ['start', {harness: 'fixture', target: {kind: 'latest'}}];
+
+test('an Install reads the program once more and is sent once, only while that fresh read still finds it absent', async () => {
+    const {calls, controller, intents} = setup({ harnessMaintenanceInventory: async (query) => { calls.push(['inventory', query]); return { harnesses: [absentEntry()] }; } });
+    await controller.refresh();  // another surface's read: a cached absence proves nothing at send time
+    calls.length = 0;
+    const first = controller.act('fixture', 'install');
+    const second = controller.act('fixture', 'install');  // a double press shares the one read and the one request
+    await Promise.all([first, second]);
+    await flush();
+    assert.deepEqual(shape(calls), [['inventory', true], START], 'one fresh read, one POST');
+    assert.equal(calls.find(([kind]) => kind === 'start')[2], 'same-key');
+    assert.equal(controller.view('fixture').operation.id, 'operation-1');
+    assert.equal(intents.get('fixture').busy, null);
+});
+
+test('an Install press never becomes an Update: found installed, by the dispatcher or by the read, it sends nothing', async () => {
+    let now = entry();  // installed, with an update offered: `latest` would update it
+    const renders = [];
+    const {api, calls, intents} = setup({ harnessMaintenanceInventory: async (query) => { calls.push(['inventory', query]); return { harnesses: [now] }; } });
+    const controller = createHarnessMaintenanceController({ api, intents, newKey: () => 'same-key', onChange: () => renders.push(1) });
+    await controller.refresh();
+    calls.length = 0;
+    // The press was drawn from an earlier absent read; the dispatcher already holds the program selected.
+    await controller.act('fixture', 'install');
+    await flush();
+    assert.deepEqual(calls, [], 'no read and no request: there is nothing to install');
+    assert.equal(intents.get('fixture').request, null);
+    // A press the dispatcher still holds absent reads it again, which finds it installed since: nothing is sent either,
+    // and the row is left released for the next press.
+    intents.get('fixture').entry = absentEntry();
+    renders.length = 0;
+    await controller.act('fixture', 'install');
+    await flush();
+    assert.deepEqual(shape(calls), [['inventory', true]]);
+    assert.equal(intents.get('fixture').request, null);
+    assert.equal(intents.get('fixture').busy, null, 'the press is released');
+    assert.ok(renders.length >= 2, 'and the row is drawn again, no longer busy');
+    // The explicit Update is unchanged: an installed program is sent `latest` at once, with no extra read.
+    calls.length = 0;
+    await controller.act('fixture', 'latest');
+    assert.deepEqual(shape(calls), [START]);
+});
+
+test('a failed, empty or foreign fresh answer authorizes no Install, whatever the cache says', async () => {
+    const answers = {
+        'a refused read': () => { throw new Error('The engine is not running.'); },
+        'an empty answer': () => ({ harnesses: [] }),
+        'an answer that leaves the program out': () => ({ harnesses: [absentEntry({harness: 'other'})] }),
+        'an answer that finds it installed': () => ({ harnesses: [entry()] }),
+        'an answer that finds it absent where the engine cannot install it': () => ({ harnesses: [absentEntry({
+            actions: {install: {available: false, reason: 'No installer here.', commands: []}, update: allowed, exactVersion: allowed}})] }),
+    };
+    for (const [why, answer] of Object.entries(answers)) {
+        const {calls, controller, intents} = setup({ harnessMaintenanceInventory: async (query) => {
+            calls.push(['inventory', query]);
+            return query.fresh ? answer() : { harnesses: [absentEntry()] };  // the cache: absent and installable
+        } });
+        await controller.refresh();
+        assert.ok(currentMissing(controller.view('fixture'))?.installable, `${why}: the cached read offered it`);
+        calls.length = 0;
+        await controller.act('fixture', 'install');
+        await flush();
+        assert.deepEqual(calls.map(([kind]) => kind), ['inventory'], `${why}: read once, started nothing`);
+        assert.equal(intents.get('fixture').request, null, why);
+        assert.equal(intents.get('fixture').busy, null, `${why}: the press is released`);
+        assert.ok(!currentMissing(controller.view('fixture'))?.installable, `${why}: the cached absence no longer stands as a fact to install by`);
+    }
+});
+
+test('an Install rejoins an unresolved press under its own key and an accepted operation; it never starts a second', async () => {
+    const calls = [], intents = new Map();
+    let keys = 0, lose = true;
+    const api = {
+        harnessMaintenanceInventory: async (query) => { calls.push(['inventory', query]); return { harnesses: [absentEntry()] }; },
+        startHarnessMaintenance: async (body, key) => { calls.push(['start', body, key]); if (lose) throw new TypeError('Failed to fetch'); return operation(); },
+        harnessMaintenanceOperation: async (id) => { calls.push(['read', id]); return operation(); },
+    };
+    const controller = createHarnessMaintenanceController({ api, intents, newKey: () => `key-${++keys}` });
+    await controller.refresh();
+    calls.length = 0;
+    await controller.act('fixture', 'install');
+    assert.deepEqual(calls.map(([kind, , key]) => [kind, key]), [['inventory', undefined], ['start', 'key-1']]);
+    assert.deepEqual(intents.get('fixture').request.body, {harness: 'fixture', target: {kind: 'latest'}}, 'the lost reply keeps its request');
+    calls.length = 0;
+    lose = false;
+    await controller.act('fixture', 'install');  // pressed again, with the program still read absent
+    assert.deepEqual(calls.map(([kind, , key]) => [kind, key]), [['inventory', undefined], ['start', 'key-1']],
+        'its own fresh read first, then the same key and body');
+    assert.equal(keys, 1, 'no second key was made');
+    calls.length = 0;
+    await controller.act('fixture', 'install');  // the engine accepted it: its operation is read, not started again
+    assert.deepEqual(calls.map(([kind]) => kind), ['read']);
+});
+
+test('a fresh answer this view did not apply authorizes no Install: the cached absence beside it is not a fact', async () => {
+    const gate = deferred();
+    let fresh = 0;
+    const {calls, controller, intents} = setup({ harnessMaintenanceInventory: async (query) => {
+        calls.push(['inventory', query]);
+        if (query.fresh && ++fresh === 1) await gate.promise;  // the press's own read stays out until released
+        return { harnesses: [absentEntry()] };
+    } });
+    await controller.refresh();  // cached: absent and installable
+    calls.length = 0;
+    const press = controller.act('fixture', 'install');
+    await flush();
+    intents.get('fixture').revision += 1;  // another surface's operation was accepted while that read was out: its answer is superseded
+    gate.resolve();
+    await press;
+    await flush();
+    assert.deepEqual(calls.map(([kind]) => kind), ['inventory', 'inventory'], 'the superseded answer is read again by the view itself');
+    assert.equal(intents.get('fixture').request, null, 'and no Install was sent on it');
+});
+
+test('two views of one program share one Install press', async () => {
+    const intents = new Map(), calls = [];
+    const api = {
+        harnessMaintenanceInventory: async (query) => { calls.push(['inventory', query]); return { harnesses: [absentEntry()] }; },
+        startHarnessMaintenance: async (body, key) => { calls.push(['start', body, key]); return operation(); },
+        harnessMaintenanceOperation: async (id) => operation(),
+    };
+    const views = [1, 2].map(() => createHarnessMaintenanceController({ api, intents, newKey: () => 'same-key' }));
+    await views[0].refresh();
+    calls.length = 0;
+    await Promise.all(views.map((view) => view.act('fixture', 'install')));
+    await flush();
+    assert.deepEqual(shape(calls), [['inventory', true], START]);
+});
+
+test('the Install a row shows carries its intent to the dispatcher, whatever the dispatcher reads by then', async () => {
+    const calls = [], intents = new Map();
+    const api = {
+        harnessMaintenanceInventory: async (query) => { calls.push(['inventory', query]); return { harnesses: [absentEntry()] }; },
+        startHarnessMaintenance: async (body, key) => { calls.push(['start', body, key]); return operation(); },
+        harnessMaintenanceOperation: async () => operation(),
+    };
+    // The row's host as the markup is drawn into it: each control it lists is pressed by its own name.
+    const element = { dataset: {familyMaintenance: 'fixture'}, ownerDocument: {}, contains: () => false, querySelector: () => null, controls: [],
+        set innerHTML(html) {
+            this.html = html;
+            this.controls = [...html.matchAll(/<button[^>]*data-maintenance-action="([^"]+)"[^>]*>([^<]*)</g)].map(([, action, label]) => ({
+                dataset: {maintenanceAction: action}, label, listeners: [], addEventListener(_type, listener) { this.listeners.push(listener); } }));
+        },
+        querySelectorAll(selector) { return selector === '[data-maintenance-action]' ? this.controls : []; } };
+    const controller = createHarnessMaintenanceController({ api, intents, newKey: () => 'same-key', host: () => ({ querySelectorAll: () => [element] }) });
+    await controller.refresh();
+    const press = (label) => element.controls.find((control) => control.label === label).listeners.forEach((listener) => listener());
+    assert.deepEqual(element.controls.map((control) => [control.dataset.maintenanceAction, control.label]).filter(([, label]) => label === 'Install'),
+        [['install', 'Install']], 'the visible Install says install, not the Update\'s name');
+    // The dispatcher now holds the program installed with an update offered: the same Install press sends nothing.
+    intents.get('fixture').entry = entry();
+    calls.length = 0;
+    press('Install');
+    await flush();
+    assert.deepEqual(calls, []);
+    assert.equal(intents.get('fixture').request, null);
+    // Absent as drawn: that press reads once and sends one Install.
+    intents.get('fixture').entry = absentEntry();
+    press('Install');
+    await flush();
+    assert.deepEqual(shape(calls), [['inventory', true], START]);
+});
+
+test('a newer answered list that leaves a program out takes its absence away; its request and operation stay', async () => {
+    const absent = entry({harness: 'gone', selection: {path: null, version: null}});
+    let rows = [entry(), absent];
+    const {controller, intents} = setup({ harnessMaintenanceInventory: async () => ({ harnesses: rows }) });
+    await controller.refresh();
+    assert.deepEqual(currentMissing(controller.view('gone')), {installable: true, failed: false, byHand: false});
+    intents.get('gone').operation = operation({harness: 'gone', state: 'failed', termination: 'unconfirmed'});
+    rows = [entry()];
+    await controller.refresh({fresh: true});
+    assert.equal(currentMissing(controller.view('gone')), null, 'a row the newest list left out is no fact to install by');
+    assert.equal(controller.view('gone').operation.id, 'operation-1', 'the owner\'s operation is kept to check');
+    rows = [entry(), absent];
+    await controller.refresh({fresh: true});
+    assert.ok(currentMissing(controller.view('gone')), 'listed again, it is current again');
+});
+
+test('a row the newest list left out offers no stale Install, Update or by-hand advice; receipt and Check again stay', () => {
+    const refused = {available: false, reason: 'No installer here.', commands: []};
+    const stale = (view) => harnessMaintenanceMarkup(absentEntry(), view);
+    // Installable absence: the fresh Check is the row's own press; no stale Install stands on the retained row.
+    assert.doesNotMatch(stale({listed: false}), /action="(install|latest)"/);
+    assert.match(stale({listed: false}), /<div class="harness-maintenance-actions"><button[^>]*action="inspect"[^>]*>Check again</);
+    // Un-installable absence: the reason that was read stays; no stale advice to install by hand, no Check latest.
+    const unable = absentEntry({ actions: { install: refused, update: allowed, exactVersion: allowed } });
+    const byHand = harnessMaintenanceMarkup(unable, { listed: false });
+    assert.match(byHand, /No installer here\./);
+    assert.doesNotMatch(byHand, /If this system cannot run it|npm install -g|>Check latest</);
+    assert.match(byHand, /<div class="harness-maintenance-actions"><button[^>]*action="inspect"[^>]*>Check again</);
+    // The owner's unresolved press keeps its receipt: rejoin stands in the row, Check keeps its Details place.
+    const pending = harnessMaintenanceMarkup(absentEntry(), { listed: false,
+        request: { key: 'k', body: { harness: 'fixture', target: { kind: 'latest' } } } });
+    assert.match(pending, /action="rejoin"[^>]*>Retry same request/);
+    assert.doesNotMatch(pending.split('harness-maintenance-details')[0], /action="inspect"/);
+    // A listed row keeps its Install: the withhold is the staleness, not the absence.
+    assert.match(harnessMaintenanceMarkup(absentEntry(), { listed: true }), /action="install"[^>]*>Install</);
+});
+
+test('a family with a known-absent program the engine cannot install offers no header button, whatever the roster read', () => {
+    const group = (rows = []) => ({ harness: 'fixture', label: 'Fixture', rows,
+        status: { tone: 'muted', label: 'Ready' } });
+    const ready = { daemon: { runtime: { state: 'ready' } } };
+    const unInstallable = { installable: false, failed: false, byHand: true };
+    for (const accountsRead of ['ok', 'failed']) {
+        // An empty family gets no Connect; a family with accounts keeps its rows and loses only the header press.
+        assert.doesNotMatch(harnessFamilyMarkup(group([]), ready, { accountsRead, missing: unInstallable }), /data-family-add/);
+        const withRows = harnessFamilyMarkup(group([{ harness: 'fixture', profile_id: 'work', kind: 'profile' }]),
+            ready, { accountsRead, missing: unInstallable });
+        assert.match(withRows, /class="ui-row harness-account-row/);
+        assert.doesNotMatch(withRows, /data-family-add/, 'the program row says why and offers Check again');
+    }
+    // The Install & connect naming still claims a roster read empty; unread keeps the runtime's own words.
+    const installable = { installable: true, failed: false, byHand: false };
+    assert.match(harnessFamilyMarkup(group([]), ready, { accountsRead: 'ok', missing: installable }),
+        /data-family-add>[^<]*Install &amp; connect</);
+    assert.match(harnessFamilyMarkup(group([]), ready, { accountsRead: 'failed', missing: installable }),
+        /data-family-add>[^<]*Connect</);
 });
 
 test('engine verdict and actions determine buttons for every program', () => {
@@ -968,4 +1261,603 @@ test('a status tick polls pending operations only; inspecting programs is an own
     clock += 1800000; second.poll(); await flush();
     assert.deepEqual(calls, [['read', 'operation-1']], 'a tick reads a pending operation and nothing else');
     second.dispose();
+});
+
+// ---- W2 (rl-20261126T182402): the read clock is shared through `intents`, so a later-asked read stands
+// across two controllers and in the same view; the install gate no longer keys on object identity; and a
+// pending request wins over a historical receipt in the row's actions. ----
+const probeApi = (pending, sent) => ({
+    harnessMaintenanceInventory: () => new Promise((resolve) => pending.push({ resolve })),
+    startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); return operation({ harness: 'opencode' }); },
+    harnessMaintenanceOperation: async () => operation({ harness: 'opencode' }),
+});
+
+test('an older install-check read never overwrites a newer installed reading, across two controllers', async () => {
+    const pending = [], sent = [], intents = new Map();
+    const a = createHarnessMaintenanceController({ api: probeApi(pending, sent), intents, newKey: () => 'press-key' });
+    const b = createHarnessMaintenanceController({ api: probeApi(pending, sent), intents });
+    const absentRow = absentEntry({ harness: 'opencode' });
+    const installedRow = entry({ harness: 'opencode', selection: { path: '/x/opencode', version: '1.4.0' } });
+    const seed = a.refresh({ fresh: true });
+    await Promise.resolve();
+    pending.shift().resolve({ harnesses: [absentRow] });
+    await seed;
+    const press = a.act('opencode', 'install');
+    await Promise.resolve();
+    const latest = b.refresh({ checkLatest: true });
+    await Promise.resolve();
+    assert.equal(pending.length, 2);
+    pending[1].resolve({ harnesses: [installedRow] });  // the newer read answers first
+    await latest;
+    assert.equal(a.view('opencode').entry.selection.version, '1.4.0');
+    pending[0].resolve({ harnesses: [absentRow] });     // the older read answers last
+    await press; await flush();
+    assert.equal(sent.length, 0, 'Install never turns into Update');
+    assert.equal(a.view('opencode').entry.selection.version, '1.4.0');
+    a.dispose(); b.dispose();
+});
+
+test('two different absent answers still let one Install go out under the press key', async () => {
+    const pending = [], sent = [], intents = new Map();
+    const a = createHarnessMaintenanceController({ api: probeApi(pending, sent), intents, newKey: () => 'press-key' });
+    const b = createHarnessMaintenanceController({ api: probeApi(pending, sent), intents });
+    const seed = a.refresh({ fresh: true });
+    await Promise.resolve();
+    pending.shift().resolve({ harnesses: [absentEntry({ harness: 'opencode' })] });
+    await seed;
+    const press = a.act('opencode', 'install');
+    await Promise.resolve();
+    const latest = b.refresh({ checkLatest: true });
+    await Promise.resolve();
+    assert.equal(pending.length, 2);
+    pending[0].resolve({ harnesses: [absentEntry({ harness: 'opencode' })] });  // same evidence, new object
+    pending[1].resolve({ harnesses: [absentEntry({ harness: 'opencode' })] });
+    await Promise.all([press, latest]); await flush();
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].key, 'press-key');
+    assert.equal(sent[0].body.target.kind, 'latest');
+    a.dispose(); b.dispose();
+});
+
+test('a pending request wins over a historical receipt: Retry same request, never Check operation', () => {
+    const receipt = operation({ id: 'old-receipt', state: 'failed', mutation: 'none', termination: 'confirmed', before: {} });
+    const html = harnessMaintenanceMarkup(absentEntry({ operation: receipt }), {
+        operation: receipt, request: { key: 'new-press', body: { harness: 'fixture', target: { kind: 'latest' } } },
+        operationError: 'Update acceptance unconfirmed: lost',
+    });
+    assert.match(html, /action="rejoin"[^>]*>Retry same request</);
+    assert.doesNotMatch(html, /Check operation/);
+});
+
+// W2 residual: the maintenance controller's completion boundary when its view is released mid-read.
+test('a view released while its Install read is in flight leaves the shared request alone', async () => {
+    const {createHarnessMaintenanceController} = await import('../modules/harness_maintenance.js');
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const harness = 'released-install';
+    const intents = new Map();
+    const absent = {harness, selection: {path: null, version: null}, updateAvailable: 'cannot_tell',
+        actions: {install: {available: true}, update: {available: false, reason: 'no update'}}};
+    const posts = [];
+    let call = 0, release;
+    const api = {
+        async harnessMaintenanceInventory() {
+            call += 1;
+            if (call === 1) return {harnesses: [absent]};
+            return new Promise((resolve) => { release = () => resolve({harnesses: [absent]}); });
+        },
+        async startHarnessMaintenance(body, key) {
+            posts.push([body, key]);
+            return {id: 'op', harness: body.harness, state: 'running'};
+        },
+    };
+    let controller;
+    let released = false;
+    controller = createHarnessMaintenanceController({api, intents, onChange: () => {
+        if (release && !released) { released = true; controller.dispose(); }
+    }});
+    await controller.refresh({harness, fresh: true});
+    const press = controller.act(harness, 'install');
+    await flush();
+    assert.ok(release, 'the Install reads the program once more before it sends');
+    release();
+    await press; await flush();
+    assert.deepEqual(posts, [], 'a released view sends nothing');
+    assert.equal(intents.get(harness).request, null, 'and it leaves the shared request as it was');
+    assert.equal(intents.get(harness).operation, null, 'no receipt of its own either');
+});
+
+// ---- W3 (rl-20261126T203549-c634366eecb0): one order for applied facts, a separate freshness clock for
+// failures, and the whole-inventory refusal scoped per program. The first two reproduce the four negative
+// cases of qa-install/w4/probe-program-order.mjs (confirmed on candidate 063e2c12): they fail on the
+// pre-W3 code. ----
+
+test('a newer inventory (passive installed, empty current, omitting current) stands over a late older install check', async () => {
+    for (const [fresh, rows, verify] of [
+        [false, [entry({ harness: 'opencode', selection: { path: '/x/opencode', version: '1.4.0' } })],
+            (view) => assert.equal(view.entry?.selection?.version, '1.4.0', 'a passive confirmation of installed')],
+        [true, [], (view) => assert.equal(view.listed, false, 'an empty current inventory omits it')],
+        [true, [entry({ harness: 'codex' })], (view) => assert.equal(view.listed, false, 'a current inventory that omits it')],
+    ]) {
+        const reads = [], sent = [], intents = new Map();
+        const api = {
+            harnessMaintenanceInventory: (opts) => new Promise((resolve) => reads.push({ opts, resolve })),
+            startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); return operation({ harness: body.harness }); },
+        };
+        const a = createHarnessMaintenanceController({ api, intents, newKey: () => 'press-key' });
+        const b = createHarnessMaintenanceController({ api, intents });
+        const seed = a.refresh({ fresh: true });
+        await Promise.resolve();
+        reads.shift().resolve({ harnesses: [absentEntry({ harness: 'opencode' }), absentEntry({ harness: 'agy' })] });
+        await seed;
+        assert.ok(currentMissing(a.view('opencode'))?.installable, 'seed: absent and installable');
+        const press = a.act('opencode', 'install');
+        await Promise.resolve();
+        const targeted = reads.shift();
+        assert.equal(targeted.opts.harness, 'opencode');
+        assert.equal(targeted.opts.fresh, true, 'the Install reads its program fresh, once');
+        const later = b.refresh({ fresh });
+        await Promise.resolve();
+        const whole = reads.shift();
+        assert.equal(whole.opts.harness, '');
+        whole.resolve({ harnesses: rows });                        // the newer inventory answers first
+        await later;
+        verify(a.view('opencode'));
+        targeted.resolve({ harnesses: [absentEntry({ harness: 'opencode' })] });  // the older check answers last
+        await press; await flush();
+        assert.equal(sent.length, 0, 'no operation is made from the superseded absence');
+        verify(a.view('opencode'));
+        a.dispose(); b.dispose();
+    }
+});
+
+test('a fresh targeted answer clears the whole-inventory refusal for its own program only', async () => {
+    const reads = [], intents = new Map();
+    const api = { harnessMaintenanceInventory: (opts) => new Promise((resolve, reject) => reads.push({ opts, resolve, reject })) };
+    const a = createHarnessMaintenanceController({ api, intents });
+    const b = createHarnessMaintenanceController({ api, intents });
+    const seed = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [absentEntry({ harness: 'opencode' }), absentEntry({ harness: 'agy' }), entry({ harness: 'codex' })] });
+    await seed;
+    const refused = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().reject(new Error('inventory service refused'));
+    await refused;
+    assert.match(a.view('agy').inventoryError, /inventory service refused/);
+    assert.equal(currentMissing(a.view('agy')), null);
+    const codex = b.refresh({ harness: 'codex', fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [entry({ harness: 'codex' })] });
+    await codex;
+    assert.equal(a.view('codex').inventoryError, '', 'its own fresh answer clears it for itself');
+    assert.match(a.view('agy').inventoryError, /inventory service refused/, 'the sibling keeps the refusal');
+    assert.equal(currentMissing(a.view('agy')), null);
+    assert.equal(currentMissing(a.view('opencode')), null);
+    a.dispose(); b.dispose();
+});
+
+test('an unresolved Install press and its receipt survive a remount on the shared intents', async () => {
+    const sent = [], intents = new Map();
+    const api = {
+        harnessMaintenanceInventory: async () => ({ harnesses: [absentEntry({ harness: 'remount' })] }),
+        startHarnessMaintenance: async (body, key) => {
+            sent.push({ body, key });
+            if (sent.length === 1) throw new Error('Lost POST');
+            return operation({ id: 'op-1', harness: 'remount', state: 'running' });
+        },
+        harnessMaintenanceOperation: async (id) => operation({ id, harness: 'remount', state: 'running' }),
+    };
+    const a = createHarnessMaintenanceController({ api, intents, newKey: () => 'press-key' });
+    await a.refresh({ harness: 'remount', fresh: true }); await flush();
+    await a.act('remount', 'install'); await flush();
+    assert.ok(a.view('remount').request, 'the lost POST is retained');
+    assert.match(a.view('remount').operationError, /Install acceptance unconfirmed: Lost POST/, 'the press names its own gesture');
+    assert.doesNotMatch(a.view('remount').operationError, /Retry the same request/,
+        'the saved reason names the gesture, not a second instruction the row\'s own control gives');
+    assert.match(harnessMaintenanceMarkup(absentEntry({ harness: 'remount' }), a.view('remount')), /Retry same request/);
+    a.dispose();
+    const b = createHarnessMaintenanceController({ api, intents, newKey: () => { throw new Error('must reuse the retained key'); } });
+    assert.ok(b.view('remount').request, 'the unresolved press survives the remount');
+    assert.match(harnessMaintenanceMarkup(absentEntry({ harness: 'remount' }), b.view('remount')), /Retry same request/);
+    await b.act('remount', 'rejoin'); await flush();
+    assert.deepEqual(sent[1], sent[0], 'rejoin sends the same key and body');
+    assert.equal(b.view('remount').operation.id, 'op-1', 'the accepted receipt is there');
+    await b.readOperation('remount'); await flush();
+    assert.equal(b.view('remount').operation.state, 'running', 'the pending receipt is read again after the remount');
+    a.dispose(); b.dispose();
+});
+
+test('an Install the engine never received says Install, not Update', async () => {
+    const { controller } = setup({
+        harnessMaintenanceInventory: async () => ({ harnesses: [absentEntry()] }),
+        startHarnessMaintenance: async () => { throw acquisitionError(503); },
+    });
+    await controller.refresh();
+    await controller.act('fixture', 'install'); await flush();
+    assert.equal(controller.view('fixture').request, null, 'a typed not-submitted refusal has no installation effect');
+    assert.match(controller.view('fixture').operationError, /^Install not started: Could not acquire the engine$/);
+    controller.dispose();
+});
+
+// ---- W5: one evidence order for the Install gate (a newer omission, refusal or installed reading
+// contradicts the press; a newer agreeing absence does not lose it), an empty answer never moves the
+// failure clock, an explicit checkLatest survives a later passive not_read, and a released issuer's
+// terminal transition still reaches the mounted views. ----
+
+const installedEntry = (harness) => entry({ harness, selection: { path: `/x/${harness}`, version: '1.4.0' } });
+
+test('the Install gate reads the press answer and the standing view together', async () => {
+    for (const [later, count] of [
+        [[entry({ harness: 'codex' })], 0],                                        // the newer whole read omits the pressed program
+        [[entry({ harness: 'opencode', selection: { path: '/x/opencode', version: '1.4.0' } })], 0],  // ... or finds it installed
+        [[absentEntry({ harness: 'opencode' })], 1],                                // ... or agrees on the absence
+    ]) {
+        const reads = [], sent = [], intents = new Map();
+        const api = {
+            harnessMaintenanceInventory: (opts) => new Promise((resolve) => reads.push({ opts, resolve })),
+            startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); return operation({ harness: body.harness }); },
+        };
+        const a = createHarnessMaintenanceController({ api, intents, newKey: () => 'press-key' });
+        const b = createHarnessMaintenanceController({ api, intents });
+        const seed = a.refresh({ fresh: true });
+        await Promise.resolve();
+        reads.shift().resolve({ harnesses: [absentEntry({ harness: 'opencode' }), absentEntry({ harness: 'agy' })] });
+        await seed;
+        assert.ok(currentMissing(a.view('opencode'))?.installable, 'seed: absent and installable');
+        const press = a.act('opencode', 'install');
+        await Promise.resolve();
+        const targeted = reads.shift();
+        assert.equal(targeted.opts.harness, 'opencode');
+        assert.equal(targeted.opts.fresh, true, 'the Install reads its program fresh, once');
+        const passive = b.refresh();
+        await Promise.resolve();
+        const whole = reads.shift();
+        assert.equal(whole.opts.harness, '');
+        whole.resolve({ harnesses: later });                          // the newer whole read answers first
+        await passive;
+        targeted.resolve({ harnesses: [absentEntry({ harness: 'opencode' })] });  // the press's own read answers last
+        await press; await flush();
+        assert.equal(sent.length, count, JSON.stringify(later));
+        if (count) assert.deepEqual(sent[0], { key: 'press-key', body: { harness: 'opencode', target: { kind: 'latest' } } });
+        a.dispose(); b.dispose();
+    }
+});
+
+test('an empty targeted answer neither clears nor re-dates a standing whole refusal', async () => {
+    const reads = [], intents = new Map();
+    const api = { harnessMaintenanceInventory: (opts) => new Promise((resolve, reject) => reads.push({ opts, resolve, reject })) };
+    const a = createHarnessMaintenanceController({ api, intents });
+    const b = createHarnessMaintenanceController({ api, intents });
+    const seed = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [absentEntry({ harness: 'opencode' }), absentEntry({ harness: 'agy' })] });
+    await seed;
+    const refused = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().reject(new Error('synthetic inspection refused'));
+    await refused;
+    const empty = b.refresh({ harness: 'opencode', fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({});  // no harness list at all: empty evidence
+    await empty; await flush();
+    assert.match(b.view('opencode').inventoryError, /synthetic inspection refused/, 'the whole refusal still stands');
+    assert.equal(currentMissing(b.view('opencode')), null, 'an empty answer proves no absence either');
+    a.dispose(); b.dispose();
+});
+
+test('a later empty whole answer never re-dates an older refusal; a program\'s own fresh answer clears only itself', async () => {
+    const reads = [], intents = new Map();
+    const api = { harnessMaintenanceInventory: (opts) => new Promise((resolve, reject) => reads.push({ opts, resolve, reject })) };
+    const a = createHarnessMaintenanceController({ api, intents });
+    const b = createHarnessMaintenanceController({ api, intents });
+    const seed = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [absentEntry({ harness: 'opencode' }), absentEntry({ harness: 'agy' })] });
+    await seed;
+    const refused = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().reject(new Error('synthetic inspection refused'));
+    await refused;
+    const proof = b.refresh({ harness: 'opencode', fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [installedEntry('opencode')] });
+    await proof;
+    const empty = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({});  // a later empty whole answer
+    await empty; await flush();
+    assert.equal(b.view('opencode').inventoryError, '', 'its own fresh success cleared the refusal for itself');
+    assert.match(b.view('agy').inventoryError, /synthetic inspection refused/, 'the sibling keeps the original, not re-dated refusal');
+    a.dispose(); b.dispose();
+});
+
+test('an explicit checkLatest is retained for the same selected program when a later passive read did not check it', async () => {
+    const reads = [], intents = new Map();
+    const api = { harnessMaintenanceInventory: (opts) => new Promise((resolve) => reads.push({ opts, resolve })) };
+    const a = createHarnessMaintenanceController({ api, intents });
+    const b = createHarnessMaintenanceController({ api, intents });
+    const seed = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [installedEntry('opencode')] });
+    await seed;
+    const checked = a.refresh({ harness: 'opencode', fresh: true, checkLatest: true });
+    await Promise.resolve();
+    const targeted = reads.shift();
+    assert.equal(targeted.opts.checkLatest, true);
+    const passive = b.refresh();
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [installedEntry('opencode')] });  // passive: newest not_read
+    await passive;
+    targeted.resolve({ harnesses: [{ ...installedEntry('opencode'), newest: { status: 'available', version: '1.5.0' }, updateAvailable: 'yes' }] });
+    await checked; await flush();
+    assert.equal(b.view('opencode').entry.newest.version, '1.5.0', 'the explicit release check holds');
+    assert.equal(b.view('opencode').entry.updateAvailable, 'yes');
+    a.dispose(); b.dispose();
+});
+
+test('a released issuer\'s lost POST still notifies the mounted views under the same key', async () => {
+    let rejectPost, beginPost;
+    const began = new Promise((resolve) => { beginPost = resolve; });
+    const answer = new Promise((resolve, reject) => { rejectPost = reject; });
+    const sent = [], observations = [], intents = new Map();
+    const api = {
+        harnessMaintenanceInventory: async () => ({ harnesses: [absentEntry({ harness: 'opencode' })] }),
+        startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); beginPost(); return answer; },
+    };
+    const a = createHarnessMaintenanceController({ api, intents, newKey: () => 'press-key' });
+    const b = createHarnessMaintenanceController({ api, intents, onChange: () => observations.push(b.view('opencode')) });
+    await a.refresh({ fresh: true }); await flush();
+    const press = a.act('opencode', 'install'); await flush();
+    assert.equal(sent.length, 1);
+    assert.ok(b.view('opencode').busy, 'the mounted view sees the shared press under way');
+    a.dispose();
+    const before = observations.length;
+    rejectPost(new TypeError('synthetic network gap'));
+    await press; await flush();
+    assert.ok(observations.length > before, 'the terminal shared transition reached the mounted view');
+    assert.ok(!observations.at(-1).busy, 'the press is released');
+    assert.equal(observations.at(-1).request?.key, 'press-key', 'the retained request keeps its key');
+    assert.equal(sent.length, 1, 'no second request was made');
+    b.dispose();
+});
+
+// ---- W5 (final): a whole read's own refusal must not outlive a newer whole answer, and a released
+// issuer's terminal transition must reach the mounted views exactly once. ----
+test('two whole reads in different views: the newer answer stands and the older refusal is not shown', async () => {
+    const intents = new Map(), reads = [];
+    const api = { harnessMaintenanceInventory: (query) => new Promise((resolve, reject) => reads.push({ query, resolve, reject })) };
+    const a = createHarnessMaintenanceController({ api, intents });
+    const b = createHarnessMaintenanceController({ api, intents });
+    const older = a.refresh();               // a whole, cached read
+    await flush();
+    const newer = b.refresh();               // another whole, cached read: the later-asked one
+    await flush();
+    assert.equal(reads.length, 2, 'both views asked their own read');
+    reads[1].resolve({ harnesses: [entry()] });                 // the newer read answers first
+    await newer; await flush();
+    reads[0].reject(new Error('synthetic inspection refused')); // the older read refuses last
+    await older; await flush();
+    assert.equal(b.inventoryError(), '', 'the newer whole answer stands: no refusal is left to show');
+    assert.equal(b.view('fixture').inventoryError, '', 'and the program row shows none either');
+    assert.equal(b.view('fixture').inspectionError, '', 'nor does the row carry the refusal of its own');
+    a.dispose(); b.dispose();
+});
+
+test('a released issuer\'s terminal Install is settled once by the next live read', async () => {
+    const intents = new Map(), reads = [], sent = [];
+    let settles = 0, release;
+    const post = new Promise((resolve) => { release = resolve; });
+    const settledOp = operation({ harness: 'opencode', state: 'succeeded', mutation: 'applied' });
+    let accepted = null;
+    const api = {
+        harnessMaintenanceInventory: async (query) => { reads.push(query); return { harnesses: [absentEntry({ harness: 'opencode', operation: accepted })] }; },
+        startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); return post; },
+    };
+    const issuer = createHarnessMaintenanceController({ api, intents, newKey: () => 'press-key', onSettled: () => { settles++; } });
+    await issuer.refresh();                  // the cached absence the press needs
+    const press = issuer.act('opencode', 'install');
+    await flush();                           // the press's own fresh read answered; the POST is out
+    assert.equal(sent.length, 1, 'the Install is sent once');
+    assert.equal(sent[0].key, 'press-key', 'under the press\'s own key');
+    const readsBefore = reads.length;
+    issuer.dispose();                        // the issuer is released while the POST is in flight
+    accepted = settledOp;
+    release(settledOp);
+    await press; await flush();
+    assert.equal(settles, 0, 'a released view delivers no settlement of its own');
+    assert.equal(intents.get('opencode').operation.state, 'succeeded', 'the receipt is kept');
+    assert.equal(reads.length, readsBefore, 'and the released view read nothing');
+    const live = createHarnessMaintenanceController({ api, intents, onSettled: () => { settles++; } });
+    await live.refresh(); await flush();
+    assert.equal(settles, 1, 'the live view that reads the operation delivers the settlement once');
+    await live.refresh(); await flush();
+    assert.equal(settles, 1, 'and not again');
+    assert.equal(sent.length, 1, 'no second request was made');
+    issuer.dispose(); live.dispose();
+});
+
+// ---- W5 (rl-20261127T050408-87b92a606451), area 1: the newest observation of a program orders
+// its facts, a lost Install is not sent again once the program has moved on, and the engine's
+// receipt under this very key is the answer to that press.
+
+test('a newer installed observation stands over a later-asked Install read of an older absence', async () => {
+    const reads = [], sent = [], intents = new Map();
+    const api = {
+        harnessMaintenanceInventory: (opts) => new Promise((resolve) => reads.push({ opts, resolve })),
+        startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); return operation({ harness: body.harness }); },
+    };
+    const a = createHarnessMaintenanceController({ api, intents, newKey: () => 'press-key' });
+    const b = createHarnessMaintenanceController({ api, intents });
+    const seed = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [absentEntry({ harness: 'opencode', observedAt: '2026-11-27T12:00:01Z' })] });
+    await seed;
+    a.refresh({ fresh: true });                                    // asked before the press's own read
+    await Promise.resolve();
+    const newerRead = reads.shift();
+    const press = b.act('opencode', 'install');
+    await Promise.resolve();
+    newerRead.resolve({ harnesses: [entry({ harness: 'opencode', selection: { path: '/x/opencode', version: '1.4.0' },
+        observedAt: '2026-11-27T12:00:03Z' })] });                 // the newer observation lands first
+    reads.shift().resolve({ harnesses: [absentEntry({ harness: 'opencode', observedAt: '2026-11-27T12:00:02Z' })] });
+    await press; await flush();
+    assert.equal(sent.length, 0, 'the newest observation says the program is installed');
+    assert.equal(b.view('opencode').entry.selection.version, '1.4.0', 'the older absence does not replace it');
+    a.dispose(); b.dispose();
+});
+
+test('a lost Install is not sent again once the program reads installed, and its key is kept', async () => {
+    const sent = [];
+    let installed = false;
+    const { controller } = setup({
+        harnessMaintenanceInventory: async () => ({ harnesses: [installed
+            ? entry({ harness: 'fixture', selection: { path: '/vendor/program', version: '2.0.0' } })
+            : absentEntry({ harness: 'fixture' })] }),
+        startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); throw new Error('Connection lost'); },
+    });
+    await controller.refresh(); await flush();
+    await controller.act('fixture', 'install'); await flush();
+    assert.equal(sent.length, 1, 'the press was sent once');
+    assert.ok(controller.view('fixture').request, 'its unknown acceptance keeps the request');
+    installed = true;
+    await controller.refresh(); await flush();
+    const view = controller.view('fixture');
+    assert.match(view.retryBlocked, /installed now/, 'the row says why the press is not sent again');
+    await controller.act('fixture', 'rejoin'); await flush();
+    assert.equal(sent.length, 1, 'the same request is not sent again as an Update');
+    assert.ok(controller.view('fixture').request, 'the original body and key stay');
+    assert.deepEqual(controller.view('fixture').request.key, 'same-key');
+    const html = harnessMaintenanceMarkup(controller.view('fixture').entry, controller.view('fixture'));
+    assert.match(html, /installed now/, 'the row says it');
+    assert.doesNotMatch(html, /action="rejoin"/, 'no enabled Retry stands in its place');
+    assert.match(html, /action="inspect"[^>]*>Check again</, 'the read-only check stands instead');
+});
+
+test('a lost Install still retries under its own key while the program reads absent', async () => {
+    const sent = [];
+    const { controller } = setup({
+        harnessMaintenanceInventory: async () => ({ harnesses: [absentEntry({ harness: 'fixture' })] }),
+        startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); throw new Error('Connection lost'); },
+    });
+    await controller.refresh(); await flush();
+    await controller.act('fixture', 'install'); await flush();
+    assert.equal(controller.view('fixture').retryBlocked, '', 'an absent program keeps the retry');
+    await controller.act('fixture', 'rejoin'); await flush();
+    assert.equal(sent.length, 2);
+    assert.deepEqual(sent[1], sent[0], 'the same key and body');
+});
+
+test('the engine\'s receipt under this very key recovers a lost Install; another press\'s receipt does not', async () => {
+    const sent = [];
+    let receipt = null;
+    const { controller } = setup({
+        harnessMaintenanceInventory: async () => ({ harnesses: [absentEntry({ harness: 'fixture', operation: receipt })] }),
+        startHarnessMaintenance: async (body, key) => { sent.push({ body, key }); throw new Error('Connection lost'); },
+    });
+    await controller.refresh(); await flush();
+    await controller.act('fixture', 'install'); await flush();
+    assert.ok(controller.view('fixture').request, 'the press is unresolved');
+    const base = { id: 'op-9', harness: 'fixture', state: 'succeeded', phase: 'settled',
+        target: { kind: 'latest', version: null }, mutation: 'applied', outcome: 'changed', termination: 'confirmed',
+        commands: [], limitations: [], progress: [] };
+    receipt = { ...base, requester: { source: 'owner', requestId: 'another-key' } };
+    await controller.refresh(); await flush();
+    assert.ok(controller.view('fixture').request, 'another press\'s receipt does not clear ours');
+    receipt = { ...base, requester: { source: 'owner', requestId: 'same-key' } };
+    await controller.refresh(); await flush();
+    const view = controller.view('fixture');
+    assert.equal(view.operation?.id, 'op-9', 'the engine\'s own receipt is adopted');
+    assert.equal(view.request, null, 'and the press is resolved by it');
+});
+
+test('a newer-asked observation of an older date never replaces the known selection', async () => {
+    const reads = [], intents = new Map();
+    const api = { harnessMaintenanceInventory: (opts) => new Promise((resolve) => reads.push({ opts, resolve })) };
+    const controller = createHarnessMaintenanceController({ api, intents });
+    const seed = controller.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [entry({ harness: 'opencode', selection: { path: '/x/opencode', version: '1.4.0' },
+        observedAt: '2026-11-27T12:00:03Z' })] });
+    await seed;
+    const later = controller.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift().resolve({ harnesses: [entry({ harness: 'opencode', selection: { path: '/x/opencode', version: '1.3.0' },
+        observedAt: '2026-11-27T12:00:02Z' })] });
+    await later; await flush();
+    assert.equal(controller.view('opencode').entry.selection.version, '1.4.0',
+        'the older-dated selection never lands under the known one');
+    controller.dispose();
+});
+
+test('a released Install preflight still tells the mounted sibling that the row is free', async () => {
+    const reads = [], intents = new Map(), seen = [];
+    const api = {
+        harnessMaintenanceInventory: () => new Promise((resolve) => reads.push(resolve)),
+        startHarnessMaintenance: async () => operation({ harness: 'opencode' }),
+    };
+    const a = createHarnessMaintenanceController({ api, intents, newKey: () => 'press-key' });
+    const b = createHarnessMaintenanceController({ api, intents, onChange: () => seen.push(intents.get('opencode')?.busy ?? null) });
+    const seed = a.refresh({ fresh: true });
+    await Promise.resolve();
+    reads.shift()({ harnesses: [absentEntry({ harness: 'opencode' })] });
+    await seed;
+    const press = a.act('opencode', 'install');
+    await Promise.resolve();
+    a.dispose();                                                       // the pressing view is released mid-read
+    reads.shift()({ harnesses: [absentEntry({ harness: 'opencode' })] });
+    await press; await flush();
+    assert.ok(seen.length, 'the mounted sibling was told');
+    assert.equal(seen[seen.length - 1], null, 'and that the row is free again');
+    b.dispose();
+});
+
+// ---- W5 area 1, the unknown-Install retry's own guard: the press reads its program once before any
+// second POST, and a row already read as no longer absent sends nothing at all.
+
+test('a lost Install reads its own program once before Retry and sends nothing when it is installed by then', async () => {
+    const sent = [];
+    let installed = false;
+    const { controller } = setup({
+        harnessMaintenanceInventory: async () => ({ harnesses: [installed
+            ? entry({ harness: 'fixture', selection: { path: '/vendor/program', version: '2.0.0' } })
+            : absentEntry({ harness: 'fixture' })] }),
+        startHarnessMaintenance: async (body, key) => { sent.push([body, key]); throw new Error('Connection lost'); },
+    });
+    await controller.refresh(); await flush();
+    await controller.act('fixture', 'install'); await flush();
+    assert.equal(sent.length, 1, 'the press was sent once');
+    installed = true;                                            // installed elsewhere since the lost reply
+    assert.equal(controller.view('fixture').retryBlocked, '', 'the last read still says absent: the row offers Retry');
+    await controller.act('fixture', 'rejoin'); await flush();
+    assert.equal(sent.length, 1, 'the retry read its program first and sent nothing');
+    const view = controller.view('fixture');
+    assert.ok(view.request, 'the original key and body stay');
+    assert.match(view.retryBlocked, /installed now/);
+    const html = harnessMaintenanceMarkup(view.entry, view);
+    assert.match(html, /installed now/);
+    assert.doesNotMatch(html, /Retry same request/, 'no enabled Retry stands in its place');
+});
+
+test('a lost Install whose row no longer reads absent sends nothing and does not even re-read', async () => {
+    let listed = true, reads = 0;
+    const sent = [];
+    const { controller } = setup({
+        harnessMaintenanceInventory: async () => { reads += 1; return { harnesses: listed ? [absentEntry({ harness: 'fixture' })] : [] }; },
+        startHarnessMaintenance: async (body, key) => { sent.push([body, key]); throw new Error('Connection lost'); },
+    });
+    await controller.refresh(); await flush();
+    await controller.act('fixture', 'install'); await flush();
+    assert.equal(sent.length, 1, 'the press was sent once');
+    listed = false;                                              // the next read answers without the program
+    await controller.refresh(); await flush();
+    const before = reads;
+    await controller.act('fixture', 'rejoin'); await flush();
+    assert.equal(sent.length, 1, 'no second POST without a current absence');
+    assert.equal(reads, before, 'the blocked press sends nothing, not even a read');
+    const view = controller.view('fixture');
+    assert.ok(view.request, 'the original key and body stay');
+    assert.match(view.retryBlocked, /no longer finds the program absent/);
+    const html = harnessMaintenanceMarkup(view.entry, view);
+    assert.doesNotMatch(html, /Retry same request/, 'no enabled Retry stands in its place');
+    assert.match(html, /action="inspect"[^>]*>Check again</, 'the read-only Check again stands instead');
 });

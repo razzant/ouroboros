@@ -17,6 +17,7 @@ from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.task_results import (
     STATUS_FAILED,
+    new_task_id,
     write_task_result,
 )
 from ouroboros.utils import utc_now_iso
@@ -276,7 +277,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
     # Membership, not truthiness (C4): an explicit 0 is the hidden partition the
     # producer stamped; only a MISSING id is absence and falls to the owner chat.
     chat_id = coerce_chat_identity(evt.get("chat_id"), owner_chat_int)
-    tid = str(evt.get("task_id") or uuid.uuid4().hex[:8])
+    tid = str(evt.get("task_id") or new_task_id())
     created_at = utc_now_iso() if not evt.get("task_id") else ""
     desc = str(evt.get("objective") or evt.get("description") or "").strip()
     expected_output = str(evt.get("expected_output") or "").strip()

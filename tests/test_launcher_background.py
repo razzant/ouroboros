@@ -1436,3 +1436,101 @@ def test_a_saved_keep_running_choice_whose_indicator_or_hide_fails_exits_without
     close(background, window)  # the saved answer is "quit on close": the owner's close is Quit
     wait_for(lambda: background.events == ["exit"])
     assert background.owner_exit.is_set()
+
+
+def test_desktop_panic_consciousness_confirm_uses_one_native_dialog_and_private_pipe(monkeypatch):
+    """C01 Stage 1: ``request_panic_consciousness_start`` reads the passive preview, shows ONE native confirmation
+    dialog with the host's lines, writes ``panic_start <basis>`` to the launcher's private stdin pipe, and reports
+    submission separately from server confirmation. Cancelling or an unreadable basis sends nothing."""
+    import io
+
+    basis = "abcdef0123456789abcdef0123456789"
+    preview_lines = [
+        "Ouroboros will also wake between your messages.",
+        "Panic turned consciousness off.",
+        "Nothing starts right now: 2 tasks stopped by Panic stay stopped at this press.",
+    ]
+    requests_seen = []
+    pipe_lines = []
+    dialogs = []
+
+    class FakeResp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+    def fake_urlopen(url, timeout=0):
+        requests_seen.append(url)
+        return FakeResp(json.dumps({
+            "to": "on", "lines": preview_lines, "places": [],
+            "after_panic": {"why": "panic", "choice": True, "held": 2, "basis": basis},
+        }).encode("utf-8"))
+
+    monkeypatch.setattr(lb.urllib.request, "urlopen", fake_urlopen)
+
+    # Cancel in the native dialog: safe cancellation, no pipe write.
+    res_cancel = lb.request_panic_consciousness_start(
+        8765, lambda title, msg: dialogs.append((title, msg)) or False, lambda raw: pipe_lines.append(raw) or True)
+    assert res_cancel == {"submitted": False, "cancelled": True}
+    assert dialogs == [("Turn on consciousness?", "\n\n".join(preview_lines))]
+    assert pipe_lines == [] and requests_seen == ["http://127.0.0.1:8765/api/consciousness?switch=on"]
+
+    # Confirm in the native dialog: writes ``panic_start <basis>`` to the private pipe only; no POST /api/command.
+    dialogs.clear()
+    requests_seen.clear()
+    res_sent = lb.request_panic_consciousness_start(
+        8765, lambda title, msg: dialogs.append((title, msg)) or True, lambda raw: pipe_lines.append(raw) or True)
+    assert res_sent == {"submitted": True, "confirmed": False}
+    assert len(dialogs) == 1 and pipe_lines == [f"panic_start {basis}\n".encode("ascii")]
+    assert requests_seen == ["http://127.0.0.1:8765/api/consciousness?switch=on"]
+
+    # Already-on consciousness with remaining Panic-stopped tasks (``why == "held"``): same native dialog + private pipe.
+    held_lines = [
+        "Consciousness is already on; tasks stopped by Panic still wait for your decision in this run.",
+        "Nothing starts right now: 1 task stopped by Panic stays stopped at this press.",
+    ]
+    dialogs.clear()
+    pipe_lines.clear()
+    monkeypatch.setattr(lb.urllib.request, "urlopen", lambda *_a, **_kw: FakeResp(json.dumps({
+        "to": "on", "lines": held_lines, "places": [],
+        "after_panic": {"why": "held", "choice": True, "held": 1, "basis": basis},
+    }).encode("utf-8")))
+    res_held = lb.request_panic_consciousness_start(
+        8765, lambda title, msg: dialogs.append((title, msg)) or True, lambda raw: pipe_lines.append(raw) or True)
+    assert res_held == {"submitted": True, "confirmed": False}
+    assert dialogs == [("Allow wakes to resume Panic-stopped tasks?", "\n\n".join(held_lines))]
+    assert pipe_lines == [f"panic_start {basis}\n".encode("ascii")]
+
+    # Pipe unavailable: reports submission failure without claiming anything turned on.
+    res_pipe_down = lb.request_panic_consciousness_start(8765, lambda *_a: True, lambda _raw: False)
+    assert res_pipe_down["submitted"] is False and "error" in res_pipe_down
+
+    # Unreadable basis or ordinary (non-Panic) preview: refuses before opening any dialog or writing to the pipe.
+    for payload, expected_key in (
+        ({"to": "on", "lines": preview_lines, "places": []}, "reason"),
+        ({"to": "on", "lines": preview_lines, "places": [],
+          "after_panic": {"why": "unknown", "choice": False, "held": None, "basis": ""}}, "error"),
+    ):
+        dialogs.clear()
+        pipe_lines.clear()
+        monkeypatch.setattr(lb.urllib.request, "urlopen",
+                            lambda *_a, _p=payload, **_kw: FakeResp(json.dumps(_p).encode("utf-8")))
+        ans = lb.request_panic_consciousness_start(
+            8765, lambda title, msg: dialogs.append((title, msg)) or True, lambda raw: pipe_lines.append(raw) or True)
+        assert ans["submitted"] is False and expected_key in ans and dialogs == [] and pipe_lines == []
+
+
+def test_consume_launcher_pipe_forwards_panic_start_and_stops_immediately_on_quit():
+    """``_consume_launcher_pipe`` forwards ``panic_start <basis>`` lines to its recording callback while returning
+    ``launcher_quit`` immediately on ``quit\\n`` and ``launcher_gone`` on EOF."""
+    import io
+    from ouroboros.server_process import _consume_launcher_pipe
+
+    basis = "2" * 32
+    seen = []
+    stream = io.BytesIO((b"x" * 300) + b"\n" + f"panic_start {basis}\n".encode("ascii") + b"quit\n")
+    assert _consume_launcher_pipe(stream, seen.append) == "launcher_quit"
+    assert seen == [basis]
+    assert _consume_launcher_pipe(io.BytesIO(b""), seen.append) == "launcher_gone"

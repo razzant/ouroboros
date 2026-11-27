@@ -134,8 +134,10 @@ def set_hold(record: Dict[str, Any], reason: str, detail: str = "", *, retry_sec
 
 def claim(record: Dict[str, Any], due_at: str) -> Dict[str, Any]:
     """A new occurrence for a due row: one token, one task id, kept across retries."""
+    from ouroboros.task_results import new_task_id
+
     record.pop("previous_run_open", None)
-    record["occurrence"] = {"token": uuid.uuid4().hex[:16], "task_id": uuid.uuid4().hex[:8],
+    record["occurrence"] = {"token": uuid.uuid4().hex[:16], "task_id": new_task_id(),
                             "due_at": str(due_at), "phase": "claimed", "claimed_at": utc_now_iso(),
                             "fingerprint": fingerprint(record)}
     return view(record)

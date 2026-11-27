@@ -11,7 +11,7 @@ import pytest
 from ouroboros.consciousness_view import describe_consciousness_state
 from tests.test_design_system_gate_browser import open_nav
 from tests.test_room_work_browser import PROJECT, Transport, activity, progress, reading
-from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, capture, subscription_ui as subscription_ui
 from tests.test_window_chrome_browser import record
 
 pytestmark = [pytest.mark.ui_browser]
@@ -32,17 +32,18 @@ def _gap_history(page, transport):
     def history(route):
         chat_id = int(parse_qs(urlparse(route.request.url).query).get("chat_id", ["1"])[0])
         reads.append(chat_id)
-        route.fulfill(json={"messages": transport.history[chat_id], "progress": [],
+        route.fulfill(json={"profile_scope": PREVIEW_SCOPE, "messages": transport.history[chat_id], "progress": [],
                             "has_more": True, "page_cursor": "recent", "next_cursor": "older"})
 
     page.route("**/api/chat/history*", history)
     return reads
 
 
-# A room tells its history gap at the head of its loaded window and raises no notice over its newest rows (#2886, U021).
-# Every notice a room's stack ever holds is kept, so "none" covers the whole flow, not one instant.
+# A room tells its history gap at the head of its loaded window and raises no notice of it over its newest rows (#2886,
+# U021). Every notice the page's stack ever holds is kept, so "none" covers the whole flow, not one instant; only notices
+# about the gap count (this fixture's first Main read can also fail before its answer, which is a notice of its own).
 _ROOM_NOTICES = """window.__roomNotices = [];
-new MutationObserver(() => document.querySelectorAll('.toast-stack--room .toast').forEach(toast => {
+new MutationObserver(() => document.querySelectorAll('#toast-stack .toast').forEach(toast => {
     if (!window.__roomNotices.includes(toast)) window.__roomNotices.push(toast);
 })).observe(document, {childList: true, subtree: true});"""
 
@@ -51,7 +52,7 @@ def _room_notices(page):
     page.wait_for_function("""() => [...document.getAnimations()].every(a =>
         a.effect?.getTiming().iterations === Infinity || a.playState !== 'running')""")
     page.wait_for_timeout(250)
-    return page.evaluate("window.__roomNotices.map(toast => toast.textContent)")
+    return page.evaluate("window.__roomNotices.map(toast => toast.textContent).filter(text => /gaps|not loaded/.test(text))")
 
 
 def _gap_heads_history(page, host):
@@ -72,7 +73,7 @@ def test_hidden_main_reads_no_history_until_shown_and_tells_its_gap_at_its_head(
     # A room behind another page neither draws nor reads (5e72b85224, "a page change ... stops drawing and reading
     # there"): Main opened behind Settings has read nothing and raised nothing.
     page.wait_for_timeout(1500)
-    hidden_notices = page.locator(".toast-stack--room .toast").count()
+    hidden_notices = page.locator("#toast-stack .toast").count()
     hidden_reads = list(reads)
     page.locator('[data-nav-page="chat"]').first.click()
     page.wait_for_selector("#page-chat.active")
@@ -111,7 +112,7 @@ def test_delayed_gap_waits_for_drawer_close_without_another_history_read(shell_u
         if room == chat_id:
             pending.append(route)
         else:
-            route.fulfill(json={"messages": transport.history[room], "progress": [], "has_more": False})
+            route.fulfill(json={"profile_scope": PREVIEW_SCOPE, "messages": transport.history[room], "progress": [], "has_more": False})
 
     page.route("**/api/chat/history*", history)
     page.goto(shell_ui["url"])
@@ -120,20 +121,20 @@ def test_delayed_gap_waits_for_drawer_close_without_another_history_read(shell_u
     if chat_id == 42:
         page.evaluate("p => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project: p}}))", PROJECT)
         page.wait_for_selector("#project-panel.open .chat-input")
-    before_drawer = page.locator('.toast-stack--room .toast').all_text_contents()
+    before_drawer = page.locator('#toast-stack .toast').all_text_contents()
     page.locator(f"{host} [data-mobile-nav-toggle]").click()
     page.wait_for_function("document.body.classList.contains('nav-drawer-open') && window.__ouroLayers.top() === 'drawer'")
     assert pending, "the response must still be held when the drawer opens"
     for route in pending:
-        route.fulfill(json={"messages": transport.history[chat_id], "progress": [],
+        route.fulfill(json={"profile_scope": PREVIEW_SCOPE, "messages": transport.history[chat_id], "progress": [],
                             "has_more": True, "page_cursor": "recent", "next_cursor": "older"})
     page.wait_for_function("host => document.querySelector(host + ' .chat-load-older-note')?.textContent.includes('gaps')", arg=host)
-    hidden = page.locator(".toast-stack--room .toast").count()
+    hidden = page.locator("#toast-stack .toast").count()
     facts = page.evaluate("""async host => ({bodyClass: document.body.className,
         inert: Boolean(document.querySelector(host).closest('[inert]')), top: window.__ouroLayers.top(),
         guardServed: (await (await fetch('/static/modules/chat.js')).text()).includes("!messagesDiv.closest('[inert]')")})""", host)
     record(f"drawer-gap-hidden-{chat_id}-{shell_ui['engine']}", {"notices": hidden, "reads": reads, "before_drawer": before_drawer,
-        "after_text": page.locator('.toast-stack--room .toast').all_text_contents(), **facts})
+        "after_text": page.locator('#toast-stack .toast').all_text_contents(), **facts})
     assert hidden == 0, "a drawer-covered room raises no notice"
     before = len(reads)
     page.keyboard.press("Escape")
@@ -162,29 +163,21 @@ def test_project_header_reserve_is_spent_once_in_each_flow_state(shell_ui):
     page.wait_for_selector("#project-panel.open .chat-messages .chat-bubble")
     page.wait_for_selector("#project-panel .rw-trigger")
     page.wait_for_timeout(400)
+    # A room's history facts live at its feed's edge and its events in the page's notice: the Project's header keeps
+    # one reserve, the bar's, in each flow state.
     states = page.evaluate("""() => {
         const panel = document.querySelector('#project-panel'), bar = panel.querySelector('.project-panel-bar');
-        const feed = panel.querySelector('.chat-messages'), status = panel.querySelector('.chat-panel-statusbar');
-        const note = document.createElement('span'); note.className = 'chat-load-older-note chat-history-status';
-        note.textContent = 'Some saved history could not be loaded.';
+        const feed = panel.querySelector('.chat-messages');
         const facts = () => ({barBottom: bar.getBoundingClientRect().bottom,
-            feedTop: feed.getBoundingClientRect().top, feedPadding: parseFloat(getComputedStyle(feed).paddingTop),
-            statusTop: status.getBoundingClientRect().top, statusBottom: status.getBoundingClientRect().bottom,
-            statusPadding: parseFloat(getComputedStyle(status).paddingTop), statusChildren: status.innerHTML});
-        const normal = facts(); status.append(note); const failed = facts();
-        note.textContent = 'Saved position could not be restored exactly.'; const approximate = facts();
-        document.body.classList.add('keyboard-open'); const keyboardNote = facts();
-        note.remove(); const keyboard = facts(); document.body.classList.remove('keyboard-open');
-        return {normal, failed, approximate, keyboardNote, keyboard};
+            feedTop: feed.getBoundingClientRect().top, feedPadding: parseFloat(getComputedStyle(feed).paddingTop)});
+        const normal = facts();
+        document.body.classList.add('keyboard-open'); const keyboard = facts(); document.body.classList.remove('keyboard-open');
+        return {normal, keyboard};
     }""")
     record(f"project-flow-{shell_ui['engine']}", states)
     assert states["normal"]["feedPadding"] >= 50
-    for name in ("failed", "approximate"):
-        assert states[name]["feedPadding"] == 8, (name, states)
-        assert states[name]["statusPadding"] >= 50
     assert states["keyboard"]["feedPadding"] == 0, states
     assert abs(states["keyboard"]["feedTop"] - states["keyboard"]["barBottom"]) <= 1, states
-    assert states["keyboardNote"]["feedPadding"] == 0 and states["keyboardNote"]["statusPadding"] == 8, states
 
 
 def test_hidden_main_does_not_take_visible_projects_notice(shell_ui):
@@ -256,7 +249,7 @@ def test_work_navigation_clears_persistent_history_error(shell_ui, chat_id, keyb
         if query.get("cursor"):
             route.fulfill(status=503, json={"error": "History read failed"})
         else:
-            route.fulfill(json={"messages": rows, "progress": [], "has_more": True,
+            route.fulfill(json={"profile_scope": PREVIEW_SCOPE, "messages": rows, "progress": [], "has_more": True,
                                 "page_cursor": "recent", "next_cursor": "older"})
 
     page.route("**/api/chat/history*", history)
@@ -269,18 +262,32 @@ def test_work_navigation_clears_persistent_history_error(shell_ui, chat_id, keyb
     if keyboard:
         page.evaluate("document.body.classList.add('keyboard-open')")
     page.locator(f"{host} .chat-load-older-btn").click()
-    page.locator(f"{host} .chat-history-status").wait_for(state="visible")
+    page.locator("#toast-stack .toast").wait_for(state="visible")  # the failed read is the page's notice
+    told = page.evaluate("""host => { const toast = document.querySelector('#toast-stack .toast');
+        return {classes: [...toast.classList], role: toast.getAttribute('role'), action: Boolean(toast.querySelector('.toast-action')),
+                words: toast.querySelector('.toast-words').textContent,
+                edge: document.querySelector(host + ' .chat-load-older-btn').textContent,
+                note: document.querySelector(host + ' .chat-load-older-note').textContent}; }""", host)
+    # Its kind's tone and role (a failure: the danger tone, an alert), no action of its own; Retry and the words at the edge.
+    assert "toast-danger" in told["classes"] and told["role"] == "alert" and not told["action"], told
+    assert told["edge"] == "Retry loading messages" and "could not be loaded" in told["note"], told
     page.locator(f"{host} .rw-trigger").click()
+    # The room's work sheet covers it: the room's notice leaves rather than lie over the sheet's rows.
+    page.wait_for_function("() => !document.querySelector('#toast-stack .toast:not(.is-hiding)')")
     page.locator(f'{host} .rw-row[data-id="gap-work"] .rw-main').click()
     page.wait_for_function("host => document.querySelector(host + ' .rw-shade:not(.cx-shade)').hidden", arg=host)
     facts = page.evaluate("""host => {
         const root = document.querySelector(host);
-        return {card: root.querySelector('.chat-live-card[data-task-id="gap-work"]').getBoundingClientRect().top,
-                error: root.querySelector('.chat-history-status').getBoundingClientRect().bottom};
+        const card = root.querySelector('.chat-live-card[data-task-id="gap-work"]');
+        const box = card.getBoundingClientRect(), bar = root.querySelector('.chat-page-header, .project-panel-bar');
+        const x = box.left + box.width / 2, y = Math.max(box.top, bar.getBoundingClientRect().bottom) + 12;
+        return {card: box.top, bar: bar.getBoundingClientRect().bottom, hit: card.contains(document.elementFromPoint(x, y)),
+                notices: document.querySelectorAll('#toast-stack .toast:not(.is-hiding)').length};
     }""", host)
     record(f"work-navigation-error-{chat_id}-{keyboard}-{shell_ui['engine']}", facts)
     capture(page, f"work-navigation-error-{chat_id}-{keyboard}-{shell_ui['engine']}")
-    assert facts["card"] >= facts["error"], facts
+    assert facts["card"] >= facts["bar"] - 1 and facts["hit"], facts  # the destination is reached, nothing covers it
+    assert facts["notices"] == 0, facts
 
 
 def test_gap_translation_reaches_both_in_feed_copies(shell_ui):
@@ -288,23 +295,39 @@ def test_gap_translation_reaches_both_in_feed_copies(shell_ui):
     transport = Transport(page, history={1: reading(14)})
     _gap_history(page, transport)
     translated = "Часть сохранённой истории не загружена. В показанных сообщениях могут быть пропуски."
-    payload = {"language": "ru", "english": False, "entries": {"code:history.gap": {"text": translated}}}
+    failed = "Часть сохранённой истории загрузить не удалось."
+    inexact = "Сохранённое место не удалось восстановить точно."
+    payload = {"language": "ru", "english": False, "entries": {
+        "code:history.gap": {"text": translated},
+        "Some saved history could not be loaded.": {"text": failed},
+        "Saved position could not be restored exactly.": {"text": inexact}}}
     page.route("**/api/ui/i18n*", lambda route: route.fulfill(json=payload))
     page.goto(shell_ui["url"])
     page.wait_for_selector("#page-chat .chat-load-older-note")
     page.wait_for_function("text => document.querySelector('#page-chat .chat-load-older-note').textContent === text",
                            arg=translated, timeout=3000)
-    # Exercise the simultaneous read-error/approximation copy through the real producer in the skipped feed.
+    # The real producer, with a failed read and an inexact return at once: the separate gap copy, and both lasting event
+    # sentences at the edge in the interface's language, before and after the notices have gone (they are made in that
+    # language where they are made, as the notices' words are).
     result = page.evaluate("""async () => {
         const {createHistoryControls} = await import('/static/modules/chat_render_batch.js');
         const feed = document.createElement('div'); feed.className = 'chat-messages';
-        document.body.append(feed); const status = document.createElement('div');
-        const controls = createHistoryControls(feed, status);
+        document.body.append(feed);
+        const told = [];
+        const controls = createHistoryControls(feed, { isVisible: () => true,
+            notify: (text) => { told.push(text); return { dispose() {} }; } });
         controls.render({initialized: true, error: new Error('read failed')}, {gaps: true}, true);
-        const text = feed.querySelector('.chat-history-gap').textContent;
-        controls.destroy(); feed.remove(); return text;
+        const read = () => ({gap: feed.querySelector('.chat-history-gap').textContent,
+                             edge: feed.querySelector('.chat-load-older-note').textContent});
+        const before = read();
+        controls.hideNotice();
+        const after = read();
+        controls.destroy(); feed.remove(); return {before, after, told};
     }""")
-    assert result == translated
+    assert result["before"]["gap"] == translated, result
+    for state in ("before", "after"):
+        assert result[state]["edge"] == f"{failed} {inexact}", result
+    assert result["told"] == [failed, inexact], result
 
 
 @pytest.mark.parametrize("width,theme", [(375, "dark"), (375, "light"), (1100, "dark"), (1100, "light"),
@@ -328,7 +351,7 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
 
     def history(route):
         chat_id = int(parse_qs(urlparse(route.request.url).query).get("chat_id", ["1"])[0])
-        route.fulfill(json={"messages": transport.history[chat_id], "progress": [],
+        route.fulfill(json={"profile_scope": PREVIEW_SCOPE, "messages": transport.history[chat_id], "progress": [],
                             "has_more": True, "page_cursor": "recent", "next_cursor": "older"})
 
     page.route("**/api/chat/history*", history)
@@ -337,31 +360,18 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
         page.goto(ui["url"] + "/")
         page.wait_for_selector("#page-chat .rw-trigger")
         page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
-        assert page.locator(".toast-stack--room .toast").count() == 0, "Main tells its gap at the head of its history"
-        # A room's own notice stack (toast.js `host`) floats between the bar and the composer.
-        page.evaluate("""async () => {
-            const {showToast} = await import('/static/modules/toast.js');
-            showToast('A room notice keeps to the reading area, between the bar and the composer.', 'info',
-                {ttl: 0, haptic: false, dismissLabel: 'Dismiss room notice', host: document.querySelector('#page-chat')});
-        }""")
-        page.wait_for_selector(".toast-stack--room .toast-dismiss")
-        page.wait_for_function("getComputedStyle(document.querySelector('.toast-stack--room .toast')).opacity === '1'")
+        assert page.locator(".toast").count() == 0, "Main tells its gap at the head of its history"
         facts = page.evaluate("""() => {
-            const rect = s => document.querySelector(s).getBoundingClientRect();
             const header = document.querySelector('#page-chat .chat-page-header');
-            return {header: rect('#page-chat .chat-page-header'), toast: rect('.toast-stack--room .toast'),
-                composer: rect('#page-chat #chat-input-area'), background: getComputedStyle(header).backgroundColor,
+            return {background: getComputedStyle(header).backgroundColor,
                 edge: (t => t.maskImage || t.webkitMaskImage)(getComputedStyle(header.querySelector(':scope > .room-edge[data-edge="tint"]'))),
                 edgeEvents: getComputedStyle(header.querySelector(':scope > .room-edge[data-edge="tint"]')).pointerEvents};
         }""")
         # The bar paints nothing of its own; under its capsules lies the room's edge (DESIGN "A room's edges"), no press.
         assert facts["background"] == "rgba(0, 0, 0, 0)"
         assert "linear-gradient" in facts["edge"] and facts["edgeEvents"] == "none", facts
-        assert facts["toast"]["top"] > facts["header"]["bottom"]
-        assert facts["toast"]["bottom"] <= facts["composer"]["top"]
-        assert not page.locator("#page-chat .chat-page-note").is_visible()
         assert "Shown messages may have gaps" in page.locator("#page-chat .chat-load-older-note").inner_text()
-        # The consciousness chip opens its list, hit-testable beside the toast, without activating a command.
+        # The consciousness chip opens its list without activating a command.
         page.click("#page-chat .cx-chip:not([hidden])")
         page.locator('#page-chat .cx-shade .cx-toggle').click(trial=True)
         if theme == 'dark':
@@ -382,8 +392,6 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
             no_blur.evaluate("el => el.remove()")
         page.click("#page-chat .cx-chip")
         page.wait_for_selector("#page-chat .cx-shade", state="hidden")
-        page.click(".toast-stack--room .toast-dismiss")
-        page.wait_for_selector(".toast-stack--room .toast", state="detached")
         if width < 720:
             page.click('#page-chat [data-mobile-nav-toggle]')
             page.wait_for_function("window.__ouroLayers.top() === 'drawer'")
@@ -392,7 +400,7 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
         page.wait_for_function("!document.body.classList.contains('nav-drawer-open')")
         assert page.locator(".shell-pill").count() == 0
         page.wait_for_function("document.querySelector('#project-panel .chat-load-older-note')?.textContent.includes('gaps')")
-        assert page.locator(".toast-stack--room .toast").count() == 0, "the arriving room raises no notice of its own"
+        assert page.locator(".toast").count() == 0, "the arriving room raises no notice of its own"
         page.wait_for_function("""() => [...document.getAnimations()].every(a =>
             a.effect?.getTiming().iterations === Infinity || a.playState !== 'running')""")
         geometry = page.locator("#project-panel").evaluate("""panel => {
@@ -429,13 +437,11 @@ def test_toast_focus_timeout_and_disposal(shell_ui):
     page.wait_for_selector("#chat-input")
     page.evaluate("""async () => {
         const {showToast} = await import('/static/modules/toast.js');
-        window.testNotice = showToast('Focused notice', 'info', {ttl: 100,
-            dismissLabel: 'Close test notice', host: document.querySelector('#page-chat')});
+        window.testNotice = showToast('Focused notice', 'info', {ttl: 100, dismissLabel: 'Close test notice'});
         window.testNotice.querySelector('button').focus();
     }""")
     page.wait_for_timeout(250)
     assert page.get_by_label("Close test notice").count() == 1
-    assert "shell-icon-control" in page.get_by_label("Close test notice").get_attribute("class")
     page.locator("#chat-input").focus()
     page.wait_for_selector("[aria-label='Close test notice']", state="detached")
     page.evaluate("""async () => {
@@ -497,14 +503,16 @@ def test_separate_ui_history_oracle_sees_in_feed_gaps(shell_ui):
     from tests.test_separate_ui_browser import _history_notice
 
     page = shell_ui["page"]
-    page.set_content('''<div id="page-chat"><span class="chat-history-status" hidden>Read failed</span>
+    page.set_content('''<div id="toast-stack"><div class="toast" hidden><span class="toast-words">Some saved history could not
+        be loaded.</span></div><div class="toast"><span class="toast-words">Saved.</span></div></div>
+        <div id="page-chat">
         <div class="chat-load-older has-gaps"><span class="chat-load-older-note">History has gaps</span>
         <span class="chat-history-gap" hidden>Separate gap</span></div></div>''')
-    assert _history_notice(page) == "History has gaps"
+    assert _history_notice(page) == "History has gaps", "a hidden notice, or one not about history, is not seen"
     page.locator('.chat-load-older-note').evaluate("el => { el.hidden = true; }")
     page.locator('.chat-history-gap').evaluate("el => { el.hidden = false; }")
     assert _history_notice(page) == "Separate gap"
     page.locator('.chat-load-older').evaluate("el => { el.classList.remove('has-gaps'); }")
     assert _history_notice(page) == ""
-    page.locator('.chat-history-status').evaluate("el => { el.hidden = false; }")
-    assert _history_notice(page) == "Read failed"
+    page.locator('#toast-stack .toast[hidden]').evaluate("el => { el.hidden = false; }")
+    assert " ".join(_history_notice(page).split()) == "Some saved history could not be loaded."

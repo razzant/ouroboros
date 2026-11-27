@@ -30,7 +30,7 @@ transaction; the original binding and the rows stay as they were written.
 from __future__ import annotations
 
 from ouroboros.store import StoreBusy, bounded_wait
-from ouroboros._usage_money import decimal_of, exact_money, known_room
+from ouroboros._usage_money import billing_group_key, decimal_of, exact_money, known_room
 from ouroboros._usage_rows import (
     ORDINARY_GROUP_CAP_SOURCES, ROOT_CAP_SCOPE, WORK_CAP_SCOPE, group_binds as _group_binds,
     prefer_group_tie as _prefer_group_tie, raised_cap, valid_work_cap, valid_work_cap_basis, work_cap_amount,
@@ -375,22 +375,23 @@ def raise_work_refusal(view: Any, scope: Any, *, dispatch: bool = False, stash: 
     return root_limit, group_limit
 
 
-def stash_row_accounting(view: Any, row: Dict[str, Any]) -> None:
-    """Refresh the process-local root and group snapshots under the row's caps. On a damaged work cap use the
-    recorded inputs instead of raising after a write."""
+def row_accounting_stash(view: Any, row: Dict[str, Any]) -> Callable[[], None]:
+    """Read ``row``'s work cap in the writer's open transaction; the returned call refreshes the process-local root and
+    group snapshots from the buckets the write cached, with no statement, so it may follow a zero-wait COMMIT."""
     from ouroboros import usage_accounting as ua
-    from ouroboros._usage_money import billing_group_key
 
     group, root_id = billing_group_key(row), str(row.get("root_task_id") or "")
     cap = view.binding(WORK_CAP_SCOPE, group) if group and not group.startswith(UNAVAILABLE_GROUP_PREFIX) else None
-    cap = cap if valid_work_cap(cap) else None
-    if group:
-        ua._stash_root_accounting(f"{GROUP_KEY_PREFIX}{group}", view.summary(billing_group_id=group), raised_cap(
-            cap, ua._number(row.get("billing_group_limit_usd", row.get("root_limit_usd"))),
-            row.get("billing_group_limit_source"), group=True)[0])
-    if root_id:
-        ua._stash_root_accounting(root_id, view.summary(root_id), _attempt_root_cap(
-            cap, ua._number(row.get("root_limit_usd")), row.get("root_limit_source"), row.get("request_root_limit_usd")))
+    cap = cap if valid_work_cap(cap) else None  # damaged: the recorded inputs, never a raise after a write
+    def stash() -> None:
+        if group:
+            ua._stash_root_accounting(f"{GROUP_KEY_PREFIX}{group}", view.summary(billing_group_id=group), raised_cap(
+                cap, ua._number(row.get("billing_group_limit_usd", row.get("root_limit_usd"))),
+                row.get("billing_group_limit_source"), group=True)[0])
+        if root_id:
+            ua._stash_root_accounting(root_id, view.summary(root_id), _attempt_root_cap(cap, ua._number(
+                row.get("root_limit_usd")), row.get("root_limit_source"), row.get("request_root_limit_usd")))
+    return stash
 
 
 def accounting_key(scope: Any) -> str:

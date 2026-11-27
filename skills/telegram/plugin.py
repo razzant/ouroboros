@@ -40,11 +40,12 @@ from .lib.telegram_state import (
     _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
     _quiet_progress, _reply_target, _reply_ingress_transport, _carried_here, _bridged,
 )
-from .lib import telegram_i18n, telegram_inbound, telegram_quiz
+from .lib import telegram_i18n, telegram_inbound, telegram_pairing, telegram_places, telegram_quiz
 from .lib.telegram_origin import origin_label
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
 from .lib.telegram_outbox import outbox_for
+from .lib import telegram_group_wiring as group_wiring
 from .lib.telegram_share import make_prepare_share
 from .lib.telegram_typing import TypingCue, host_reply_preparation
 from .lib.telegram_poll_binding import (
@@ -334,9 +335,9 @@ def _target_chat(settings: Dict[str, Any], event: Dict[str, Any]) -> int:
         transport = event.get("transport") if isinstance(event.get("transport"), dict) else {}
         if transport.get("kind") == "telegram":
             return chat_id
-        # ...and the owner's notes, skill notices and the Safety Supervisor's notices: System rows
+        # ...and the owner's notes, skill and Safety Supervisor notices, a sign-in's «connected»: System rows
         # written for the owner, which an owner who left the web should still get on the phone.
-        if event.get("role") == "system" and event.get("system_type") in {"reminder", "skill_notice", "safety_notice"}:
+        if event.get("role") == "system" and event.get("system_type") in {"reminder", "skill_notice", "safety_notice", "sign_in_connected"}:
             return chat_id
         return 0
     # No pinned chat configured — only forward events that originate from
@@ -522,7 +523,8 @@ async def _authorized_owner(api, client, update, pinned_chat: str, lang: str) ->
     if not pinned_chat:
         if str(chat.get("type") or "") != "private" or chat_id != user_id:
             return None
-        merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_CHAT_ID": str(chat_id)})
+        if not await telegram_pairing.bind_unbound(api, client, update, chat_id, lang):
+            return None  # a link from setup waits and this is not it (lib/telegram_pairing.py)
         pinned_chat = str(chat_id)
     if str(chat_id) == pinned_chat and str(user_id) == pinned_chat:
         return pinned_chat
@@ -546,7 +548,8 @@ async def _edit_panel(api, client, chat_id: int, message_id: int, text: str, key
 
 async def _validate_bot(api, client, command_mode: str, lang: str, generation: int | None = None) -> None:
     """Validate the token (getMe) and finish bridge startup bookkeeping; ready names the exact binding proved."""
-    await client.call("getMe")
+    group_wiring.claim_before_contact(client)  # one local reader per bot: none if the connector holds it
+    me = await client.call("getMe")
     # Menu discovery follows command mode; owner Panic has its own immediate door.
     try:
         await client.call("setMyCommands", data={"commands": json.dumps(_bot_commands(command_mode, lang))})
@@ -560,6 +563,7 @@ async def _validate_bot(api, client, command_mode: str, lang: str, generation: i
         if not binding.current(generation):
             raise TelegramBindingChanged(getattr(client, "accepted", 0))
         binding.mark_validated(generation)
+        group_wiring.note_verified(api, generation, client.bot_id, me)  # the bot a group consent may name
     _save_bridge_status(api, "ready", bot=client.bot_id, generation=generation)
     api.log("info", f"Telegram poller started (command_mode={command_mode}, lang={lang})")
 
@@ -575,6 +579,12 @@ async def _start_poller(api):
         try:
             await _validate_bot(api, client, command_mode, lang, generation)
             validated = True
+        except group_wiring.TelegramBotInUse:
+            # The connector reads this bot here: the bridge does not contact Telegram with it. Record why (not a
+            # network deferral); the polling loop re-checks after its back-off, and only a restart frees the bot.
+            validated = False
+            _save_bridge_status(api, "degraded", "telegram_bot_in_use", bot=client.bot_id, generation=generation)
+            api.log("warning", "Telegram bot is read by the Telegram Bot connector here; this bridge waits.")
         except Exception as exc:
             if not is_transient_telegram_error(exc):
                 raise
@@ -777,6 +787,7 @@ async def _poller(api) -> None:
         except (TelegramBindingChanged, TelegramTokenMissing):
             continue
     client, generation, server, cursor, pinned_chat, max_updates, command_mode, lang, validated = started
+    feed = group_wiring.feed(api)
 
     retry_delay = TELEGRAM_RETRY_INITIAL_SEC
     degraded_cause = ""
@@ -795,6 +806,7 @@ async def _poller(api) -> None:
                 # own oldest update, while a rotated token of the same bot keeps its position.
                 validated = validated and not token_changed and server is not None and saved[0] == server[0]
                 (client, generation), server = _bridge_client(api, server=saved), saved
+                feed.accepted_poll = None
                 cursor.follow(saved[0], bot_id(client.token))
                 if token_changed:
                     _save_bridge_status(api, "connecting", "telegram_token_changed", bot=client.bot_id, generation=generation)
@@ -806,10 +818,9 @@ async def _poller(api) -> None:
                 revalidating = True
                 await _validate_bot(api, client, command_mode, lang, generation)  # it records ready
                 revalidating, validated, degraded = False, True, ""
-            updates = await client.get_updates(cursor.offset)
+            updates, period = await group_wiring.get_updates(feed, client, cursor.offset)  # the batch's group consent
             if not binding.current(generation):
-                # Answered for the previous token: neither confirmed nor handled, so the same bot's
-                # rotated token receives these updates again and another bot never sees them.
+                # A previous token's answer stays unconfirmed for the same bot's next poll.
                 continue
             if degraded_cause:
                 api.log("info", f"Telegram poller recovered after {degraded_cause}; polling resumed.")
@@ -820,11 +831,11 @@ async def _poller(api) -> None:
             retry_delay = TELEGRAM_RETRY_INITIAL_SEC
             if updates:
                 local_settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
-
             deferred, lang = await handle_poll_batch(
                 api, client, updates, cursor, binding, generation, pinned_chat, max_updates, command_mode, lang,
                 authorize=_authorized_owner, is_panic=_panic_update, on_message=_handle_owner_message,
-                on_callback=_handle_poll_callback,
+                on_callback=_handle_poll_callback, group_period=period,
+                on_group=group_wiring.on_group(api, feed, client, period, cursor=cursor),
             )
             await asyncio.sleep(_NOT_ACCEPTED_RETRY_SEC if deferred else 0.1)
         except (TelegramBindingChanged, TelegramTokenMissing):
@@ -879,8 +890,7 @@ async def _handle_owner_message(
         text = text.strip()
     # Handle /menu command locally — always allowed
     cleaned_text = text.lower().strip()
-    is_menu_cmd = _is_exact_bot_command(cleaned_text, "/menu")
-    if is_menu_cmd:
+    if _is_exact_bot_command(cleaned_text, "/menu"):
         header, keyboard = _build_menu_keyboard(command_mode, lang)
         if keyboard:
             await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
@@ -891,16 +901,16 @@ async def _handle_owner_message(
     # Handle /language locally — always allowed. Bare: the keyboard. With an argument
     # ("/language Quenya", "/language pt-BR", "/language invent a language and translate
     # everything into it"): the owner's words go to the host's one language writer.
-    is_lang_cmd = _is_exact_bot_command(cleaned_text, "/language")
-    if is_lang_cmd:
+    if _is_exact_bot_command(cleaned_text, "/language"):
         header, keyboard = _build_language_keyboard(lang)
         await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
         return
     # Handle /help command locally — always allowed
-    is_help_cmd = _is_exact_bot_command(cleaned_text, "/help")
-    if is_help_cmd:
-        help_text = _LOCALIZED_TEXTS[lang]["help_text"]
-        await client.send_message(chat_id, help_text)
+    if _is_exact_bot_command(cleaned_text, "/help"):
+        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["help_text"])
+        return
+    if telegram_pairing.start_payload(text) is not None:  # Start is the bridge's own in every mode, never a command
+        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["connected"])
         return
 
     if _panic_update(update):
@@ -1020,7 +1030,7 @@ async def _handle_owner_message(
 
 
 def _make_poller(api):
-    return lambda: _poller(api)
+    return lambda: group_wiring.while_polling(api, _poller(api))  # the group feed is reachable only while polling
 
 
 def _make_outbound(api, cue: TypingCue | None = None):
@@ -1316,17 +1326,12 @@ def _make_links(api):
                 return
             client = _telegram_client(api, event, chat_id)
             title = str(event.get("title") or "").strip() or "Links"
-            raw_actions = event.get("actions") if isinstance(event.get("actions"), list) else []
-            actions = []
-            for action in raw_actions:
-                if not isinstance(action, dict):
-                    continue
-                label = str(action.get("label") or "").strip()
-                url = str(action.get("url") or "").strip()
-                if label and url:
-                    actions.append((label, url))
-            # Shared link-action contract cap: ouroboros.tools.core._MAX_LINK_ACTIONS.
-            actions = actions[:12]
+            # An address is a button; a place inside Ouroboros (a skill's sign-in) is a line saying where to finish it.
+            actions, places = telegram_places.link_rows(event.get("actions"))
+            if places:
+                _clear_silent_msg(api, chat_id)
+                await client.send_message(chat_id, telegram_places.finish_lines(
+                    places, _LOCALIZED_TEXTS[telegram_i18n.language()]), parse_mode="")  # a label is literal text
             if not actions:
                 return
             _clear_silent_msg(api, chat_id)
@@ -1467,6 +1472,7 @@ def register(api):
     # GET hydrates the declarative form with what is stored; POST saves it.
     api.register_route("settings/save", handler=_make_settings_save(api), methods=("GET", "POST"))
     api.register_route("miniapp/status", handler=_make_status(api), methods=("POST",))
+    group_wiring.install(api, _bridge_client)  # your own bot in groups: route group_feed
     # Share… in the Mini App: the bridge's own client prepares the owner's message for Telegram's chat picker.
     api.register_route("miniapp/prepare-share", handler=make_prepare_share(api, _bridge_client), methods=("POST",))
     register_connection(api)  # Connection's status and its kept-copies form

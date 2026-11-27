@@ -181,8 +181,11 @@ CONTROL_KEYS = (
     "evolution_mode_enabled", "evolution_owner_stopped", "evolution_stop_source",
     "post_task_autostop", "bg_consciousness_enabled", "bg_consciousness_stop_source",
     "owner_id", "owner_chat_id", "owner_external_id", "owner_external_chat_id",
+    # The last received Panic (``supervisor.panic_choice``): a backup's copy proves nothing until written again.
+    "panic_ingress_receipt",
 )
-OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop", "bg_consciousness_stop_source"})
+OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop", "bg_consciousness_stop_source",
+                                   "panic_ingress_receipt"})
 CURRENT_QUALITIES = frozenset({"current", "recovered"})
 
 

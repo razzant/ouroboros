@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.25
+version: 1.6.1
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -11,6 +11,23 @@ permissions: [net, read_settings, widget, route, supervised_task, subscribe_even
 env_from_settings: [TELEGRAM_BOT_TOKEN]
 secret_fields:
   botToken: TELEGRAM_BOT_TOKEN
+connection_card:
+  title: "Phone via Telegram"
+  pitch: "Chat with Ouroboros anywhere"
+  steps:
+    - {text: "Open @BotFather in Telegram", link: "https://t.me/BotFather", action: "Open @BotFather"}
+    - {text: "Send /newbot, then choose a name and a username ending in “bot”"}
+    - {text: "BotFather replies with a token: paste it here and press Check"}
+  token: botToken
+  pairing:
+    code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}
+    link: "https://t.me/{username}?start={code}"
+    identity: "lib/telegram_pairing.py:bot_identity"
+    api_base: "lib/telegram_pairing.py:saved_api_base"
+    hint: "Scan it with your phone’s camera, then press Start in Telegram."
+    note: "You can finish setup now; the bot answers Connected once Ouroboros starts."
+  options:
+    - {key: TELEGRAM_NOTIFY_TASKS, label: "Send results and errors of work here", "on": "on", "off": "off", new_connection: true, store: skill_settings, route: settings/save}
 subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state]
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
@@ -29,12 +46,15 @@ companion_processes:
 # Telegram
 
 One owner-only Telegram integration provides both the established bot bridge
-and the optional Mini App. The first positive private Telegram chat binds as
-the sole owner. Text, photos and files (documents, video, audio and voice notes) can be sent
+and the optional Mini App. Its card in the setup wizard shows a QR of a one-time link to the bot: while that link
+waits, only its own Start binds the owner chat and the bot answers Connected; where no link was shown, the first
+positive private Telegram chat binds as the sole owner. /panic from that chat stops Ouroboros in every command
+mode from its first message. Text, photos and files (documents, video, audio and voice notes) can be sent
 to Ouroboros, with or without a caption. The bridge checks the complete download against any size Telegram announced.
 A file over this integration's 10 MiB cap or one that failed to download still delivers its caption and why it is missing, as one
 message you can Reply to; only intake Ouroboros cannot confirm gets a bot notice. Replies,
-photos, videos, documents, typing state, subagent cards, quiz cards, and opt-in notifications are mirrored back to that owner. A helper's own final report
+photos, videos, documents, typing state, subagent cards, quiz cards, and opt-in notifications are mirrored back to that owner;
+a link to a skill's sign-in inside Ouroboros arrives as a line saying to finish it on the computer running Ouroboros. A helper's own final report
 stays in the app, where its card shows it; Ouroboros's answer speaks for it, while a helper's
 message to you, question or file still comes here. A helper's card and its notices for work begun
 from this chat also come in Telegram-only mode, from a Project room too, but only through the bot and
@@ -118,6 +138,28 @@ exactly the ids its own field lists (names are never read back); one kept later 
 deleted copy's outcome stays listed. After a deletion that field is empty until the page is
 opened again. Completion notices keep their own retry; the bot's replies to commands, typing
 and `/panic` are sent once, as before.
+
+Your bot can also take part in groups through the Official `telegram-bot` connector, which then
+handles those groups (files, topics, replies) as it does for its own bot; this bridge stays the bot's
+only reader and keeps its token. Off by default: until the owner chooses this bot in Add a place
+(`POST group_feed` with the bot shown, refused for another bot or before the bot is bound to the
+owner), and whenever no owner is bound, group updates are dropped as before. Off (`enabled: false`
+with the `consent_account_id` shown) withdraws only that bot's consent, also while Telegram is away;
+a successful poll marks the new consent ready. Each consent gathers membership afresh; an existing quiet
+place can refresh only its own group's membership. getUpdates asks for membership and reactions
+(`callback_query` kept). Only a group connected as an exact `owner_bot` place is passed whole; any
+other group the bot is in leaves only its newest id, type, title and membership for the chooser,
+never words, senders or files. Private chats, callbacks and channels never leave this bridge, a
+group `/panic` is no Panic, and the owner's private Panic never waits behind group work. Kept items
+wait in `group_feed.sqlite3` until the connector confirms them; one that cannot be written at once
+is counted (`write_gaps`) and the owner's updates never wait. The connector, an unchanged Official
+release, sends only through the Host relay: listed methods and arguments, the exact place at its
+connection, Active, in its topic (an edit, deletion or reaction in its message's topic, the bot's
+replies included; a restriction or ban only from a chat-wide place). One bot has one reader here:
+before its first request with a token this bridge takes the bot unless that connector already reads
+it with its own token, then waits (Connection: the Telegram Bot connector is already reading this
+bot) and asks Telegram nothing until another bot is saved or Ouroboros restarts. Wire and rules:
+`lib/telegram_group_feed.py` and `ouroboros/telegram_owner_bot.py`.
 
 Before a body rollback or skill downgrade to native Telegram 1.4.14 or older,
 export needed kept copies with the recipe below and verify the saved artifacts.
@@ -304,7 +346,7 @@ receipt; journal gaps and preview omissions remain visible.
 
 Set `TELEGRAM_BOT_TOKEN` in Settings → Accounts and keys (or enter it in the form setup asks with),
 grant it to this skill, enable the skill, and send the bot a private message to
-bind the owner. No legacy Telegram skill
+bind the owner (or press Start on the setup wizard's link). No legacy Telegram skill
 state is copied or changed. Installations that use `telegram-bridge` or
 `telegram-miniapp-poc` must disable or remove those skills before enabling this
 one.

@@ -134,7 +134,8 @@ def test_every_base_section_is_still_exactly_one_chapter(book_id):
     """The structural half, unbounded in time: the base's `##` titles are the
     chapters' H1 titles, in order, one each, or one base chapter `N. Title` is a
     consecutive run of subject files `N.1 Title — …`, `N.2 Title — …` (chapter 6's
-    split). A later edit to a chapter body cannot make this red, and a lost,
+    split), or a base chapter is followed by a listing moved out of it as `N.1 Title`
+    (chapter 1's module directory). A later edit to a chapter body cannot make this red, and a lost,
     merged or re-titled chapter still can."""
     old = _git("show", f"{MIGRATION_BASE}:{BOOK_ENTRYPOINTS[book_id]}")
     if old is None:
@@ -166,6 +167,11 @@ def test_every_base_section_is_still_exactly_one_chapter(book_id):
         elif i < len(chapter_titles):
             regrouped.append(chapter_titles[i])
             i += 1
+            # A listing moved out of the base chapter keeps the chapter and follows it as `N.1 Title`
+            # (chapter 1's module directory): one more chapter, never a lost one.
+            while i < len(chapter_titles) and number[:-1].isdigit() and chapter_titles[i].startswith(
+                    f"{number[:-1]}.") and " — " not in chapter_titles[i]:
+                i += 1
     assert regrouped == base_titles and i == len(chapter_titles), chapter_titles
 
 

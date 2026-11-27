@@ -465,9 +465,10 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200:CardPinResponse 404,409,503:ErrorResponse", note="component cards only; broadcasts extension_lifecycle"),
     "DELETE /api/cards/{card_id}/pin": Shape("200:CardPinResponse 503:ErrorResponse", note="a repeat answers pinned false"),
     "GET /api/chat/history": Shape(
-        "200,400,409,503:ChatHistoryResponse", query="chat_id cursor around n_human n_progress limit reason mode decision detail",
+        "200,400,409,503:ChatHistoryResponse", query="chat_id cursor around n_human n_progress limit reason mode decision detail repair",
         note="an error page echoes the cursor sent, so the same request can be repeated; "
-             "reason, mode, decision and detail only say why the read was made (counted, never a selector)"),
+             "reason, mode, decision and detail only say why the read was made (counted, never a selector); "
+             "repair=settled: after reads answer a shown task that settled with `repairs`"),
     "GET /api/chat/search": Shape(
         "200,400,409,503:ChatSearchResponse", query="chat_id q cursor",
         note="read-only; one bounded read of the room's saved messages as candidates, newest first; the cursor continues older"),
@@ -663,7 +664,8 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/mcp/status": Shape("200:McpStatusResponse"),
     "POST /api/mcp/refresh": Shape("200:McpRefreshResponse 400:ErrorResponse", "McpRefreshRequest", note="safe to repeat"),
     "POST /api/mcp/sign-in": Shape("200:McpSignInResponse 400,404:ErrorResponse", "McpSignInRequest",
-                                   note="begin answers the provider page; a refused step is 200 with ok false"),
+                                   note="begin answers the provider page; a refused step is 200 with ok false (not_sent: repeat "
+                                        "it once fixed)"),
     "POST /api/sign-in": Shape("200:SignInResponse 400,404:ErrorResponse", "SignInRequest",
                                note="a skill's service sign-in; begin answers the provider page; a refused step "
                                     "is 200 with ok false"),

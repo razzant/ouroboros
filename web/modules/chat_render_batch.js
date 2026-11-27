@@ -5,7 +5,7 @@ import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
-import { tr } from './i18n.js';
+import { tr, tx } from './i18n.js';
 import { replaceScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
 import { compareTimelineOrder } from './chat_timeline_order.js';
 
@@ -17,23 +17,25 @@ export const feedIsEmpty = messages => Array.from(messages.children).every(node 
     || node.classList.contains('chat-empty-welcome') || node.dataset.ephemeral === '1');
 
 const GAP_NOTE = 'Some saved history is not loaded. Shown messages may have gaps.';
-const gapNoticeDocs = new WeakSet();
+const FAILED_NOTICE = 'Some saved history could not be loaded.';
+const APPROXIMATE_NOTICE = 'Saved position could not be restored exactly.';
 
 /**
  * History chrome only; the chat instance retains navigation and reading state.
  *
- * `Load more history` only ever loads OLDER messages and shows only while there
- * are older ones, including those a newer read revealed behind the reader's chain
- * (owner decisions 2026-09-14, 2026-10-05). Whether a newer page is
- * cached is a fact about the bounded page cache, not about what the reader can
- * see, so it never drives this button: a released newer page returns through a
- * positive gesture at an unambiguous island edge, and the floating scroll-to-latest
- * button remains the only return-to-present control.
+ * `Load more history` only ever loads OLDER messages and shows only while there are older ones, including those a newer
+ * read revealed behind the reader's chain (owner decisions 2026-09-14, 2026-10-05). Whether a newer page is cached is a
+ * fact about the bounded page cache, not about what the reader can see, so it never drives this button: a released newer
+ * page returns through a positive gesture at an unambiguous island edge, and the floating scroll-to-latest button
+ * remains the only return-to-present control.
+ * What happened to the window (a read failed, a return could not land exactly) is news: the page's one notice
+ * (`notify(text, kind)`, toast.js) tells it once per episode, only while the room is the one shown (`isVisible`), and
+ * withdraws it when the room is left or covered (`hideNotice`) or the episode ends. The fact itself, its explanation and
+ * its Retry stay at the feed's older edge for as long as they are true, as do the states (a gap, the beginning, a store
+ * being upgraded, a project list it cannot read).
  */
-export function createHistoryControls(messagesDiv, statusHost = null, {
-    // The gap's fact stands at the edge of history it concerns (the note at the feed's start); a room announces nothing
-    // over its newest rows (U021). Main's archive uses the effective refusal and hears newest restoration separately.
-    onGapNotice = null, archive = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
+export function createHistoryControls(messagesDiv, {
+    notify = null, archive = null, others = [], isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
 } = {}) {
     const doc = messagesDiv.ownerDocument;
     const root = doc.createElement('div');
@@ -47,36 +49,35 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
     gapNote.className = 'chat-history-gap';
     gapNote.hidden = true;
     root.append(button, note, gapNote);
-    // The recent-window read is the chat's own request, not a pager page, so its
-    // in-flight and failed states are carried here and drawn by the same control
-    // (issue #1102: an empty feed under a green header read as a dead app, and a
-    // failed read looked identical to a slow one).
+    // The recent-window read is the chat's own request, not a pager page, so its in-flight and failed states are carried
+    // here and drawn by the same control (issue #1102: an empty feed under a green header read as a dead app).
     let recent = null;
-    let notice = null;
-    let pendingNotice = false;
-    // Hidden hydration still draws the durable edge note. Only a showing room
-    // spends the document's announcement; showing it never reads history again.
+    // Per kind of event: its episode open, told in it, its notice while shown (a failure's ends on a read that is no failure).
+    const episodes = { failed: { words: FAILED_NOTICE }, approximate: { words: APPROXIMATE_NOTICE } };
+    // The room's other notices (the archive's restore, Main's Panic list) keep the same rules: `owed`, `announce`, `hide`.
+    const extra = [archive, ...others].filter(Boolean);
+    const hideNotice = () => { for (const ep of Object.values(episodes)) { ep.notice?.dispose?.(); ep.notice = null; } extra.forEach(x => x.hide?.()); };
+    const settle = (ep, open) => { if (!open) { ep.notice?.dispose?.(); ep.told = false; ep.notice = null; } ep.open = open; };
     function showNotice() {
-        if (!pendingNotice || doc.hidden || !isVisible() || gapNoticeDocs.has(doc) || typeof onGapNotice !== 'function') return;
-        gapNoticeDocs.add(doc);
-        notice = onGapNotice(tr('history.gap', GAP_NOTE), messagesDiv);
+        const owed = Object.entries(episodes).filter(([, ep]) => ep.open && !ep.told);
+        if (typeof notify !== 'function' || doc.hidden || !(owed.length || extra.some(x => x.owed)) || !isVisible()) return;
+        for (const [kind, ep] of owed) { ep.told = true; ep.notice = notify(tx(ep.words), kind); }
+        extra.forEach(x => x.announce(notify));
     }
     return {
         olderButton: button,
         showNotice,
-        destroy() { pendingNotice = false; notice?.dispose?.(); notice = null; archive?.dispose(); },
-        // Only an EMPTY feed (or a failure already on screen) gets the loading
-        // state: an ordinary refresh never puts chrome over a painted transcript.
-        // Returns whether there is a state to draw, so a painted feed costs nothing.
-        // A migrating store read again is still `waiting` for its publication.
+        hideNotice,
+        destroy() { hideNotice(); archive?.dispose(); },
+        // Only an EMPTY feed (or a failure already on screen) gets the loading state: an ordinary refresh never puts
+        // chrome over a painted transcript; a migrating store read again is still `waiting` for its publication.
         beginRecent() {
             if (recent?.error || feedIsEmpty(messagesDiv)) {
                 recent = { loading: true, waiting: recent?.waiting || isStoreMigrating(recent?.error) };
             }
             return Boolean(recent);
         },
-        // A failure is shown where the loading state was; elsewhere the reader
-        // keeps the transcript they have and the next sync reconciles it. A migrating store has not failed.
+        // A failure is shown where the loading state was; elsewhere the reader keeps the transcript they have.
         endRecent(error = null, partial = false, page = null) { recent = error ? { error, partial } : null; archive?.recent(partial ? null : error, page); },
         recentFailed: () => Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)),
         render(snapshot, coverage = {}, approximate = false) {
@@ -89,19 +90,19 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             const changedView = error?.body?.reason_code === 'history_view_changed';
             const incomplete = coverage.gaps === true;
             const emptyLoading = hydrating && feedIsEmpty(messagesDiv);
-            pendingNotice = snapshot.initialized && !migrating && !error && !emptyLoading && incomplete;
-            showNotice();
             const gapText = incomplete ? tr('history.gap', GAP_NOTE) : '';
-            let noteText = migrating ? 'Saved history is being upgraded…' : archiveNote || (error ? 'Some saved history could not be loaded.' : '');
-            if (!error && !emptyLoading) noteText = incomplete ? gapText : !hydrating && coverage.complete ? 'Beginning of saved history' : '';
-            if (approximate) noteText = `${error ? `${noteText} ` : ''}Saved position could not be restored exactly.`;
-            // Failure and approximate restoration move into persistent chrome when it describes the reading
-            // window; the gap explanation and ordinary beginning marker belong at the feed's start.
-            const host = statusHost && noteText && Boolean(error || approximate) ? statusHost : root;
-            if (note.parentNode !== host) host.appendChild(note);
-            note.classList.toggle('chat-history-status', host === statusHost);
-            // A concurrent read/position problem must not consume the persistent gap explanation.
-            const separateGap = incomplete && Boolean(error || approximate) && !emptyLoading;
+            // The state at the edge: an upgrading store or the archive's refusal (the gap beside them), else the gap or
+            // the beginning; an empty feed still loading says only its loading state.
+            const edgeState = emptyLoading ? '' : gapText || (!error && !hydrating && coverage.complete ? 'Beginning of saved history' : '');
+            const stateText = migrating ? 'Saved history is being upgraded…' : archiveNote || edgeState;
+            const failed = Boolean(error) && !migrating && !archiveNote;
+            if (failed || !loading) settle(episodes.failed, failed);  // an upgrade or the archive's refusal ends it too
+            settle(episodes.approximate, Boolean(approximate));
+            showNotice();
+            // The edge keeps the event's explanation while it is true, beside its Retry.
+            const edgeText = (failed ? [tx(FAILED_NOTICE), approximate && tx(APPROXIMATE_NOTICE)]  // translated where made,
+                : [approximate && tx(APPROXIMATE_NOTICE), stateText]).filter(Boolean).join(' ');  // as the notice's words are
+            const separateGap = Boolean(gapText) && !emptyLoading && !edgeText.includes(gapText);
             // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
             // began ends at its older end: ↓ is the way to the present.
             const buttonHidden = migrating || (!retry && !snapshot.canOlder
@@ -110,9 +111,9 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
                 [button, { textContent: hydrating ? 'Loading saved history…' : loading ? 'Loading…'
                     : changedView ? 'Refresh history' : retry ? 'Retry loading messages' : 'Load more history',
                     disabled: loading, hidden: buttonHidden }],
-                [note, { textContent: noteText, hidden: !noteText }],
+                [note, { textContent: edgeText, hidden: !edgeText }],
                 [gapNote, { textContent: separateGap ? gapText : '', hidden: !separateGap }],
-                [root, { hidden: buttonHidden && (host !== root || !noteText) && !separateGap }],
+                [root, { hidden: buttonHidden && !edgeText && !separateGap }],
             ];
             archive?.offer(button, buttonHidden || loading ? null : retry);
             for (const [node, values] of fields) {
@@ -124,9 +125,12 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             // For ↓, each read of the present by its own error, whichever note heads the edge: `failed`, one it retries where
             // the reader is (the room's newest, or the pager's `latest`); else `waiting`, one the migrating store refused.
             const latest = snapshot.retryDirection === 'latest', latestWaits = latest && isStoreMigrating(snapshot.error);
-            const failed = Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)) || latest && !latestWaits;
-            const waiting = !failed && (isStoreMigrating(recent?.error) || Boolean(recent?.waiting) || latestWaits);
-            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error), failed, waiting,
+            const failedRead = Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)) || latest && !latestWaits;
+            const waiting = !failedRead && (isStoreMigrating(recent?.error) || Boolean(recent?.waiting) || latestWaits);
+            // `note`: what the window says of itself, its event's words first (the room's read state, not its paint).
+            const told = failed ? FAILED_NOTICE : error ? stateText : edgeState;
+            const noteText = approximate ? [error && told, APPROXIMATE_NOTICE].filter(Boolean).join(' ') : told;
+            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error), failed: failedRead, waiting,
                 note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
         },
     };

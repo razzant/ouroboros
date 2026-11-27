@@ -2,6 +2,7 @@
 // section is the place's context: its circle (a choice: the place moves when another is chosen), the circle's words
 // with who wrote them and who placed the place there, the place's own notes in brief and its optional description;
 // its conversations follow. Connect is separate in place_connect.js; the body stays here for the place-room integration.
+import { disposeNotices } from './toast.js';
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
@@ -13,7 +14,7 @@ import { catalogPrograms } from './model_program.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
 import { modelPriceWords } from './route_editor_primitives.js';
 import { modelCatalog } from './model_catalog_store.js';
-import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
+import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, isOwnerBotPair, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
 import {
     ACTIVE_UNCHECKED_NOTE, PLACE_STATES, SILENT_CARD, WAKE_FACT_WORDS, accountIdText, authorWord, capitalized, inheritedModel, listWords, noKindChecked,
@@ -383,6 +384,7 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
     const close = () => {
         if (closed) return;
         closed = true;
+        disposeNotices(dialog);  // what a link pressed in the sheet answered (toast.js `modalNotice`) leaves with it
         if (dialog.open && typeof dialog.close === 'function') dialog.close();
         disposeFade();
         disposeFocus?.();
@@ -469,6 +471,13 @@ const DONE_WORDS = {
     'save-description': (place) => (place.description ? tr('places.description.saved', 'Description saved.') : tr('places.description.cleared', 'Description cleared.')),
 };
 
+/** The typed Off state describes the group transport, independently of a saved Active place or another bot. */
+export function ownerBotGroupsOff(place, raw) {
+    return isOwnerBotPair(place) && raw?.reason === 'feed_off' && raw.enabled === false
+        && (!raw.account_id || raw.account_id === place.accountId)
+        ? { text: tr('places.tg.sheet.feed_off', 'Group feed off in Telegram'), tone: 'warn', authored: false } : null;
+}
+
 /** Open one projected place; requests keep its revision and drafts survive a refused or concurrent write. `circles`
  *  are the opener's (Circles); another opener's sheet reads them, and later circle writes, from the places list. */
 export function openPlaceSheet(place, { returnFocus = document.activeElement, onClose = null, update = updatePlace,
@@ -476,8 +485,11 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
     readRooms = readPlaceRooms, readList = readPlaces, openRoomChatId = null, openRoom: namedRoom = null, circles = null,
     connectorStatus = null } = {}) {
     let current = place;
+    const scopedStatus = (raw) => (raw && typeof raw === 'object'
+        && !(isOwnerBotPair(place) && place.accountId && raw.account_id !== place.accountId) ? raw : null);
     const ui = { drafts: {}, status: {}, busy: false, adding: false, confirmDisconnect: false, moreOpen: false,
-        serviceLabel: place.serviceLabel || place.provider, roomIndex: { rooms: null }, circles, allRooms: false, connectorStatus };
+        serviceLabel: place.serviceLabel || place.provider, roomIndex: { rooms: null }, circles, allRooms: false,
+        connectorStatus: scopedStatus(connectorStatus), readiness: ownerBotGroupsOff(place, connectorStatus) };
     // The revision each replacing draft was first typed against. A newer read meanwhile (another client's write) then
     // meets the server's conflict, never a silent overwrite; the conflict re-bases that draft, so its next Save is the
     // owner's choice. A write from this sheet carries the drafts written on its revision to the one it made.
@@ -743,9 +755,17 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
     if (place.source) void readStatus(place, { signal: abort.signal }).then((data) => {
         if (sheet.closed || current?.source?.url !== place.source.url) return;
         const status = normalizePlaceStatus(data);
-        ui.connectorStatus = data;
+        if (isOwnerBotPair(place) && place.accountId
+            && status.identity?.sends_as?.id && status.identity.sends_as.id !== place.accountId) {
+            status.identity = null;
+        }
+        const ownerReason = isOwnerBotPair(place) && !status.readiness && typeof data?.reason === 'string' ? data.reason : '';
+        const fallbackReadiness = ownerReason === 'account_mismatch' ? { text: tr('places.tg.sheet.account_mismatch', 'Paired Telegram bot changed'), tone: 'warn', authored: false }
+            : ownerReason ? { text: tr('places.tg.sheet.unavailable', 'Telegram bot status unavailable'), tone: 'warn', authored: false } : null;
+        ui.connectorStatus = scopedStatus(data);
         ui.identity = status.identity; ui.labels = status.labels;
-        if (status.readiness) ui.readiness = { ...status.readiness, authored: true };
+        ui.readiness = ownerBotGroupsOff(place, data)
+            || (status.readiness ? { ...status.readiness, authored: true } : fallbackReadiness);
         paint();
     }).catch(() => { ui.status.state = { text: tr('places.status.unavailable', 'The connector status could not be read.'), tone: 'warn' }; paint(); });
     void loadRooms();

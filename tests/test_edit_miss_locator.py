@@ -165,7 +165,8 @@ def ws(tmp_path, monkeypatch):
 
     monkeypatch.setattr(edit_ops, "_resolve_edit_target", resolver)
     monkeypatch.setattr(edit_ops, "_edit_content_block", lambda *_args: "")
-    monkeypatch.setattr(edit_ops, "_finish_mutation", lambda ctx_, paths, tool, binding=None: "NOT committed.")
+    monkeypatch.setattr(edit_ops, "_finish_mutation",
+                        lambda ctx_, paths, tool, binding=None, facts=None: "NOT committed.")
     return ctx
 
 

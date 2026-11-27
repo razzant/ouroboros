@@ -38,6 +38,7 @@ import re
 import signal
 import sys
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -820,6 +821,34 @@ class Background:
                 return
 
 
+def request_panic_consciousness_start(port: int, confirm_fn, send_stdin) -> dict:
+    """Read the server's passive post-Panic switch preview, ask one native OS confirmation dialog, and write
+    ``panic_start <basis>`` to the private launcher->server stdin pipe. Reports pipe submission, not outcome."""
+    if not port:
+        return {"submitted": False, "error": "The local server is restarting; try again in a moment."}
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/api/consciousness?switch=on", timeout=15) as resp:
+            preview = json.loads(resp.read().decode("utf-8") or "{}")
+    except (OSError, ValueError) as exc:
+        return {"submitted": False, "error": f"Could not read the consciousness preview from the local server: {exc}"}
+    lines = ([str(line) for line in (preview.get("lines") or ()) if isinstance(line, str) and line.strip()]
+             if isinstance(preview, dict) else [])
+    after_panic = preview.get("after_panic") if isinstance(preview, dict) else None
+    why = after_panic.get("why") if isinstance(after_panic, dict) else None
+    if why not in ("panic", "unknown", "held"):
+        return {"submitted": False, "reason": "not_after_panic", "error": "No post-Panic consciousness action is pending."}
+    basis = str(after_panic.get("basis") or "")
+    if not lines or len(basis) != 32 or any(ch not in "0123456789abcdef" for ch in basis):
+        return {"submitted": False, "error": "Consciousness state could not be read; nothing was sent."}
+    title = "Allow wakes to resume Panic-stopped tasks?" if why == "held" else "Turn on consciousness?"
+    if not confirm_fn(title, "\n\n".join(lines)):
+        return {"submitted": False, "cancelled": True}
+    if not send_stdin(f"panic_start {basis}\n".encode("ascii")):
+        return {"submitted": False, "error": "The desktop shell could not send the confirmation to the local server; "
+                                             "nothing was sent."}
+    return {"submitted": True, "confirmed": False}
+
+
 class DesktopApi:
     """The page's alerts, shell facts and emergency stop. A page feature-detects each method per call: a launcher
     built before one of them simply lacks it (the page then falls back and says so, DESIGN §9)."""
@@ -852,6 +881,7 @@ class DesktopApi:
 
         return {"shell_version": _SHELL_VERSION, **self._shell_facts, "persistent_storage": PERSISTENT_WEBVIEW_STORAGE,
                 "native_notifications": self._notifier_answer("status"), "interface_size": self._zoom_info(),
+                "panic_consciousness_confirm": callable(getattr(self, "request_panic_consciousness_start", None)),
                 "local_context_archive": webview2_renderer(sys.modules.get("webview"))}
 
     def open_local_context_report(self) -> dict:

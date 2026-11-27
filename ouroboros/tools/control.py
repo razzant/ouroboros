@@ -530,11 +530,11 @@ def get_tools() -> List[ToolEntry]:
                 "A model beyond Main and Light needs your human's cited words or pressed choice (owner_words, scope)."
             ),
             "parameters": {"type": "object", "properties": {
-                "model": {"type": "string", "description": "Exact model route. Cited work/Main choices require it; cited scope room accepts empty or main to follow Main. An uncited empty work switch keeps its acting route."},
+                "model": {"type": "string", "description": "Exact model route. Cited work/Main choices require it; cited scope room or new accepts empty or main to follow Main. An uncited empty work switch keeps its acting route."},
                 "model_as_typed": {"type": "boolean", "default": False, "description": "With owner_words, use the exact typed id despite similar catalog suggestions. It remains unverified; this grants no additional model authority."},
                 "owner_words": {"type": "string", "description": "Copy your human's words verbatim or the complete label they pressed. The host verifies the cited source."},
-                "scope": {"type": "string", "enum": ["work", "room", "main"], "default": "work",
-                          "description": "With owner_words: work sets this work's primary; room saves its room's model; main changes Main itself. Without a cite, work keeps the existing Main/Light acting switch; in Cyber Pro use the settings writer for your own room or Main changes."},
+                "scope": {"type": "string", "enum": ["work", "room", "new", "main"], "default": "work",
+                          "description": "With owner_words: work sets this work's primary; room saves its room's model; new saves the model new work starts on in Main, which new rooms copy; main changes Main itself, the role. Without a cite, work keeps the existing Main/Light acting switch; in Cyber Pro use the settings writer for your own room or Main changes."},
                 "project_id": {"type": "string", "description": "For scope room: existing room id; omitted uses this work's room."},
                 "effort": {"type": "string", "enum": list(EFFORT_SCALE),
                            "description": "Reasoning effort for the next round, inside my human's effort range. Main keeps its level outside Cyber Pro (delegate deeper thinking: schedule_subagent(effort=…)); a child, an evolution task or a wake moves inside the range; a pinned or model-named focus keeps its level. Leave empty to keep current."},

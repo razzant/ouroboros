@@ -60,7 +60,7 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     rows.extend({"role": "assistant", "text": f"Reading line {i}. " + "Useful content continues below the header. " * 6,
                  "ts": f"2026-09-09T00:01:{i:02}Z"} for i in range(12))
     page.route("**/api/chat/history*", lambda route: route.fulfill(
-        content_type="application/json", body=json.dumps({"messages": rows, "progress": []})))
+        content_type="application/json", body=json.dumps({"profile_scope": setup_browser.PREVIEW_SCOPE, "messages": rows, "progress": []})))
     open_app(ui)
     page.wait_for_selector(".system-message-actions")
     actions = page.locator("#chat-messages .system-message-actions")
@@ -103,41 +103,41 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         return pieces
 
     pieces = two_steps_under_a_tint(paint)
-    # The edge reaches one edge length below the bar on every layout, the desk included; the deep step stops short of
-    # it by the part of the taper the soft step finishes alone. This history read left Main's note under the bar: a
-    # later sibling at the bar's own level, it paints over the edge as the capsules do, so its words stay sharp.
-    reach = 32
-    assert pieces["tint"]["height"] == pytest.approx(paint["bar"] + reach, abs=1), paint
-    assert pieces["soft"]["height"] == pytest.approx(paint["bar"] + reach, abs=1), paint
-    assert pieces["deep"]["height"] == pytest.approx(paint["bar"] + reach - (reach + 24) / 2, abs=1), paint
-    # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
+    # The edge ends at the capsules' lower side, inside the bar, on every layout, the desk included; it is full above
+    # them and clears through their band, the deep step over its upper half. Nothing hangs under the bar: a failed
+    # history read is the page's notice.
+    top, capsules = header.evaluate("""el => { const b = [...el.querySelectorAll('.app-page-actions button')]
+        .filter(n => n.getClientRects().length).map(n => n.getBoundingClientRect());
+        return [Math.min(...b.map(r => r.top)), Math.max(...b.map(r => r.bottom))]; }""")
+    assert pieces["tint"]["height"] == pytest.approx(capsules, abs=1) and pieces["tint"]["height"] <= paint["bar"], (capsules, paint)
+    assert pieces["soft"]["height"] == pytest.approx(capsules, abs=1), paint
+    assert pieces["deep"]["height"] == pytest.approx(capsules - (capsules - top) / 2, abs=1), (top, capsules, paint)
+    # The transcript's first row clears the bar (style.css --chat-top-reserve), the edge taking no more of it.
     feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
-    assert feed_top >= paint["bar"] + reach - 1, (feed_top, paint)
-    assert page.locator("#page-chat > .chat-page-note > *").count() and page.locator("#page-chat > .chat-page-note").is_visible()
-    order = page.evaluate("""() => { const bar = document.querySelector('#page-chat > .chat-page-header');
-        const note = document.querySelector('#page-chat > .chat-page-note');
-        return {after: Boolean(bar.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING),
-            bar: Number(getComputedStyle(bar).zIndex), note: Number(getComputedStyle(note).zIndex)}; }""")
-    assert order["after"] and order["note"] >= order["bar"], order
+    assert feed_top >= paint["bar"] - 1, (feed_top, paint)
+    assert page.locator("#page-chat > .chat-page-note").count() == 0
     # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
     # never takes its box, and the strip still takes presses for the title bar.
     page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
+    # The room re-measures where its capsules stand once the bar is laid out again (chat.js, a frame later).
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 50))))")
     chrome = header.evaluate(edge)
+    chrome_capsules = header.evaluate("el => Math.max(...[...el.querySelectorAll('.app-page-actions button')].filter(n => n.getClientRects().length).map(n => n.getBoundingClientRect().bottom))")
     page.evaluate("delete document.documentElement.dataset.windowChrome")
-    assert two_steps_under_a_tint(chrome)["tint"]["height"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
+    assert two_steps_under_a_tint(chrome)["tint"]["height"] == pytest.approx(chrome_capsules, abs=1), (chrome_capsules, chrome)
     assert chrome["strip"] == "auto", chrome
     # The composer's edge mirrors the bar's inside its area: the same nodes, the same steps, no press taken.
     area = page.locator("#chat-input-area")
     composer = area.evaluate(edge)
     assert composer["own"] == "none" and composer["background"] == "rgba(0, 0, 0, 0)", composer
     assert all(piece["shown"] for piece in two_steps_under_a_tint(composer).values()), composer
-    assert composer["pieces"]["tint"]["height"] == pytest.approx(composer["bar"], abs=1), composer
+    assert composer["pieces"]["tint"]["height"] == pytest.approx(composer["bar"] - 24, abs=1), ('from the capsule row down', composer)
     # With the keyboard up the top edge ends with the bar and the composer draws no edge at all (style.css).
     page.evaluate("document.body.classList.add('keyboard-open')")
     keyboard = header.evaluate(edge)
     composer_gone = area.evaluate(edge)
     page.evaluate("document.body.classList.remove('keyboard-open')")
-    assert keyboard["pieces"]["tint"]["height"] == pytest.approx(keyboard["bar"], abs=1), keyboard
+    assert keyboard["pieces"]["tint"]["height"] <= keyboard["bar"], keyboard
     assert not any(piece["shown"] for piece in composer_gone["pieces"].values()), composer_gone
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
@@ -236,7 +236,7 @@ def test_photo_menu_escapes_gallery_crop_downloads_and_cleans_up(subscription_ui
     page = subscription_ui["page"]
     page.set_viewport_size({"width": 390, "height": height})
     page.route("**/api/chat/history*", lambda route: route.fulfill(content_type="application/json", body=json.dumps({
-        "messages": [{"role": "assistant", "text": "Photo fixture is ready", "ts": "2026-09-09T00:00:00Z"}]})))
+        "profile_scope": setup_browser.PREVIEW_SCOPE, "messages": [{"role": "assistant", "text": "Photo fixture is ready", "ts": "2026-09-09T00:00:00Z"}]})))
     open_app(subscription_ui)
     page.get_by_text("Photo fixture is ready", exact=True).wait_for()
     # Actual media renderer, gallery grouping, menu and CSS. Callbacks only bind it
@@ -589,6 +589,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
 
     def connect(ws):
         sockets.append(ws)
+        ws.send(setup_browser.PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({'type': 'heartbeat'}))
     page.route_web_socket('**/ws', connect)
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [project]}))
@@ -655,7 +656,8 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
             # Later Main reading below the questions, so a removal can happen above the reader.
             rows += [{'role': 'assistant', 'text': f'Later Main note {i}. ' + 'Reading continues below the questions. ' * 4,
                       'ts': f'2026-09-16T00:1{i}:00Z'} for i in range(8)]
-        route.fulfill(json={'messages': rows, 'progress': []})
+        route.fulfill(json={'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': rows, 'progress': [],
+                            'has_more': False, 'page_cursor': 'recent'})
     page.route('**/api/chat/history*', history)
     open_app(ui)
     mirrors = page.locator('#chat-messages .chat-bubble.project-question')
@@ -951,7 +953,7 @@ def test_main_waiting_pill_reaches_each_target_and_one_tap_close(subscription_ui
                 for i in range(8)] + [question] + [
                 {'role': 'assistant', 'text': f'Later Main note {i}. ' + 'Reading continues below the question. ' * 6,
                  'ts': f'2026-09-16T01:{i:02d}:00Z'} for i in range(14)]
-        route.fulfill(json={'messages': rows if main else [], 'progress': []})
+        route.fulfill(json={'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': rows if main else [], 'progress': []})
     page.route('**/api/chat/history*', history)
 
     def decide(route):

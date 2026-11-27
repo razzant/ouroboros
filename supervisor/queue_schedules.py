@@ -594,7 +594,9 @@ def _task_from_schedule(record: Dict[str, Any], *, task_id: str = "") -> Dict[st
     if is_note(record):  # a note is shown as written, never re-read as a model task's objective
         raise ValueError("a kind=notify row is a note, not a task template")
     template = normalize_template(record)
-    task_id = task_id or uuid.uuid4().hex[:8]
+    from ouroboros.task_results import new_task_id
+
+    task_id = task_id or new_task_id()
     # Membership, not truthiness: a template's explicit chat 0 is its hidden partition.
     has_chat = template.get("chat_id") not in (None, "")
     from supervisor.state import control_value

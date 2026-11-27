@@ -91,6 +91,9 @@ def test_uncredentialed_api_actor_stops_before_the_llm_loop(monkeypatch, tmp_pat
     assert result["reason_code"] == "subagent_executor_unavailable"
     assert result["subagent_availability"]["host_fallback"] is False
     assert "session-builder" in result["result"]
+    # The notice names the read of this record, and the record the worker wrote holds the rows it names.
+    assert 'get_task_result(task_id="api-child", authority_fields=["subagent_availability"])' in result["result"]
+    assert result["subagent_availability"]["alternatives"] == [{"subagent_id": "session-builder"}]
     assert any(event.get("type") == "task_done" for event in events)
 
 

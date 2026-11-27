@@ -325,7 +325,7 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
         assert core.body_map in plan.projection("max").system_content_json
         assert "window unknown" in line and "921,227" in line and "2026-10-19" in line
     elif accepted > stated:
-        assert "input: accepted 2026-10-19" in line
+        assert "input: an accepted request of that size 2026-10-19" in line
     for size in ([880_000, 921_227, 921_228] if stated == 872_000 else [900_000, 950_000, 991_808, 991_809]):
         monkeypatch.setattr(context_measurement, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
         disposition = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r",

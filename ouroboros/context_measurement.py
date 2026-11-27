@@ -294,11 +294,12 @@ def reclaim_low_water_margin(
 def room_fact(measurement, components, *, source="", memory=""):
     """Passive measured room, before this facts row; usable by either actor driver."""
     from ouroboros.context_budget import bound_host_row
+    from ouroboros.context_view_facts import largest_parts_text
     window = measurement['capacity_total_tokens']
     reserve, used = measurement['response_reserve_tokens'], measurement['estimated_input_tokens']
     free = window - reserve - used if window is not None else 'unknown'
     memory = f" | {memory} |" if memory else ""
-    largest = ', '.join(f'{name} ~{size:,}' for name, size in components)
+    largest = largest_parts_text(components)
     return bound_host_row('ouroboros_context_facts', (
         f"[CONTEXT_FACTS] Fresh view before this facts row: window {window if window is not None else 'unknown'}; "
         f"reply/working reserve {reserve}; input ~{used}; free ~{free}. Largest residents: {largest}.{memory}{source}"))

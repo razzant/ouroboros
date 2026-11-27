@@ -281,5 +281,63 @@ def test_rejected_panic_does_not_claim_termination(monkeypatch, text, source, us
     assert server_control._restart_stop_requested is False
 
 
+_FREE = {"initialization_id": "i", "owner_external_id": None, "owner_external_chat_id": None}
+_BOUND = {"initialization_id": "i", "owner_external_id": 17, "owner_external_chat_id": 23}
+
+
+@pytest.fixture
+def free_door(monkeypatch, tmp_path):
+    import threading
+    from types import SimpleNamespace
+
+    from ouroboros import server_control
+
+    calls = []
+    monkeypatch.setattr(server_control, "_restart_stop_requested", False)
+    monkeypatch.setattr("ouroboros.config.resolve_data_dir", lambda: tmp_path)
+    monkeypatch.setattr("ouroboros.panic_source.record_source", lambda root, **evidence: None)
+    monkeypatch.setattr(threading, "Thread", lambda *, target, **_: SimpleNamespace(start=target))
+    return server_control.PanicIngress(lambda: calls.append("stop")), calls
+
+
+def _unconfirmed(keys):
+    from supervisor.state import STATE_READ_KEY
+    return {**_FREE, STATE_READ_KEY: {"quality": "current", "unconfirmed": list(keys)}}
+
+
+@pytest.mark.parametrize("observed,user_id,chat_id,accepted", [
+    (_FREE, 17, 23, True),  # a slot observed free: the first private Panic stops, before anyone is bound
+    (_FREE, 0, 0, False),  # no sender identity
+    (_FREE, 17, -100123, False),  # a group chat is never an owner's private chat
+    (None, 17, 23, False),  # never observed: unknown is not free
+    ({**_FREE, "initialization_id": ""}, 17, 23, False),
+    ({"initialization_id": "i", "owner_external_id": None}, 17, 23, False),  # one key missing is unknown
+    (_unconfirmed(["owner_external_chat_id"]), 17, 23, False),  # a key a backup could not confirm is unknown
+    ({**_FREE, "_recovery": {"unconfirmed": ["owner_external_id"]}}, 17, 23, False),
+    (_BOUND, 17, 23, True),
+    (_BOUND, 99, 23, False),  # a recorded pair still decides
+])
+def test_external_panic_by_observed_owner_slot(free_door, observed, user_id, chat_id, accepted):
+    door, calls = free_door
+    if observed is not None:
+        door.observe_owner(observed)
+    assert door.request("/panic", source="skill:telegram", user_id=user_id, chat_id=chat_id) is accepted
+    assert calls == (["stop"] if accepted else [])
+
+
+def test_a_free_slot_follows_the_ordinary_writer_and_reset_closes_it(free_door):
+    door, calls = free_door
+    door.observe_owner(_FREE)
+    door.observe_owner(_BOUND)  # the ordinary writer publishes the pair it saved
+    assert door._owner[1] == (17, 23)
+    door.observe_owner(_FREE)  # a later stale read of the empty slot cannot unbind it
+    assert door._owner[1] == (17, 23)
+    assert not door.request("/panic", source="skill:telegram", user_id=5, chat_id=5)
+    door.invalidate_owner()
+    door.observe_owner(_FREE)
+    assert not door.request("/panic", source="skill:telegram", user_id=17, chat_id=23)
+    assert calls == []
+
+
 if __name__ == "__main__":
     _exercise(sys.argv[1])

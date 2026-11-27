@@ -944,7 +944,8 @@ reinstall reads none), not other readers. Unadmitted files wait for a passing re
 exact files; the press does not approve them. Turn-on is separate and never overrides Off. Replacing a key while a skill that reads it is enabled is
 allowed; the skill may read the new value on its next call, while code that copied the value at start (a poller,
 a companion's environment) keeps the old one until it restarts. A skill can apply saves itself with PluginAPI 2.4:
-`get_settings_state(keys)` tells `ok` values and missing keys from an `unknown` (unreadable) document, and
+`get_settings_state(keys)` tells `ok` values and missing keys (a value the host withholds is missing) from an
+`unknown` (unreadable) document, and
 `refresh_companion_process(name, expected)`, off the event loop, respawns that companion only when its
 `env_from_settings` values changed; `expected` holds the values you read (empty for missing). It answers
 `unchanged` or `not_running` (nothing to do; a crash's absence is the crash monitor's), `restarted` or `started`
@@ -1061,7 +1062,8 @@ Transport/control skills are first-class local-UI replacements: every owner comm
 polling and justified owner-event mirroring. Their review and runtime obligations belong to [CHECKLISTS](CHECKLISTS.md#transport-and-control-skills-are-first-class-binding-for-all-reviewers).
 
 `POST /chat/inject` treats text beginning with `/panic` (case-insensitive, surrounding whitespace ignored,
-trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop.
+trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop, or, while no
+pair is bound yet (a slot read as positively free), a positive private sender: the bridge decides who that is.
 Unavailable or unauthorized Panic returns `503 {ok:false,error}` and never falls through to ordinary
 chat; this refusal of command-looking text is intentional. Accepted Panic returns `202 {ok:true,status:"accepted"}`,
 without a correlated operation or delivery replay, even with `client_message_id`. Telegram exposes owner
@@ -1179,10 +1181,12 @@ contributes:
 - `provides: place` requires `type: extension` and the `presence` permission. The Browse "Connectors" filter and
   "Connects <Service>" are derived from it; no tag or suffix is needed.
 - The connector carries the service name in its place `label`; the technical skill id stays in details.
-  Skills cards prefer the optional top-level, one-line `title`, then the place contribution's `label`, then `name`.
-  Catalog entries may carry `title`; it is display text, never a new skill identity. Place, instance, account and
-  signal labels are authored content, outside the host's translation overlay; a host sentence that composes one
-  keeps it exactly as written, case included.
+  Skills cards prefer the optional top-level, one-line `title`, then the place contribution's `label`, then the title
+  of the skill's entry in its own source, then `name`. Catalog entries may carry `title`; it is display text, never a
+  new skill identity. Search finds the skill by each of these, by its `ui_tab.title` and by the headers its live
+  widget tabs register from its installed folder; actions still take `name`.
+  Place, instance, account and signal labels are authored content, outside the host's translation overlay; a host
+  sentence that composes one keeps it exactly as written, case included.
 
 The optional `settings` member names the connector's registered Settings section (for example
 `api.register_settings_section("connection", ...)`); it is a section id, not an embedded form or a new
@@ -1464,6 +1468,39 @@ Use the connector's ordinary content-hash-bound skill token for:
   fallback, and finds no naming place as confirmed unbound (`place_not_connected` under `require_place=true`). The
   v1 snapshot never records the mode: keep it beside the snapshot and check with the same one.
   Missing/invalid snapshots are not inferred from `origin.kind`; ordinary queries and legacy rows keep their old lookup.
+- The owner's own Telegram bot in groups (`/identity.telegram_group_feed: 1`). Only an unchanged Official
+  `telegram-bot` release of the stock OuroborosHub (its install record, and the bytes its token was issued for)
+  passes the identity, updates, call, upload and file doors below and submits that bot's events and history; any
+  other copy gets `connector_mismatch` (`blocked` at `/presence/turn` and `/presence/history`).
+  The bundled `telegram` bridge reads that bot and keeps its token, which no settings read hands any connector
+  version: the connector never polls it. One bot has one local reader per process, kept until restart. With
+  `/identity.telegram_group_poll_claim: 1`, right before its deleteWebhook and getUpdates with its own bot B any
+  admitted `telegram-bot` posts `POST /telegram/feed/poller {bot_id}` (B's id as its saved, granted token names
+  it): `{ok, owned: false}` means the bridge reads B here, so it contacts Telegram with B not;
+  `409 account_changed`, `503 settings_unknown`. Its other reads claim nothing. An older connector (no
+  `owner_bot_status`) is given its bot by its token read and never handed one the bridge holds.
+  `GET /telegram/feed/identity?bot_id=<B>` answers `same_as_owner_bridge` from Settings (the bridge's saved,
+  admitted token; `null` unknown), `connector_token_held` (`true`: the connector's saved token names that bot,
+  so it reads as unsaved; `null` unknown) and the bridge's bot (`account_id`, `identity.sends_as`, `invite_url`,
+  `owner_bound`, `enabled`); only `groups=1` adds `group_ids`, the groups and supergroups that bot is in this
+  consent period (`[]` none, or no consent or bound owner; `null` unknown).
+  `GET /telegram/feed/updates?account_id&offset&timeout` is getUpdates over the bridge's spool
+  (`{feed_id, update, place:{place_id,connected_revision,thread_id}}` or `{feed_id, sighting}`; `offset` confirms
+  below it under the consent the poll began with; Off, a new consent or another bot confirms nothing). Its places
+  are the projected `owner_bot` declaration: exact account and group only, never blank, wildcard or account-wide.
+  Submit its events with that `binding_id` and `connected_revision` (`/presence/turn`). A fresh arrival held by an
+  unavailable bridge returns `503 telegram_group_feed_unavailable` with `disposition: retry`, before capture;
+  matching settled answers stay readable. Bind sends with `operation=bind|check&contribution_id=owner_bot` (no fallback).
+  Every provider call goes through `POST /telegram/feed/call|upload` with the binding's `place_id`,
+  `connected_revision` and `thread_id` (a topic send names its topic; an edit, deletion or reaction acts in its
+  message's own topic, the bot's replies included; a restriction or ban needs a chat-wide place), files by path
+  inside the connector's own state folder with `size` and `sha256`, and `GET /telegram/feed/file` for the opaque
+  `file_path` a relayed getFile answered (query `connected_revision` in plain decimal). File offers last for the
+  connection, not the queue offset; opaque paths need their original consent through delivery. A read timeout of its bytes
+  alone returns `504 {relay_outcome: file_read_timeout}`. Telegram's answer otherwise comes
+  back with its status; a relay refusal is a Telegram-shaped 403 with `relay_refusal` (nothing sent);
+  `503 {relay_outcome: not_sent}`; `502 {relay_outcome: unknown}` has no `ok` and is never resent. Methods and
+  arguments are listed in `skills/telegram/lib/telegram_group_feed.py`.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
   including after a place is Paused or disconnected. The binding query is optional;
   the authenticated connector must still own the stored work.
@@ -2246,7 +2283,9 @@ The Host Service routes take the skill from `x-skill-token`, never from the body
   expects, any other or none being `409 connection_changed`; `consent`: below) → `200 {ok, access_token,
   token_type, expires_at (epoch seconds), scope, account: {key, label}, connection_id?, consent?}`; `409 {ok: false, code: "SIGN_IN_REQUIRED",
   reason, service, account, note, hint}` (hand `hint` to the mind; `note` is your `refresh_rejected` text when that is
-  the reason); `503 SIGN_IN_UNAVAILABLE` (the provider did not answer; the grant is kept); `404 {ok: false, error, reason, hint}`
+  the reason; reason `provider_refused`: the provider answered the renewal with its own refusal, such as
+  `admin_policy_enforced`, named in `error` with your `refused` note; the grant is kept and repeating will not help);
+  `503 SIGN_IN_UNAVAILABLE` (the provider did not answer, or answered 429/5xx; the grant is kept); `404 {ok: false, error, reason, hint}`
   with no account to use (`unknown_service`, `unknown_account`, `account_required`, `not_signed_in`, `no_usable_account`; hand `hint` to the mind); `403` the token floor. Cache the token until `expires_at`; never log it.
 - `consent` is an opaque account-row reference: a refresh keeps it, a new sign-in or transfer replaces it, and it is never a pass. To bind a new write, take `key`, `connection_id` and `consent` from one current `GET /sign-in/accounts` row, send them as `account`, `connection_id` and `consent` to `/sign-in/token`, and accept the bearer only when the answer repeats that `consent`: a host without the v2 field ignores it and repeats nothing. A replaced consent returns `409 consent_changed` without a token or a provider request. A receipt records what happened to the transfer. It does not authorize an earlier write to continue under a new consent; do not replace that write's expected value.
 - `POST /sign-in/handover` `{service, recover?, clients: [{client_id, client_secret?, label_hint, return_hint: "loopback" |
@@ -2344,7 +2383,7 @@ the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mc
 svc:<service>,nonce}` is a declared service's sign-in, posted to `/api/sign-in`. A skill's own `oauth/complete` flow
 remains the path on cores without `sign_in_version`.
 Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
-The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported; after a declared service's `answer_saved` (the provider's answer is kept, only the account read waits) it offers Finish sign-in, which sends the same return again from the page's memory on the owner's press.
+The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported; after a declared service's `answer_saved` (the provider's answer is kept, only the account read waits) or a remote MCP server's `not_sent` (stopped here before anything changed at the provider) it offers Finish sign-in, which sends the same return again from the page's memory on the owner's press.
 Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.
 
 ### Reading memory

@@ -172,7 +172,8 @@ def test_packet_fit_failure_is_a_typed_error(tmp_path, monkeypatch):
         build_two_part_brief(frozen, PACKET, goal="raise f", commit_message="bump f")
 
 
-# --- the installed domains of the touched paths, for a packet seat (no module tree in the book) ------------
+# --- what a tool-less packet seat receives, against the pre-PR target ------------------------------------------
+
 
 def _installed_and_subject(tmp_path, *, manifest=True):
     """An installed body (the governance root) and a clone of it whose index is the reviewed subject."""
@@ -197,40 +198,6 @@ def _installed_and_subject(tmp_path, *, manifest=True):
     return installed, subject
 
 
-def _packet_brief(tmp_path, installed, subject, *, whole=False):
-    data = tmp_path / "data"
-    (data / "logs").mkdir(parents=True, exist_ok=True)
-    ctx = SimpleNamespace(repo_dir=str(subject), drive_root=str(data), task_id="t-rows", task_metadata=None,
-                          _review_history=[], _review_advisory=[], _review_iteration_count=0,
-                          drive_logs=lambda: data / "logs")
-    spec = ReviewSubjectSpec(root_kind="system_repo", root=str(subject), kind="index", surface="commit_gate",
-                             layer="body", governance_root=str(installed))
-    brief = build_two_part_brief(freeze_subject(ctx, spec), PACKET, goal="g", commit_message="m")
-    return brief if whole else brief["system"]
-
-
-def _module_block(system):
-    from ouroboros.tools.governance_module_rows import HEADING
-
-    start = system.index(HEADING)
-    return system[start:system.index("\n\n", start)]
-
-
-def test_a_packet_seat_gets_one_installed_owner_row_per_path_and_no_other_module(tmp_path):
-    installed, subject = _installed_and_subject(tmp_path)
-    (subject / "ouroboros" / "a.py").write_text('"""STAGED lead of a."""\n', encoding="utf-8")
-    _git(subject, "mv", "ouroboros/c.py", "ouroboros/c\u00e9.py")  # a rename to a non-ASCII name
-    _git(subject, "add", "-A")
-    (subject / "ouroboros" / "a.py").write_text('"""WORKTREE lead of a."""\n', encoding="utf-8")  # after staging
-    system = _packet_brief(tmp_path, installed, subject)
-    assert _module_block(system).splitlines()[1:] == [
-        "- ouroboros/a.py (modified in this change; domain D06: Review stack; manuals: docs/architecture/06-4.md)",
-        "- ouroboros/c\u00e9.py (renamed from ouroboros/c.py in this change; domain D06: Review stack; "
-        "manuals: docs/architecture/06-4.md)"]  # owned where its source was
-    assert "ouroboros/b.py" not in system and "Lead of b." not in system  # no other module of the domain
-    assert "lead of a." not in _module_block(system) and "STAGED lead of a." in system  # the change carries it
-
-
 def test_the_synchronous_gate_reads_the_same_structured_set_from_the_staged_index(tmp_path):
     """No frozen subject: the staged index against HEAD, NUL-decoded, rename sides kept, names unquoted."""
     from ouroboros.tools.review_subject import subject_changes
@@ -244,97 +211,40 @@ def test_the_synchronous_gate_reads_the_same_structured_set_from_the_staged_inde
     assert subject_changes(str(tmp_path / "not-a-repo")) == ()
 
 
-def test_an_added_and_a_deleted_module_are_labelled_by_their_git_change_on_both_gates(tmp_path):
-    """Labels come from the frozen subject's name status, never from presence in the installed listing: on a
-    separate installed tree and on the in-place gate, whose installed tree is the author's own checkout."""
-    installed, subject = _installed_and_subject(tmp_path)
-    (subject / "ouroboros" / "new.py").write_text('"""Proposed new module."""\n', encoding="utf-8")
-    manifest = (subject / "ouroboros" / "domains.toml").read_text(encoding="utf-8")
-    (subject / "ouroboros" / "domains.toml").write_text(
-        manifest.replace('"ouroboros/b.py" = "D06"\n', "") + '"ouroboros/new.py" = "D06"\n', encoding="utf-8")
-    (subject / "ouroboros" / "b.py").unlink()
-    _git(subject, "add", "-A")
-    separate = _module_block(_packet_brief(tmp_path, installed, subject))
-    assert "- ouroboros/new.py (added in this change; the installed map has no owner for it)" in separate
-    assert "- ouroboros/b.py (deleted in this change; domain D06: Review stack;" in separate  # installed owner
-    in_place = _module_block(_packet_brief(tmp_path, subject, subject))
-    assert "- ouroboros/new.py (added in this change; domain D06: Review stack;" in in_place
-    assert "- ouroboros/b.py (deleted in this change; the installed map has no owner for it)" in in_place
-
-
-def test_the_rows_give_way_first_in_the_fit_ladder_and_a_missing_manifest_is_said(tmp_path, monkeypatch):
-    from ouroboros.tools import review as review_tool, review_admission
-    from ouroboros.tools.commit_gate import commit_review_contract_material
-    from ouroboros.tools.governance_module_rows import HEADING, MODULE_ROWS_PATH, UNAVAILABLE, YIELD_REASON, YIELDED
-    from ouroboros.review_words import HEADING as WORDS
-    from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
-
-    def strings(value):
-        if isinstance(value, str):
-            return [value]
-        items = value.values() if isinstance(value, dict) else value if isinstance(value, (list, tuple)) else ()
-        return [text for item in items for text in strings(item)]
-
-    set_review_pool(monkeypatch, pool_roster(pool_seat("packet-seat", "openai/gpt-y", delivery="packet")))
-    contract = "\n".join(strings(commit_review_contract_material()))  # a pool with a packet seat counts the rows
-    assert HEADING in contract and UNAVAILABLE in contract and YIELDED.format(count="⟨count⟩") in contract
-    set_review_pool(monkeypatch, pool_roster(pool_seat("native-seat", "openai/gpt-y", delivery="native")))
-    assert HEADING not in "\n".join(strings(commit_review_contract_material()))  # and only then
-    installed, subject = _installed_and_subject(tmp_path / "roomy")
-    (subject / "ouroboros" / "a.py").write_text('"""Changed."""\nMESSAGE = "Words a reader of the change sees."\n',
-                                                encoding="utf-8")
-    _git(subject, "add", "-A")
-    prompts = []
-    real = review_admission.assemble_packet_prompt
-    monkeypatch.setattr(review_admission, "assemble_packet_prompt",
-                        lambda **kw: prompts.append(real(**kw)) or prompts[-1])
-    roomy = _packet_brief(tmp_path / "roomy", installed, subject)
-    assert HEADING in roomy and YIELDED.format(count=1) not in roomy
-    # One token short of the whole packet: the rows give way, nothing of the change does, and both records say so.
-    limit = review_tool.estimate_tokens(prompts[-1][0]) - 1
-    monkeypatch.setattr(review_tool, "_quorum_input_token_limit", lambda *a, **k: limit)
-    tight = _packet_brief(tmp_path / "roomy", installed, subject, whole=True)
-    assert HEADING not in tight["system"] and YIELDED.format(count=1) in tight["system"]
-    # The rows give way before the other optional evidence: the change's source words stay whole (not their omission).
-    assert WORDS in roomy and "Source literals" in roomy
-    assert "Source literals" in tight["system"] and "source words omitted to fit" not in tight["system"]
-    assert '"""Changed."""' in tight["system"] and "Full post-change snapshots were omitted" not in tight["system"]
-    assert [(r["disposition"], r["reason"]) for r in tight["manifest"]["governance_manifest"]
-            if r["path"] == MODULE_ROWS_PATH] == [("navigation", YIELD_REASON)]
-    monkeypatch.undo()
-    bare, subject = _installed_and_subject(tmp_path / "bare", manifest=False)
-    (subject / "ouroboros" / "a.py").write_text('"""Changed."""\n', encoding="utf-8")
-    _git(subject, "add", "-A")
-    unavailable = _packet_brief(tmp_path / "bare", bare, subject)
-    assert UNAVAILABLE in unavailable and "Errno" not in unavailable
-    (bare / "ouroboros" / "domains.toml").write_text("[graph]\nallowed = 7\n", encoding="utf-8")  # valid TOML, wrong type
-    assert UNAVAILABLE in _packet_brief(tmp_path / "bare", bare, subject)
-
-
-def _fixture_js(lines: int) -> bytes:
+def _fixture_js(lines: int, word: str = "fixture") -> bytes:
     """Frozen synthetic bytes this test owns (the shipped web tree may change freely)."""
-    return "".join(f"// fixture line {index:05d}: " + "x" * 60 + "\n" for index in range(lines)).encode()
+    return "".join(f"// {word} line {index:05d}: " + "x" * 60 + "\n" for index in range(lines)).encode()
 
 
-# (comment-touched file lines, added test file lines or 0, window, the pre-PR target's delivery)
+# (comment-touched file lines, added test file lines or 0, window, the pre-PR target's delivery), measured against the
+
+
 PRE_PR_DELIVERY = [
-    (900, 0, 131_072, "full"),   # with the pre-round-5 navigation: snapshot omitted
-    (150, 220, 100_000, "diff"),  # with the pre-round-5 navigation: REVIEW_BLOCKED (46,049 > 45,454)
-    (900, 0, 256_000, "full"),   # roomy control
+    (900, 0, 131_072, "full"),
+    (150, 220, 100_000, "diff"),
+    (150, 302, 100_000, "diff"),     # the target's last fitting size: a larger packet fixed cost refuses it
+    (150, 320, 100_000, "refused"),  # both refuse: the control that keeps the boundary honest
+    (306, 0, 100_000, "full"),       # the target's last whole-source size at this window
+    (312, 0, 100_000, "diff"),
+    (900, 0, 256_000, "full"),       # roomy control
 ]
 
 
+FIXTURE_SENTINEL = "// fixture line 00007: "  # inside the source, outside the diff's hunk
+RANK = {"refused": 0, "diff": 1, "full": 2}
+
+
 def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(tmp_path, monkeypatch):
-    """The expectations in ``PRE_PR_DELIVERY`` are what the pre-PR target (razzant/ouroboros bcac9f84126b: its
-    governance_context, its context_layout and its book blobs) delivered to a packet seat for exactly these bytes,
-    measured on 27 Nov 2026 beside this head ("full" = the touched file's whole source, "diff" = the diff with the
-    snapshot omitted). The subject is frozen synthetic bytes; the books, their navigation, the builder and the cold
-    sizing are the real ones, which is what this guards. A failure here means the tool-less packet's navigation grew
-    past what the pre-PR target delivered, so a change now costs a reviewer its snapshot or its review. A legitimate
-    re-measure follows only a deliberate change of the books' navigation size, against the same target.
-    Where the owner rows do not fit they give way with their counted notice; where the whole source arrives, so do
-    they."""
-    from ouroboros.tools import governance_module_rows as gmr, review as review_tool
+    """The expectations in ``PRE_PR_DELIVERY`` are what the pre-PR target (razzant/ouroboros, with its own
+    governance_context, context_layout and governance documents; measured 27 Nov 2026 at bcac9f84126b, ad9e98f10198
+    and a4c694fb4f21, as the boundaries move with the target's documents) delivered to a packet seat for exactly
+    these bytes ("full" = the touched file's whole source, "diff" = the diff with the snapshot omitted, "refused" = no
+    packet). The subject is frozen synthetic bytes; the books,
+    their navigation, tier-1 governance, the builder and the cold sizing are the real ones, which is
+    what this guards. A failure means the packet's fixed cost (navigation, tier-1 governance, the selected sections)
+    grew past what the pre-PR target spent, so a change now loses its snapshot or its review. A legitimate
+    re-measure follows only a deliberate change of that fixed cost, against the same target."""
+    from ouroboros.tools import review as review_tool
     from ouroboros.tools.registry import ToolContext
 
     root = pathlib.Path(__file__).resolve().parents[1]
@@ -348,158 +258,37 @@ def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(t
             stream.write("// Review one trailing comment.\n")
         if added:
             (subject / "web" / "tests").mkdir(parents=True)
-            (subject / "web" / "tests" / "fixture.test.js").write_bytes(_fixture_js(added))
+            (subject / "web" / "tests" / "fixture.test.js").write_bytes(_fixture_js(added, "testing"))
         _git(subject, "add", "-A")
         ctx = ToolContext(repo_dir=subject, drive_root=tmp_path / "drive")
         ctx._review_iteration_count = 0
         frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(subject), "index", surface="commit_gate",
                                                        governance_root=str(root), layer="body"))
         monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: window)
-        text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
+        where = f"packet fixed cost grew past the pre-PR target's: {(touched, added, window)}"
+        try:
+            text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive",
+                                        goal="Review these edits")["system"]
+        except ValueError as refusal:
+            assert delivered == "refused" and "REVIEW_BLOCKED" in str(refusal), where
+            continue
         omitted = "Full post-change snapshots were omitted" in text
-        assert ("diff" if omitted else "full") == delivered, (touched, added, window)
-        assert "// Review one trailing comment." in text, (touched, window)
-        assert (gmr.HEADING in text) != ("were NOT delivered: with them" in text), (touched, window)
-        assert omitted or gmr.HEADING in text, (touched, window)
+        got = "diff" if omitted else "full"
+        assert RANK[got] >= RANK[delivered], where  # strictly better than the target is not a failure
+        staged = text.split("## Staged diff\n\n", 1)[1].split("\n\n## Changed files", 1)[0].strip()
+        # the delivered diff section is exactly the frozen full or -U0 rendering: headers, order and context included
+        assert staged in (frozen.diff_text.strip(), frozen.render_prompt_diff(0).strip()), where
+        assert (FIXTURE_SENTINEL in text) == (not omitted), where  # the whole source is really there, or not
+        if not omitted:  # a full-source rung carries every promised file body whole
+            bodies = [(subject / "web" / "modules" / "fixture.js").read_text(encoding="utf-8")]
+            bodies += [(subject / "web" / "tests" / "fixture.test.js").read_text(encoding="utf-8")] if added else []
+            assert all(body.rstrip("\n") in text for body in bodies), where
 
 
-def _edited_rows(needle, replacement):
-    """``governance_module_rows`` with one fixed text edited, as a separate module."""
-    import inspect
-    import sys
-    import types
-
-    from ouroboros.tools import governance_module_rows as gmr
-
-    source = inspect.getsource(gmr)
-    assert source.count(needle) == 1, needle
-    module = types.ModuleType("ouroboros.tools.edited_owner_rows")
-    sys.modules[module.__name__] = module
-    exec(compile(source.replace(needle, replacement), str(gmr.__file__), "exec"), module.__dict__)
-    return module
-
-
-EDITS = [('NO_MANUALS = "none named"', 'NO_MANUALS = "none published"'),
-         ('MODULE_ROWS_PATH = "ouroboros/domains.toml#module_map"', 'MODULE_ROWS_PATH = "ouroboros/domains.toml#ownership"'),
-         ('", ".join(manifest.references.get(key, ()))', '" and ".join(manifest.references.get(key, ()))'),
-         ('UNDEFINED_TITLE = "the installed map does not define this id"', 'UNDEFINED_TITLE = "no installed definition"'),
-         ('change; surface {surface}; manuals', 'change; surface area {surface}; manuals'),
-         ('"T": "type-changed"', '"T": "mode-changed"'), ('TOUCHED = "touched"', 'TOUCHED = "named"'),
-         ("one row per path of the change;", "a row per path of the change;"),
-         ("change; the installed map has no owner for it)", "change; the installed map owns it nowhere)"),
-         ("they give way before any part", "they yield before any part"),
-         ('"unavailable; the review', '"unreadable; the review')]
-
-
-def test_every_fixed_rows_text_is_in_the_packet_contract_and_only_there(monkeypatch):
-    """Editing any fixed text the rows render changes the commit gate's contract fingerprint for a pool with a
-    packet seat; a native-only pool keeps the identical material and hash."""
-    from ouroboros.tools import commit_gate, governance_context as gc
-    from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
-
-    def fingerprints():
-        set_review_pool(monkeypatch, pool_roster(pool_seat("packet-seat", "openai/gpt-y", delivery="packet")))
-        packet = commit_gate.commit_review_contract_fingerprint()
-        set_review_pool(monkeypatch, pool_roster(pool_seat("native-seat", "openai/gpt-y", delivery="native")))
-        return packet, commit_gate.commit_review_contract_fingerprint(), commit_gate.commit_review_contract_material()
-
-    packet, native, material = fingerprints()
-    assert packet and native and packet != native
-    for needle, replacement in EDITS:
-        with monkeypatch.context() as patched:
-            patched.setattr(gc, "gmr", _edited_rows(needle, replacement))
-            edited_packet, edited_native, edited_material = fingerprints()
-        assert edited_packet != packet, needle
-        assert (edited_native, edited_material) == (native, material), needle
-
-
-def _golden_gate(tmp_path, monkeypatch):
-    """The commit gate's real preparation over an installed body with one staged web edit (a changed literal), the
-    repository's offline three-seat substrate recording every send: ``(run, sent)``."""
-    from ouroboros import review_substrate as substrate
-    from ouroboros.tools import git as git_mod
-    from ouroboros.tools.registry import ToolContext
-    from ouroboros.tools.review_change import run_review_change
-    from tests import _contributor_packet_shared as shared
-    from tests.review_pool_rosters import set_review_pool
-    from tests.test_review_reuse_identity import _actual_sends
-
-    set_review_pool(monkeypatch, shared.golden_pool())
-    for name, value in (("OUROBOROS_REVIEW_ENFORCEMENT", "blocking"), ("OUROBOROS_RUNTIME_MODE", "pro"),
-                        ("OUROBOROS_REVIEW_MAX_CYCLES", "unlimited")):
-        monkeypatch.setenv(name, value)
-    monkeypatch.setattr(git_mod, "_run_review_preflight_tests", shared.passing_test_runner)
-    repo = pathlib.Path(shared.init_installed_body(tmp_path / "world")["repo"])
-    for path, text in ((".gitignore", "__pycache__/\n"), ("web/app.js", 'export const TITLE = "An installed web app.";\n'),
-                       ("ouroboros/domains.toml",
-                        '[domains]\nD01 = "Core"\n[references]\n"web/" = ["docs/a-guide.md", "docs/b-guide.md"]\n[modules]\n')):
-        (repo / path).parent.mkdir(parents=True, exist_ok=True)
-        (repo / path).write_text(text, encoding="utf-8")
-    shared.git(repo, "add", "-A")
-    shared.git(repo, "commit", "-q", "-m", "installed web app")
-    (repo / "web/app.js").write_text('export const TITLE = "An installed web app, changed.";\n', encoding="utf-8")
-    shared.git(repo, "add", "web/app.js")
-    ctx, sent, inner = ToolContext(repo_dir=repo, drive_root=tmp_path / "drive"), [], shared.golden_substrate([])
-    ask = dict(root="system_repo", surface="change", subject="index", goal="Review the one edit", scope="the web app")
-
-    def substrate_run(request, *, slots, **kwargs):
-        sent.extend(str(_actual_sends(request, slot, "[]")) for slot in slots)
-        return inner(request, slots=slots, **kwargs)
-    monkeypatch.setattr(substrate, "run_review_request", substrate_run)
-    return (lambda: run_review_change(ctx, **ask)), sent
-
-
-def test_at_the_gate_the_rows_give_way_before_the_source_words(tmp_path, monkeypatch):
-    """The gate seam's own ladder (``review._prepare_unified_review``) one token short of its whole packet: the
-    owner rows give way with their notice and the changed literal's words section stays whole."""
-    from ouroboros.review_words import HEADING as WORDS
-    from ouroboros.tools import review as review_tool
-    from ouroboros.tools.governance_module_rows import HEADING, YIELDED
-
-    real_fit = review_tool._fit_triad_prompt
-
-    def one_token_short(api_models, assemble, files, diff, *args, **kwargs):
-        whole = review_tool.estimate_tokens(assemble(files, diff)[0])
-        with monkeypatch.context() as patched:
-            patched.setattr(review_tool, "_quorum_input_token_limit", lambda *a, **k: whole - 1)
-            return real_fit(api_models, assemble, files, diff, *args, **kwargs)
-    monkeypatch.setattr(review_tool, "_fit_triad_prompt", one_token_short)
-    run, sent = _golden_gate(tmp_path, monkeypatch)
-    assert run()["aggregate"] == "PASS"
-    notice = YIELDED.format(count=1).split(":")[0]  # the sends are recorded as repr text, which escapes the apostrophe
-    packets = [text for text in sent if notice in text]
-    assert packets and all(HEADING not in text and WORDS in text and "source words omitted" not in text
-                           for text in packets), [text[-1500:] for text in sent]
-
-
-def test_an_edited_owner_row_is_never_reused_as_a_settled_verdict(tmp_path, monkeypatch):
-    """Astra's replay: a settled PASS is reused for the identical subject; once a fixed text of the rows the packet
-    seat received changes (the section title, the words joining two manuals, a row template), the same subject is
-    reviewed again and the new text is what the seat is sent."""
-    from ouroboros.tools import governance_context as gc
-
-    run, sent = _golden_gate(tmp_path, monkeypatch)
-    first = run()
-    row = "- web/app.js (modified in this change; surface web/; manuals: docs/a-guide.md, docs/b-guide.md)"
-    assert first["aggregate"] == "PASS" and not first["reused"], first
-    assert any(row in text for text in sent), [text[text.find("## Governance navigation") - 600:][:900] for text in sent]
-    again = run()
-    assert again["reused"] and again["record_id"] == first["record_id"]
-    for needle, replacement, word in (EDITS[1] + ("## ouroboros/domains.toml#ownership",),
-                                      EDITS[2] + ("a-guide.md and docs/b-guide.md",),
-                                      EDITS[4] + ("surface area web/",)):
-        count = len(sent)
-        with monkeypatch.context() as patched:
-            patched.setattr(gc, "gmr", _edited_rows(needle, replacement))
-            edited = run()
-        assert not edited["reused"] and edited["record_id"] != first["record_id"], needle
-        assert len(sent) > count and any(word in text for text in sent[count:]), needle
-
-
-def test_every_gate_variant_reads_one_structured_path_set_for_rows_and_file_bodies(tmp_path, monkeypatch):
-    """Default Git quotes a UTF-8 name in its display output; the gate's touched-file pack reads the same NUL-decoded
-    set the owner rows do, so a pure rename to ``web/café.js`` arrives with its body on the synchronous, the
-    read-only and the frozen gate, labelled added/deleted/renamed as the builder labels it."""
+def test_every_gate_variant_reads_one_structured_path_set_for_file_bodies(tmp_path, monkeypatch):
+    """Default Git quotes a UTF-8 name in its display output; the gate's touched-file pack reads the NUL-decoded path
+    set, so a pure rename to ``web/café.js`` arrives with its body on the synchronous, the read-only and the frozen
+    gate, as it does through the public builder."""
     import contextlib
 
     from ouroboros.tools import git_review_cycle, review as review_tool
@@ -509,9 +298,6 @@ def test_every_gate_variant_reads_one_structured_path_set_for_rows_and_file_bodi
     set_review_pool(monkeypatch, ["openai/packet-fixture"])
     monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 1_000_000)
     _installed, repo = _installed_and_subject(tmp_path)
-    manifest = repo / "ouroboros" / "domains.toml"
-    manifest.write_text(manifest.read_text(encoding="utf-8").replace("[references]", '[references]\n"web/" = ["web.md"]'),
-                        encoding="utf-8")
     for path, text in (("web/change-me.js", "// Only the renamed file holds THIS_RENAME_BODY.\n"),
                        ("web/gone.js", "// deleted\n")):
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
@@ -538,7 +324,245 @@ def test_every_gate_variant_reads_one_structured_path_set_for_rows_and_file_bodi
 
     for label, prompt in (("synchronous", gate(None, False)), ("read-only", gate(None, True)),
                           ("frozen gate", gate(frozen, True))):
-        block = _module_block(prompt)
-        assert "- web/café.js (renamed from web/change-me.js in this change; surface web/" in block, label
-        assert "- web/new.js (added in this change" in block and "- web/gone.js (deleted in this change" in block, label
-        assert "THIS_RENAME_BODY" in prompt, label
+        assert "THIS_RENAME_BODY" in prompt and "web/café.js" in prompt, label
+
+
+
+TARGET_ROWS = [  # (touched path, its row in the target's chapter-1 tree, verbatim) — reviewers' samples, rev-pr2h
+    ('supervisor/workers.py', 'workers.py — pool: forkserver Linux, spawn elsewhere, never fork (why: its comment)'),
+    ('supervisor/worker_owner_wait.py', 'worker_owner_wait.py — required owner wait lends active slot; task stays RUNNING, custodied (§5)'),
+    ('supervisor/schedule_notes.py', 'schedule_notes.py — due `kind:"notify"` → signed `reminder` System row (no model, no retry)'),
+    ('supervisor/task_reaper.py', 'task_reaper.py — off-loop reaper (timeout never retries, crash, idle, unready; unconfirmed death keeps reaping; mints no cancel intents) (§5)'),
+    ('supervisor/steering.py', 'steering.py — host-minted `issuer` mailbox steering (refused during pending cancel; §6)'),
+    ('ouroboros/owner_hurry.py', 'owner_hurry.py — task-local `kind=hurry` latch, one line for running work, never a chat message (§5)'),
+    ('ouroboros/outcome_receipt_store.py', 'outcome_receipt_store.py — verification-receipt store; zero-run writes `incomplete`/`unknown` only (zero-run "complete" is unverifiable self-report)'),
+    ('ouroboros/cost_projection.py', 'cost_projection.py — sole task-cost projection (`accounted_upper_bound_usd`, null ≠ $0.00) (§6 Budget tracking)'),
+    ('ouroboros/delegate_start_claims.py', 'delegate_start_claims.py — serializes custody recheck/`START_REQUESTED` outside waits (retries never hold root/store locks)'),
+    ('ouroboros/workspace_admission.py', 'workspace_admission.py — disjoint roots, Project binding, never system-repo fallback (CLI / Headless Boundary) (§6 Owner routing verbs; CLI / Headless Boundary below)'),
+    ('ouroboros/review_slot_cancel.py', 'review_slot_cancel.py — typed cancel outcomes reporting only proof (`ReviewSessionSucceededResultUnavailable`, never "may still be live")'),
+    ('web/modules/settings_language.js', 'i18n.js, settings_language.js — chrome-only translation overlay; chat prose, logs, code and owner names never walked (§3 Settings)'),
+    ('web/modules/project_reference.js', 'project_reference.js, task_reference.js — sole Project and Main task doors (DESIGN)'),
+    ('web/modules/model_chooser.js', 'model_roles.js, model_chooser.js — the Models editor and editable chooser shared by Settings, onboarding and route editors; catalog arrival never assigns a value (§3 Navigation)'),
+    ('supervisor/task_admission.py', 'task_admission.py — duplicate-ingress reservation fences before effects (§5)'),
+    ('supervisor/schedule_occurrence.py', 'schedule_time.py, schedule_occurrence.py — cron/tz parsing; at most one root per occurrence'),
+    ('supervisor/direct_roots.py', 'direct_roots.py — retired: old file folded/removed at boot (§5)'),
+    ('ouroboros/agent_startup_checks.py', 'agent_startup_checks.py — boot health (warning-only) and self-restart host adoption (§2)'),
+    ('ouroboros/evolution_checkpoints.py', 'evolution_checkpoints.py, evolution_fingerprint.py — append-only campaign checkpoints; canonical objective repeat fingerprint'),
+    ('ouroboros/cancel_intents.py', 'cancel_intents.py — sole ingress `request_cancel`, durable projection, claim fencing, fail-closed reads (§5; §10.14–15)'),
+    ('ouroboros/local_custody_repair.py', 'local_custody_repair.py, custody_owed.py — ended claims retire on proof; unwritten facts stay owed (§6 Owner Continue)'),
+    ('ouroboros/custody_owed.py', 'local_custody_repair.py, custody_owed.py — ended claims retire on proof; unwritten facts stay owed (§6 Owner Continue)'),
+    ('ouroboros/_usage_settlement.py', '_usage_settlement.py — usage/price evidence projected outside ledger tx (§6 Budget tracking)'),
+    ('ouroboros/argv_budget.py', 'argv_budget.py — ARG_MAX byte admission (argv + env; checked by `skill_exec`)'),
+    ('ouroboros/tools/media.py', 'media.py — `extract_pdf_text` (`ocr_pdf`; text layer, not OCR), `youtube_transcript`, `extract_video_frames`, `read_archive` (`archive_reader.py`; nothing extracted)'),
+    ('ouroboros/tools/subagent_integration.py', 'subagent_integration.py — `integrate_subagent_patch` (protected-path gated, genesis refused), `compare_subagent_patches`'),
+    ('ouroboros/desktop_media.py', 'desktop_media.py — GTK display probe, own-loopback audio grant (other shells keep native prompts; §8)'),
+    ('ouroboros/tools/commit_gate.py', 'commit_gate.py — block classification, paid cycle cap, contract fingerprint'),
+    ('ouroboros/force_remove.py', 'force_remove.py, unindexed.py — permission-granting `force_rmtree`; `.noindex` names'),
+]
+
+
+def _single_file_subject(tmp_path, path: str, source: bytes):
+    """One repository whose index changes ``path`` by a trailing comment line; no installed tree is built."""
+    from ouroboros.tools.registry import ToolContext
+
+    repo = tmp_path / "subject"
+    (repo / path).parent.mkdir(parents=True)
+    _git(tmp_path, "init", "-q", str(repo))
+    for key, value in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(repo, "config", key, value)
+    (repo / path).write_bytes(source)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fixture source")
+    with (repo / path).open("a", encoding="utf-8") as stream:
+        stream.write("// Review one trailing comment.\n")
+    _git(repo, "add", "-A")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "drive")
+    ctx._review_iteration_count = 0
+    return ctx, repo
+
+
+@pytest.mark.parametrize("path, row", TARGET_ROWS)
+def test_a_tool_less_reviewer_without_the_snapshot_gets_the_target_row_of_the_touched_file(tmp_path, monkeypatch,
+                                                                                         path, row):
+    """The target's chapter-1 tree row for a touched file (frozen here, verbatim) reaches a tool-less packet seat whose
+    snapshot was omitted, as on the pre-PR target: the selector excerpts the directory's lines naming a touched file.
+    A rule edited away in the directory turns this red."""
+    from ouroboros.tools import review as review_tool
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    ctx, repo = _single_file_subject(tmp_path, path, _fixture_js(3000))
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
+                                                   governance_root=str(root), layer="body"))
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 131_072)
+    text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
+    assert "Full post-change snapshots were omitted" in text, path
+    assert row in text, (path, row)
+
+
+def test_the_frozen_builder_reviews_a_conflict_anchor_outside_the_delta(tmp_path, monkeypatch):
+    """A managed resolution that keeps a conflict file at its mechanical-merge bytes leaves it out of the Git delta;
+    the reviewed set is the delta and the anchors (``ManagedReviewSubject.touched_paths``), as at the gate, so the
+    packet's changed-files list names the anchor."""
+    from ouroboros.tools.registry import ToolContext
+    from tests import test_managed_review_subject as managed_fixture
+
+    repo, simple, tx = managed_fixture._managed_resolution_repo(tmp_path, monkeypatch)
+    _git(repo, "checkout", tx["m0_tree"], "--", "conflict.txt")  # the anchor back at its M0 bytes
+    _git(repo, "add", "-A")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data", task_id=simple.task_id,
+                      task_metadata=simple.task_metadata)
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
+                                                   layer="body"))
+    assert frozen.managed is not None and "conflict.txt" not in {path for _s, path in frozen.name_status}
+    system = build_two_part_brief(frozen, PACKET, goal="g", commit_message="m")["system"]
+    for path in ("conflict.txt", "resolver_note.txt"):  # a reviewed path: a file heading, or a changed-files row
+        assert f"\n### {path}\n" in system or path in system[system.index("## Changed files"):], path
+
+
+def test_a_chapter_opening_naming_a_touched_file_is_sent_once(tmp_path, monkeypatch):
+    """Chapter 12's first paragraph names ``ouroboros/place_arrivals.py``: the selector picks that paragraph for a
+    change to it, and the packet navigation (which carries every introduction) then skips it, so the reviewer reads
+    it once and its bytes are not paid twice (the gate assembles through the same governance selector)."""
+    from ouroboros.reference_books import _preamble, load_reference_book
+    from ouroboros.tools import review as review_tool
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    chapter = next(c for c in load_reference_book(root, "architecture").chapters
+                   if c.source_path.endswith("12-host-service-companions-and-chat-ids.md"))
+    opening = chapter.text_at(_preamble(chapter)).strip()
+    assert "place_arrivals.py" in opening
+    ctx, repo = _single_file_subject(tmp_path, "ouroboros/place_arrivals.py", b'"""Fixture."""\n')
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
+                                                   governance_root=str(root), layer="body"))
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 1_000_000)
+    built = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
+    assert built.count(opening) == 1
+
+
+# Real history replayed by a reviewer (rev-pr2j), frozen as synthetic files of the same names and sizes and the same
+# numbers of changed lines: (paths with (added, deleted, bytes before), window, the target's rung, sections it selected).
+HISTORY = [
+    ({"docs/DESIGN.md": (1, 1, 321_047), "web/ui.css": (0, 2, 120_198)}, 100_000, "diff",
+     ("Navigation and shared UI contracts", "opening block 2 (excerpt: its lines naming a touched file)")),
+    ({"docs/DESIGN.md": (1, 1, 317_362), "tests/test_phone_keyboard_recovery_browser.py": (5, 5, 81_942),
+      "tests/test_ui_coherence_browser.py": (1, 1, 89_734), "web/ui.css": (1, 1, 113_592)}, 100_000, "diff",
+     ("Navigation and shared UI contracts", "opening block 2 (excerpt: its lines naming a touched file)")),
+]
+
+
+@pytest.mark.parametrize("files, window, rung, sections", HISTORY)
+def test_replayed_history_keeps_the_target_sections_and_directory_rows(tmp_path, monkeypatch, files, window, rung,
+                                                                      sections):
+    """A chapter opening already carried by the packet navigation is not selected again, so the change-specific share
+    goes to the sections and directory rows the pre-PR target selected for the same paths (measured 27 Nov 2026 at
+    7981018bb40e with the target's governance code and documents)."""
+    from ouroboros.tools import review as review_tool
+    from ouroboros.tools.registry import ToolContext
+
+    def lines(count, word):
+        return "".join(f"/* {word} line {index:05d}: " + "x" * 60 + " */\n" for index in range(count))
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    repo = tmp_path / "subject"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    for key, value in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(repo, "config", key, value)
+    for path, (added, deleted, size) in files.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(lines(max(size // 80, deleted + 1), "base"), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    for path, (added, deleted, _size) in files.items():
+        body = (repo / path).read_text(encoding="utf-8").split("\n")
+        body = body[:len(body) - 1 - deleted] + [line for line in lines(added, "new").split("\n") if line] + [""]
+        (repo / path).write_text("\n".join(body), encoding="utf-8")
+    _git(repo, "add", "-A")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "drive")
+    ctx._review_iteration_count = 0
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(repo), "index", surface="commit_gate",
+                                                   governance_root=str(root), layer="body"))
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: window)
+    text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review")["system"]
+    got = "diff" if "Full post-change snapshots were omitted" in text else "full"
+    assert RANK[got] >= RANK[rung]
+    for section in sections:
+        assert f"#{section}\n" in text, section
+
+
+def test_a_packet_sendable_with_the_resident_opening_selected_stays_sendable(monkeypatch):
+    """The fit ladder's last step before refusing switches to the governance fallback (the selection that re-sends a
+    resident opening, smaller where skipping it admitted larger sections); without one it refuses."""
+    from ouroboros.tools import review as review_tool, review_admission
+
+    monkeypatch.setattr(review_tool, "_quorum_input_token_limit", lambda *a, **k: 1_000)
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 1_000_000)
+    state = {"governance": "x" * 8_000}
+
+    def assemble(files, diff):
+        return state["governance"] + files + diff, 0
+
+    def fallback():
+        state["governance"] = "small"
+    assemble.fallback = fallback
+    prompt, _stable, error = review_admission.fit_triad_prompt(["openai/gpt-y"], assemble, "", "+one line", "a.py",
+                                                               ".", compact_diff=lambda: "+one line")
+    assert not error and prompt.startswith("small")
+    state["governance"] = "x" * 8_000
+    _prompt, _stable, error = review_admission.fit_triad_prompt(["openai/gpt-y"], assemble, "", "+one line", "a.py",
+                                                                ".", compact_diff=lambda: "+one line")
+    assert "REVIEW_BLOCKED" in error
+
+
+def test_a_many_file_change_gets_every_full_body_where_the_pre_pr_target_did(tmp_path, monkeypatch):
+    """Thirteen synthetic web modules with one trailing comment each: at 262,750 the pre-PR target (7981018bb40e,
+    measured with its own governance code and documents) sends all thirteen full bodies; so must this packet, whose
+    changed-files list points at the file headings it already carries instead of repeating thirteen paths."""
+    from ouroboros.tools import review as review_tool
+    from ouroboros.tools.review_admission import CHANGED_FILES_ARE_HEADINGS
+    from ouroboros.tools.registry import ToolContext
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    paths = [f"web/modules/many_{index:02d}.js" for index in range(13)]
+    _installed, subject = _installed_and_subject(tmp_path)
+    for path in paths:
+        (subject / path).parent.mkdir(parents=True, exist_ok=True)
+        (subject / path).write_text("".join(f"// many line {k:05d}: " + "x" * 60 + "\n" for k in range(300)),
+                                    encoding="utf-8")
+    _git(subject, "add", "-A")
+    _git(subject, "commit", "-qm", "base")
+    for path in paths:
+        with (subject / path).open("a", encoding="utf-8") as stream:
+            stream.write("// Review one trailing comment.\n")
+    _git(subject, "add", "-A")
+    ctx = ToolContext(repo_dir=subject, drive_root=tmp_path / "drive")
+    ctx._review_iteration_count = 0
+    frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(subject), "index", surface="commit_gate",
+                                                   governance_root=str(root), layer="body"))
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 262_750)
+    text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
+    assert "Full post-change snapshots were omitted" not in text
+    assert all(f"\n### {path}\n" in text for path in paths) and CHANGED_FILES_ARE_HEADINGS in text
+
+
+def test_the_fallback_step_buys_no_second_density_probe(monkeypatch):
+    """A cold overflowing route is probed once: switching to the governance fallback reuses the first pass's
+    calibrated limit instead of re-entering the cold-density rung (a provider without usage would be probed again)."""
+    from ouroboros.tools import review as review_tool, review_admission
+
+    monkeypatch.setattr(review_tool, "calibrated_input_token_limit", lambda *a, **k: 1_000)
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 1_000_000)
+    probes = []
+    monkeypatch.setattr(review_admission, "density_probe_before_size_refusal",
+                        lambda *a, **k: probes.append(a[1]) or "no_sample")
+    state = {"governance": "x" * 8_000}
+
+    def assemble(files, diff):
+        return state["governance"] + files + diff, 0
+
+    def fallback():
+        state["governance"] = "small"
+    assemble.fallback = fallback
+    prompt, _stable, error = review_admission.fit_triad_prompt(["openai/gpt-y"], assemble, "", "+one line", "a.py",
+                                                               ".", compact_diff=lambda: "+one line")
+    assert not error and prompt.startswith("small") and probes == ["openai/gpt-y"]

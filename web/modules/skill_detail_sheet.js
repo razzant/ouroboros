@@ -5,6 +5,7 @@
 // so while it does. Close, Escape and the backdrop return focus to the opener.
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindScrollFade } from './scroll_fade.js';
+import { disposeNotices } from './toast.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { bindRenderedMarkdown, mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { mountConnectorPlaces } from './connector_places.js';
@@ -12,7 +13,7 @@ import { mountSkillSignIn } from './skill_sign_in.js';
 import { reviewSentence } from './skill_card_renderer.js';
 import {
     catalogWhoHtml, connectsServices, declaredPermissionWords, displayAddress, externalLinkHtml, officialMarkHtml, permissionWords, popularityText,
-    relativeAge, repoLabel, routeExternalLink, skillTitle, trustSentence, versionText,
+    relativeAge, repoLabel, routeExternalLink, skillOfferChanged, skillTitle, trustSentence, versionText,
 } from './skill_presentation.js';
 
 function section(title, html) {
@@ -67,13 +68,13 @@ function linksHtml(detail, item) {
     return rows.length ? `<p>${rows.map(([url, label]) => externalLinkHtml(url, label)).join(' · ')}</p>` : '';
 }
 
-// The sheet is named as its card is: the catalog's title, else the installed skill's (its manifest title or the place
-// it adds), never its id, which Details keeps.
-const sheetTitle = (item, installed) => (skillTitle(item) !== item.name || !installed ? skillTitle(item) : skillTitle(installed));
+// The sheet is named as the card that opened it (`item` carries that card's title: a Browse card's catalog title, a
+// Skills card's own); the id stays in Details. The name is authored, so no view translates it differently.
+const sheetTitle = (item) => skillTitle(item);
 
 function detailsHtml(item, installed) {
     const rows = [
-        ['ID', sheetTitle(item, installed) !== item.name ? item.name : ''],
+        ['ID', sheetTitle(item) !== item.name ? item.name : ''],
         ['Source', [item.source_name, displayAddress(item.repo_url)].filter(Boolean).join(' · ')],
         ['Exact version', [versionText(item.version), item.digest || ''].filter(Boolean).join(' · ')],
         ['Installed folder', installed?.payload_root || ''],
@@ -88,10 +89,12 @@ function detailsHtml(item, installed) {
  * Open the sheet. `item` is the catalog entry (or the installed skill seen as
  * one); `actionsHtml` mirrors the card's action row; `onAction(action, node)`
  * receives presses on `[data-sheet-action]`. `readDetail()` fetches the full
- * entry; without it the sheet shows what the card had. Review says one thing, as the sheet opened: an installed
+ * entry; without it the sheet shows what the card had. `acceptDetail` can require that it describe installed bytes.
+ * Review says one thing, as the sheet opened: an installed
  * copy's own recorded review, else how a new install goes while its source's setting holds (`policy`).
  */
-export function openSkillDetailSheet({ item, installed = null, policy = null, actionsHtml = '', onAction = () => {}, readDetail = null, returnFocus = document.activeElement, access, signIn = null }) {
+export function openSkillDetailSheet({ item, installed = null, policy = null, actionsHtml = '', onAction = () => {}, readDetail = null,
+    acceptDetail = (detail) => !skillOfferChanged(item, detail?.item), returnFocus = document.activeElement, access, signIn = null }) {
     // `access`: undefined in Browse, where the catalog's entry says what a skill can use. The Installed sheet passes the
     // loaded row's own `{permissions, needs_keys}` (its parsed manifest and grants), or null when none was read: the
     // catalog entry, cached or fetched, is then never its access.
@@ -104,7 +107,7 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
     dialog.innerHTML = `<div class="document-reader-panel">
         <div class="document-reader-head">
             <div class="document-reader-identity">
-                <h2 class="document-reader-title" id="skills-sheet-title">${escapeHtml(sheetTitle(item, installed))}${item.official ? ` ${officialMarkHtml({ control: false })}` : ''}</h2>
+                <h2 class="document-reader-title" id="skills-sheet-title"><span data-i18n-authored>${escapeHtml(sheetTitle(item))}</span>${item.official ? ` ${officialMarkHtml({ control: false })}` : ''}</h2>
                 <div class="document-reader-meta">${catalogWhoHtml(item, { version: true })}${popularity ? ` · ${escapeHtml(popularity)}` : ''}</div>
             </div>
             <div class="document-reader-actions" data-sheet-actions>${actionsHtml}</div>
@@ -114,17 +117,21 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
     </div>`;
     const body = dialog.querySelector('[data-sheet-body]');
     const content = dialog.querySelector('[data-sheet-content]');
+    const actions = dialog.querySelector('[data-sheet-actions]');
     let disposePlaces = null, disposeSignIn = null;
     let closed = false;
     let disposeFocus = null;
     const disposeFade = bindScrollFade(body);
     let controller = null;
+    let readGeneration = 0;
+    let offerChanged = false;
     const close = () => {
         if (closed) return;
         closed = true;
         controller?.abort();
         disposePlaces?.();
         disposeSignIn?.();
+        disposeNotices(dialog);  // what a press in the sheet answered (toast.js `modalNotice`) leaves with it
         destroyChatMarkdown(content.querySelector('.skills-sheet-about'));
         // Close the modal first: WebKit's own close moves focus to what was focused before it opened
         // (a pressed button is not focused there), and the restore below then returns it to the opener.
@@ -145,8 +152,11 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
             ? note(`Its SKILL.md couldn’t be read (${escapeHtml(detail.about_error)}); this is the catalog’s description.`) : '';
         destroyChatMarkdown(content.querySelector('.skills-sheet-about'));
         content.innerHTML = [
-            reading ? `<p class="skills-sheet-status" role="status">Reading ${escapeHtml(sheetTitle(item, installed))} from ${escapeHtml(item.source_name || 'its source')}…</p>` : '',
+            reading ? `<p class="skills-sheet-status" role="status">Reading ${escapeHtml(sheetTitle(item))} from ${escapeHtml(item.source_name || 'its source')}…</p>` : '',
             error ? `<div class="skills-sheet-status is-error" role="alert"><p>Couldn’t read the full description from ${escapeHtml(item.source_name || 'its source')}: ${escapeHtml(error)}.</p><button type="button" class="btn btn-default btn-sm" data-sheet-retry>Try again</button></div>` : '',
+            offerChanged ? `<p class="skills-sheet-status" role="status">${access === undefined
+                ? 'This offer changed. Close this sheet, refresh Browse, and open the card again.'
+                : 'The catalog could not confirm details for these installed files. Showing the installed description.'}</p>` : '',
             `<section class="skills-sheet-section"><h3>About</h3><div class="skills-sheet-about" data-i18n-authored></div>${aboutError}</section>`,
             section('What it can use', access === undefined ? usesHtml(detail, item) : usesHtml(null, access || {}, true)),
             section('Review', review && `<p>${escapeHtml(review)}</p>`),
@@ -159,16 +169,27 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
         mountChatMarkdown(aboutEl, about, { softBreaks: true });
         bindRenderedMarkdown(aboutEl);
     };
+    const rejectOffer = () => {
+        if (closed || offerChanged) return;
+        offerChanged = true;
+        controller?.abort();
+        if (actions.contains(document.activeElement)) body.focus({ preventScroll: true });
+        actions.innerHTML = '';
+        paint(null);
+    };
     const read = async () => {
         if (!readDetail) { paint(null); return; }
         controller?.abort();
         controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const generation = ++readGeneration;
         paint(null, { reading: true });
         try {
             const detail = await readDetail({ signal: controller?.signal });
-            if (!closed) paint(detail);
+            if (closed || offerChanged || generation !== readGeneration) return;
+            if (acceptDetail(detail)) paint(detail);
+            else rejectOffer();
         } catch (err) {
-            if (!closed && err?.name !== 'AbortError') paint(null, { error: err?.message || String(err) });
+            if (!closed && !offerChanged && generation === readGeneration && err?.name !== 'AbortError') paint(null, { error: err?.message || String(err) });
         }
     };
     dialog.addEventListener('click', (event) => {
@@ -176,7 +197,7 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
         if (event.target === dialog || event.target.closest('[data-sheet-close]')) { close(); return; }
         if (event.target.closest('[data-sheet-retry]')) { read(); return; }
         const action = event.target.closest('[data-sheet-action]');
-        if (action) onAction(action.dataset.sheetAction, action);
+        if (action && !offerChanged) onAction(action.dataset.sheetAction, action);
     });
     dialog.addEventListener('close', close);
     dialog.addEventListener('cancel', (event) => { event.preventDefault(); close(); });
@@ -194,11 +215,13 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
     return {
         close,
         get closed() { return closed; },
+        get offerChanged() { return offerChanged; },
+        rejectOffer,
         /** Repaint the head's action row from the card's current state. */
         setActions(html) {
-            if (closed || html === actionsHtml) return;  // the same action keeps its button, and the keyboard its place
+            if (closed || offerChanged || html === actionsHtml) return;  // the same action keeps its button, and the keyboard its place
             actionsHtml = html;
-            dialog.querySelector('[data-sheet-actions]').innerHTML = html;
+            actions.innerHTML = html;
         },
     };
 }

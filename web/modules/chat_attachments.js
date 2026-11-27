@@ -396,14 +396,18 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     };
 }
 
-// What a reload keeps of a sent frame: its words, identity, routing, its data-profile claim and the
+// What a reload keeps of a sent frame: its words, identity, routing, its data-profile claim, the model
+// choice it named as new work (`new_work`: a Send again is judged on that same choice) and the
 // refs of uploads the host already stores — never bytes, never the send-time client_surface (an
 // honest gap on resend). The claim stays the frame's own, so a frame kept under one profile is resent
 // with that profile and refused by a connection serving another (#3294), never re-scoped into it.
-const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt', 'profile_scope'];
+const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt', 'profile_scope', 'new_work'];
 // The typed cause of a refused Send again whose room the core's acceptance no longer confirms (gateway/ws.py
 // `_RoomWordLapsed.reason_code`).
 const ROOM_WORD_LAPSED = 'ordinary_room_unconfirmed';
+// The typed cause of a message sent as new work on a model choice that is no longer the room's (message_ingress
+// `ModelChoiceChanged.reason_code`): nothing of it was saved.
+const CHOICE_CHANGED = 'model_choice_changed';
 
 function draftUpload(raw) {
     const filename = String(raw?.filename || '');
@@ -467,7 +471,7 @@ export function placeIngressNote(bubble, note) {
  * destroying it. Nothing here resends by itself or deletes an upload: those stay on the host.
  */
 export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, storage = null, storageKey = '',
-    release = null }) {
+    release = null, onGivenUp = () => {} }) {
     const frames = new Map();  // id -> { frame, reply, views, ts, restored, queued, deliveryUnknown }
     const bubbleOf = id => {
         const frame = frames.get(id)?.frame;
@@ -524,6 +528,24 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
 
     function forget(id) {
         if (frames.delete(id)) persist();
+    }
+
+    // The host refused a message sent as new work because the room's model changed elsewhere (`CHOICE_CHANGED`). Its
+    // copy stops naming that choice, so nothing repeats the refused intent: a Send again is an ordinary message of the
+    // same id. Plain words (no files, no quote but a selected passage) return to a composer that is free for them, and
+    // their copy leaves the feed; any other copy stays, offered as before.
+    function unchoose(id) {
+        const entry = frames.get(id);
+        if (!entry || !('new_work' in entry.frame)) return;
+        const { new_work: _named, ...frame } = entry.frame;
+        entry.frame = frame;
+        persist();
+        const bubble = bubbleOf(id);
+        if (!compose || !bubble || bubble.dataset.historyId || frame.attachments?.length || (frame.reply_to && !frame.reply_excerpt)) return;
+        const quote = frame.reply_excerpt ? entry.reply?.reply_to || { address: frame.reply_to, excerpt: frame.reply_excerpt } : null;
+        if (compose(String(frame.content || ''), quote, { quiet: true }) !== true) return;
+        forget(id);
+        (release || (node => node.remove()))(bubble);
     }
 
     function retry(id, note) {
@@ -590,9 +612,12 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
     // Prepares the composer with the owner's own words (a selected reply with its quote) and sends nothing: the saved row
     // stays as it is, and the owner reads, edits and sends (or does not) from the composer. Short visible words so the
     // sentence and its actions share one row on a phone; the name stays whole.
-    function sendAsNew(bubble, reply) {
+    function sendAsNew(bubble, reply, id = '') {
         const words = () => bubble.querySelector('.message')?.textContent || '';
-        const asNew = action(tr('chat.send_as_new_short', 'Send as new'), 'send_as_new', () => compose(words(), reply?.excerpt ? reply : null));
+        // Words the composer took are the owner's next message: what the copy still owed its sender goes with them.
+        const asNew = action(tr('chat.send_as_new_short', 'Send as new'), 'send_as_new', () => {
+            if (compose(words(), reply?.excerpt ? reply : null) === true && id) onGivenUp(id);
+        });
         asNew.setAttribute('aria-label', tr('chat.send_as_new', 'Send as a new message'));
         return asNew;
     }
@@ -601,7 +626,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
     // left the composer when it was sent, a third that brings its words and quote back.
     function mark(id, bubble) {
         const entry = frames.get(id);
-        if (entry?.deliveryUnknown) return doubtDelivery(bubble, entry.reply?.reply_to);
+        if (entry?.deliveryUnknown) return doubtDelivery(bubble, entry.reply?.reply_to, id);
         const saved = bubble.querySelector('[data-ingress-saved]');
         let note = saved || bubble.querySelector('[data-ingress-unconfirmed]');
         if (!frames.has(id) || saved?.dataset.ingressSaved === '' || note?.querySelector('[data-unconfirmed-action]')) return false;
@@ -613,16 +638,18 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             bubble.insertBefore(note, bubble.querySelector('.msg-time'));
         }
         const { frame, reply } = frames.get(id);
+        // A selected reply can also go back to the composer as words with its quote.
+        const again = frame.reply_excerpt ? reply?.reply_to || { address: frame.reply_to, excerpt: frame.reply_excerpt } : null;
         note.append(action(tr('chat.send_again', 'Send again'), 'retry', () => retry(id, note)),
-            ...(compose && frame.reply_excerpt ? [sendAsNew(bubble, reply?.reply_to || { address: frame.reply_to, excerpt: frame.reply_excerpt })] : []),
-            action(tr('chat.send_discard', 'Discard'), 'discard', () => { forget(id); onDomWrite(() => (clearActions(note, bubble), true)); }));
+            ...(compose && again ? [sendAsNew(bubble, again, id)] : []),
+            action(tr('chat.send_discard', 'Discard'), 'discard', () => { forget(id); onGivenUp(id); onDomWrite(() => (clearActions(note, bubble), true)); }));
         placeIngressNote(bubble, note);  // a pending saved note with actions is a row again
         return true;
     }
 
     // Saved by a host process that has since ended: what it did with the row is unknown, and nothing replays it.
     // The one honest next step is a NEW message (`sendAsNew`).
-    function doubtDelivery(bubble, reply) {
+    function doubtDelivery(bubble, reply, id = '') {
         let note = bubble.querySelector('[data-ingress-saved]');
         if (!note) {
             note = Object.assign(document.createElement('div'), { className: 'msg-pending' });
@@ -632,7 +659,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         clearActions(note);
         note.dataset.ingressSaved = 'unconfirmed';
         note.textContent = tr('chat.saved_delivery_unconfirmed', 'Saved; delivery not confirmed.');
-        if (compose) note.append(sendAsNew(bubble, reply));
+        if (compose) note.append(sendAsNew(bubble, reply, id));
         placeIngressNote(bubble, note);
         return true;
     }
@@ -681,8 +708,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
                 if (entry.deliveryUnknown) {
                     entry.deliveryUnknown = false;
                     persist();
-                    if (bubble) onDomWrite(() => clearDoubt(bubble));
                 }
+                if (bubble) onDomWrite(() => clearDoubt(bubble));
             } else {
                 // A saved row of an ended host is a fact of the receipt, kept with the frame whether or not its bubble is in
                 // the feed now. Drawn on the bubble when there is one; without it the frame stays `restored` (a kept copy
@@ -692,7 +719,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
                 entry.reply = { ...entry.reply, reply_to: row.reply_to || entry.reply?.reply_to };
                 if (bubble) entry.restored = false;
                 persist();
-                if (bubble) onDomWrite(() => doubtDelivery(bubble, entry.reply.reply_to));
+                if (bubble) onDomWrite(() => doubtDelivery(bubble, entry.reply.reply_to, id));
             }
         },
         /** The socket closed or a frame was refused: every still-unsaved sent message in the feed says so. */
@@ -700,10 +727,13 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         /** The host refused a frame (`initialization_notice`): the one it names, or every held one, says so (`unsettle`).
          *  A Send again its acceptance refused because it no longer confirms the room the copy's word named (typed
          *  `reason_code`, gateway/ws.py) first loses that word: the copy leaves the feed, kept for the next fresh word.
+         *  A message sent as new work on a model choice that changed elsewhere (`CHOICE_CHANGED`) stops naming it and,
+         *  where the composer can take its words, returns to it (`unchoose`).
          *  Any other refusal (a busy store, no socket) leaves it offered as before. */
         refused(notice) {
             const id = String(notice?.client_message_id || '');
             if (id && notice.reason_code === ROOM_WORD_LAPSED && proven.has(id)) withdraw(id);
+            if (id && notice.reason_code === CHOICE_CHANGED) unchoose(id);
             unsettle(id ? [id] : undefined);
         },
         /** What a disconnect now puts in doubt: the held messages the socket has written (a queued one is the queue's). */

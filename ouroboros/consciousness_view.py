@@ -121,7 +121,8 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     else:
         wake_at = snapshot.get("next_wake_at")
         status, detail = "sleeping", f"Sleeping until {_clock_of(wake_at)}{_zone_of(wake_at)}."
-    return {**{key: value for key, value in snapshot.items() if key != "detail_note"},
+    drop = ("detail_note",) if requested_enabled is True else ("detail_note", "panic_choice_available")
+    return {**{key: value for key, value in snapshot.items() if key not in drop},
             "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {}),
             "position": position_words(requested_enabled, snapshot.get("places_brief")),
             "position_short": position_words(requested_enabled, snapshot.get("places_brief"), short=True),
@@ -261,14 +262,17 @@ def _running_line(running) -> str:
 
 
 def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str = "", daily_usd=None,
-                   running=None, letters: bool | None = False) -> dict:
+                   running=None, letters: bool | None = False, after_panic: dict | None = None) -> dict:
     """What turning the switch ``to`` ("on" | "off") changes, said before it happens, from this install's facts:
     ``places`` (stored places or view rows; ``None`` unread), ``people`` (``recent_people``; ``None`` unread),
     ``circles`` (place id → its circle's name), ``autonomy`` and ``daily_usd`` (turning on), ``running`` (turning off:
     the state line's live wake and own tasks). ``{"to", "lines", "places"}``: one sentence a line and every place the
     turn concerns with its people, for the dialog's details (``None`` when the places could not be read: the app still
-    asks, with these lines). ``letters``: a linked Ouroboros's letters start work here, Off or not. A fact absent says
-    nothing."""
+    asks, with these lines). ``letters``: a linked Ouroboros's letters start work here, Off or not. ``after_panic``
+    (turning on; ``supervisor.panic_choice.preview_start``): Panic's or an unknown stop, or Panic-stopped work my
+    human's desktop confirmation may hand over. The answer then says what the turn means for that work, and carries
+    ``after_panic``.
+    A fact absent says nothing."""
     if to == "off":
         hearing = None if places is None else _ranked([p for p in places if _place_fact(p)["state"] != "paused"],
                                                       people, circles)
@@ -282,6 +286,10 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
                       _people_line(people)]
         lines += [_running_line(running), "Your chats, your tasks and the schedules you asked for keep working."]
         return {"to": "off", "lines": [line for line in lines if line], "places": hearing}
+    if after_panic and after_panic.get("why") == "held":
+        return {"to": "on", "lines": after_panic_lines(after_panic), "places": [],
+                "after_panic": {"why": "held", "choice": bool(after_panic.get("choice")),
+                                "held": after_panic.get("held"), "basis": str(after_panic.get("basis") or "")}}
     facts = _ranked(places or (), people, circles)
     active = [fact for fact in facts if fact["state"] == "active"]
     silent = [fact for fact in facts if fact["state"] == "silent"]
@@ -300,7 +308,51 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
     if active or silent:
         lines.append("What arrived while it was off waits; at its first wake it sees what is unread there and decides what "
                      "to read and answer.")
-    return {"to": "on", "lines": lines, "places": None if places is None else active + silent}
+    preview = {"to": "on", "lines": lines, "places": None if places is None else active + silent}
+    if after_panic:
+        lines += after_panic_lines(after_panic)
+        preview["after_panic"] = {"why": str(after_panic["why"]), "choice": bool(after_panic.get("choice")),
+                                  "held": after_panic.get("held"), "basis": str(after_panic.get("basis") or "")}
+    return preview
+
+
+def after_panic_lines(shown: dict) -> list:
+    """What a Turn on after Panic means, one sentence a line, from ``preview_start``'s facts: true of the desktop
+    confirmation and of a plain Start elsewhere (which hands over no choice; the app's switch says so)."""
+    why, held = shown.get("why"), shown.get("held")
+    lines = ["Consciousness is already on; tasks stopped by Panic still wait for your decision in this run."
+             if why == "held" else "Panic turned consciousness off." if why == "panic" else
+             "How consciousness was stopped could not be read."]
+    if held is None and why == "panic":
+        lines.append("Nothing starts right now: whether Panic stopped any task could not be read, so this turn hands "
+                     "over no choice to resume tasks.")
+    elif held and shown.get("choice"):
+        lines += [f"Nothing starts right now: {_count(held, 'task')} stopped by Panic "
+                  f"{'stays' if held == 1 else 'stay'} stopped at this press.",
+                  "Confirmed in the desktop app, Ouroboros may on its later wakes decide "
+                  f"{'whether to resume it' if held == 1 else 'which of them to resume'}, "
+                  "even one the Panic was pressed for.",
+                  "A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits "
+                  "stay in force.",
+                  "Turning consciousness off, or restarting Ouroboros, ends that choice."]
+    elif held:
+        lines.append(f"Nothing starts right now: {_count(held, 'task')} stopped by Panic "
+                     f"{'stays' if held == 1 else 'stay'} stopped, and this {'action' if why == 'held' else 'turn'} "
+                     f"hands over no choice to resume {'it' if held == 1 else 'them'}.")
+    else:
+        lines.append("Nothing starts right now, and this turn hands over no choice to resume Panic-stopped tasks.")
+    return lines
+
+
+def panic_start_sentence(shown: dict | None) -> str:
+    """What a confirmed Start after Panic did about the work Panic stopped, after the switch's own words: "" for an
+    ordinary Start or when no such work was shown."""
+    held = len((shown or {}).get("holds") or ())
+    if not held:
+        return ""
+    tasks = _count(held, "task")
+    return (f" No task was started; on its wakes Ouroboros may now decide which of the {tasks} stopped by Panic to resume."
+            if shown.get("choice") else f" {tasks} stopped by Panic {'stays' if held == 1 else 'stay'} stopped.")
 
 
 def read_switch_preview(drive_root, to: str, running=None) -> dict:
@@ -328,8 +380,13 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
                                    services={p.place_id: p.provider for p in places})
         except Exception:
             log.warning("Recent people unreadable for the switch preview", exc_info=True)
+    offer = None
+    if to == "on":  # passive preview facts when a Panic or unknown stop stands; empty for an ordinary Start
+        from supervisor.panic_choice import preview_start
+
+        offer = preview_start(drive_root)
     return switch_preview(to, places, people=people, circles=circles, autonomy=get_consciousness_autonomy(),
-                          daily_usd=get_consciousness_daily_usd(), running=running,
+                          daily_usd=get_consciousness_daily_usd(), running=running, after_panic=offer,
                           letters=letters_can_start_work(drive_root, records=records) if places is not None else None)
 
 

@@ -2,6 +2,9 @@
 // Dispatch order belongs to this client; provider observation dates remain unchanged.
 import { apiFetch, withinRequestLifetime } from './api_client.js';
 
+// A saved subscription's credential kinds, as the server names them (gateway/onboarding.py `_SUBSCRIPTION_CREDENTIAL_KINDS`).
+const SUBSCRIPTION_KINDS = new Set(['config_dir_login', 'oauth_token']);
+
 // `resources` is optional quota evidence with its own order (see merge).
 const facets = {
     catalog: ['harnesses'],
@@ -156,9 +159,11 @@ export function createObservationReads({ fetchImpl = apiFetch, getSnapshot, comm
         else delete out.resources;
         if (roster && marks) roster = { ...Object.fromEntries(Object.entries(roster)
             .filter(([key]) => !markFields.includes(key))), ...marks };
+        // Once a policy was read, a saved subscription keeps its row whatever it says (its program may be missing, and a
+        // newer passive roster may list the account first); an API-key profile still needs a harness the policy admits.
         if (roster) out.profiles = projected = Array.isArray(roster.profiles) ? { ...roster,
             profiles: (roster.profiles || []).filter(row => loginPolicy === null
-                || loginPolicy?.includes(row.profile?.harness_id)),
+                || loginPolicy?.includes(row.profile?.harness_id) || (loginPolicy && SUBSCRIPTION_KINDS.has(row.profile?.credential_kind))),
             ...(loginPolicy !== undefined ? { login_capable_harnesses: loginPolicy } : {}) } : roster;
         // Raw membership before the first full read cannot offer login actions.
         if (accountRead) out.reads.accounts = loginPolicy === undefined && accountRead === 'ok' ? 'not_read' : accountRead;

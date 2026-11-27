@@ -1122,3 +1122,22 @@ def test_a_decision_without_review_arguments_carries_the_review_of_the_request_i
     from ouroboros.update_qualification import commit_qualification
 
     assert commit_qualification(world.gh.merge_inputs[-1]) == b["qualification"]  # the decided request's own trailer
+
+
+@pytest.mark.parametrize("status", ["changes_after_review", "unknown"])
+def test_the_owners_card_names_a_failed_review_of_earlier_code_and_a_pass_stays_quiet(status):
+    """BIBLE P3: continuing over a failed panel leaves a loud, owner-visible trace. When the merged code is not what the
+    failed review read (edits after it, or coverage unknown), the owner's card still says that review returned FAIL
+    (C11, 25.11: #4276 merged after a FAIL panel and its card said only "earlier version reviewed"): the card head
+    carries "· FAIL"; a PASS adds nothing, and a FAIL on exactly what merged keeps its own label without a repeat."""
+    def receipt(verdict, coverage):
+        return {"number": 7, "outcome": {"status": "merged", "merge_sha": "a" * 40},
+                "coverage": coverage, "review": {"record": {"state": "settled", "verdict": {"aggregate": verdict}}}}
+    coverage = ({"status": "changes_after_review"} if status == "changes_after_review"
+                else {"status": "unknown", "gaps": ["reviewed_head_not_recorded"]})
+    label, _sentence = merge_receipts.coverage_reading(receipt("FAIL", coverage))
+    assert label.endswith(" · FAIL") and label != merge_receipts._REJECTED
+    assert merge_receipts.card_row_text(receipt("FAIL", coverage)).partition("\n")[0].endswith(" · FAIL")
+    assert "FAIL" not in merge_receipts.coverage_reading(receipt("PASS", coverage))[0]
+    label, _sentence = merge_receipts.coverage_reading(receipt("FAIL", {"status": "covers_head"}))
+    assert label == merge_receipts._REJECTED

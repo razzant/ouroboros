@@ -1386,12 +1386,12 @@ def _late_reviews_text(marks: List[Dict[str, Any]], role: str, part=_rendered) -
 
 
 def _marks_text(marks: List[Dict[str, Any]], part=_rendered) -> str:
-    lines = part(["## Marks I keep in view", ""])
+    lines = part(["## Marks I keep in view", "Each mark ends with its id; I release marks with memory_mark(release_ids=['<id>', …], reason=…).", ""])
     for mark in marks:
         entry = [f"- [{mark['scope']}; {mark['room']}] " + _indented(mark["text"]).lstrip()
                      + f" — marked by {mark['by']} on {mark['date']}; target {mark['target']}; "
                      + (f"also shown after a task's first call matching {mark['anchor']}; " if mark.get("anchor") else "")
-                     + f"memory_mark(release_ids=['{mark['id']}'], reason=…)"]
+                     + f"id {mark['id']}"]
         if mark.get("quote"):
             entry.append(f"{INDENT}quote: " + _indented(mark["quote"]).lstrip())
         lines += part(entry, "mark", [mark])

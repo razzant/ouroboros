@@ -1154,6 +1154,8 @@ def test_panic_and_an_unrecorded_stop_need_the_owners_start(held):
     clock.stop(source=AGENT_STOP)
     assert held.saved() == ((True, False), (True, "panic"))
     assert clock.start(source=AGENT_STOP) == held_stop_text("panic") and "Panic turned it off" in held_stop_text("panic")
+    door = "/bg start (Start in the app or in Telegram)"  # every stop's door, Panic's too (the owner 27.11)
+    assert all(door in held_stop_text(by) for by in ("panic", "unknown", "owner"))
     # Migration: off with no recorded source (an earlier body's stop) is unknown until the owner starts it once.
     held.state.update_state(lambda st: st.pop(clock_module.STOP_SOURCE_KEY))
     assert clock.start(source=AGENT_STOP) == held_stop_text("")
@@ -1178,7 +1180,11 @@ def test_only_my_humans_start_after_a_panic_returns_what_linked_ouroboroses_are_
     assert held.saved()[1] == (True, "panic")
     clock.start(source=AGENT_STOP)
     assert returned == [] and clock.enabled is False
+    # After Panic my human's plain Start from any door turns it on as in 7.12.1 (the owner 27.11): the replies linked
+    # Ouroboroses are owed go, and no choice of Panic-stopped work is handed over (only the desktop's confirmed press).
+    from supervisor.panic_choice import active_choice
     assert clock.start().startswith("Consciousness on:") and returned == [{}]
+    assert clock.enabled is True and held.saved()[1] == (True, None) and active_choice() is None
 
 
 def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_holds_here(held, monkeypatch):
@@ -1193,7 +1199,10 @@ def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_
     held.state.update_state(recovered)
     clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
     assert clock.start(source=AGENT_STOP) == held_stop_text("") and clock.enabled is False
-    assert clock.start().startswith("Consciousness on:")  # the owner's start confirms both again
+    from supervisor.panic_choice import active_choice
+    # how it was stopped cannot be read: my human's plain Start from any door confirms both again, handing over nothing
+    assert clock.start().startswith("Consciousness on:") and clock.enabled is True and active_choice() is None
+    assert held.saved() == ((True, True), (True, None))
     real = held.state.update_state
 
     def unwritable(*_args, **_kwargs):

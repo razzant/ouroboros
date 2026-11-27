@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import uuid
 from typing import Any, Optional
 from supervisor.state import append_jsonl
 from ouroboros.utils import utc_now_iso
@@ -342,7 +341,9 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     from ouroboros.contracts.task_contract import attach_task_contract
     from ouroboros.project_naming import admission_names
 
-    tid = str(evt.get("task_id") or uuid.uuid4().hex[:16])
+    from ouroboros.task_results import new_task_id
+
+    tid = str(evt.get("task_id") or new_task_id())
     admission_token = str(evt.get("routing_token") or "").strip()
     objective = str(evt.get("objective") or "")
     if not objective.strip():

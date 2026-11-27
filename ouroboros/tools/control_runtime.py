@@ -1234,8 +1234,8 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown effort: {effort}. Valid: {', '.join(EFFORT_SCALE)}")))
     from ouroboros.tools.control_models import cited_switch, refuse
 
-    if scope not in {"work", "room", "main"} or (project_id and scope != "room"):
-        return refuse(ctx, "scope must be work, room or main; project_id belongs to room only.")
+    if scope not in {"work", "room", "new", "main"} or (project_id and scope != "room"):
+        return refuse(ctx, "scope must be work, room, new or main; project_id belongs to room only.")
     if (owner_words or scope != "work") and primary:
         return refuse(ctx, "primary return/wait acts on this work; omit owner_words, scope and project_id.")
     if owner_words or scope != "work":

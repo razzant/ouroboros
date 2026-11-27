@@ -7,6 +7,7 @@ the shared fixtures' doubles. Screenshots and full snapshots are portable eviden
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from starlette.applications import Starlette
@@ -20,7 +21,7 @@ from supervisor import queue
 from tests.test_execution_clock_resume_handover import clock  # noqa: F401
 from tests.test_retry_pause_identity import _assign, _loop_once, reaper  # noqa: F401
 from tests.test_retry_resume_stop_authority import paused_retry
-from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, subscription_ui  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._work_projection_shared import state_fields
 
@@ -78,6 +79,7 @@ def test_browser_resumes_current_retry_once(host, monkeypatch, clock, reaper, su
         Route("/api/tasks", api_tasks_list), Route("/api/tasks/{task_id}", api_task_get),
         Route("/api/tasks/{task_id}/resume", api_task_resume, methods=["POST"])])
     app.state.drive_root = host.root
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: PREVIEW_SCOPE)  # the proof the page's scope meta names
     page = ui["page"]
     evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR") or host.root / "screenshots")
     evidence.mkdir(parents=True, exist_ok=True)

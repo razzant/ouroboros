@@ -929,3 +929,80 @@ def test_docs_only_introduction_of_download_span_is_not_prose(candidate):
     staged, prepared, bound = _three_consumers(candidate)
     assert staged and "PREFLIGHT_BLOCKED" in staged and "readme_download_refs" in staged
     assert all(report["status"] == "blocked" for report in (prepared, bound))
+
+
+@pytest.mark.parametrize("source", ["index", "worktree"])
+@pytest.mark.parametrize("carrier,old,new", [
+    (
+        "readme_windows_badge",
+        "[![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)][download-windows-x64]",
+        "[![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)][download-windows-setup-x64]",
+    ),
+    (
+        "readme_windows_links",
+        "- **Windows x64:** [**Download for Windows (.zip)**][download-windows-x64]",
+        "- **Windows x64:** [**Download for Windows (.zip)**][download-windows-setup-x64]",
+    ),
+    (
+        "readme_windows_links",
+        "- **Windows x64:** [**Download for Windows (.zip)**][download-windows-x64]",
+        "- **Windows x64:** [**Download for Windows (.exe)**][download-windows-setup-x64] "
+        "or the [portable ZIP][download-windows-x64]",
+    ),
+])
+def test_windows_badge_or_bullet_target_change_is_not_neutral_while_adjacent_prose_is(
+    candidate, source, carrier, old, new,
+):
+    repo = candidate.repo_dir
+    readme_path = repo / "README.md"
+    base_readme = (
+        readme_path.read_text(encoding="utf-8")
+        + "[![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)][download-windows-x64]\n\n"
+        + "- **Windows x64:** [**Download for Windows (.zip)**][download-windows-x64]\n\n"
+        + "### Windows quick start\n\n"
+        + "1. Click [**Download for Windows (.zip)**][download-windows-x64].\n"
+        + "2. Extract the ZIP to a permanent folder.\n"
+        + "3. Open the extracted `Ouroboros` folder and run `Ouroboros.exe`.\n\n"
+        + "[download-windows-x64]: https://github.com/razzant/ouroboros/releases/download/v1.2.3/"
+        + "Ouroboros-1.2.3-windows-x64.zip\n"
+    )
+    readme_path.write_text(base_readme, encoding="utf-8", newline="\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-qm", "fixture windows download README")
+
+    # Changing ONLY the Windows link target in the badge or bullet while VERSION stays put is non-neutral.
+    mutated = base_readme.replace(old, new, 1)
+    assert mutated != base_readme
+    readme_path.write_text(mutated, encoding="utf-8", newline="\n")
+    if source == "index":
+        _git(repo, "add", "README.md")
+    report = admission.release_metadata_diagnostics(repo, source=source, neutral_allowed=True)
+    assert (report["form"], report["status"], report["unavailable"]) == ("neutral", "blocked", []), report
+    assert any(carrier in finding for finding in report["findings"]), report
+    if source == "index":
+        staged = review._preflight_check("windows link tweak", review._build_preflight_staged(str(repo)), repo)
+        assert staged and "PREFLIGHT_BLOCKED" in staged and carrier in staged
+
+    # Ordinary prose adjacent to the badge, bullet, and quick start keeps every span intact and stays neutral.
+    prose_readme = base_readme.replace(
+        "[download-windows-x64]\n\n- **Windows x64:**",
+        "[download-windows-x64]\n\nOrdinary intro prose beside the badge.\n\n- **Windows x64:**",
+        1,
+    ).replace(
+        "- **Windows x64:** [**Download for Windows (.zip)**][download-windows-x64]\n",
+        "- **Windows x64:** [**Download for Windows (.zip)**][download-windows-x64] (ordinary note)\n",
+        1,
+    ).replace(
+        "run `Ouroboros.exe`.\n\n[download-windows-x64]:",
+        "run `Ouroboros.exe`.\n\nOrdinary prose after Windows quick start.\n\n[download-windows-x64]:",
+        1,
+    )
+    readme_path.write_text(prose_readme, encoding="utf-8", newline="\n")
+    if source == "index":
+        _git(repo, "add", "README.md")
+    prose_report = admission.release_metadata_diagnostics(repo, source=source, neutral_allowed=True)
+    assert (prose_report["form"], prose_report["status"], prose_report["findings"]) == (
+        "neutral", "not_applicable", [],
+    ), prose_report
+    if source == "index":
+        assert review._preflight_check("adjacent prose", review._build_preflight_staged(str(repo)), repo) is None

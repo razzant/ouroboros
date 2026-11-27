@@ -14,6 +14,7 @@ import json
 import subprocess
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -47,6 +48,112 @@ def _legacy(text):
 
     typed = LegacyTextResultAdapter.from_text("verify_and_record", text)
     return typed.status, typed.code
+
+
+@pytest.fixture
+def holding_safety(process_context, monkeypatch):
+    registry, _, _, _ = process_context
+    safety = Mock(return_value=(False, "⚠️ SAFETY_RETURNED: fixture"))
+    monkeypatch.setattr("ouroboros.safety.check_safety", safety)
+    monkeypatch.setattr(registry, "_invoke_builtin_handler", Mock(side_effect=AssertionError("handler reached")))
+    return safety
+
+
+@pytest.mark.parametrize("kind,arguments,received", [
+    ("visible_verifier", {}, "this call sent none"),
+    ("explicit_metric", {"check": []}, "check=[] holds no command"),
+    ("explicit_command", {"check": ["", "sample"], "env_from_settings": {"VALUE": "FIXTURE_KEY"}},
+     "the supplied check holds no command"),
+])
+def test_missing_command_returns_before_target_and_safety(
+        process_context, holding_safety, monkeypatch, kind, arguments, received):
+    registry, ctx, workspace, data = process_context
+    monkeypatch.setattr("ouroboros.tools.tool_resolution._normalize_dispatch_path_args_result",
+                        Mock(side_effect=AssertionError("target preparation reached")))
+    monkeypatch.setattr("ouroboros.config.selection_settings",
+                        Mock(side_effect=AssertionError("process settings selected")))
+    result = _verify(registry, workspace, contract_kind=kind, **arguments)
+    holding_safety.assert_not_called()
+    assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR")
+    assert f"contract_kind={kind} requires `check`" in result.text and received in result.text
+    if "env_from_settings" in arguments:
+        assert "sample" not in result.text and "FIXTURE_KEY" not in result.text
+    assert _receipts(data, ctx.task_id) == []
+
+
+def test_unknown_argument_still_precedes_missing_command(process_context, holding_safety):
+    registry, ctx, workspace, data = process_context
+    result = _verify(registry, workspace, extra_field="sample")
+    assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR")
+    assert "unsupported argument(s): extra_field" in result.text
+    holding_safety.assert_not_called()
+    assert _receipts(data, ctx.task_id) == []
+
+
+def test_disabled_verifier_precedes_missing_command(process_context, holding_safety):
+    registry, ctx, workspace, data = process_context
+    ctx.task_contract = {"disabled_tools": ["verify_and_record"]}
+    result = _verify(registry, workspace)
+    assert (result.status, result.code) == ("blocked", "RESOURCE_CONSTRAINT_BLOCKED")
+    holding_safety.assert_not_called()
+    assert _receipts(data, ctx.task_id) == []
+
+
+@pytest.mark.parametrize("args", [{}, {"contract_kind": "unlisted_kind"}])
+def test_kind_validation_returns_before_target_preparation(process_context, holding_safety, monkeypatch, args):
+    registry, ctx, _, data = process_context
+    monkeypatch.setattr("ouroboros.tools.tool_resolution._normalize_dispatch_path_args_result",
+                        Mock(side_effect=AssertionError("target preparation reached")))
+    result = registry.execute_result("verify_and_record", args)
+    assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR")
+    assert "contract_kind must be one of" in result.text
+    holding_safety.assert_not_called()
+    assert _receipts(data, ctx.task_id) == []
+
+
+@pytest.mark.parametrize("kind,check,guard_argv", [
+    ("visible_verifier", "echo ok", ["sh", "-c", "echo ok"]),
+    (" explicit_command ", ["echo", ""], ["echo", ""]),
+    ("explicit_metric", '["echo","ok"]', ["echo", "ok"]),
+])
+def test_command_reaches_shell_guard_then_safety(
+        process_context, holding_safety, monkeypatch, kind, check, guard_argv):
+    from ouroboros.tools import registry_guard_process
+
+    registry, ctx, workspace, data = process_context
+    guard = Mock(wraps=registry_guard_process._run_shell_safety_check)
+    monkeypatch.setattr(registry_guard_process, "_run_shell_safety_check", guard)
+    result = _verify(registry, workspace, contract_kind=kind, check=check, expected="ok", timeout=5)
+    guard.assert_called_once()
+    assert guard.call_args.args[1]["cmd"] == guard_argv
+    holding_safety.assert_called_once()
+    name, args = holding_safety.call_args.args
+    assert name == "verify_and_record" and args["check"] == check and args["timeout_sec"] == 5
+    binding = guard.call_args.args[3]
+    assert binding is not None
+    assert binding is holding_safety.call_args.kwargs["resolved_binding"]
+    assert binding.target_path.resolve() == workspace.resolve()
+    assert (result.status, result.code) == ("blocked", "SAFETY_RETURNED")
+    assert _receipts(data, ctx.task_id) == []
+
+
+@pytest.mark.parametrize("kind,arguments,receipt_status", [
+    ("artifact_observation", {"artifact_paths": ["."]}, "observed"),
+    ("no_visible_machine_contract", {"expected": "manual observation"}, "declared"),
+    ("delegation_zero_run", {"zero_run_decision": "incomplete", "zero_run_basis": "Fixture leaf never started."},
+     "declared"),
+])
+def test_non_run_kinds_still_record_after_safety(process_context, monkeypatch, kind, arguments, receipt_status):
+    registry, ctx, workspace, data = process_context
+    safety = Mock(return_value=(True, ""))
+    monkeypatch.setattr("ouroboros.safety.check_safety", safety)
+    if kind == "delegation_zero_run":
+        ctx._configured_actor_bootstrap = {"route_id": "fixture", "physical_started": False}
+    result = _verify(registry, workspace, contract_kind=kind, **arguments)
+    safety.assert_called_once()
+    assert result.status == "ok"
+    [receipt] = _receipts(data, ctx.task_id)
+    assert (receipt["contract_kind"], receipt["status"]) == (kind, receipt_status)
 
 
 # ---------------------------------------------------------------------------

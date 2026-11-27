@@ -62,6 +62,9 @@ def test_the_one_line_joins_the_phrase_and_its_step_each_translated_first(tmp_pa
     _seed(tmp_path, "ru", {phrase: {"text": "Бюджет исчерпан."},
                            "code:notice.step.raise_total_budget": {"text": "Поднимите его."}})
     assert host_notice.notice_line(row, "ru", drive_root=tmp_path) == "Бюджет исчерпан. Поднимите его."
+    # Its phrase alone is sent beside the line, in the same language (the call card sets the step under it).
+    sent = host_notice.view(row, lang="ru", drive_root=tmp_path)["notice"]
+    assert (sent["line"], sent["phrase"]) == ("Бюджет исчерпан. Поднимите его.", "Бюджет исчерпан.")
     # While the phrase has no translation the step stays English too: the line is in one language (RV4 17).
     _seed(tmp_path, "de", {"code:notice.step.raise_total_budget": {"text": "Erhöhen."}})
     assert host_notice.notice_line(row, "de", drive_root=tmp_path) == f"{phrase} {host_notice.STEPS['raise_total_budget']}"
@@ -545,3 +548,114 @@ def test_manual_actions_are_typed_steps_and_an_objective_is_never_the_phrase(mon
     skill_review_runner._append_interrupted_review_progress(tmp_path, "alpha", {"job_id": "j1"}, ts="2026-11-22T10:00:00Z")
     [row] = rows
     assert row["notice"]["step"] == "review_again" and row["notice"]["values"] == {"skill": "alpha"}
+
+
+def test_a_call_that_could_not_start_names_its_step_and_the_mind_reads_its_numbers():
+    """A call refused for lack of room sends the owner to the Calls settings (a translated step), and the mind reads that
+    step and the refusal's Details beside the phrase on its next turn in the room."""
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+    from ouroboros.ui_translation import _core_catalogs
+
+    assert "open_calls" in host_notice.STEPS
+    assert _core_catalogs()["notice.step"][0]["open_calls"] == host_notice.STEPS["open_calls"]
+    facts = RouteFacts(85_000, None, 8_000, "estimator", "documented window", "2026-11-26")
+    said = capacity_notice("voice-test", facts, stage="session_candidate", need=90_123, measured=True,
+                           reserve=8_000, window=85_000)
+    row = {"role": "system", "text": said["text"], "notice": said["notice"]}
+    read = dialogue_text(row)
+    assert read.startswith(said["text"]) and f"[Step: {host_notice.STEPS['open_calls']}]" in read
+    for fact in ("85,000", "8,000", "77,000", "90,123", "characters / 4", "documented window", "2026-11-26"):
+        assert fact in read, fact
+    assert said["notice"]["values"] == {"engine": "voice-test", "need": "90,123", "takes": "77,000"}
+
+
+def test_a_refused_calls_window_line_credits_the_catalogue_only_for_its_own_number():
+    """When the window in effect differs from the catalogue's declaration (an accepted input raised it), Details name
+    both numbers and credit the catalogue's source and date to its own declaration; an equal window reads as one."""
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+
+    facts = RouteFacts(133_554, 150_000, 10_000, "provider", "catalogue declaration", "2026-10-20")
+    window_line = lambda said: next(line for line in said["notice"]["details"].splitlines() if line.startswith("Window"))
+    raised = window_line(capacity_notice("Voice", facts, stage="session_candidate", need=170_000, measured=True,
+                                         reserve=10_000, window=168_000))
+    assert "168,000" in raised and "133,554" in raised
+    assert raised.index("133,554") < raised.index("catalogue declaration")  # the credit follows its own number
+    assert raised.index("168,000") < raised.index("133,554")
+    equal = window_line(capacity_notice("Voice", facts, stage="session_candidate", need=170_000, measured=True,
+                                        reserve=10_000, window=133_554))
+    assert equal.count("133,554") == 1 and "catalogue declaration" in equal and "2026-10-20" in equal
+    # The window is the catalogue's declared count; what is estimated on a provider route is the room's need (Opus N2).
+    need_line = lambda said: next(line for line in said["notice"]["details"].splitlines() if line.startswith("Input"))
+    provider = capacity_notice("Voice", facts, stage="session_candidate", need=170_000, measured=True, reserve=10_000,
+                               window=133_554)
+    assert "estimate" not in window_line(provider) and "provider's units" in window_line(provider)
+    assert "estimate" in need_line(provider)
+
+
+def test_a_window_no_catalogue_declared_is_credited_to_its_own_source_never_to_the_catalogue():
+    """Both directions (Astra REV2 4.3): a custom adapter that declares no window refuses on a limit a recorded
+    refusal supplied; Details credit that number to the refusal with its date, say the catalogue declares none and
+    print neither the catalogue's source nor its date. Without the limit's record the source is said to be
+    unrecorded, still not the catalogue's. A window equal to the catalogue's declaration keeps the catalogue's credit."""
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+
+    window_line = lambda said: next(line for line in said["notice"]["details"].splitlines() if line.startswith("Window"))
+    bare = RouteFacts(None, None, 10_000, "estimator", "No published window", "2026-10-21")
+    refused = {"tokens": 80_000, "kind": "total", "source": "refusal", "observed_at": "2026-11-25T10:02:00+00:00",
+               "basis": "anchored_estimate"}
+    line = window_line(capacity_notice("Voice", bare, stage="session_candidate", need=90_000, measured=True,
+                                       reserve=10_000, window=80_000, limit=refused))
+    assert "80,000" in line and "source: refusal" in line and "2026-11-25 10:02" in line
+    assert "derived from a refusal that stated no number" in line and "declares no window" in line
+    assert "No published window" not in line and "2026-10-21" not in line
+    unrecorded = window_line(capacity_notice("Voice", bare, stage="task_preparation", need=90_000, measured=False,
+                                             reserve=10_000, window=80_000))
+    assert "not recorded with this refusal" in unrecorded and "No published window" not in unrecorded
+    declared = RouteFacts(80_000, None, 10_000, "estimator", "retention probes", "2026-10-21")
+    equal = window_line(capacity_notice("Voice", declared, stage="session_candidate", need=90_000, measured=True,
+                                        reserve=10_000, window=80_000, limit=refused))
+    assert "retention probes" in equal and "2026-10-21" in equal and "refusal" not in equal and equal.count("80,000") == 1
+
+
+def test_an_unmeasured_call_refusal_lists_its_parts_and_does_not_call_them_the_fixed_part_alone():
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+
+    facts = RouteFacts(80_000, None, 10_000, "estimator", "catalogue", "2026-10-21")
+    said = capacity_notice("Voice", facts, stage="task_preparation", need=94_000, measured=False, reserve=10_000,
+                           window=80_000, parts=(("marks", 37_935), ("identity", 20_000)), model="voice-1")
+    details = said["notice"]["details"]
+    assert "marks 37,935" in details and "identity 20,000" in details and "at least 94,000" in details
+    assert "fixed part alone" not in details and "voice-1" in details and "voice-1" not in said["text"]
+
+
+@pytest.mark.parametrize("limit", ["user_setting total", "accepted input"])
+def test_a_capacity_notice_credits_its_window_in_a_persons_words(limit):
+    """pr2rev1 G18: Details name a window's source as a person reads it (one table, shared with
+    ``context_view_facts.window_projection``), never its raw key, and say whether the number is an input limit (the
+    window is that input plus the reserve) or a total; a window the catalogue declares credits the catalogue."""
+    from ouroboros.context_view_facts import window_projection
+    from ouroboros.context_window import WindowLimit, WindowRecord
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+
+    stated = (WindowLimit(64_000, "total", "user_setting", observed_at="2026-11-26T10:00") if limit == "user_setting total"
+              else WindowLimit(120_000, "input", "accepted", observed_at="2026-11-26T11:00"))
+    record = WindowRecord("fixture", **{stated.kind: stated}, reserve=10_000)
+    window = record.total_equivalent
+
+    def line(declared):
+        notice = capacity_notice("Grok", RouteFacts(declared, None, 10_000, "estimator", "catalogue", "2026-11-26"),
+                                 stage="task_preparation", need=window + 1, measured=False, reserve=10_000, window=window,
+                                 limit=window_projection(record))
+        return next(row for row in notice["notice"]["details"].splitlines() if row.startswith("Window:"))
+    credited = line(80_000)
+    assert stated.source not in credited.replace("an accepted request", "")
+    if limit == "user_setting total":
+        assert "(a total; source: set in Settings; observed: 2026-11-26 10:00); the catalogue declares 80,000" in credited
+    else:
+        assert "(an input limit of 120,000 plus the reserve; source: an accepted request of that size; observed: 2026-11-26 11:00)" in credited
+    assert line(window).endswith("source: catalogue; observed: 2026-11-26.")  # the catalogue's own number: its own credit

@@ -38,6 +38,11 @@ class ChatInbound(TypedDict):
     # (``ChatHistoryResponse.ordinary_room``): the room that word named. The ordered acceptance asks it again before
     # saving or handing over anything (gateway/ws.py ``_accept_on_room_word``); frames without it pass as before.
     ordinary_room: NotRequired[int]
+    # Sent as new work of its own on the model saved for this room: the ``choice_token`` its owner's pick was
+    # answered with (``OwnerChatModelResponse``). The acceptance assigns the model and tier from the saved choice
+    # itself, and refuses the frame (``reason_code: model_choice_changed``) when that choice is no longer the one
+    # named; the accepted row keeps what it assigned, and a repeat of its id takes that. Never a model of its own.
+    new_work: NotRequired[str]
 
 
 class ConnectionProfileOutbound(TypedDict):
@@ -102,6 +107,7 @@ class HostNotice(TypedDict, total=False):
     template: str  # a variable phrase's constant English with {name} slots; the template is what gets translated
     values: dict[str, str]  # the words that fill the template's slots, inserted as written, never translated
     line: str  # phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
+    phrase: str  # that line's phrase alone, sent beside it; a reader that sets the step under the phrase reads it
 
 
 class HostNoticeField(TypedDict, total=False):

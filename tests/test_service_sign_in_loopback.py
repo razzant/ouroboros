@@ -255,6 +255,33 @@ def test_a_refused_refresh_asks_for_sign_in_with_the_skills_note_and_an_unreacha
     assert (row["state"], row["reason"]) == ("sign_in_required", "refresh_rejected")
 
 
+def test_an_administrators_refusal_of_a_renewal_is_named_never_repeated_as_an_outage_and_keeps_the_grant(world, monkeypatch):
+    provider, owner, host = world
+    _save_client(owner)
+    key = _sign_in(provider, owner, CAL)["account"]["key"]
+    grant = service_sign_in._grant(CAL, "google", key)
+    oauth_engine.save(grant, {**oauth_engine.load(grant), "tokens": {**oauth_engine.load(grant)["tokens"], "expires_at": 1}})
+    served = provider.handle
+
+    def policy(request):  # the account's administrator blocked this client after the sign-in
+        if request.url.path == "/token":
+            return httpx.Response(400, json={"error": "admin_policy_enforced", "error_description": "blocked"})
+        return served(request)
+
+    monkeypatch.setattr(provider, "handle", policy)
+    refused = _token(host, CAL)
+    body = refused.json()
+    assert refused.status_code == 409 and (body["code"], body["reason"], body["error"], body["account"]) == (
+        "SIGN_IN_REQUIRED", "provider_refused", "admin_policy_enforced", key)  # the account chosen for the skill
+    assert "repeating will not help" in body["hint"]
+    saved = oauth_engine.load(grant)
+    assert saved["tokens"]["refresh_token"] and saved["last_error"]["reason"] == "provider_refused"
+    row = owner.get("/api/sign-in/status").json()["services"][0]["accounts"][0]
+    assert row["state"] == "signed_in" and row["last_error"]["error"] == "admin_policy_enforced"
+    monkeypatch.setattr(provider, "handle", served)  # the administrator allowed the client again: the kept grant works
+    assert _token(host, CAL).status_code == 200
+
+
 def test_disconnect_asks_nobody_and_revoke_ends_only_this_grant_with_its_own_client(world, monkeypatch):
     provider, owner, host = world
     _save_client(owner)

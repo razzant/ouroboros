@@ -102,7 +102,15 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
             # The server's receipt and timing, word for word: what the value replaced (an empty one in the row's own word).
             assert save("OUROBOROS_EXTRA_CA_BUNDLE", "/nonexistent/extra-ca.pem") == "Saved · applies to new tasks · was none · Undo"
             assert saves[-1] == {"OUROBOROS_EXTRA_CA_BUNDLE": "/nonexistent/extra-ca.pem"}
-            assert save("OUROBOROS_EXTRA_CA_BUNDLE", "") == "Saved · applies to new tasks · was /nonexistent/extra-ca.pem · Undo"
+            # The value it replaced is a raw path: it rides behind the line's Details, never translated (outcomeLine).
+            assert save("OUROBOROS_EXTRA_CA_BUNDLE", "") == "Saved · applies to new tasks · Undo\nDetails"
+            # Open the line's real Details summary: the old path must be revealed visibly and word for word.
+            old = setting_row(page, "OUROBOROS_EXTRA_CA_BUNDLE").locator("[data-setting-result] details.ui-disclosure")
+            if not old.evaluate("el => el.open"):
+                old.locator(":scope > summary").click()
+            replaced = old.locator(":scope > .ui-result-details")
+            expect(replaced).to_be_visible()
+            expect(replaced).to_have_text("/nonexistent/extra-ca.pem")
             assert "OUROBOROS_UI_DIR" not in saves[-1]
 
             # An unusable directory: saved, applied at restart as built-in with its reason; no reload.

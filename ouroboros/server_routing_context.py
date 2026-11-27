@@ -631,6 +631,12 @@ def _main_routing_manifest(ctx: Any, roots: Optional[RootSnapshot] = None) -> Di
     }
 
 
+# What a turn is told when my human sent its words as new work on the model chosen for this room.
+NEW_WORK_RULE = ("My human chose this room's model and sent these words as new work of its own: this turn runs on that "
+                 "model and answers them. No work already running here was addressed; tell one only where the words "
+                 "plainly continue its task.")
+
+
 def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task_metadata: Any,
                             roots: Optional[RootSnapshot] = None, *, decided_project_id: Optional[str] = None) -> Any:
     """Enrich a chat turn's metadata with the structural facts the decision turn
@@ -709,6 +715,10 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
         from ouroboros.work_reply import FALLBACK_RULE
 
         routing_contract["work_reply"] = {"rule": FALLBACK_RULE, **fallback}
+    from ouroboros.route_choice import new_work_carriers
+
+    if new_work_carriers(md.get("new_work")):  # its acceptance's answer; the seed turns it into the turn's carriers
+        routing_contract["new_work"] = {"rule": NEW_WORK_RULE}
     from ouroboros.routing_wait import message_routing_acts
     try:
         address = routing_source_address(ref, source_room, client_message_id)

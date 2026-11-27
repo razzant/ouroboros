@@ -296,6 +296,21 @@ def verified_chat_mail_kind(row, source, submitted, *, opening=False) -> str:
     return KIND_OWNER_TEXT
 
 
+def held_mail_kind(row: Any, root: Any, *, source: Any) -> str:
+    """The writer's kind a held chat row proves for its handed ``source`` label, read as the work my human addressed
+    read it on delivery (``owner_relay.inject_relay``): its card against the root it was read from, and only for an
+    attested owner row. ``""`` for another author's row, a corpus rebuild, a press or any label but the mail's."""
+    from ouroboros.answer_facts import card_input, row_source
+    from ouroboros.owner_relay import quotable_owner_row
+
+    source_root = row.get("_owner_source_root") or root if isinstance(row, Mapping) else None
+    if source_root is None or not quotable_owner_row(row, source_root):
+        return ""
+    living = card_input(row, source_root)
+    kind = verified_chat_mail_kind(row, living.get("source") or row_source(row, "owner_mailbox", source_root), living)
+    return trusted_mail_kind(kind, source=source)
+
+
 def held_owner_source(key, row, source_root, origin, *, carried, cited):
     """A retained row in the ordinary Safety corpus; an exact checked citation can supply its physical input kind."""
     from ouroboros.answer_facts import card_input, card_reference_view, row_source

@@ -87,7 +87,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "GIGACHAT_VERIFY_SSL_CERTS": "true",
     "GIGACHAT_PROFANITY_CHECK": "",
     # PEM file with CA certificates ADDED to the default trust bundle for every
-    # first-party provider call (net_transport.extra_ca_bundle); "" = defaults only.
+    # first-party provider call and HTTPS MCP connection (net_transport); "" = defaults only.
     "OUROBOROS_EXTRA_CA_BUNDLE": "",
     "ANTHROPIC_API_KEY": "",
     "MINIMAX_API_KEY": "",
@@ -108,6 +108,10 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_MODEL_CONTEXT_WINDOWS": "{}",
     "OUROBOROS_PROCESSING_PREFERENCE": "",
     "OUROBOROS_MODEL_PROCESSING_PREFERENCES": "{}",
+    # The Main chat's own model and tier for new work there, which a new room copies once (composer_cognition).
+    # Blank follows Main / is Default. Never a role's key: no role's model, account, window or tier moves with them.
+    "OUROBOROS_MAIN_CHAT_MODEL": "",
+    "OUROBOROS_MAIN_CHAT_PROCESSING": "",
     # Worker lanes; empty means "use OUROBOROS_MODEL" (one model by default, per-lane
     # override optional). HEAVY = mutative first-level subagents; LIGHT = auto/deep bulk.
     "OUROBOROS_MODEL_HEAVY": OPENROUTER_DEFAULTS["heavy"],
@@ -534,11 +538,13 @@ _DISK_AUTHORED_SETTINGS = ("OUROBOROS_CONTEXT_MODE", "OUROBOROS_CONTEXT_MODE_AUT
                           "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "OUROBOROS_SAFETY_OWNER_RULES",
                           "OUROBOROS_MODEL_SAFETY", "OUROBOROS_DESKTOP_KEEP_RUNNING")
 
-# ENDPOINT-AUTHORED, DISK-ONLY: install-time facts POST /api/onboarding/complete alone writes. The ratchets above are
+# ENDPOINT-AUTHORED, DISK-ONLY: install-time facts POST /api/onboarding/complete alone writes, and the Main chat's own
+# model and tier, which its composer's writers alone save. The ratchets above are
 # disk-authored yet DO project once the file carries them; these never leave disk in EITHER direction — an env timestamp alone closed the onboarding window on a fresh install, and an env marker was then persisted by a save.
 ENDPOINT_AUTHORED_SETTINGS = frozenset({"OUROBOROS_SUBSCRIPTION_PRESET_VERSION", "OUROBOROS_SUBAGENT_PRESET_RECEIPT",
                                         "OUROBOROS_ONBOARDING_COMPLETED_AT", "OUROBOROS_ONBOARDING_ATTEMPT_ID",
-                                        "OUROBOROS_ONBOARDING_CONSCIOUSNESS"})
+                                        "OUROBOROS_ONBOARDING_CONSCIOUSNESS",
+                                        "OUROBOROS_MAIN_CHAT_MODEL", "OUROBOROS_MAIN_CHAT_PROCESSING"})
 # ENDPOINT-WRITTEN, PROJECTED: one endpoint owns the write (the generic save skips the key and names the writer in
 # `ignored_keys`, so a language change always creates the memory header, fires the hooks and broadcasts), yet the value
 # projects to the environment like any setting: a restart, the worker and the Telegram bridge read it (the disk-only set above lost it).

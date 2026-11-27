@@ -396,10 +396,8 @@ def _query_code_read(
             repo_root, drive_root=pathlib.Path(ctx.drive_root), persist=persist, exclude_paths=exclude_paths,
             scope=scope, path_allowed=admitted, parse=parse, name=name,
         )
-        inventory.files = [
-            file for file in inventory.files
-            if _visible_file(ctx, repo_root, file.path, binding, runtime_check)
-        ]
+        visible = [file for file in inventory.files if _visible_file(ctx, repo_root, file.path, binding, runtime_check)]
+        inventory.files = visible
         return inventory
 
     try:

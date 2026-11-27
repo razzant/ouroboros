@@ -29,7 +29,7 @@ import { sourceMark } from './model_source_mark.js';
 import { receiptWords, resolvedTier, routeTiers, servedWords, tierNamed, tierWord } from './processing_choice.js';
 import { modelWaitReasonLabel, modelWaitRoleLabel } from './model_wait.js';
 import { controlIcon } from './page_icons.js';
-import { showToast } from './toast.js';
+import { modalNotice, showToast } from './toast.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { describeRoute, normalizeRoute, routeKey, sameRoute, shortName } from './chat_model_routes.js';
 
@@ -42,6 +42,7 @@ export const APPLIED_WORDS = Object.freeze({
 const BASIS_WORDS = Object.freeze({
     main: ['model.basis.main', 'follows Main'],
     room: ['model.basis.room', 'this room\'s model'],
+    copied: ['model.basis.copied', 'copied from Main'],  // a room's model nobody chose there (`lead.copied`)
     owner: ['model.basis.owner', 'you chose it'],
     owner_words: ['model.basis.owner_words', 'you asked for it'],
     owner_press: ['model.basis.owner_press', 'you pressed this option'],
@@ -142,7 +143,8 @@ export function leadView(lead, { index = null, since = '', queued = false } = {}
     return {
         said, basis, fallback, primary, awaitingPrimary, leftMain, leftName, since, parts, cited,
         name: parts.filter(Boolean).join(' · '),
-        why: fallback ? left : [basis === 'main' ? '' : basisWords(basis), left].filter(Boolean).join(' · '),
+        why: fallback ? left : [basis === 'main' ? '' : basisWords(basis === 'room' && lead.copied === true ? 'copied' : basis), left]
+            .filter(Boolean).join(' · '),
         pending: pending && !sameRoute(pending, said.route)
             ? fmt(queued ? '→ {model} when it starts' : '→ {model} at the next step', { model: shortName(pending) }) : '',
         cause: causeWords(lead.cause),
@@ -469,6 +471,7 @@ export function openCardModel(record) {
         if (busy || closed) return;
         busy = true;
         again = null;
+        const say = modalNotice(sheet?.el, deps.toast);  // named at the press: a tier's answer stands in the sheet it leaves open
         refusal.hidden = true;
         sheet?.el.setAttribute('aria-busy', 'true');
         sheet?.paint();
@@ -480,7 +483,7 @@ export function openCardModel(record) {
             const kept = before.said.said.short;
             if (action === 'processing') {
                 const words = tier ? fmt('{tier} for this work.', { tier: tierWord(tier) }) : tr('model.tier.default_work', 'Default tier for this work.');
-                deps.toast(`${words} ${APPLIED_WORDS[reply?.applied] || ''}`.trim(), 'ok');
+                say(`${words} ${APPLIED_WORDS[reply?.applied] || ''}`.trim(), 'ok');
                 // The answer's own tier stands on the card until the next state body says it again.
                 adoptAnswer(record, state, before, { processing: reply?.processing });
                 return;
@@ -593,8 +596,15 @@ export function openCardModel(record) {
         const tier = !pending || typeof now.processing?.resolved === 'string' ? workTier(now)
             : (follows || explicit) ? resolvedTier({ choice: own, follows, tiers: now.tiers || store.tiers?.() }) : own;
         const stated = own || !tier ? tierWord(own || tier) : fmt('Default · {tier}', { tier: tierWord(tier) });
+        // A tier the work carries for one confirmed destination (the Main chat's Ultrafast). While its calls go
+        // there it is theirs alone (`processing.bound`); while they go to another model or profile, or the work's
+        // confirmed API connection is no longer the one its call would use (`processing.withheld`), they take Default.
+        // Either way the strip says so and what a press here does.
+        const withheld = !own && typeof now.processing?.withheld === 'string' ? now.processing.withheld : '';
         // The tier this work runs on, its own or Default's (Main's included), reaches its new subagents without one.
-        const scope = now.queued ? tr('processing.scope.work_queued_helpers', 'for this work when it starts, and its new subagents without a tier of their own')
+        const scope = withheld ? fmt('{tier} from the Main chat is not confirmed now for the model, profile and connection this work is on, so its calls take Default; a tier chosen here is this work’s own', { tier: tierWord(withheld) })
+            : own && now.processing?.bound === true ? tr('processing.scope.work_bound', 'from the Main chat, for this work’s own calls where it was confirmed (that model, profile or connection); its subagents and calls elsewhere take Default, and a tier chosen here is this work’s own')
+            : now.queued ? tr('processing.scope.work_queued_helpers', 'for this work when it starts, and its new subagents without a tier of their own')
             : tr('processing.scope.work_helpers', 'for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs');
         const account = follows ? store.mainAccount?.(route) ?? null : explicit ? '' : null;
         const index = store.index();
@@ -647,7 +657,10 @@ export function openCardModel(record) {
             // The Main row is the way to follow Main: its facts say what a press does, or that the work already does.
             mainFacts: () => (follows() ? tr('model.row.follows_main', 'this work follows Main') : tr('model.row.will_follow_main', 'this work will follow Main')),
             onRoute: pick,
-            onPin: (route, pinned) => store.setPinned(route, pinned).catch((error) => deps.toast(error?.message || 'Could not change the pinned models.', 'error')),
+            onPin: (route, pinned) => {
+                const pinSay = modalNotice(sheet?.el, deps.toast);
+                return store.setPinned(route, pinned).catch((error) => pinSay(error?.message || 'Could not change the pinned models.', 'error'));
+            },
         },
         tier: { onChoose: (tier) => run('processing', null, undefined, tier), view: tierView,
             mainRoute: () => { const { follows, route } = next(); return follows ? route : null; } },

@@ -99,7 +99,6 @@ def body_governance(system_root: Any, read_text: Callable[[pathlib.Path, str], s
     A book that cannot be assembled is a typed ``PlanPacketError``, never an empty or entrypoint-only pack."""
     from ouroboros.context_layout import design_navigation
     from ouroboros.reference_books import compose_book, load_reference_book
-    from ouroboros.tools.governance_module_rows import domains_index
 
     root = pathlib.Path(system_root)
     try:
@@ -113,9 +112,7 @@ def body_governance(system_root: Any, read_text: Callable[[pathlib.Path, str], s
             "architecture_chapter_locators": tuple(str(root.joinpath(*chapter.source_path.split("/")))
                                                    for chapter in book.chapters),
             "design_nav_map": design_navigation(read_text(root, "docs/DESIGN.md") or None,
-                                                source=str(root / "docs/DESIGN.md")),
-            # The book keeps no module tree: a packet seat gets the domain index (a retrieving seat calls the lookup).
-            "domains_table": domains_index(root)}
+                                                source=str(root / "docs/DESIGN.md"))}
 
 
 def build_stable_prompt(
@@ -129,7 +126,6 @@ def build_stable_prompt(
     architecture_chapter_locators: Sequence[str] = (),
     governance_by_retrieval: bool = False,
     design_nav_map: Optional[str] = None,
-    domains_table: Optional[str] = None,
 ) -> str:
     """The byte-stable part of every delivery of one plan (role, checklist, reply
     contract, the body pack). A body plan without BIBLE.md or ARCHITECTURE.md text is a
@@ -164,9 +160,6 @@ def build_stable_prompt(
             parts.append(f"## BIBLE.md (constitution — this plan touches Ouroboros's own body)\n\n{bible_text}\n\n---\n")
             parts.append("## ARCHITECTURE.md (architecture and data flow — inline, in full, for a plan that changes "
                          f"Ouroboros's own body)\n\n{architecture_text}\n\n---\n")
-            if domains_table:  # the book keeps no module tree; a seat without tools gets the domain index
-                parts.append("## Domains (`ouroboros/domains.toml`: domain, what it is, module count, owning manuals)"
-                             f"\n\n{domains_table}\n\n---\n")
         if design_nav_map:
             parts.append("\n" + design_nav_map + "\n")
             parts.append(

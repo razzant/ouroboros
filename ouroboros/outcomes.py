@@ -60,6 +60,7 @@ from ouroboros.outcome_receipt_store import (  # noqa: F401 - public compatibili
     read_verification_receipts_from_roots,
     verification_receipts_path,
 )
+from ouroboros.shell_parse import verify_run_kind
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
     STATUS_REJECTED_DUPLICATE,
@@ -224,8 +225,6 @@ WARN_VERIFICATION_RED = "verification_red_unreconciled"
 WARN_CHILDREN_UNDECIDED = "children_undecided"
 # Facts for the owner's details that ask nothing of the owner: the headline stays Done (9 Nov 2026).
 DETAIL_ONLY_WARNINGS = frozenset({WARN_RECEIPT_ABSENT, WARN_VERIFICATION_RED, WARN_CHILDREN_UNDECIDED})
-# The verify_and_record kinds that RUN a check whose outcome the author then sees.
-_EXAMINING_VERIFY_KINDS = frozenset({"explicit_command", "explicit_metric", "visible_verifier"})
 # Receipt statuses that are not ledger failures: a pass, an observed artifact, an honest declaration.
 _RECEIPT_GROUNDING_STATUSES = frozenset({"pass", "observed", "declared"})
 
@@ -305,7 +304,7 @@ def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
             continue
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         tool = str(call.get("tool") or "")
-        if tool == "verify_and_record" and str(args.get("contract_kind") or "") in _EXAMINING_VERIFY_KINDS:
+        if tool == "verify_and_record" and verify_run_kind(args):
             return False
         if tool == "review_change" and str(args.get("subject") or "") == "result":
             meta = call.get("tool_result_meta") if isinstance(call.get("tool_result_meta"), dict) else {}
@@ -430,23 +429,18 @@ def objective_warned(objective: Any, debt: Optional[list]) -> bool:
                for code in [objective.get("warning"), *warnings])
 
 # Tools/roots whose successful use means the turn produced reviewable work.
-# Root-aware write tools: these take a `root` arg, so the scratch-exclusion rule
-# applies directly. (The retired SDK edit gateway was the one cwd-based coding
-# tool; delegated coding now rides the subagent lane, whose integration lands
-# through integrate_subagent_patch below — D10.)
 _EFFECT_COMMIT_TOOLS = frozenset({"commit_reviewed", "vcs_commit_reviewed"})
-# Exclusion model: only pure scratch is exempt. Every other root is a real surface
-# (deliverable, workspace, repo, skill payload, or a light-mode skill write via
-# runtime_data). Excluding by scratch — not enumerating "deliverable" roots —
-# keeps the immune gate complete as roots evolve and errs toward reviewing work.
+# Exclusion model: only pure scratch is exempt; every other root is a real surface.
 _SCRATCH_ROOTS = frozenset({"task_drive"})
-# Substantial cwd-based coding tools: none since D10 retired the SDK edit
-# gateway; the set stays so the projection shape (and its consumers) hold.
 _EFFECT_CODING_TOOLS = frozenset()
-# Parent integration of a child's patch stages a repo mutation -> reviewable work.
-# The nanny's explicit apply of a delegated run's captured diff (C1) is the same
-# class of staged mutation and rides the same gate.
+# Parent integration of a child's patch or nanny apply of a delegated diff stages a repo mutation.
 _EFFECT_INTEGRATION_TOOLS = frozenset({"integrate_subagent_patch", "integrate_delegated_patch"})
+
+
+def write_logical_root(args: Any, meta: Any) -> str:
+    """Logical root a native write acted through: its typed receipt, else its call arg."""
+    return str((meta.get("logical_root") if isinstance(meta, dict) else "")
+               or (args.get("root") if isinstance(args, dict) else "") or "active_workspace")
 
 
 def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bool = False) -> List[Dict[str, Any]]:
@@ -482,7 +476,7 @@ def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bo
             continue  # the producer proved this call changed nothing (a same-byte write): an outcome, no effect
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         is_effect = transferred or succeeded and (tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or integration)
-        if (succeeded or partial) and tool in _ROOT_WRITE_TOOLS and str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
+        if (succeeded or partial) and tool in _ROOT_WRITE_TOOLS and write_logical_root(args, meta) not in _SCRATCH_ROOTS:
             is_effect = True
         if is_effect or artifact:
             effects.append({

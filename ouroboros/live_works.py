@@ -1,16 +1,21 @@
 """One read-only present for new heads, derived from the independent-root roster.
 
 Focus is the model's authored account of its work. It is deliberately distinct
-from the web card's latest visible narration and never supplies routing authority.
+from the web card's latest visible narration and never supplies routing authority. The source it retained reads
+with ``get_task_result(task_id=<author>, include_focus_source=True, focus_source_sha256=…)``.
 
 ``works`` holds one row per listed root: its id, title, room, state, ``started_at``,
 open questions, waiting and hold facts, ``tails`` (what of it still runs) and focus.
 ``other_live_work`` is a sibling of ``works``, present only when not empty: ended
 roots whose helpers or runs go on (``peer_roster.unlisted_live_work``, from queue and recorded task facts) and unlisted live place turns. It is never a row
 field, and ``works`` can be empty while it lists running helpers.
+
+The Runtime section's shorter form (``context_sections.runtime_host_section``) states each work as one line,
+``work_line``; the late roster note leaves to the head what its list in view already carries (``head_carried``).
 """
 from __future__ import annotations
 
+import json
 import pathlib
 
 
@@ -97,6 +102,17 @@ def _stop_shown(stop):
     return shown
 
 
+def work_entry(row):
+    """One roster row as ``works`` lists it (the head's capture and the late roster note compare these)."""
+    return {"task_id": row["task_id"], "title": row.get("title") or row.get("suggested_name") or "",
+            "room": {key: row.get(key) for key in ("chat_id", "project_id", "project_name")},
+            "state": row["status"], "started_at": row.get("started_at"),
+            "open_questions": row.get("open_questions") or [], "waiting": row.get("waiting") or [],
+            **{key: _stop_shown(row[key]) if key == "stop" else row[key]
+               for key in ("focus", "project_admission_hold", "recorded_status", "tails", "unavailable", "stop", "release", "refusal")
+               if key in row}}
+
+
 def live_works_present(root, *, exclude=""):
     """Project every host-listed root; stale/missing source observations stay explicit. A root's dated ``focus``
     stands once, whole (no second copy of its text and date beside it), and so does the press of its ``stop``,
@@ -104,17 +120,7 @@ def live_works_present(root, *, exclude=""):
     from ouroboros.peer_roster import independent_roots
 
     roster = independent_roots(pathlib.Path(root))
-    works = []
-    for row in roster["roots"]:
-        if row["task_id"] == exclude:
-            continue
-        works.append({"task_id": row["task_id"], "title": row.get("title") or row.get("suggested_name") or "",
-            "room": {key: row.get(key) for key in ("chat_id", "project_id", "project_name")},
-            "state": row["status"], "started_at": row.get("started_at"),
-            "open_questions": row.get("open_questions") or [], "waiting": row.get("waiting") or [],
-            **{key: _stop_shown(row[key]) if key == "stop" else row[key]
-               for key in ("focus", "project_admission_hold", "recorded_status", "tails", "unavailable", "stop", "release", "refusal")
-               if key in row}})
+    works = [work_entry(row) for row in roster["roots"] if row["task_id"] != exclude]
     from ouroboros.peer_roster import unlisted_live_work
 
     listed = {row["task_id"] for row in roster["roots"]}
@@ -126,6 +132,133 @@ def live_works_present(root, *, exclude=""):
             "incomplete": roster["incomplete"] or any(row.get("unavailable") for row in other),
             **({"other_live_work": other} if other else {}), "note": _HYGIENE_NOTE,
             "queue_snapshot": roster["queue_snapshot"]}
+
+
+_HANDLE_FIXED = {"kind": "task_source", "root": "artifact_store"}  # ``focus._safe_handle`` admits no other values
+# The shorter Runtime form states, once, how to read the lines that follow its JSON object.
+WORKS_LINES_HEADING = "Running works (live_works_present.works), one line each"
+WORKS_LINES_LEGEND = (": `- <task_id>` and its facts as key=JSON. chat, project_id and project_name are its room (an "
+                      "empty project is left out), started its start; an absent open_questions or waiting is empty; "
+                      "focus is its dated focus whole (focus_at its date, focus_source the reader it names), and "
+                      "focus_sha256 with focus_size the source it retained, read with get_task_result(task_id=<task_id>, "
+                      "include_focus_source=True, focus_source_sha256=<focus_sha256>); every other key stands as the "
+                      "row records it.")
+
+
+def _json(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def work_line(work):
+    """Every fact of one ``works`` entry on one line, the Runtime section's shorter form of it (owner 26.11.2026,
+    D2: the last form the host chooses). Only what the legend restores leaves: the field names' JSON, the room's
+    empty project, empty lists, the focus author (always this work: ``peer_roster._compact_root``) and its retained
+    source's fixed kind and root and its path, which ``focus_source_sha256`` selects through the reader the legend
+    names (the whole row stays in the retained full section). Unknown fields stay whole."""
+    facts = dict(work)
+    task_id, room, focus = facts.pop("task_id"), facts.pop("room", None), facts.pop("focus", None)
+    pairs = [(key, facts.pop(key)) for key in ("state", "title") if key in facts]
+    if isinstance(room, dict) and set(room) == {"chat_id", "project_id", "project_name"}:
+        pairs += [("chat", room["chat_id"])] + [(key, room[key]) for key in ("project_id", "project_name") if room[key] != ""]
+    elif "room" in work:
+        pairs.append(("room", room))
+    pairs += [("started", facts.pop("started_at"))] if "started_at" in facts else []
+    pairs += [(key, value) for key, value in facts.items() if not (key in ("open_questions", "waiting") and value == [])]
+    if isinstance(focus, dict):
+        focus = dict(focus)
+        pairs += [(name, focus.pop(key)) for key, name in (("text", "focus"), ("authored_at", "focus_at"),
+                                                           ("source_ref", "focus_source")) if key in focus]
+        if focus.get("author_task_id") == task_id:
+            focus.pop("author_task_id")
+        handle = focus.get("source_handle")
+        if (isinstance(handle, dict) and set(handle) == {*_HANDLE_FIXED, "path", "size", "sha256"}
+                and all(handle[key] == value for key, value in _HANDLE_FIXED.items())):
+            focus.pop("source_handle")
+            pairs += [("focus_sha256", handle["sha256"]), ("focus_size", handle["size"])]
+        pairs += [(f"focus_{key}", value) for key, value in focus.items()]
+    elif "focus" in work:
+        pairs.append(("focus", focus))
+    return f"- {task_id} " + " ".join(f"{key}={_json(value)}" for key, value in pairs)
+
+
+def works_lines(works):
+    """The text after the shorter Runtime object: the legend once, then one line per work; nothing for none, or
+    when an entry is not a work's row (the list then stays whole in the object)."""
+    if not works or not all(isinstance(work, dict) and isinstance(work.get("task_id"), str) for work in works):
+        return ""
+    return f"\n\n{WORKS_LINES_HEADING}{WORKS_LINES_LEGEND}\n" + "\n".join(map(work_line, works))
+
+
+def head_works(messages):
+    """The list of running works the head in view carries, as the mind reads it there: ``(its exact text, {task_id:
+    whole entry or line}, its observation's ``incomplete``)``, or None when no row in view holds a Runtime section that
+    lists works. A block of another shape (a pasted or quoted fragment) is skipped, never read as the head's."""
+    marker = "## Runtime context\n\n"
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        for text in [content] if isinstance(content, str) else [
+                block.get("text") or "" for block in content or () if isinstance(block, dict)]:
+            if marker not in text:
+                continue
+            try:
+                runtime, end = json.JSONDecoder().raw_decode(text, text.index(marker) + len(marker))
+            except ValueError:
+                continue
+            live = runtime.get("live_works_present") if isinstance(runtime, dict) else None
+            works, incomplete = (live.get("works"), live.get("incomplete")) if isinstance(live, dict) else (None, None)
+            if not isinstance(incomplete, bool):
+                continue
+            if isinstance(works, list) and all(isinstance(work, dict) and isinstance(work.get("task_id"), str)
+                                               for work in works):
+                return _json(works), {work["task_id"]: work for work in works}, incomplete
+            block = text[end:].split(f"\n\n{WORKS_LINES_HEADING}", 1)
+            if isinstance(works, str) and len(block) == 2:
+                lines = [line for line in block[1].split("\n\n", 1)[0].split("\n")[1:] if line.startswith("- ")]
+                return "\n".join(lines), {line.split(" ", 2)[1]: line for line in lines}, incomplete
+    return None
+
+
+def _owner_held(work):
+    """An owner's question, a stop or hold (with its author and words): never left to the head alone."""
+    return bool(work["open_questions"] or work.get("stop") or work.get("refusal") or work.get("project_admission_hold")
+                or any(isinstance(wait, dict) and wait.get("kind") in ("owner", "owner_pause", "hold")
+                       for wait in work["waiting"]))
+
+
+# The first roster note after a head whose list of running works is in view (``head_base``).
+HEAD_INTRO = (" Active independent works beside the list of running works in this context's Runtime context: a root "
+              "it lists with the same facts is not repeated (a line here names only what it does not hold), each "
+              "other row replaces its entry there; an owner question, stop or hold is always whole.")
+
+
+def head_base(messages, roster, exclude, shown):
+    """The late roster note's base while no note is in view: ``(the head's list text, the displayed rows ``shown``
+    (task_id -> rendered row) of the roots that list carries exactly as the roster says now, plus "" for each of its
+    roots no longer listed, {carried task_id: its line of what only the note says})``, or None without a visible head
+    list (``peer_roster.maybe_append_roster_note``). A work with an owner question, stop or hold is never carried.
+    The head is a base only for the same observation: one whose completeness differs from the roster's now, or a
+    roster the note cannot display whole (its count of roots not shown), takes the complete first note instead."""
+    head = head_works(messages)
+    rows = {row["task_id"]: row for row in roster.get("roots") or () if row["task_id"] != exclude}
+    if head is None or head[2] != bool(roster.get("incomplete")) or len(shown) != len(rows):
+        return None
+    text, listed, _incomplete = head
+    same = {task_id for task_id, row in rows.items() if task_id in listed and not _owner_held(work := work_entry(row))
+            and listed[task_id] == (work_line(work) if isinstance(listed[task_id], str) else json.loads(_json(work)))}
+    return (text, {**{task_id: shown_row for task_id, shown_row in shown.items() if task_id in same},
+                   **dict.fromkeys(set(listed) - set(rows), "")},
+            {task_id: f"- {task_id} · {facts}" for task_id in same if task_id in shown
+             and (facts := note_only_facts(rows[task_id]))})
+
+
+def note_only_facts(row):
+    """What a roster note says of a root that the head's ``works`` entry does not hold, or ``""``."""
+    facts = [f"{key}={_json(row[key])}" for key in ("origin", "lane_wait") if row.get(key)]
+    if not row.get("title") and row.get("suggested_name"):
+        facts.append(f"suggested_name={_json(row['suggested_name'])}")
+    lane = ("live direct conversation" if row.get("direct_chat")
+            else "live place conversation turn" if row.get("inline_presence") else "")
+    return " · ".join(facts + ([lane] if lane else []))
 
 
 def context_present(env, task):

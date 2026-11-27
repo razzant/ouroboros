@@ -388,7 +388,7 @@ def observe_argument_refusal(task_metadata: Any, name: str, args: Mapping[str, A
 
     The protected dispatch guard asks this on every call, so it also carries the
     narrowings Act shares: below Full, ``configure_presence`` lists and inspects
-    places (``PLACE_READ_ACTIONS``), and ``switch_model`` writes no room/Main choice.
+    places (``PLACE_READ_ACTIONS``), and ``switch_model`` writes no room, new-work or Main choice.
     """
     tool = str(name or "").strip()
     values = args if isinstance(args, Mapping) else {}
@@ -403,11 +403,11 @@ def observe_argument_refusal(task_metadata: Any, name: str, args: Mapping[str, A
         )
     if (tool == "switch_model" and is_consciousness_origin(metadata)
             and normalize_level(metadata.get("consciousness_autonomy")) != LEVEL_FULL
-            and str(values.get("scope") or "") in {"room", "main"}):
+            and str(values.get("scope") or "") in {"room", "new", "main"}):
         return (
-            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: below Full autonomy a wake does not change Main "
-            "or a room's model; your human changes either in the Model capsule or by a word "
-            "in Main, a Full wake may carry the cite."
+            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: below Full autonomy a wake does not change Main, "
+            "a room's model or the model new work starts on; your human changes them in the "
+            "Model capsule or by a word in Main, a Full wake may carry the cite."
         )
     if not is_observe_origin(task_metadata):
         return ""

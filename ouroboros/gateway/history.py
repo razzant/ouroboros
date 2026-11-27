@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Optional
 
 from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
-from ouroboros.chat_annotations import HistoryPageReceipts
+from ouroboros.chat_annotations import HistoryPageReceipts, owner_row_receipt as _user_annotation
 from ouroboros.chat_uploads import attachment_views
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_provenance import agent_note_text, declared_author
@@ -45,7 +45,7 @@ from ouroboros.project_completion_facts import (
     attach_current_outcomes, copy_task_summary_metadata as _copy_task_summary_metadata,
     matches_history_attempt, matches_result_attempt, recorded_attempt, remember_terminal, same_attempt_ending,
 )
-from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS
+from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES
 from ouroboros.room_appearances import frame_project, room_project
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, show_requested_executor_route, subagent_message_meta
@@ -201,19 +201,6 @@ def _project_history_context(
                 raise StoreError("Project origins unavailable") from None
             log.debug("Failed to load canonical Project source refs", exc_info=True)
     return project_chat_ids, source_refs, all_task_bindings(data_dir), rooms, classified
-
-
-def _user_annotation(
-    role: str,
-    client_message_id: str,
-    annotations: Dict[str, Any],
-    chat_id: int | None = None, address: str = "",
-) -> Optional[Dict[str, Any]]:
-    annotation = annotations.get((chat_id, client_message_id, address) if chat_id is not None else client_message_id)
-    if role != "user" or not isinstance(annotation, dict):
-        return None
-    # The live frame's fields, so a reload paints what the frame did (#968), plus the row's `detail`.
-    return {key: annotation[key] for key in (*ROUTING_RECEIPT_FIELDS, "detail") if key in annotation}
 
 
 def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, receipts=None, quotes=None) -> list:
@@ -622,6 +609,8 @@ def _annotate_terminal_task_truth(
         raise
     except Exception as exc:
         log.debug("Failed to annotate terminal task status in history: %s", exc)
+        if _READS in (result_cache or {}):  # rows sent again for a settled task must not miss their ending
+            result_cache[_READS].projection_failed = True
 
 
 def _stream_truncation_cause(filtered_rows: int, quota: int, reached_start: bool) -> Optional[str]:
@@ -805,16 +794,15 @@ def _collect_chat_rows(
                     rec["late_report_id"] = entry["late_report_id"]
             if rec["role"] == "user" and entry.get("ingress_accepted") is True:
                 rec["ingress_accepted"] = True
-                # Proven undispatched, entered, or this live process's and pending; an ended process's: nothing.
-                live = LIVE.get()
-                rec.update(delivery_facts(entry, entry_chat) if live is None else
-                           delivery_facts(entry, entry_chat, bus_root=live["message_bus_root"]))
+                rec.update(delivery_facts(entry, entry_chat, drive_root=chat_path.parent.parent))
             if isinstance(entry.get("presence_contact"), dict):
                 rec["presence_contact"] = dict(entry["presence_contact"])
             if role == "user" and entry.get("attachments"):  # the same views the live echo carried
                 rec["attachments"] = attachment_views(entry["attachments"], chat_path.parent.parent)
             if role == "user" and entry.get("text_placeholder") is True:  # host-written text, not the owner's
                 rec["text_placeholder"] = True
+            if role == "user" and isinstance(entry.get("new_work"), dict):  # as its live echo said: taken as new work
+                rec["new_work"] = True
             if rec["system_type"] in {"project_started", "project_handoff", "project_completion_summary"}:
                 # Read-side plain normalization for lifecycle rows persisted
                 # before the producer stripped markdown; a no-op on new rows.
@@ -895,10 +883,10 @@ def _collect_chat_rows(
             if (attempt := recorded_attempt(entry)) is not None:
                 rec["task_attempt"] = attempt
             _copy_task_summary_metadata(rec, entry)
-            # Lineage, the origin label, the host's card placement (card_row / card_row_id) and a late-review
-            # row's evidence pointer (#1369, stored on that type only) replay verbatim; an absent key is omitted.
+            # Lineage, the origin label, the host's card placement (card_row / card_row_id), a late-review row's evidence
+            # pointer (#1369) and a call's spoken provenance (the live frame's caption identity) replay verbatim, or are absent.
             rec.update({field: entry[field] for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "continue_requester", "place_origin",
-                        "card_row", "card_row_id", "card_row_revision", "late_evidence", "narration") if field in entry})
+                        "card_row", "card_row_id", "card_row_revision", "late_evidence", "narration", "spoken") if field in entry})
             rec.update(notice_view(entry))  # a host notice's step and details, and its line in the install's language
             combined.append(rec)
     except StoreMigrating:
@@ -1397,19 +1385,19 @@ def _assemble_history_response(
     n_human: int,
     n_progress: int,
     cursor: Optional[str] = None, around: Optional[str] = None, profile_scope: str = "",
-    *, live: dict | None = None,
+    repair: str = "", *, live: dict | None = None,
 ) -> bytes:
     """Select from the stores with this request's serving facts (or local observations)."""
     token = LIVE.set(live)
     try:
-        return _render_history_response(data_dir, thread_id, n_human, n_progress, cursor, around, profile_scope, live)
+        return _render_history_response(data_dir, thread_id, n_human, n_progress, cursor, around, profile_scope, live, repair)
     finally:
         LIVE.reset(token)
 
 
 def _render_history_response(
     data_dir: pathlib.Path, thread_id: int, n_human: int, n_progress: int,
-    cursor: Optional[str], around: Optional[str], profile_scope: str, live: dict | None,
+    cursor: Optional[str], around: Optional[str], profile_scope: str, live: dict | None, repair: str,
 ) -> bytes:
     """Select and project recent/archive history in the endpoint's one worker.
 
@@ -1449,7 +1437,7 @@ def _render_history_response(
                                 "progress": progress_quota_predicate(row_matches_thread, _stored_chat_id)},
                                {"human": _MAX_N_HUMAN, "progress": _MAX_N_PROGRESS},
                                room_lens(data_dir, thread_id, project_chat_ids, project_source_refs, bindings_by_task),
-                               notes, rooms.warm, around, (row_matches_thread, _stored_chat_id), row_target)
+                               notes, rooms.warm, around, (row_matches_thread, _stored_chat_id), row_target, repair)
     selections, before, recent = page["selections"], page["before"], page["recent"]
     order = _reading_order(selections["chat"][0])
     n_human, n_progress = page["quotas"]["human"], page["quotas"]["progress"]
@@ -1501,7 +1489,8 @@ def _render_history_response(
         human_rows_dropped = lineage_truncated = review_overlays_truncated = False
 
     # Annotate only emitted rows; an absent summary must not strand a card.
-    deferred_lineage: set = set()
+    deferred_lineage: set = page.setdefault("stripped", set())  # a child row shown without its lineage
+    page["lineage"] = rooms.lineage  # the facts its parents are anchored by below: no held rows for a child or parent
     evidence_anchors = {}
     if recent or page["after"]:  # current work has no history position: its evidence lands at the page end
         from ouroboros.gateway.state import current_work_in_room
@@ -1548,14 +1537,20 @@ def _render_history_response(
         message.pop("summary_kind", None)
         show_requested_executor_route(message)
     messages.extend(replay_evidence_rows(messages, replay_evidence))
-    tokens = history_page_tokens(page, messages, result_cache[_READS])
+    reads = result_cache[_READS]
+    partial = reads.failed or reads.projection_failed or PROJECTION_FAILED in (chat_gaps | progress_gaps)
+    tokens = history_page_tokens(page, messages, reads, partial)
     stream_gaps = delivered_history_gaps(data_dir, page, {
         "chat": chat_gaps | selections["chat"][2], "progress": progress_gaps | selections["progress"][2]})
     if not classified and not named:  # direct-address reads can miss rows a Project would inherit
         for gaps in stream_gaps.values():
             gaps.add("room_unclassified")
-    if result_cache[_READS].failed or PROJECTION_FAILED in (stream_gaps["chat"] | stream_gaps["progress"]):
-        tokens.pop("after_cursor", None)  # a read that failed part-way is read whole again, never continued
+    unread = reads.failed and any(result_cache.get(row.get("task_id")) == {} for row in messages)  # no store answer
+    if reads.projection_failed or unread:  # a terminal projection cut short or a shown task unread: rows without truth
+        for gaps in stream_gaps.values():
+            gaps.add(PROJECTION_FAILED)
+    if partial:  # a read that failed part-way is read whole again, never continued: no settlement is answered either
+        tokens.pop("after_cursor", None)
     window = _window_metadata(
             chat_quota_rows, progress_quota_rows, n_human, n_progress,
             {source: selections[source][1] == 0 for source in ("chat", "progress")},

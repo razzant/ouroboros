@@ -33,7 +33,8 @@ def complete_history(page, transport):
     def respond(route):
         chat_id = int(parse_qs(urlparse(route.request.url).query).get("chat_id", ["1"])[0])
         rows = transport.history.get(chat_id, [])
-        route.fulfill(json={"messages": rows, "progress": [], "has_more": False, "page_cursor": "proof",
+        route.fulfill(json={"profile_scope": rw.setup_browser.PREVIEW_SCOPE,  # the profile this document proves
+                            "messages": rows, "progress": [], "has_more": False, "page_cursor": "proof",
             "coverage": {"v": 1, "view": "proof", "upper": {"chat": len(rows), "progress": 0}, "spans": {
                 "chat": {"from": 0, "to": len(rows), "chain": "proof", "gaps": []},
                 "progress": {"from": 0, "to": 0, "chain": "empty", "gaps": []}}}})

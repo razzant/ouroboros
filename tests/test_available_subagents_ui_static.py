@@ -109,7 +109,11 @@ def test_preview_contract_and_task_only_agy_copy_are_explicit() -> None:
 
     types = _read(MODULES / "api_types.js")
     step = _read(MODULES / "onboarding_agents_step.js")
-    assert "{ harness: 'agy' }" in step
+    harnesses = _read(MODULES / "harness_accounts.js")
+    # The bootstrap families (agy included, task-only) live in the one shared list; the wizard
+    # compiles its families from it and lets familyLabel resolve each product name.
+    assert "export const BOOTSTRAP_HARNESSES = ['codex', 'claude', 'cursor', 'agy'];" in harnesses
+    assert "AGENT_FAMILIES = BOOTSTRAP_HARNESSES.map((harness) => ({ harness }))" in step
     assert "familyLabel(family.harness" in step
     assert "{ harness: 'agy', label:" not in step
     assert "@typedef {Object} SubagentLastDelegation" in types

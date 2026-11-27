@@ -414,10 +414,15 @@ def _signed_session(data_dir: Path, age_sec: int) -> str:
 
 
 def _history_notice(page) -> str:
-    """The Main feed's persistent history note ("Some saved history is not loaded ..."), if shown."""
-    return page.evaluate("""() => [...document.querySelectorAll(
-        '#page-chat .chat-history-status, #page-chat .chat-load-older.has-gaps :is(.chat-load-older-note, .chat-history-gap)')]
-        .filter(node => !node.hidden).map(node => node.textContent.trim()).join(' | ')""")
+    """Main's history facts as a person sees them: the edge's gap ("Some saved history is not loaded ...") and the page's
+    notice of a failed history read, each only while rendered (other notices are not history)."""
+    return page.evaluate("""() => {
+        const seen = node => node.getClientRects().length > 0 && !node.closest('[hidden]');
+        const edge = [...document.querySelectorAll('#page-chat .chat-load-older.has-gaps :is(.chat-load-older-note, .chat-history-gap)')];
+        const notices = [...document.querySelectorAll('#toast-stack .toast-words')]
+            .filter(node => /saved history/i.test(node.textContent));
+        return [...edge, ...notices].filter(seen).map(node => node.textContent.trim()).join(' | ');
+    }""")
 
 
 def _send(page, scope: str, text: str) -> str:

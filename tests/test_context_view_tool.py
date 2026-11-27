@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -1026,3 +1027,110 @@ def test_no_fold_changes_a_review_index_before_its_note_and_a_stale_one_after_it
     at = _notes(tail)[-1]
     assert tail[:at] == view[:at] and at == len(view) - 3
     assert sum(row == old for row in tail) == 1 and tail[2] == old  # the copy after the note left, the start's stays
+
+
+def test_an_inspection_names_the_note_and_selectors_it_did_not_apply(tmp_path, monkeypatch):
+    """Both directions: an inspect call that also carries a note and selectors returns the inventory and names each of
+    them as not applied; a plain inspect names nothing."""
+    messages = [*_source()[:2], *_read("r0"), *_read("r1")]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, messages, [])
+    plain = json.loads(_compact_context(ctx, inspect=True))
+    assert "not_applied" not in plain and plain["units"]
+    unit = plain["units"][0]
+    asked = dict(working_note="What I learned.", keep_unit_ids=[unit["unit_id"]], view_address=["F2:row:1"],
+                 replace_note_ids=["note-1"], schema_names=["read_file"], fold_last_n=1,
+                 restore_unit_refs=[{"checkpoint_ref": "c", "unit_id": unit["unit_id"], "raw_sha256": unit["raw_sha256"]}])
+    seen = json.loads(_compact_context(ctx, inspect=True, **asked))
+    assert seen["units"] == plain["units"] and getattr(ctx, "_pending_compaction", None) is None
+    assert all(name in seen["not_applied"] for name in asked)
+    assert "expected_view_revision" not in seen["not_applied"]
+    pinned = json.loads(_compact_context(ctx, inspect=True, expected_view_revision="a-revision-it-does-not-pin"))
+    assert "expected_view_revision" in pinned["not_applied"] and pinned["units"] == plain["units"]
+
+
+def test_an_overlong_page_names_a_next_page_only_when_there_is_one(tmp_path, monkeypatch):
+    """A page over the tool's limit says so on any page, and names next_offset only when it returns one."""
+    from ouroboros import tool_capabilities
+
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 6000)
+    schemas = [{"type": "function", "function": {"name": f"a_tool_with_a_long_descriptive_name_number_{n:04d}",
+                                                  "description": "Reads one thing.", "parameters": {"type": "object"}}}
+               for n in range(300)]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *_read("r0")], schemas)
+    text = _compact_context(ctx, inspect=True)
+    only = json.loads(text)
+    assert len(text) > 6000 and "next_offset" not in only and only["limitation"]
+    assert "next_offset" not in only["limitation"]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *(row for index in range(20) for row in _read(f"r{index}"))], schemas)
+    first = json.loads(_compact_context(ctx, inspect=True))
+    assert "next_offset" in first and "next_offset" in first["limitation"]
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 200)  # one unit outgrows a later page
+    later_text = _compact_context(ctx, inspect=True, offset=1)
+    later = json.loads(later_text)
+    assert len(later_text) > 200 and later["limitation"] and ("next_offset" in later) is ("next_offset" in later["limitation"])
+    # Its reason is true of the page it describes (Astra REV2 4.4): at 300 characters the later page's one unit is
+    # shorter than a page and the page repeats other fields; past the end there is no unit to blame.
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 300)
+    later = json.loads(_compact_context(ctx, inspect=True, offset=1))
+    assert len(later["units"]) == 1 and len(json.dumps(later["units"][0], ensure_ascii=False)) < 300
+    assert {"view_revision", "units", "offset"} <= set(later) and "next_offset" in later
+    past = json.loads(_compact_context(ctx, inspect=True, offset=10_000))
+    assert past["units"] == [] and "next_offset" not in past
+    for page in (first, later, past):
+        assert "first unit alone" not in page["limitation"] and "only units" not in page["limitation"], page["limitation"]
+        assert ("one unit" in page["limitation"]) is bool(page["units"]), page["limitation"]
+
+
+@pytest.mark.parametrize("limit", [15_000, 6_000])
+def test_page_one_names_what_overflowed_it_at_the_stock_and_a_reduced_limit(tmp_path, monkeypatch, limit):
+    """Both directions (Astra REV3 4.1): when page one runs over because of a field only it carries (a large schema
+    inventory), its limitation names that field with its size and gives what the fields every page carries and its
+    one unit take; at the shipped limit and at a reduced one. A page that fits carries no limitation, and a later
+    page, which carries none of those fields, keeps describing its own fields and unit."""
+    from ouroboros import tool_capabilities
+
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: limit)
+    schemas = [{"type": "function", "function": {"name": f"a_tool_with_a_long_descriptive_name_number_{n:04d}",
+                                                  "description": "Reads one thing.", "parameters": {"type": "object"}}}
+               for n in range(450)]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *(row for index in range(20) for row in _read(f"r{index}"))], schemas)
+    text = _compact_context(ctx, inspect=True)
+    first = json.loads(text)
+    told = first["limitation"]
+    names = len(json.dumps({"schema_names": first["schema_names"]}, ensure_ascii=False, separators=(",", ":"))) - 2
+    assert f"schema_names {names:,}" in told and "the fields only page one carries take" in told, told
+    once, rest = (int(n.replace(",", "")) for n in re.findall(r"takes? ([\d,]+)", told))
+    page = len(text) - len(json.dumps({"limitation": told}, ensure_ascii=False, separators=(",", ":"))) + 1
+    assert once + rest == page and rest < limit and once > page - limit  # the named fields are what overflowed
+    assert "Continue at next_offset" in told and "next_offset" in first
+    later = json.loads(_compact_context(ctx, inspect=True, offset=first["next_offset"]))
+    assert "limitation" not in later and later["units"]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *_read("r0")], schemas[:5])  # a page that fits names nothing
+    assert "limitation" not in json.loads(_compact_context(ctx, inspect=True))
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 300)
+    record_context_view(ctx, [*_source()[:2], *(row for index in range(5) for row in _read(f"r{index}"))], schemas[:5])
+    small = json.loads(_compact_context(ctx, inspect=True, offset=1))
+    assert "only page one" not in small["limitation"] and "one unit" in small["limitation"]
+
+
+def test_an_inspection_page_stays_within_its_result_limit_or_says_what_it_could_not_show(tmp_path, monkeypatch):
+    """A view whose shared diagnostics are large (many tool schemas): page one stays within the tool's result limit or
+    names what it could not show and how to read it, and next_offset continues on the same observed revision."""
+    from ouroboros import tool_capabilities
+
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 6000)
+    schemas = [{"type": "function", "function": {"name": f"a_tool_with_a_long_descriptive_name_number_{n:04d}",
+                                                  "description": "Reads one thing.", "parameters": {"type": "object"}}}
+               for n in range(300)]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *(row for index in range(20) for row in _read(f"r{index}"))], schemas)
+    text = _compact_context(ctx, inspect=True)
+    first = json.loads(text)
+    assert len(text) <= 6000 or first.get("limitation")
+    following = json.loads(_compact_context(ctx, inspect=True, offset=first["next_offset"]))
+    assert following["view_revision"] == first["view_revision"] and following["units"]

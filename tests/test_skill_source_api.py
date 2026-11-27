@@ -160,6 +160,55 @@ def test_catalog_search_and_detail(env):
     assert missing.status_code == 404
 
 
+# The words a card prints for an entry unrelated to its id (a hub title before and after a rename, a manifest titled
+# otherwise or not at all), the title its widget declares, its id spelled with spaces, and neighbouring searches that
+# must keep finding only what they named.
+@pytest.mark.parametrize(("title", "manifest_title"), [("Account limits", ""), ("Claudexor Quotas", ""),
+                                                       ("Account limits", "Quota board")])
+def test_search_finds_an_entry_by_its_card_title_widget_title_or_spelled_id_and_the_detail_names_it_alike(
+        env, title, manifest_title):
+    from ouroboros.skill_source_catalog import refresh_source
+
+    client, drive, hub, _tmp = env
+    extra = (f"title: {manifest_title}\n" if manifest_title else "") + "ui_tab:\n  tab_id: quotas\n  title: Claudexor Quotas\n"
+    hub.add_hosted("claudexor_quotas", "0.13.2", official=True, extra=extra)
+    hub.entries["claudexor_quotas"].update(title=title, description="Shows what is left of each subscription.")
+    # Three names that share no word: the id, the hub's title and the title its widget declares.
+    hub.add_hosted("relay_post", extra="ui_tab:\n  tab_id: desk\n  title: Courier Desk\n")
+    hub.entries["relay_post"].update(title="Messages for others", description="Hands notes on.")
+    hub.commit("titled entries")
+    assert not refresh_source(drive, hub.rows()[1]).get("error")
+    listed = {item["name"]: item for item in client.get("/api/skill-catalog").json()["items"]}
+    assert (listed["claudexor_quotas"]["title"], listed["claudexor_quotas"]["widget_title"]) == (title, "Claudexor Quotas")
+    assert (listed["relay_post"]["title"], listed["relay_post"]["widget_title"]) == ("Messages for others", "Courier Desk")
+    assert listed["weather"]["widget_title"] == "", "a skill without a widget declares no widget title"
+    assert listed["claudexor_quotas"].get("search_names") == ([manifest_title] if manifest_title else None), \
+        "the manifest's own title, which the card no longer prints, still names it"
+
+    def found(query):
+        answer = client.get("/api/skill-catalog/search", params={"q": query})
+        assert assert_bound("GET /api/skill-catalog/search", answer)
+        return [item["id"] for item in answer.json()["items"]]
+
+    for query in (title, title.upper(), f"  {title.lower()}  ", "claudexor_quotas", "Claudexor Quotas",
+                  "claudexor-quotas", "Claudexor - Quotas", "quotas claudexor", "subscription",
+                  *([manifest_title] if manifest_title else [])):
+        assert found(query) == ["ouroboros/claudexor_quotas"], query
+    for query in ("Messages for others", "Courier Desk", "courier_desk", "relay post", "relay-post", "relay_post"):
+        assert found(query) == ["ouroboros-community/relay_post"], query
+    assert found("weather") == ["ouroboros/weather"] and found("limits weather") == [] and found("courier weather") == []
+    assert found("notes card") == ["ouroboros-community/notes"], "words still match across name and description"
+    assert found("-") == [], "a lone dash means itself: nothing here holds one, and it never finds everything"
+    detail = client.get("/api/skill-catalog/item/ouroboros/claudexor_quotas")
+    assert assert_bound("GET /api/skill-catalog/item/{source_id}/{name}", detail)
+    shown = detail.json()["item"]
+    assert shown["title"] == title, "the detail names the entry as its card does, not as its manifest does"
+    keys = ("id", "name", "title", "widget_title", "search_names", "digest", "version", "official", "trust", "connects",
+            "icon")
+    assert {key: shown.get(key) for key in keys} == {key: listed["claudexor_quotas"].get(key) for key in keys}
+    assert (shown["type"], shown["permissions"]) == ("instruction", []), "the release manifest's facts still join"
+
+
 def _with_clawhub(hub, monkeypatch):
     rows = [*hub.rows(), {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}]
     monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps(rows))
@@ -275,6 +324,7 @@ def test_listing_rows_carry_install_facts_without_network(env, monkeypatch):
     row = next(r for r in listing.json()["skills"] if r["name"] == "notes")
     assert row["install"]["source"]["id"] == "ouroboros-community" and row["install"]["basis"] == "review"
     assert row["install"]["modified"] is False and row["category"] == ["writing"]
+    assert row["catalog_id"] == "ouroboros-community/notes", "the detail sheet's address, as resolved for this row"
 
 
 def test_starter_skills_for_onboarding(env):

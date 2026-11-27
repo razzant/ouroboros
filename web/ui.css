@@ -42,7 +42,6 @@
     --accent-18: rgba(201, 53, 69, 0.18);
     --accent-22: rgba(201, 53, 69, 0.22);
     --accent-25: rgba(201, 53, 69, 0.25);
-    --accent-35: rgba(201, 53, 69, 0.35);
     --accent-45: rgba(201, 53, 69, 0.45);
     --accent-55: rgba(201, 53, 69, 0.55);
     /* Project identity (vivid fuchsia): a converted task card, its sidebar marker,
@@ -110,14 +109,13 @@
     --diagram-tertiary: #151617;
     --ui-modal-bg: rgba(var(--modal-rgb), 0.98);
     /* Status triples: fg/bg/border named together, never derived
-       (docs/DESIGN.md "Status and chips"). The fg tints are readable at 12px on the dark room, where a status body
+       (docs/DESIGN.md "Status and chips"); success has no border, as nothing paints its edge. The fg tints are readable at 12px on the dark room, where a status body
        is a neutral veil carrying the hue's ink (a dark tint of green, amber or red goes olive or brown); inside the
        dark Ouroboros voice the body is that voice's opaque capsule step and the red ink its readable word (the
        material, after the light block). The red ink is a step lighter than the crimson word; the saturated
        --green/--amber/--red stay for dots, tracks and other large indicators. */
     --status-ok-fg: #83e499;
     --status-ok-bg: rgba(255, 255, 255, 0.08);
-    --status-ok-border: rgba(255, 255, 255, 0.1);
     --status-warn-fg: #f7cb58;
     --status-warn-bg: rgba(255, 255, 255, 0.08);
     --status-warn-border: rgba(255, 255, 255, 0.1);
@@ -175,6 +173,9 @@
     /* The one veil under every layer: dialogs, the Project panel, the file dialog and the reader, the feed under a row
        lifted by a long press. */
     --scrim: rgba(0, 0, 0, 0.45);
+    /* The veil's one softening: faint enough that the room behind an open layer, Main
+       beside a Project, still reads; glass on a floating object is --glass. */
+    --scrim-filter: blur(2px);
     --radius-object: 18px;
     --radius-inner: 12px;
     --radius-sheet: 24px;
@@ -482,7 +483,6 @@
     --status-error-border: rgba(239, 68, 68, 0.30);
     --green-dim: rgba(34, 197, 94, 0.15);
     --status-ok-bg: var(--green-dim);
-    --status-ok-border: rgba(34, 197, 94, 0.28);
     --status-warn-word: initial;
     --status-error-word: initial;
     --project-08: rgba(232, 121, 249, 0.08);
@@ -1618,6 +1618,10 @@ select.ui-source-backing {
     .ui-source-options [role="option"] { min-height: 44px; align-content: center; }
 }
 textarea.ui-control { resize: vertical; }
+/* An empty multiline field has nothing to scroll sideways. WebKit lays a textarea's placeholder out zoom times as wide as
+   the field, so at an Interface size above 100 % (the window's page zoom) an empty field with a placeholder drew a
+   sideways bar under it. With words in it the placeholder is gone: a wrapping field wraps, a code field scrolls. */
+textarea:placeholder-shown { overflow-x: hidden; }
 /* A read-only multiline value (renderSafeField's output): the field's box keeps its border, fill and ring whole at every
    scroll state; the value's own body inside is the scrollport the shared fade masks, so a waiting edge fades text only.
    Selectable, in the value's ink; only a very long one scrolls, and its focus reaches that by keyboard. */

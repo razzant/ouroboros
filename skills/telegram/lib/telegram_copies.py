@@ -62,15 +62,15 @@ def kind_of(topic: str, event: Dict[str, Any]) -> str:
 
 def carries(topic: str, event: Dict[str, Any]) -> bool:
     """Whether the event holds what its handler sends (plugin.py's filters after the target chat): a medium's bytes
-    or a document's file reference, a link with its label and URL, a question with its task and quiz ids. Any other
+    or a document's file reference, a link with its label and URL or sign-in place, a question with its task and quiz ids. Any other
     topic is decided by its handler."""
     if topic in _MEDIA:
         ref = event.get("file_ref") if topic == "document" else None
         return bool(str(event.get(_MEDIA[topic]) or "").strip() or (isinstance(ref, dict) and ref))
-    if topic == "links":
-        actions = event.get("actions") if isinstance(event.get("actions"), list) else []
-        return any(isinstance(action, dict) and str(action.get("label") or "").strip()
-                   and str(action.get("url") or "").strip() for action in actions)
+    if topic == "links":  # a button for an address, or a line saying where to finish a skill's sign-in
+        from .telegram_places import link_rows
+
+        return any(link_rows(event.get("actions")))
     if topic == "quiz":
         return all(str(event.get(key) or "").strip() for key in ("question", "task_id", "quiz_id"))
     return True

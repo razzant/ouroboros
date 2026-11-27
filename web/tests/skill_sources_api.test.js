@@ -45,6 +45,8 @@ test('each call sends exactly what the host takes', async () => {
         await skillSourcesApi.item('ouroboros-community', 'scholion');
         await skillSourcesApi.install('ouroboros/weather');
         await skillSourcesApi.install('clawhub/steipete/weather', { replace: true });
+        await skillSourcesApi.install('ouroboros/weather', { expectedSourceKey: 'git-view', expectedDigest: 'a'.repeat(64) });
+        await skillSourcesApi.install('clawhub/steipete/weather', { expectedSourceKey: 'registry-view', version: '1.0.0', replace: true });
         await skillSourcesApi.updateSkill('anime_studio', 'merge', 'a'.repeat(64), 'b'.repeat(64));
         await skillSourcesApi.updateSkill('weather', 'replace', 'c'.repeat(64));
         await skillSourcesApi.uninstallSkill('weather');
@@ -63,6 +65,8 @@ test('each call sends exactly what the host takes', async () => {
             { url: '/api/skill-catalog/item/ouroboros-community/scholion', method: 'GET', body: undefined },
             { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'ouroboros/weather', turn_on_when_ready: true } },
             { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'clawhub/steipete/weather', turn_on_when_ready: true, replace: true } },
+            { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'ouroboros/weather', turn_on_when_ready: true, expected_source_key: 'git-view', expected_digest: 'a'.repeat(64) } },
+            { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'clawhub/steipete/weather', turn_on_when_ready: true, replace: true, expected_source_key: 'registry-view', version: '1.0.0' } },
             { url: '/api/skills/anime_studio/update', method: 'POST', body: { mode: 'merge', digest: 'a'.repeat(64), local_digest: 'b'.repeat(64) } },
             { url: '/api/skills/weather/update', method: 'POST', body: { mode: 'replace', digest: 'c'.repeat(64) } },
             { url: '/api/skills/weather/uninstall', method: 'POST', body: {} },

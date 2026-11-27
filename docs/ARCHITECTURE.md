@@ -5,6 +5,7 @@ This is the map of my body (BIBLE P6): what I am made of, what each part lets me
 ## Chapters
 
 - [1. High-Level Architecture](architecture/01-high-level-architecture.md)
+- [1.1 Module Directory](architecture/01-module-directory.md)
 - [2. Startup / Onboarding Flow](architecture/02-startup-onboarding-flow.md)
 - [3. Web UI Pages & Buttons](architecture/03-web-ui-pages-and-buttons.md)
 - [4. Server API Endpoints](architecture/04-server-api-endpoints.md)

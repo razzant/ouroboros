@@ -11,6 +11,7 @@ import shlex
 import pytest
 
 from ouroboros import claudexor_daemon as owned
+from tests._governance_docs_shared import architecture_text
 
 
 def _write_descriptor(config_dir: pathlib.Path, *, port: int = 45678) -> None:
@@ -407,6 +408,59 @@ def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
     assert manifest_reads == [] and payload["harnesses"] == [] and payload["profiles"]["profiles"] == []
     assert payload["profiles"]["login_capable_harnesses"] == []
 
+    # A saved subscription account keeps its family on the list while its program is missing (the row's sign-in is
+    # null then): the owner's account is shown, not hidden, its catalog row stays out, an API-key profile adds nothing.
+    class MissingProgramGateway(CurrentGateway):
+        def agent_capabilities(self):
+            return {"harnesses": [*super().agent_capabilities()["harnesses"], {
+                "id": "agy", "displayName": "Antigravity", "status": "unavailable", "enabled": True, "setupLogin": None}]}
+
+        def credential_profiles(self):
+            roster = super().credential_profiles()
+            roster["profiles"] = [*roster["profiles"], *({"profile": {"harness_id": harness, "profile_id": name,
+                "credential_kind": kind}, "status": {}, "identity": {}} for harness, name, kind in
+                (("agy", "work", "config_dir_login"), ("agy", "key", "api_key"),
+                 ("openrouter", "spare", "api_key")))]
+            return roster
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", MissingProgramGateway)
+    payload = _status_payload(include_models=False)
+    assert [h["id"] for h in payload["harnesses"]] == ["codex", "cursor", "claude"]
+    # The list is the login capability itself: agy offers no sign-in now (its
+    # program is missing), so it is not in it. Its saved subscription account
+    # keeps its own row; the api_key sibling of the same harness does not.
+    assert payload["profiles"]["login_capable_harnesses"] == ["claude", "codex", "cursor"]
+    assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["koshak", "work"]
+
+    # A refused roster keeps that family on the policy from the roster held, which the browser filters the held and the
+    # passive rows by; with no roster held the policy is not restated, so a refusal never hides a saved account.
+    class RefusedRosterGateway(MissingProgramGateway):
+        def credential_profiles(self):
+            raise gw.ClaudexorUnavailable("daemon_unreachable", "transient")
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", RefusedRosterGateway)
+    payload = _status_payload(include_models=False)
+    assert payload["reads"]["accounts"] != "ok"
+    # A refused roster still publishes the capability the catalog answered, and
+    # the held rows keep the saved subscription account among them.
+    assert payload["profiles"]["login_capable_harnesses"] == ["claude", "codex", "cursor"]
+    assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["koshak", "work"]
+    import ouroboros.gateway.claudexor_accounts as accounts
+    monkeypatch.setattr(accounts, "_FACET_MEMORY", {})
+    payload = _status_payload(include_models=False)
+    # Capability and roster are independent reads: a refused roster does not
+    # withhold the capability the catalog already answered, and it invents no
+    # account rows of its own.
+    assert payload["profiles"]["login_capable_harnesses"] == ["claude", "codex", "cursor"]
+    assert "profiles" not in payload["profiles"]
+    # The browser's passive merge keeps a saved subscription by the same kinds.
+    import pathlib
+    import re
+    from ouroboros.gateway.onboarding import _SUBSCRIPTION_CREDENTIAL_KINDS
+    merge = (pathlib.Path(__file__).resolve().parents[1] / "web/modules/claudexor_observation_reads.js").read_text(encoding="utf-8")
+    kinds = re.search(r"SUBSCRIPTION_KINDS = new Set\(\[([^\]]*)\]\)", merge).group(1)
+    assert set(re.findall(r"'([^']+)'", kinds)) == set(_SUBSCRIPTION_CREDENTIAL_KINDS)
+
     # A row that is not current evidence (an unknown mode, or a legacy row
     # without the key among current ones) leaves the decision to the
     # manifests, read once, exactly as before.
@@ -423,6 +477,87 @@ def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
         assert manifest_reads == [1], gap
         assert [h["id"] for h in payload["harnesses"]] == ["codex"]
         assert payload["profiles"]["login_capable_harnesses"] == ["codex"]
+
+
+def test_a_saved_subscription_keeps_its_row_without_granting_its_harness_a_sign_in(monkeypatch, tmp_path):
+    """A saved subscription account keeps ITS row when the harness offers no
+    sign-in now (its program is missing), and it grants that harness nothing:
+    an api_key profile of the same adapter stays hidden, and the published
+    login-capability list does not name the family."""
+    from ouroboros.gateway.claudexor_accounts import _status_payload
+    from ouroboros.gateways import claudexor as gw
+
+    class FakeDaemon:
+        def status_dict(self):
+            return {"state": "running"}
+
+    class FakeGateway:
+        engine_version = "9.9.9"
+
+        def __init__(self, endpoint):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def handshake(self, **_kw):
+            return {}
+
+        def agent_capabilities(self):
+            return {"harnesses": [
+                {"id": "codex", "displayName": "Codex CLI", "status": "ok", "enabled": True,
+                 "setupLogin": {"mode": "in_app"}},
+                {"id": "agy", "displayName": "Antigravity", "status": "unavailable", "enabled": True,
+                 "setupLogin": None},
+            ]}
+
+        def harnesses(self):
+            raise AssertionError("a current catalog answers eligibility; no manifest sweep")
+
+        def credential_profiles(self):
+            return {"profiles": [
+                {"profile": {"harness_id": "agy", "profile_id": "work",
+                             "credential_kind": "config_dir_login"}, "status": {}, "identity": {}},
+                {"profile": {"harness_id": "agy", "profile_id": "key",
+                             "credential_kind": "api_key"}, "status": {}, "identity": {}},
+            ], "accountPools": []}
+
+        def quota_snapshots(self):
+            return []
+
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: FakeDaemon())
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setattr(gw, "discover_daemon_at", lambda _path: object())
+    monkeypatch.setattr(gw, "ClaudexorGateway", FakeGateway)
+
+    payload = _status_payload(include_models=False)
+    assert payload["profiles"]["login_capable_harnesses"] == ["codex"]
+    assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["work"]
+    assert [h["id"] for h in payload["harnesses"]] == ["codex"]
+
+    # The catalog was not current evidence (a legacy row without setupLogin):
+    # the manifests decide, and the same per-row rule holds.
+    class LegacyCatalogGateway(FakeGateway):
+        def agent_capabilities(self):
+            return {"harnesses": [
+                {"id": "codex", "displayName": "Codex CLI", "status": "ok", "enabled": True,
+                 "setupLogin": {"mode": "in_app"}},
+                {"id": "agy", "displayName": "Antigravity", "status": "unavailable", "enabled": True},
+            ]}
+
+        def harnesses(self):
+            return [
+                {"id": "codex", "manifest": {"capability_profile": {"auth": {
+                    "supported_sources": ["native_session"]}}}},
+            ]
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", LegacyCatalogGateway)
+    payload = _status_payload(include_models=False)
+    assert payload["profiles"]["login_capable_harnesses"] == ["codex"]
+    assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["work"]
 
 
 def test_a_legacy_native_login_vouches_no_harness_past_a_readable_manifest(monkeypatch, tmp_path):
@@ -3561,15 +3696,8 @@ def test_the_proxy_count_in_the_docs_matches_the_handlers_that_exist(tmp_path):
         f"does not say \"{expected} THIN proxies\""
     )
 
-    # The module map names the gateway owners (the ``module_map`` lookup over the code);
-    # the endpoint registry names every registered route.
-    from ouroboros.code_intelligence_architecture import load_domain_manifest
-    from ouroboros.code_intelligence_module_map import module_map_rows
-
-    gateway = "\n".join(module_map_rows(pathlib.Path(__file__).resolve().parents[1], "ouroboros/gateway/",
-                                         load_domain_manifest(pathlib.Path(__file__).resolve().parents[1])))
-    for owner in ("claudexor_accounts.py", "claudexor_quota.py"):
-        assert re.search(rf"^ouroboros/gateway/{owner} \(D\d+\) — \S", gateway, re.M), owner
+    arch = architecture_text()
+    assert "claudexor_accounts.py" in arch and "claudexor_quota.py" in arch
     from ouroboros.reference_books import load_reference_book, read_book_section
 
     book = load_reference_book(pathlib.Path(__file__).resolve().parents[1], "architecture")

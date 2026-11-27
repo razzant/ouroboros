@@ -459,6 +459,12 @@ export function nativeStatusText({ enabled = true, shell = null, native = false,
 
 /* ---------------------------------------------------------------- shell ---- */
 
+// Whether a notification names a place createNotificationActivation can route: Main, or a chat by its number.
+const hasDestination = (target) => {
+    const chatId = Number(target?.chatId);
+    return target?.isMain === true || (Number.isSafeInteger(chatId) && chatId !== 0);
+};
+
 /** Resolve a clicked notice by its publication address, never a sidebar slice.
  * Lookup is activation-only; live classification/hydration keep their policy.
  * A later activation supersedes an outstanding lookup from an earlier click.
@@ -473,7 +479,7 @@ export function createNotificationActivation({ resolveProject, openProject, open
                 await openMain();
                 return;
             }
-            if (!Number.isSafeInteger(chatId) || chatId === 0) throw new Error('Missing destination');
+            if (!hasDestination(target)) throw new Error('Missing destination');
             const project = await resolveProject(chatId);
             if (revision !== generation) return;
             if (!project?.id || Number(project.chat_id) !== chatId || project.lifecycle !== 'active') {
@@ -780,12 +786,11 @@ export function createNotifier({
         } else void fallbackTone(decision);
         const line = decision.body ? `${decision.title}: ${decision.body}` : decision.title;
         try {
-            // The in-app surface must reach the source too, so the returned node
-            // gets its own listener; the stack's own handler still dismisses it.
-            const node = toast?.(line, 'info');
-            node?.addEventListener?.('click', () => {
-                try { activate?.(decision.target, decision); } catch { /* best-effort */ }
-            });
+            // The in-app surface reaches the source through its own Open (owner 26.11, A): its words stay words and
+            // its close only hides it. A notice with no destination (Settings' test) offers none.
+            const open = () => { try { activate?.(decision.target, decision); } catch { /* best-effort */ } };
+            if (hasDestination(decision.target)) toast?.(line, 'info', { action: { label: tr('notify.open', 'Open'), run: open } });
+            else toast?.(line, 'info');
         } catch { /* the toast stack owns its own errors */ }
         return 'in_app';
     }

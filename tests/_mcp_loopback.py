@@ -2,11 +2,12 @@
 
 ``loopback(transport, required, wrap=None)`` serves one synthetic FastMCP app (one ``echo`` tool) behind a guard
 that records and checks request headers, on a free loopback port (``start_asgi``), and resets the process
-manager around the test.
+manager around the test. ``_Provider`` is an in-memory authorization server for the SDK's auth routes.
 """
 
 from __future__ import annotations
 
+import secrets
 import socket
 import threading
 import time
@@ -42,14 +43,85 @@ class _Synthetic:
         await self.app(scope, receive, send)
 
 
-def start_asgi(app, running, name="mcp-loopback"):
-    """Serve one ASGI app on a free loopback port; ``running`` collects it for shutdown."""
+class _Provider:
+    """The SDK provider interface, in memory, auto-approving (no login page)."""
+
+    def __init__(self, base: str) -> None:
+        self.base, self.clients, self.codes, self.access, self.refresh = base, {}, {}, {}, {}
+        self.counts = {"register": 0, "refresh_ok": 0, "refresh_refused": 0, "revoke": 0}
+
+    async def get_client(self, client_id):
+        return self.clients.get(client_id)
+
+    async def register_client(self, client_info):
+        self.counts["register"] += 1
+        self.clients[client_info.client_id] = client_info
+
+    async def authorize(self, client, params):
+        from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
+
+        code = secrets.token_urlsafe(16)
+        self.codes[code] = AuthorizationCode(
+            code=code, scopes=params.scopes or ["mcp"], expires_at=time.time() + 300, client_id=client.client_id,
+            code_challenge=params.code_challenge, redirect_uri=params.redirect_uri,
+            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly, resource=params.resource)
+        return construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state, iss=self.base + "/")
+
+    async def load_authorization_code(self, client, code):
+        return self.codes.get(code)
+
+    def _issue(self, client_id, scopes):
+        from mcp.server.auth.provider import AccessToken, RefreshToken
+        from mcp.shared.auth import OAuthToken
+
+        access, refresh = secrets.token_urlsafe(16), secrets.token_urlsafe(16)
+        self.access[access] = AccessToken(token=access, client_id=client_id, scopes=scopes,
+                                          expires_at=int(time.time()) + 3600)
+        self.refresh[refresh] = RefreshToken(token=refresh, client_id=client_id, scopes=scopes)
+        return OAuthToken(access_token=access, token_type="Bearer", expires_in=3600, refresh_token=refresh,
+                          scope=" ".join(scopes))
+
+    async def exchange_authorization_code(self, client, code):
+        self.codes.pop(code.code, None)
+        return self._issue(client.client_id, code.scopes)
+
+    async def load_refresh_token(self, client, refresh_token):
+        found = self.refresh.get(refresh_token)
+        if found is None:
+            self.counts["refresh_refused"] += 1
+        return found
+
+    async def exchange_refresh_token(self, client, refresh_token, scopes):
+        from mcp.server.auth.provider import TokenError
+
+        if self.refresh.pop(refresh_token.token, None) is None:  # rotation: each refresh token works once
+            self.counts["refresh_refused"] += 1
+            raise TokenError("invalid_grant", "refresh token already used")
+        self.counts["refresh_ok"] += 1
+        return self._issue(client.client_id, scopes or refresh_token.scopes)
+
+    async def load_access_token(self, token):
+        return self.access.get(token)
+
+    async def revoke_token(self, token):
+        self.counts["revoke"] += 1
+        self.access.pop(token.token, None)
+        self.refresh.pop(token.token, None)
+
+
+def start_asgi(app, running, name="mcp-loopback", port=0, **options):
+    """Serve one ASGI app on a loopback port (a free one by default); ``running`` collects it for shutdown.
+    ``options`` go to ``uvicorn.Config`` (``ssl_certfile``/``ssl_keyfile`` serve HTTPS)."""
     import uvicorn
 
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    if not port:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+    # A bound on the graceful stop: a connection a client abandoned mid-handshake (a refused certificate) can stay
+    # registered on Windows, and uvicorn would wait for it forever, leaving this thread alive after the test.
+    options.setdefault("timeout_graceful_shutdown", 2)
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", **options))
     thread = threading.Thread(target=server.run, name=name, daemon=True)
     thread.start()
     running.append((server, thread))

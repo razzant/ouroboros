@@ -163,12 +163,10 @@ def test_the_real_architecture_book_navigation_exposes_all_h4_groups():
     assert end <= len(lines)
 
 
-def test_the_packet_index_writes_each_fact_once_and_says_the_atlas_is_not_there():
-    """A seat without tools: the chapters' folder once on the `## Chapters` line standing directly above them, each
-    chapter's file, its introduction and every heading with its range (indented from the chapter's shallowest
-    listed heading), the entrypoint's other text verbatim, and one line where the Reference Atlas stood. The range
-    convention is not repeated per book (the governance navigation states it once). The overview a reader WITH
-    tools gets keeps full paths and the Atlas rows."""
+def test_a_packet_index_says_the_reference_atlas_is_not_there_in_one_line():
+    """A seat without tools gets one line where the entrypoint's Reference Atlas stood (the resident Body Map
+    carries the Atlas for a mind that can open its documents); the entrypoint's other text stays verbatim and
+    the reader with tools keeps the Atlas rows."""
     from ouroboros.reference_books import load_reference_book
 
     files = {
@@ -176,19 +174,20 @@ def test_the_packet_index_writes_each_fact_once_and_says_the_atlas_is_not_there(
                                  b"- [Core](architecture/01-core.md)\n- [The web](architecture/02-web.md)\n\n"
                                  b"## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) \xe2\x80\x94 how the screens look.\n\n"
                                  b"## See also\n\nA closing word.\n"),
-        "docs/architecture/01-core.md": b"# Core\n\nWhat the core gives me.\n\n### Loop\n\nA.\n\n#### Rounds\n\nB.\n",
+        "docs/architecture/01-core.md": b"# Core\n\nWhat the core gives me.\n\n### Loop\n\nA.\n",
         "docs/architecture/02-web.md": b"# Web\n\nWhat the web gives me.\n\n## Pages\n\nC.\n",
     }
     book = load_reference_book(Path("unused"), "architecture", lambda path: files[path])
-    assert cl.book_navigation(book, instructions=False) == (
-        "# Body\n\nThe map; the Reference Atlas below lists the rest.\n\n"
-        f"{cl.PACKET_ATLAS}\n\n## See also\n\nA closing word.\n\n"
-        "## Chapters (files in `docs/architecture/`)\n\n"
-        "# Core — `01-core.md`\nWhat the core gives me.\n- 5-11 Loop\n  - 9-11 Rounds\n\n"
-        "# Web (listed as The web) — `02-web.md`\nWhat the web gives me.\n- 5-7 Pages")
+    packet = cl.book_navigation(book, instructions=False)
+    assert packet.startswith("# Body\n\nThe map; the Reference Atlas below lists the rest.\n\n## Chapters\n\n"
+                             f"{cl.PACKET_ATLAS}\n## See also\n\nA closing word.\n")
+    assert "DESIGN.md" not in packet and packet.count(cl.PACKET_ATLAS) == 1
     with_tools = cl.book_navigation(book)
-    assert "docs/architecture/02-web.md" in with_tools and cl.PACKET_ATLAS not in with_tools
-    assert cl.PACKET_BOOK_INDEX not in cl.book_navigation(book, instructions=False)
+    assert "how the screens look." in with_tools and cl.PACKET_ATLAS not in with_tools
+    del files["docs/ARCHITECTURE.md"]  # a book without an Atlas gains no such line
+    files["docs/ARCHITECTURE.md"] = b"# Body\n\nThe map.\n\n## Chapters\n\n- [Core](architecture/01-core.md)\n- [The web](architecture/02-web.md)\n"
+    plain = load_reference_book(Path("unused"), "architecture", lambda path: files[path])
+    assert cl.PACKET_ATLAS not in cl.book_navigation(plain, instructions=False)
 
 
 def test_a_legacy_revision_navigates_as_the_single_source_it_is():
@@ -231,3 +230,30 @@ def test_reference_doc_sections_carry_one_body_map_and_the_handbook_only_when_re
     assert plain == body_map and (not isinstance(plain, HostSection) or plain.operative_view is None)
     [pointer], _ = cl.reference_doc_sections(context_mode="max", body_map="")
     assert "docs/ARCHITECTURE.md" in pointer and "docs/DEVELOPMENT.md" in pointer
+
+
+def test_a_packet_index_states_its_notation_once_and_keeps_an_annotated_chapter_list():
+    """A tool-less packet's index of the real books states PACKET_INDEX once (the governance navigation adds it) and
+    no per-heading "lines" wording; a book whose Chapters list carries prose beside a link keeps the overview form,
+    which keeps that prose."""
+    import dataclasses
+    import pathlib
+
+    from ouroboros.context_layout import PACKET_INDEX, book_navigation
+    from ouroboros.markdown_source import parse_markdown_source
+    from ouroboros.reference_books import load_reference_book
+    from ouroboros.tools.governance_context import governance_context
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    packet = governance_context(root, surface="triad", touched_paths=["web/modules/chat.js"],
+                                usable_window_tokens=200_000, delivery="packet", checklist_section_text="x")
+    assert packet.navigation.count(PACKET_INDEX) == 1 and " — lines " not in packet.navigation.split(PACKET_INDEX)[1]
+    retrieving = governance_context(root, surface="triad", touched_paths=["web/modules/chat.js"],
+                                    usable_window_tokens=200_000, delivery="retrieving", checklist_section_text="x")
+    assert PACKET_INDEX not in retrieving.navigation and " — lines " in retrieving.navigation
+    book = load_reference_book(root, "architecture")
+    entry = book.entrypoint
+    annotated = entry.raw.replace(b"(architecture/02-startup-onboarding-flow.md)",
+                                  b"(architecture/02-startup-onboarding-flow.md) Read this before changing startup.")
+    book = dataclasses.replace(book, entrypoint=parse_markdown_source(annotated, entry.source_path))
+    assert "Read this before changing startup." in book_navigation(book, instructions=False)
