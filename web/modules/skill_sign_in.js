@@ -436,14 +436,14 @@ const draftOf = (group) => {
  * again and answers it (the page repaints its cards from the same answer); `open` is the control that opened the
  * sheet, whose `data-sign-in-*` name a service and, with `data-sign-in-begin`, an account to sign in. Returns the disposer.
  */
-export function mountSkillSignIn(container, skillName, { status = null, reload = readSignInStatus, open = null } = {}) {
+export function mountSkillSignIn(container, skillName, { status = null, reload = readSignInStatus, open = null, ask: wanted = null } = {}) {
     const doc = container.ownerDocument, win = doc.defaultView;
     const states = new Map(), written = new WeakMap();
     const lifetime = new AbortController();
     let current = status, closed = false, menu = null, disarm = null;
     const isWaiting = () => [...states.values()].some((state) => state.editor?.kind === 'waiting');
-    let ask = open?.dataset?.signInService
-        ? { service: open.dataset.signInService, account: open.dataset.signInAccount || '', begin: open.dataset.signInBegin !== undefined } : null;
+    let ask = wanted || (open?.dataset?.signInService
+        ? { service: open.dataset.signInService, account: open.dataset.signInAccount || '', begin: open.dataset.signInBegin !== undefined } : null);
     const services = () => servicesOf(current, skillName);
     const stateOf = (id) => states.get(id) || states.set(id, { editor: null, confirm: null, results: new Map(), dirty: false, busy: false }).get(id);
     const groupOf = (id) => [...container.querySelectorAll('[data-sign-in-group]')].find((node) => node.dataset.signInGroup === id) || null;

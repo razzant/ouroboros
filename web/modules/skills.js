@@ -408,7 +408,7 @@ export function initSkills(ctx = {}) {
     let destroyed = false;
     let listingReadController = null;
     let filter = 'all';
-    let requestedSkill = '';
+    let requestedSkill = '', requestedService = '';  // a conversation's sign-in button names its service too
     let openRequest = 0;
     let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
@@ -719,7 +719,7 @@ export function initSkills(ctx = {}) {
             if (listingOnWay !== read) return;
             listingOnWay = null;
             if (listed) revealRequestedSkill();
-            requestedSkill = '';  // a failure or an absent skill ends the request too
+            requestedSkill = requestedService = '';  // a failure or an absent skill ends the request too
         };
         listingOnWay = read;
         read.then(settled, () => settled(false));
@@ -1125,7 +1125,7 @@ export function initSkills(ctx = {}) {
         (findings || details).scrollIntoView({ block: 'nearest' });
     }
 
-    function openInstalledSheet(name, opener) {
+    function openInstalledSheet(name, opener, ask = null) {
         const card = opener && (opener.closest('.skills-card') || (activeMenu?.popover.contains(opener) && activeMenu.card));
         const key = card ? cardRowKey(card) : name;
         const skill = projected().find((row) => installedSkillRowKey(row) === key);
@@ -1159,7 +1159,7 @@ export function initSkills(ctx = {}) {
         const titleOf = () => Array.from(container.querySelectorAll(':scope > .skills-card'))
             .find((listed) => cardRowKey(listed) === pendingKey && !listed.hidden)?.querySelector('.skills-card-name') || null;
         sheet = openSkillDetailSheet({
-            item, installed: skill, returnFocus: pendingKey ? titleOf : opener, access, signIn: { status: signIn, reload: reloadSignIn, open: opener },
+            item, installed: skill, returnFocus: pendingKey ? titleOf : opener, access, signIn: { status: signIn, reload: reloadSignIn, open: opener, ask },
             readDetail: entry ? ({ signal } = {}) => skillSourcesApi.item(...entry, { signal }) : null,
             acceptDetail: (detail) => matchesRelease(detail?.item),
         });
@@ -1384,6 +1384,7 @@ export function initSkills(ctx = {}) {
             }
         }
         card.scrollIntoView({ block: 'nearest' });
+        if (requestedService) openInstalledSheet(requestedSkill, card, { service: requestedService, account: '', begin: true });
     }
 
     // Opening Skills may already have started a fresh read. A read started before this request
@@ -1546,10 +1547,10 @@ export function initSkills(ctx = {}) {
     // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js). The
     // explicit target opens regardless of the device's previously selected page.
     const onOpenSkills = async (event) => {
-        const { skill = '', query = '', category = '' } = event?.detail || {};
+        const { skill = '', service = '', query = '', category = '' } = event?.detail || {};
         const request = ++openRequest;
         const beforeOpen = listingReadController;
-        requestedSkill = '';
+        requestedSkill = ''; requestedService = skill ? String(service || '') : '';
         closeMenus();
         if (!await section.open(skill ? 'installed' : 'browse') || request !== openRequest || destroyed) return;
         if (!skill && category) { await browse?.showCategory(category); return; }

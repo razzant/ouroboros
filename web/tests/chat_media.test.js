@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { documentMessageKey } from '../modules/chat_activity.js';
-import { bindComposerFileTargets, decorateContactSource, fileNames, linksMessageHtml, safeHttpUrl, signInPlaceSkill } from '../modules/chat_media.js';
+import { bindComposerFileTargets, decorateContactSource, fileNames, linksMessageHtml, safeHttpUrl, signInPlace } from '../modules/chat_media.js';
 import { createComposerAttachments } from '../modules/chat_attachments.js';
 import { uploadView } from './helpers/attachment_views.js';
 import { NodeStub, fixture } from './helpers/media_dom.js';
@@ -26,12 +26,15 @@ test('a sign-in place is a button to the skill in Extensions, never an address',
         { label: 'Docs', url: 'https://example.com/docs' },
         { label: 'Broken', place: 'skill-sign-in/../google' },
     ] }); } finally { fx.controller.destroy(); fx.restore?.(); }
-    assert.match(html, /<a class="chat-link-button" href="#skills" data-sign-in-place="calendar">Sign in to Google<\/a>/);
+    assert.match(html, /<a class="chat-link-button" href="#skills" data-sign-in-place="calendar" data-sign-in-service="google">Sign in to Google<\/a>/);
     assert.match(html, /href="https:\/\/example.com\/docs"/);
     assert.doesNotMatch(html, /Broken/);
-    assert.equal(signInPlaceSkill('skill-sign-in/email-presence/google'), 'email-presence');
-    assert.equal(signInPlaceSkill('skill-sign-in/calendar'), '');
-    assert.equal(signInPlaceSkill('https://example.com'), '');
+    assert.deepEqual(signInPlace('skill-sign-in/email-presence/google'), { skill: 'email-presence', service: 'google' });
+    // Canonical names the host's answers give: a dot in a skill name, a service id that starts with `_`.
+    assert.deepEqual(signInPlace('skill-sign-in/calendar.team/_work'), { skill: 'calendar.team', service: '_work' });
+    for (const bad of ['skill-sign-in/calendar', 'https://example.com', 'skill-sign-in/.hidden/google', 'skill-sign-in/calendar/Google']) {
+        assert.equal(signInPlace(bad), null, bad);
+    }
 });
 
 test('a framed question joins its Project to the voice and ends on its time alone', () => {

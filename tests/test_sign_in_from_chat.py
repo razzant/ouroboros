@@ -11,7 +11,7 @@ import pytest
 
 from ouroboros import link_actions, sign_in_offers
 from ouroboros.link_actions import LinkActionsValidationError, validate_link_actions
-from tests.test_service_sign_in_loopback import CAL, _save_client, _sign_in, _token, world  # noqa: F401 -- the fixture
+from tests.test_service_sign_in_loopback import CAL, _save_client, _shown, _sign_in, _token, world  # noqa: F401 -- the fixture
 
 PLACE = "skill-sign-in/calendar/google"
 
@@ -26,6 +26,30 @@ def test_a_place_is_a_link_action_with_a_label_and_no_address():
         with pytest.raises(LinkActionsValidationError):  # the whole batch is refused, the good link too
             validate_link_actions([{"label": "Docs", "url": "https://example.com/docs"}, bad])
     assert link_actions.sign_in_place(PLACE) == ("calendar", "google")
+    # The canonical names the host's sign-in answers give: a dot in a skill name, a service id that starts with "_".
+    assert link_actions.sign_in_place("skill-sign-in/calendar.team/_work") == ("calendar.team", "_work")
+    assert link_actions.sign_in_place("skill-sign-in/calendar/Google") is None
+    # A model that fills both optional fields sends an empty place beside its address: an ordinary link.
+    assert validate_link_actions([{"label": "Docs", "url": "https://example.com/docs", "place": ""}]) == [
+        {"label": "Docs", "url": "https://example.com/docs"}]
+
+
+def test_a_place_names_a_skill_that_declares_that_sign_in(world):  # noqa: F811
+    from ouroboros.tools import core_artifacts
+
+    core_artifacts._known_sign_in_places([{"label": "Sign in", "place": PLACE}])
+    for typo in ("skill-sign-in/calendar/gogle", "skill-sign-in/calendr/google"):
+        with pytest.raises(LinkActionsValidationError, match="declares no sign-in service"):
+            core_artifacts._known_sign_in_places([{"label": "Sign in", "place": typo}])
+
+
+def test_a_phone_only_mirror_still_hears_connected():
+    from skills.telegram.plugin import _target_chat
+
+    owner = {"TELEGRAM_CHAT_ID": "4242", "TELEGRAM_MIRROR_MODE": "telegram_only"}
+    row = {"role": "system", "system_type": "sign_in_connected", "transport": {}}
+    assert _target_chat(owner, row) == 4242, "an owner-act receipt, like a skill notice, reaches the phone"
+    assert _target_chat(owner, {**row, "system_type": "storage_free_notice"}) == 0
 
 
 def test_a_links_row_with_a_place_is_delivered_and_its_conversation_noted(tmp_path, monkeypatch):
@@ -79,3 +103,24 @@ def test_telegram_says_where_to_finish_a_sign_in_instead_of_a_dead_button():
     line = telegram_places.finish_lines(places, _LOCALIZED_TEXTS["en"])
     assert line.startswith("Sign in to Google: finish this on the computer running Ouroboros")
     assert "Extensions › Skills › calendar" in line
+
+
+def test_a_replayed_return_never_answers_a_newer_offer(world, monkeypatch):  # noqa: F811
+    """A stale tab's second Finish replays the filed receipt of an earlier sign-in: no new sign-in happened, so the
+    newer offer waits for the real one."""
+    provider, owner, _host = world
+    from ouroboros import config
+
+    said = []
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: said.append((a, k)))
+    _save_client(owner)
+    started = owner.post("/api/sign-in", json={"action": "begin", "skill": CAL, "service": "google",
+                                               "scope_words": ["openid", "email", "calendar.events"],
+                                               **_shown(owner, CAL, "")}).json()
+    returned = provider.approve(started["url"])
+    assert owner.post("/api/sign-in", json={"action": "complete", "returned_url": returned}).json()["state"] == "signed_in"
+    sign_in_offers.note(config.DATA_DIR, 4242, [{"label": "Sign in", "place": PLACE}])
+    owner.post("/api/sign-in", json={"action": "complete", "returned_url": returned})  # the stale tab's replay
+    assert said == [], "a replayed receipt is not a new sign-in"
+    _sign_in(provider, owner, CAL)
+    assert [(args[0], kwargs["system_type"]) for args, kwargs in said] == [(4242, "sign_in_connected")]

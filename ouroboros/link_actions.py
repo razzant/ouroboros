@@ -8,7 +8,6 @@ address, account or secret, and pressing it changes nothing by itself.
 from __future__ import annotations
 
 import ipaddress
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 _MAX_LINK_ACTIONS = 12
@@ -40,7 +39,7 @@ def validate_link_actions(actions: Any) -> List[Dict[str, str]]:
             raise LinkActionsValidationError(
                 "SEND_LINKS_ARG_ERROR", "each link must contain label and url."
             )
-        if "place" in item:
+        if str(item.get("place") or "").strip():  # an empty place beside a url is no place
             cleaned.append(_place_action(item))
             continue
         label = str(item.get("label") or "")
@@ -94,13 +93,16 @@ def validate_link_actions(actions: Any) -> List[Dict[str, str]]:
     return cleaned
 
 
-_SIGN_IN_PLACE = re.compile(r"skill-sign-in/([a-z0-9][a-z0-9_-]{0,63})/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})")
-
-
 def sign_in_place(place: Any) -> Optional[Tuple[str, str]]:
-    """``(skill, service)`` of a sign-in place, else None."""
-    found = _SIGN_IN_PLACE.fullmatch(str(place or ""))
-    return (found.group(1), found.group(2)) if found else None
+    """``(skill, service)`` of a sign-in place, else None: a canonical skill name and a declared service id, exactly as
+    the host's sign-in answers name them (``canonical_skill_name``, ``service_sign_in_declaration``)."""
+    from ouroboros.contracts.skill_manifest import canonical_skill_name
+    from ouroboros.service_sign_in_declaration import _ID as service_id
+
+    parts = str(place or "").split("/")
+    if len(parts) != 3 or parts[0] != "skill-sign-in" or not parts[1] or canonical_skill_name(parts[1]) != parts[1]:
+        return None
+    return (parts[1], parts[2]) if service_id.fullmatch(parts[2]) else None
 
 
 def _place_action(item: Dict[str, Any]) -> Dict[str, str]:

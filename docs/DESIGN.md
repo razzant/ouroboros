@@ -1171,7 +1171,8 @@ words the owner typed into the control (an Evolution objective) stay theirs, exa
 
 A host fact has a subject, and the subject names its carrier: a task's fact is a
 row of its card, a fact about the owner's message is the typed annotation on that
-message, and a landed act publishes no row (its receipt or card already says it).
+message, and a landed act publishes no row (its receipt or card already says it). One exception: a skill's
+sign-in offered as a button in a conversation is said there once (`sign_in_connected`), since its card is elsewhere.
 The mind's Storage → Free request is reported in Main as a typed System row (`storage_free_notice`).
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the

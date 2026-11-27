@@ -43,6 +43,19 @@ def note(data_dir: Any, chat_id: int, actions: Iterable[Mapping[str, Any]]) -> N
         log.warning("A sign-in offer could not be noted (%s)", type(exc).__name__)
 
 
+def open_attempt(returned: Mapping[str, Any]) -> bool:
+    """Whether a provider's return finishes a sign-in still open now (its nonce is the pending attempt's), not a
+    return already filed: a stale tab's second Finish replays its receipt and must not answer a newer offer."""
+    from ouroboros import oauth_engine, service_sign_in
+
+    try:
+        envelope = oauth_engine.envelope(str(returned.get("state") or ""), "sign_in")
+        grant = service_sign_in._grant(envelope["sign_in"], envelope["svc"], "pending")
+        return bool(envelope["nonce"]) and (oauth_engine.load(grant).get("pending") or {}).get("nonce") == envelope["nonce"]
+    except Exception:  # noqa: BLE001 — unreadable: say nothing rather than answer the wrong offer
+        return False
+
+
 def announce(data_dir: Any, skill: str, service: str, label: str) -> bool:
     """One System row «<skill> is signed in to <service> now.» in the conversation that offered this sign-in, if one
     did; the offer leaves first, so the row is said at most once. Never raises; True when a row was sent."""

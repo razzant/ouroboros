@@ -147,6 +147,28 @@ def test_add_account_waits_at_the_provider_then_shows_the_row_on_return_and_by_p
             browser.close()
 
 
+def test_a_conversations_sign_in_button_opens_that_services_sign_in_editor(skills_browser):
+    """The chat's sign-in button (chat_media.js: a links row's place ``skill-sign-in/calendar/google``) opens the
+    skill's sheet at that service with the sign-in editor shown; the provider is asked only when the owner says so."""
+    from playwright.sync_api import expect
+
+    browser = skills_browser.chromium.launch(headless=True)
+    try:
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        skills = open_skills(page, extensions=[CALENDAR])
+        skills.answers[STATUS] = status()
+        page.goto(URL, wait_until="networkidle")
+        page.evaluate("window.dispatchEvent(new CustomEvent('ouro:open-skills', "
+                      "{ detail: { skill: 'calendar', service: 'google' } }))")
+        group = page.locator('dialog.skills-detail-sheet [data-sign-in-group="google"]')
+        expect(group.locator('[data-sign-in-editor="sign_in"]')).to_be_visible()
+        expect(group.locator('[data-sign-in-editor="sign_in"]').get_by_role("button", name="Open the sign-in page")).to_be_visible()
+        assert not [body for body in skills.posted(SIGN_IN) if body.get("action") == "begin"], "the owner starts it"
+        capture(page, "chromium", 1280, "sign-in-from-chat")
+    finally:
+        browser.close()
+
+
 def test_sign_in_uses_the_selected_it_client_for_the_work_account(skills_browser):
     from playwright.sync_api import expect
 

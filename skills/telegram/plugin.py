@@ -335,9 +335,9 @@ def _target_chat(settings: Dict[str, Any], event: Dict[str, Any]) -> int:
         transport = event.get("transport") if isinstance(event.get("transport"), dict) else {}
         if transport.get("kind") == "telegram":
             return chat_id
-        # ...and the owner's notes, skill notices and the Safety Supervisor's notices: System rows
+        # ...and the owner's notes, skill and Safety Supervisor notices, a sign-in's «connected»: System rows
         # written for the owner, which an owner who left the web should still get on the phone.
-        if event.get("role") == "system" and event.get("system_type") in {"reminder", "skill_notice", "safety_notice"}:
+        if event.get("role") == "system" and event.get("system_type") in {"reminder", "skill_notice", "safety_notice", "sign_in_connected"}:
             return chat_id
         return 0
     # No pinned chat configured — only forward events that originate from
@@ -1330,7 +1330,8 @@ def _make_links(api):
             actions, places = telegram_places.link_rows(event.get("actions"))
             if places:
                 _clear_silent_msg(api, chat_id)
-                await client.send_message(chat_id, telegram_places.finish_lines(places, _LOCALIZED_TEXTS[telegram_i18n.language()]))
+                await client.send_message(chat_id, telegram_places.finish_lines(
+                    places, _LOCALIZED_TEXTS[telegram_i18n.language()]), parse_mode="")  # a label is literal text
             if not actions:
                 return
             _clear_silent_msg(api, chat_id)

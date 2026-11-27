@@ -141,8 +141,8 @@ export function linksMessageHtml(msg) {
     const rows = actions.map((item) => {
         const url = safeHttpUrl(item?.url);
         const label = String(item?.label || '').trim().slice(0, 120);
-        const skill = signInPlaceSkill(item?.place);  // a place inside Ouroboros: the skill's card, never an address
-        if (label && !url && skill) return `<a class="chat-link-button" href="#skills" data-sign-in-place="${escapeHtmlAttr(skill)}">${escapeHtml(label)}</a>`;
+        const place = signInPlace(item?.place);  // a place inside Ouroboros: the skill's sign-in, never an address
+        if (label && !url && place) return `<a class="chat-link-button" href="#skills" data-sign-in-place="${escapeHtmlAttr(place.skill)}" data-sign-in-service="${escapeHtmlAttr(place.service)}">${escapeHtml(label)}</a>`;
         return url && label
             ? `<a class="chat-link-button" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}<span aria-hidden="true">↗</span></a>`
             : '';
@@ -155,10 +155,11 @@ export function linksMessageHtml(msg) {
         </div>`;
 }
 
-/** The skill a `skill-sign-in/<skill>/<service>` place opens (ouroboros/link_actions.py), else ''. */
-export function signInPlaceSkill(place) {
-    const found = /^skill-sign-in\/([a-z0-9][a-z0-9_-]{0,63})\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.exec(String(place || ''));
-    return found ? found[1] : '';
+/** `{skill, service}` of a `skill-sign-in/<skill>/<service>` place (ouroboros/link_actions.py: a canonical skill name, a
+ *  declared service id), else null. */
+export function signInPlace(place) {
+    const found = /^skill-sign-in\/([\p{L}\p{N}_.-]{1,64})\/([a-z0-9_]{1,40})$/u.exec(String(place || ''));
+    return found && !/^[._]|[._]$/.test(found[1]) ? { skill: found[1], service: found[2] } : null;
 }
 
 export function safeHttpUrl(value) {
@@ -899,10 +900,11 @@ export function createChatMedia({
         if (destroyed) return null;
         const body = linksMessageHtml(msg);
         const bubble = body ? bubbleFrame(msg, body) : null;
-        // A sign-in place opens the skill's card in Extensions, where the owner chooses the account and signs in.
+        // A sign-in place opens that skill's sign-in in Extensions, where the owner chooses the account and signs in.
         bubble?.querySelectorAll?.('[data-sign-in-place]').forEach((link) => link.addEventListener('click', (event) => {
             event.preventDefault();
-            globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-skills', { detail: { skill: link.dataset.signInPlace } }));
+            globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-skills', {
+                detail: { skill: link.dataset.signInPlace, service: link.dataset.signInService } }));
         }));
         return bubble;
     }

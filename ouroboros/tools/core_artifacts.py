@@ -454,6 +454,18 @@ def _validate_wait_bound(max_wait_minutes: Any, *, wait_for_answer: bool, task: 
     return int(max_wait_minutes)
 
 
+def _known_sign_in_places(actions: list) -> None:
+    """A sign-in place names a skill that declares that service: a typo would draw a button to no card, and the
+    mind would hear it was delivered. The host's sign-in answers name the exact place."""
+    from ouroboros.link_actions import sign_in_place
+    from ouroboros.service_sign_in import declared_service
+
+    for skill, service in filter(None, (sign_in_place(action.get("place")) for action in actions)):
+        if declared_service(skill, service) is None:
+            raise LinkActionsValidationError("SEND_LINKS_ARG_ERROR", f"skill {skill} declares no sign-in service "
+                                             f"{service}; offer the place the host's sign-in answer names.")
+
+
 def _send_links(
     ctx: ToolContext,
     links: list | None = None,
@@ -465,6 +477,7 @@ def _send_links(
         return "⚠️ SEND_LINKS_NO_CHAT: no active chat."
     try:
         actions = validate_link_actions(links)
+        _known_sign_in_places(actions)
     except LinkActionsValidationError as exc:
         # Validation rejects the whole batch before delivery. The adapter keeps
         # URL policy denials distinct from bad arguments, including TOO_MANY;
