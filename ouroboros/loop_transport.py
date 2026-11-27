@@ -981,6 +981,9 @@ def _provider_terminal_text(
         if unknown:
             text += _unknown_terminal_recovery_hint(accumulated_usage) + UNKNOWN_ATTEMPT_COST_NOTE
         return text + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True)
+    withheld = accumulated_usage.get("_last_llm_route_withheld")
+    if withheld and not unknown:  # the host sent nothing: its own words, with the one way out, are the whole reason
+        return f"⚠️ {withheld} Any files written so far are preserved in the workspace."
     released = accumulated_usage.get("_last_llm_attempt_custody") == "released" and not unknown
     return (
         ("⚠️ The model request did not start generation." if released else "⚠️ The model provider returned no usable response.")
