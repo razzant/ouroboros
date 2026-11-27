@@ -971,7 +971,7 @@ def _capture_context_core(
         drive_root=canonical_root,
         budget_drive_root=canonical_root,
         branch_dev=getattr(env, "branch_dev", "ouroboros"),
-        repo_path=env.repo_path,
+        repo_path=env.repo_path, task=task,  # whose context this is (``_drive_state_section``: a wake's own facts)
         drive_path=lambda rel: (canonical_root / safe_relpath(rel)).resolve(),
     )
 

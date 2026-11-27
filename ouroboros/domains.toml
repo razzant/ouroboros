@@ -1126,6 +1126,7 @@ D20 = "Presence"
 "supervisor/restart_retention.py" = "D08"
 "supervisor/owner_pause_control.py" = "D08"
 "supervisor/owner_pause_resume.py" = "D08"
+"supervisor/panic_choice.py" = "D08"  # the owner's Turn on after Panic that lets a wake return work that Panic stopped
 "supervisor/work_stop_migration.py" = "D08"
 "supervisor/continuation_admission.py" = "D08"
 "supervisor/tree_census.py" = "D08"  # one tree's writer census, its inputs read once per change of its rows

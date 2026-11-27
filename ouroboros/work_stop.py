@@ -561,9 +561,12 @@ def stop_for_reader(stop: dict, task: dict, reader_id: str) -> dict:
 
 
 def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:
-    """Release permission, not readiness. An unbound call is not the owner's door."""
+    """Release permission, not readiness. An unbound call is not the owner's door; after Panic a mind's call passes
+    only on my human's own action the host verified for it (``control_actor.panic_release``)."""
+    from ouroboros.control_actor import panic_release_bound
+
     stop, actor = stop or {}, actor or {}
-    if stop.get("release") == "owner" and actor.get("actor") != "owner":
+    if stop.get("release") == "owner" and actor.get("actor") != "owner" and not panic_release_bound():
         return {"ok": False, "error": "panic_requires_owner_resume"}
     if stop.get("release") == "none":
         return {"ok": False, "error": "stop_not_resumable"}
