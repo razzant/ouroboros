@@ -103,8 +103,8 @@ def memory_facts(plan, mode, messages=()):
         form = "chapter maps" if preference == "maps" else "a smaller memory view"
         line += f"; first send chose {form} after a refusal on its planned connection; that refusal stated no window"
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
-    line += ((f"; shown only by address: {shown}" if shown else "") + held_heads_fact(plan, receipt)
-             + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
+    line += (resident_fact(plan, snapshot, receipt) + (f"; shown only by address: {shown}" if shown else "")
+             + held_heads_fact(plan, receipt) + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
     return "" if any(message.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME
                      and f" | {line} | " in f" | {message.get('content') or ''} | " for message in messages) else line
 
@@ -124,6 +124,68 @@ def held_heads_fact(plan, receipt):
     tokens = sum(floor.view_tokens(part.full_text) for part in plan.core.dynamic_sections
                  if isinstance(part, HeldNoteSection) and part.section_id not in stepped)
     return f"; held note heads: {tokens:,} tokens stand whole" if tokens else ""
+
+
+RESIDENT_BASIS = "estimator tokens, JSON characters / 4, of this view's own text; provider tokens not counted"
+
+
+def resident_fact(plan, snapshot, receipt):
+    """``; resident here, …``: what my own authored parts that stay in every request cost in this view as its fit drew
+    it (``memory_floor.kept_level``): the marks block, the selected accounts and this room's block, with the date this
+    captured view was first measured and the basis; a part the view does not draw is named, never printed as 0.
+    Facts only (owner 1A, 26.11.2026: marks stay whole and I tidy them myself): no advice and nothing acts on them.
+    Kept on the captured core per level, like ``start_facts``, so a facts row reprints nothing while they stand."""
+    held = vars(plan.core).setdefault("_resident_facts", {}) if hasattr(plan.core, "__dict__") else {}
+    level = floor.kept_level(snapshot, receipt)
+    if level.addressed not in held:
+        held[level.addressed] = _resident_text(snapshot, level)
+    return held[level.addressed]
+
+
+def _resident_text(snapshot, level):
+    if not snapshot.active:
+        return f"; resident parts not measured: my memory is not active ({snapshot.store_status.get('state')})"
+    gone, spec, sizes = dict(level.addressed), snapshot.spec, []
+    ordinary = [mark for mark in snapshot.marks if not mark.get("late_review")]
+    if ordinary:  # the same piece the view's room price keeps (``memory_view._room_parts``)
+        chars = snapshot.piece(("marks",), lambda: mv._marks_text(ordinary))
+        sizes.append(f"marks block {floor.tokens_of(chars):,} ({len(ordinary)} marks)")
+    elif spec.marks != "none":
+        sizes.append("marks none")
+    if spec.story:
+        told: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in snapshot.story:
+            if entry.get("told_by"):
+                told.setdefault(entry["told_by"], []).append(entry)
+        accounts = [entry for entry in snapshot.story if entry.get("kind") == "account" and not entry.get("told_by")]
+        chars = sum(mv.json_chars("\n".join(mv._page_lines(entry) + mv._told_lines(entry["id"], told))) for entry in accounts)
+        sizes.append(f"selected accounts {floor.tokens_of(chars):,} ({len(accounts)})" if accounts else "selected accounts none")
+    room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
+    if room:
+        steps = tuple((step, gone.get(step, ())) for step in mv._ROOM_STEPS)
+        sizes.append(f"this room's block {floor.tokens_of(snapshot.piece(('room', steps), lambda: mv._room_text(room, gone))):,}")
+    if not sizes:
+        return ""
+    return (f"; resident here, measured {utc_now_iso().replace('T', ' ')[:16]} UTC ({RESIDENT_BASIS}): "
+            + ", ".join(sizes))
+
+
+def resident_marks(root, plan) -> Dict[str, Any]:
+    """The ``memory_mark`` receipt's total: the marks block this focus's view draws (its captured spec, over the acting
+    marks as they stand after the change), the same text and price ``resident_fact`` reads at the next capture. A
+    focus without a captured view that keeps marks gets the fact that it was not measured, never a number."""
+    from ouroboros.chronicle_store import ChronicleStore
+
+    snapshot = memory_snapshot(plan) if plan is not None else None
+    if snapshot is None or snapshot.spec.marks == "none":
+        return {"measured": False, "why": "this focus holds no captured view that keeps marks"}
+    try:
+        marks = [mark for mark in mv._capture_marks(ChronicleStore(root), snapshot.spec, mv.room_labeler(root))
+                 if not mark.get("late_review")]
+    except (OSError, TimeoutError, ValueError) as exc:  # the change is saved; only this total is unread
+        return {"measured": False, "why": f"the marks could not be read: {type(exc).__name__}"}
+    chars = mv.json_chars(mv._marks_text(marks)) if marks else 0
+    return {"marks": len(marks), "tokens": floor.tokens_of(chars), "basis": RESIDENT_BASIS + ", read after this change"}
 
 
 _SHORT_BASIS = {"request": " with no memory", "route": " with no memory and no tool schemas"}  # ``lowered_need``

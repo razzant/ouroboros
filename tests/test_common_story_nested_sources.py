@@ -1,8 +1,11 @@
 """Retained source changes survive common-account replacement without rewriting its basis."""
 from __future__ import annotations
 
+import re
+
 import pytest
 
+from ouroboros import memory_view as mv
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.tools.chronicle import _memory_read
 from tests._memory_inventory_shared import MIND
@@ -54,13 +57,15 @@ def test_selected_account_keeps_changes_inside_its_retained_sources(tmp_path, so
     for text in (block, document):
         assert marker in text and f"{change_kind} of nested source page {target}" in text
         assert f"via {inner}" in text and event["id"] in text and event["ts"] in text
-        assert f"memory_read(node_id='{event['id']}')" in text and "root, task t1" in text
-        assert "original account text unchanged" in text
+        assert "root, task t1" in text and "original account text unchanged" in text
         if source_kind == "account":
             assert f"cited revision {target}" in text
         else:
             assert "member revision was not recorded" in text
             assert f"cited revision {target}" not in text
+    # The reader prints each change's own reader; the story states the readers once and prints the id once.
+    assert f"memory_read(node_id='{event['id']}')" in document and f"memory_read(node_id='{event['id']}')" not in block
+    assert block.count(event["id"]) == 1 and "memory_read(node_id='<change id>') reads a change" in block
     assert _story(tmp_path, KID) == selected
     assert _journal(tmp_path) == journal  # all interpretations and renderings are reads
     assert all(store.get(ident) == record for ident, record in original.items())
@@ -137,3 +142,96 @@ def test_nested_graph_uses_each_frozen_revision_and_keeps_many_to_many_and_local
     read = _memory_read(_ctx(tmp_path), **entry["cited_source"]["read"]["arguments"])
     assert first["text"] in read and last["text"] not in read  # the frozen revision A, not the later change B
     assert _journal(tmp_path) == before
+
+
+def nested_world(root):
+    """Accounts nested five deep over pages, a part and a helper's draft, then signed changes after every citation:
+    corrections of cited pages (a cited revision), of a part's member (no recorded member revision) and my
+    acceptance of the draft. ``{name: id}``; the corrections under ``fixes``."""
+    _world, alpha, _beta, a1, b1, h1 = _rooms(root)
+    store = ChronicleStore(root)
+    p2 = _page(root, alpha, 2, 3, text="Alpha's first question, answered.")
+    part = _part(root, alpha, [a1, p2], text="Alpha, told as one part.")
+
+    def account(text, sources):
+        result = store.publish_account(room_id="1", text=text, sources=sources, author=MIND)
+        assert result.ok, result
+        return result.record["id"]
+
+    acc1 = account("How Alpha and Main met.", [a1, b1])
+    acc2 = account("Alpha as a part, Beta's draft beside it.", [part, h1, a1])
+    acc3 = account("Both tellings at once.", [acc1, acc2])
+    acc4 = account("The same, a season later.", [acc3])
+    acc5 = account("Again, with Main's page read anew.", [acc4, b1])
+    outer = account("The whole arc, told last.", [acc5])
+    assert store.select_account(outer, replaces=[acc5], author=MIND, reason="The latest telling.").ok
+    fixes = []
+    for target, words in ((a1, "Alpha counted twice, not once."), (b1, "The owner asked twice."),
+                          (a1, "Alpha's count was eleven.\nThe second line of that correction."),
+                          (p2, "The first question was about trust."), (b1, "Main's page: the owner's word was 'go on'."),
+                          (a1, "Alpha: the last correction.")):
+        revision = store.interpret([store.get(target)])[0]["revision"]
+        result = store.correct(target, words, MIND, expected_revision=None if revision == target else revision)
+        assert result.ok, result
+        fixes.append(result.record["id"])
+    assert store.decide(h1, True, MIND, "The helper's draft holds.").ok
+    return {"outer": outer, "acc5": acc5, "a1": a1, "b1": b1, "h1": h1, "p2": p2, "part": part, "fixes": fixes}
+
+
+_CHANGE = re.compile(r"- (?P<kind>correction|acceptance|rejection) of nested source (?P<source_kind>\S+) (?P<source>\S+) "
+                     r"\(room (?P<room>[^)]*)\) via (?P<chain>.+?); (?P<basis>cited revision (?P<revision>\S+); later "
+                     r"change not in that source account|part member; member revision was not recorded); "
+                     r"(?P<change>\S+) by mind \((?P<signer>.*)\) at (?P<ts>.+)")
+
+
+def _full_form(story_lines):
+    """The exact reader's lines rebuilt from the story's lines alone, by the readers and chain rule its first line
+    states: what the story prints once each must give back every id, text, path and revision fact."""
+    head, rest, full, above = story_lines[0], story_lines[1:], [], []
+    assert "original account text unchanged" in head and "(first N as above)" in head
+    for line, text in zip(rest[::2], rest[1::2]):
+        found = _CHANGE.fullmatch(line)
+        assert found, line
+        chain = found["chain"].split(" -> ")
+        if chain[0].startswith("(first "):
+            chain = above[:int(chain[0].split()[1])] + chain[1:]
+        above = chain
+        event = "correction" if found["kind"] == "correction" else "decision"
+        revision = f", revision='{found['revision']}'" if found["revision"] else ""
+        full += [f"- {found['kind']} of nested source {found['source_kind']} {found['source']} (room {found['room']}) via "
+                 f"{' -> '.join(chain)}; {found['basis']}; original account text unchanged",
+                 f"  {event} {found['change']} by mind ({found['signer']}) at {found['ts']}; "
+                 f"memory_read(node_id='{found['change']}')", text, f"  source: memory_read(node_id='{found['source']}'{revision})"]
+    return full
+
+
+def test_an_accounts_nested_changes_print_each_id_once_and_give_back_the_readers_lines(tmp_path):
+    """Both directions (K7 b): the story prints every nested change of a shown account with its id once, the shared
+    chain prefix by count and the readers once; rebuilt by the rule it states, that form is the exact account reader's
+    form line for line, and the reader still prints it whole. Every correction id, text, chain and revision fact
+    reaches the story, and the story is shorter."""
+    from ouroboros.memory_view_account import source_change_lines, story_change_lines
+    from ouroboros.tools.chronicle import _memory_read
+
+    ids = nested_world(tmp_path)
+    story, document = _story(tmp_path), _memory_read(_ctx(tmp_path), node_id=ids["outer"])
+    block = _block(story, ids["outer"])
+    shown = next(entry for entry in _snapshot(tmp_path).story if entry["id"] == ids["outer"])
+    sources = [src for src in shown["sources"] if src.get("nested_changes")]
+    assert sources and sum(len(src["nested_changes"]) for src in sources) >= 12
+    bases = {change.get("revision") is None for src in sources for change in src["nested_changes"]}
+    assert bases == {True, False}  # cited revisions and part members alike
+    assert max(len(change["via"]) for src in sources for change in src["nested_changes"]) >= 5
+    for src in sources:
+        compact, full = story_change_lines(src), source_change_lines(src)
+        assert _full_form(compact) == full
+        assert "\n".join(compact) in block and "\n".join(full) in document and "\n".join(full) not in block
+        for line in compact[1::2]:  # each change line names its change and its source once
+            found = _CHANGE.fullmatch(line)
+            assert line.count(found["change"]) == 1 and line.replace(found["basis"], "").count(found["source"]) == 1
+    for fix in ids["fixes"]:
+        record = ChronicleStore(tmp_path).get(fix)
+        assert fix in block and record["text"].split("\n")[0] in block
+        assert f"memory_read(node_id='{fix}')" in document and f"memory_read(node_id='{fix}')" not in block
+    assert "The helper's draft holds." in block and "part member; member revision was not recorded" in block
+    assert mv.json_chars(block) < mv.json_chars("\n".join(line for src in sources for line in source_change_lines(src)))

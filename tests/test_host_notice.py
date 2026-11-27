@@ -594,6 +594,32 @@ def test_a_refused_calls_window_line_credits_the_catalogue_only_for_its_own_numb
     assert "estimate" in need_line(provider)
 
 
+def test_a_window_no_catalogue_declared_is_credited_to_its_own_source_never_to_the_catalogue():
+    """Both directions (Astra REV2 4.3): a custom adapter that declares no window refuses on a limit a recorded
+    refusal supplied; Details credit that number to the refusal with its date, say the catalogue declares none and
+    print neither the catalogue's source nor its date. Without the limit's record the source is said to be
+    unrecorded, still not the catalogue's. A window equal to the catalogue's declaration keeps the catalogue's credit."""
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+
+    window_line = lambda said: next(line for line in said["notice"]["details"].splitlines() if line.startswith("Window"))
+    bare = RouteFacts(None, None, 10_000, "estimator", "No published window", "2026-10-21")
+    refused = {"tokens": 80_000, "kind": "total", "source": "refusal", "observed_at": "2026-11-25T10:02:00+00:00",
+               "basis": "anchored_estimate"}
+    line = window_line(capacity_notice("Voice", bare, stage="session_candidate", need=90_000, measured=True,
+                                       reserve=10_000, window=80_000, limit=refused))
+    assert "80,000" in line and "source: refusal" in line and "2026-11-25 10:02" in line
+    assert "derived from a refusal that stated no number" in line and "declares no window" in line
+    assert "No published window" not in line and "2026-10-21" not in line
+    unrecorded = window_line(capacity_notice("Voice", bare, stage="task_preparation", need=90_000, measured=False,
+                                             reserve=10_000, window=80_000))
+    assert "not recorded with this refusal" in unrecorded and "No published window" not in unrecorded
+    declared = RouteFacts(80_000, None, 10_000, "estimator", "retention probes", "2026-10-21")
+    equal = window_line(capacity_notice("Voice", declared, stage="session_candidate", need=90_000, measured=True,
+                                        reserve=10_000, window=80_000, limit=refused))
+    assert "retention probes" in equal and "2026-10-21" in equal and "refusal" not in equal and equal.count("80,000") == 1
+
+
 def test_an_unmeasured_call_refusal_lists_its_parts_and_does_not_call_them_the_fixed_part_alone():
     from ouroboros.contracts.realtime import RouteFacts
     from ouroboros.realtime_setup import capacity_notice
