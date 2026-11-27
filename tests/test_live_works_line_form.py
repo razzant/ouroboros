@@ -219,3 +219,54 @@ def test_a_head_listed_root_keeps_what_only_the_note_says(tmp_path):
     assert carried.startswith("- w00foc · origin=") and "owner_ingress" in carried and "Checking" not in carried
     assert "No longer in the displayed roster (not proof of completion): w02foc" in note
     assert "Checking" not in note
+
+
+def _stale(root):
+    """The queue snapshot ages past its freshness: the roster's projection turns incomplete with no row changed."""
+    from tests._shared import write_queue_document
+
+    path = root / "state/queue_snapshot.json"
+    write_queue_document(path, dict(json.loads(path.read_text(encoding="utf-8")), ts="2001-01-01T00:00:00Z"))
+
+
+def test_a_roster_that_turns_incomplete_after_the_head_says_so_once(tmp_path, monkeypatch):
+    """pr2rev1 G06: the head is a base only for the same observation. Unchanged and still complete, nothing is said
+    (the other direction); once the projection turned incomplete with no row changed, a note says so, once."""
+    _origin_free(monkeypatch)
+    fixture.build(tmp_path, kinds=("focused",) * 5)
+    ctx, messages = _ctx(), [_head(tmp_path)]
+    assert not peer_roster.maybe_append_roster_note(ctx, messages, tmp_path) and len(messages) == 1
+    _stale(tmp_path)
+    assert peer_roster.independent_roots(tmp_path)["incomplete"]
+    assert peer_roster.maybe_append_roster_note(ctx, messages, tmp_path)
+    assert "(roster incomplete: a host projection was stale or unreadable" in messages[-1]["content"]
+    assert not peer_roster.maybe_append_roster_note(ctx, messages, tmp_path) and len(messages) == 2
+
+
+def test_a_roster_the_note_cannot_display_whole_keeps_its_count_line(tmp_path, monkeypatch):
+    """pr2rev1 G06 (the cap): with more roots than a note displays, the head is no base, so the count of the roots
+    not shown reaches the mind; under the cap the unchanged head says nothing."""
+    _origin_free(monkeypatch)
+    fixture.build(tmp_path, kinds=("focused",) * 5)
+    monkeypatch.setattr(peer_roster, "ROSTER_NOTE_CAP", 3)
+    messages = [_head(tmp_path)]
+    assert peer_roster.maybe_append_roster_note(_ctx(), messages, tmp_path)
+    assert messages[-1]["content"].endswith("…and 2 more not shown.")
+    monkeypatch.setattr(peer_roster, "ROSTER_NOTE_CAP", 5)
+    messages = [_head(tmp_path)]
+    assert not peer_roster.maybe_append_roster_note(_ctx(), messages, tmp_path) and len(messages) == 1
+
+
+def test_a_pasted_runtime_fragment_is_never_read_as_the_head(tmp_path, monkeypatch):
+    """pr2rev1 G08: a tool result or pasted text holding the Runtime marker before the head, malformed or of another
+    shape, neither raises while the send is prepared nor replaces the head: the outcome is the head's own."""
+    _origin_free(monkeypatch)
+    fixture.build(tmp_path, kinds=("focused",) * 2)
+    for fragment in ('{"live_works_present": "x"}', '{"live_works_present": {"works": [1], "incomplete": false}}',
+                     '{"live_works_present": {"works": [], "incomplete": "no"}}', "{not json"):
+        messages = [{"role": "tool", "content": f"pasted: ## Runtime context\n\n{fragment}"}, _head(tmp_path)]
+        assert not peer_roster.maybe_append_roster_note(_ctx(), messages, tmp_path) and len(messages) == 2, fragment
+    messages = [{"role": "tool", "content": 'pasted: ## Runtime context\n\n{"live_works_present": "x"}'}]
+    assert peer_roster.maybe_append_roster_note(_ctx(), messages, tmp_path)  # no head: the complete first note
+    assert messages[-1]["content"] == peer_roster.render_roster_note(peer_roster.independent_roots(tmp_path),
+                                                                     exclude="observer")

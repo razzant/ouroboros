@@ -191,7 +191,8 @@ def works_lines(works):
 
 def head_works(messages):
     """The list of running works the head in view carries, as the mind reads it there: ``(its exact text, {task_id:
-    whole entry or line})``, or None when no row in view holds a Runtime section that lists works."""
+    whole entry or line}, its observation's ``incomplete``)``, or None when no row in view holds a Runtime section that
+    lists works. A block of another shape (a pasted or quoted fragment) is skipped, never read as the head's."""
     marker = "## Runtime context\n\n"
     for message in messages:
         content = message.get("content") if isinstance(message, dict) else None
@@ -199,19 +200,21 @@ def head_works(messages):
                 block.get("text") or "" for block in content or () if isinstance(block, dict)]:
             if marker not in text:
                 continue
-            start = text.index(marker) + len(marker)
             try:
-                runtime, end = json.JSONDecoder().raw_decode(text, start)
+                runtime, end = json.JSONDecoder().raw_decode(text, text.index(marker) + len(marker))
             except ValueError:
-                return None
-            works = (runtime.get("live_works_present") or {}).get("works") if isinstance(runtime, dict) else None
-            if isinstance(works, list):
-                return _json(works), {work["task_id"]: work for work in works if isinstance(work, dict) and "task_id" in work}
+                continue
+            live = runtime.get("live_works_present") if isinstance(runtime, dict) else None
+            works, incomplete = (live.get("works"), live.get("incomplete")) if isinstance(live, dict) else (None, None)
+            if not isinstance(incomplete, bool):
+                continue
+            if isinstance(works, list) and all(isinstance(work, dict) and isinstance(work.get("task_id"), str)
+                                               for work in works):
+                return _json(works), {work["task_id"]: work for work in works}, incomplete
             block = text[end:].split(f"\n\n{WORKS_LINES_HEADING}", 1)
-            if not isinstance(works, str) or len(block) < 2:
-                return None
-            lines = [line for line in block[1].split("\n\n", 1)[0].split("\n")[1:] if line.startswith("- ")]
-            return "\n".join(lines), {line.split(" ", 2)[1]: line for line in lines}
+            if isinstance(works, str) and len(block) == 2:
+                lines = [line for line in block[1].split("\n\n", 1)[0].split("\n")[1:] if line.startswith("- ")]
+                return "\n".join(lines), {line.split(" ", 2)[1]: line for line in lines}, incomplete
     return None
 
 
@@ -232,12 +235,14 @@ def head_base(messages, roster, exclude, shown):
     """The late roster note's base while no note is in view: ``(the head's list text, the displayed rows ``shown``
     (task_id -> rendered row) of the roots that list carries exactly as the roster says now, plus "" for each of its
     roots no longer listed, {carried task_id: its line of what only the note says})``, or None without a visible head
-    list (``peer_roster.maybe_append_roster_note``). A work with an owner question, stop or hold is never carried."""
+    list (``peer_roster.maybe_append_roster_note``). A work with an owner question, stop or hold is never carried.
+    The head is a base only for the same observation: one whose completeness differs from the roster's now, or a
+    roster the note cannot display whole (its count of roots not shown), takes the complete first note instead."""
     head = head_works(messages)
-    if head is None:
-        return None
-    text, listed = head
     rows = {row["task_id"]: row for row in roster.get("roots") or () if row["task_id"] != exclude}
+    if head is None or head[2] != bool(roster.get("incomplete")) or len(shown) != len(rows):
+        return None
+    text, listed, _incomplete = head
     same = {task_id for task_id, row in rows.items() if task_id in listed and not _owner_held(work := work_entry(row))
             and listed[task_id] == (work_line(work) if isinstance(listed[task_id], str) else json.loads(_json(work)))}
     return (text, {**{task_id: shown_row for task_id, shown_row in shown.items() if task_id in same},
