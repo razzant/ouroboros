@@ -33,8 +33,12 @@ def _open(browser, engine, width, theme):
     template = catalog["items"][0]
     for row in rows:
         row["submit_hub"] = {"visible": True, "task_start_allowed": True, "publication_ready": True, "state": "ready"}
+        # The catalog lists the release the host offers as the update: Browse acts only on the exact release its
+        # card shows (skill_browse.js `offeredUpdate`), and a real listing names the files the update would install.
+        offered = row.get("install", {}).get("update_available") or {}
+        release = {key: offered[key] for key in ("version", "digest") if offered.get(key)}
         catalog["items"].append({**template, "id": f"ouroboros/{row['name']}", "name": row["name"],
-                                 "source_id": "ouroboros", "source_name": "Ouroboros", "recommended": False})
+                                 "source_id": "ouroboros", "source_name": "Ouroboros", "recommended": False, **release})
     skills = open_skills(page, extensions=rows, sources=sources, catalog=catalog)
     page.goto(URL, wait_until="networkidle", timeout=120_000)
     page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)

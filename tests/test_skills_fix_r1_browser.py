@@ -104,7 +104,11 @@ def test_acceptance_and_update_outcomes(skills_browser, browser_name, width, the
             _contained(page)
             if name == 'self_checked':
                 detail = fixture('skill_catalog_item.json')
-                detail['item'].update(name=name, source_id='ouroboros', source_name='Ouroboros')
+                # The catalog's entry for the installed release: the sheet borrows catalog prose only for the files
+                # that are installed (skills.js `matchesRelease`), never another release's.
+                shown = next(row for row in fixture('extensions_fix_r1.json')['skills'] if row['name'] == name)
+                detail['item'].update(name=name, id=f'ouroboros/{name}', source_id='ouroboros', source_name='Ouroboros',
+                                      version=shown['version'], digest=shown['content_hash'])
                 skills.answers[f'/api/skill-catalog/item/ouroboros/{name}'] = detail
                 card.locator('.skills-card-name').click()
                 sheet = page.locator('.skills-detail-sheet')
