@@ -266,6 +266,26 @@ def test_the_header_line_stands_on_the_lights_centre_and_an_older_shell_keeps_th
     assert line["header"] == pytest.approx(TOP, abs=0.6) and line["card"] >= TOP, line
 
 
+def test_the_search_capsule_is_a_text_target_and_the_band_beside_it_drags(subscription_ui):
+    """Find a project stands in the title band: its glyph, its padding and its words are the field's (a press focuses
+    the words, a double press never zooms the window); the empty band beside the lights stays the window's handle."""
+    page = shell_page(subscription_ui, 1100)
+    apply(page, mid=MID)
+    capsule = box(page, "#primary-sidebar .nav-projects-find")
+    glyph = box(page, "#primary-sidebar .nav-find-glyph")
+    words = box(page, "#primary-sidebar .nav-find-input")
+    middle = capsule["y"] + capsule["height"] / 2
+    for x in (glyph["x"] + glyph["width"] / 2, capsule["x"] + 2, words["x"] + 20):
+        page.evaluate("document.activeElement?.blur()")
+        page.mouse.click(x, middle)
+        assert page.evaluate("document.activeElement?.classList.contains('nav-find-input')"), x
+        page.mouse.dblclick(x, middle)
+    assert drags(page) == [], "no part of the capsule is the window's handle"
+    page.mouse.click(150, 3)  # the empty band above it
+    page.mouse.dblclick(150, 3)
+    assert drags(page) == ["drag", "drag", "double-click"]
+
+
 def test_narrow_layouts_start_past_the_traffic_lights(subscription_ui):
     ui = subscription_ui
     page = shell_page(ui, 600)  # the drawer layout

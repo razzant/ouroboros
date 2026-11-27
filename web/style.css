@@ -9358,6 +9358,7 @@ body.keyboard-open :is(#page-chat, .chat-instance-panel, .project-panel)[data-sh
     transition: var(--motion-tone);
 }
 .nav-projects-find[hidden] { display: none; }
+.nav-projects-find, .nav-projects-find > .nav-find-glyph { cursor: text; }  /* the whole capsule is the field */
 .nav-projects-find[data-focused] {
     outline-width: 2px;
     outline-offset: -2px;
