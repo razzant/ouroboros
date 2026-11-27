@@ -2,7 +2,7 @@
 
 The ordinary build (``context.build_context_fit_plan``) over the real checkout and a private synthetic drive
 (``tests/_memory_scale_fixture.install``); routes are stub resolvers shaped as the call catalogues answer. The bound
-never refuses a request the full fit admits: ``test_the_bound_never_exceeds_the_fitted_minimum``.
+never refuses a start a completed capture of the same state would fit: ``test_the_bound_never_exceeds_the_fitted_minimum``.
 """
 from __future__ import annotations
 

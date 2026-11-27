@@ -16,20 +16,29 @@ envelopes. The texts are priced as the fitter prices them (``memory_view.json_ch
 four, plus ``tool_schema_tokens`` of the Nano selection ``context_fit._frame_choices`` makes), against the Nano reserve
 and window of the same route frame (``context_fit.route_window``). The density is 1.0 on an estimator-basis window and
 otherwise the lowest fresh witness of the route (``capability_evidence.lowest_main_token_density``), never the newest
-one the fit applies: the bound never refuses a request the full fit admits.
+one the fit applies: the bound never refuses a start that a completed capture of the same state would fit.
 
-The route is looked at without consuming or fetching: an arrived ``RouteQuestion`` answer (``peek``), or any other
-resolver asked with ``allow_fetch=False``; no answer, an unknown window or a failed read means no bound. An answer
-taken beside the build never refuses by itself (owner, 12.11): the same question is asked again at the usual point and
-only a second refusal stands. Any failure inside the bound other than its refusal means no bound; the start goes on to
-the full fit unchanged. The refusal is ``context_fit.MinimumViewUnfit`` with ``memory_measured`` False and the frame's
-named ``parts``; ``refusal_parts`` names the parts of the fitter's own refusals the same way. Those name core,
-assignment, control-tool and work-room nonfit, protected owner words beside the minimum view, or a directly required
-handbook; a cold start's Nano frame whose fixed part alone overflows is refused there without rendering memory, and
-says so (``memory_measured`` False) rather than reporting an unmeasured memory as 0.
+Order of reads: the cheap exclusions (a declared input, a held-note resume, a child), then the route, looked at
+without consuming or fetching: an arrived ``RouteQuestion`` answer (``peek``), or any other resolver asked with
+``allow_fetch=False``. No answer, an unknown window or a failed read means no bound, and nothing of the start is read
+here; only a known window reads the view spec (a delegated role then gets no bound), the frame texts and the density.
+An answer taken beside the build never refuses by itself (owner, 12.11): the same question is asked again at the usual
+point and only a second refusal stands. Any failure inside the bound other than its refusal means no bound; the start
+goes on to the full fit unchanged.
 
-Residual: a chronicle readable here and unreadable seconds later at the capture would have had its marks counted
-though the degraded view would not show them; the refusal is still true for the state it measured.
+Where it applies: a resolver asked without fetching (a call's route, ``turn.resolve_route``) and a ``RouteQuestion``
+whose answer has arrived (a Claudexor text start). A text start whose question has no key (every other provider) gets
+no early bound: the full fit decides.
+
+The refusal is ``context_fit.MinimumViewUnfit`` with ``memory_measured`` False and the frame's named ``parts``;
+``refusal_parts`` names the parts of the fitter's own refusals the same way. Those name core, assignment, control-tool
+and work-room nonfit, protected owner words beside the minimum view, or a directly required handbook; a cold start's
+Nano frame whose fixed part alone overflows is refused there without rendering memory, and says so
+(``memory_measured`` False) rather than reporting an unmeasured memory as 0.
+
+Residual: the marks are counted from a chronicle readable here. A capture that fails anywhere and degrades (any
+unreadable memory source) shows no marks, so where the marks decide the refusal, that memory-less start would have
+been admitted on this route and is refused. The refusal is true for the healthy state, and its Details name the marks.
 """
 from __future__ import annotations
 

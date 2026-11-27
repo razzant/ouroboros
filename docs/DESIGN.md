@@ -2475,10 +2475,13 @@ where the platform allows; dictation still stops on hide. End, Stop, Panic,
 pagehide, device loss, unload and a successful Calls-off read end them. A call
 the room's context cannot fit into the selected engine's window leaves one System
 line and nothing else: the engine, what the room needs (or at least needs, when
-memory was not measured) and what the engine takes; the stage, window, reserve
-and parts behind Details; the Calls (beta) settings as its step. Its sheet says
-so calmly with Open Calls. An End pressed while the call prepared stays the
-owner's End. Failed
+memory was not measured) and what the engine takes; the stage, window and
+reserve behind Details, with the parts when the room's own context was refused,
+and the request measured whole with the call's instructions and tools when the
+call's setup was; the Calls (beta) settings as its step. Its sheet says so
+calmly with Open Calls. An End pressed while the call prepared stays the
+owner's End: before the call opened it reads "Call ended before it started." on
+the room's row and on every connected sheet. Failed
 configuration reads keep the last good value; mount, focus, visible return and
 successful Settings saves refresh it. There is no call time cap or separate
 per-call reserve; the ordinary shared spending limit applies. The feature's
