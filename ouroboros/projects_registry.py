@@ -822,9 +822,12 @@ _UNREADABLE_SAID: set = set()  # the causes of an unknown room set this process 
 def readable_rooms(drive_root: Any) -> Optional[set]:
     """The chat ids the registry's readable rows reserve (a healthy row survives an invalid neighbour). ``None``
     when the registry names no room it can vouch for: it cannot be read, is missing with surviving evidence, or
-    holds rows none of which is readable. That is an unknown set, never "no Projects"."""
+    holds rows none of which is readable. That is an unknown set, never "no Projects". A missing file is "no
+    Projects" only on the root's first use, the rule Main's history decides its readiness by
+    (``room_archive.registry_reservations``): task bindings or another trace surviving it make it unknown."""
     try:
-        return {project["chat_id"] for project in list_reserved_projects(drive_root, require_readable=True)}
+        snapshot = display_registry_snapshot(drive_root, require_readable=True, require_known_absence=True)
+        return {project["chat_id"] for project in snapshot["projects"]}
     except Exception as error:
         # Main's saved history and the room set wait on this answer, and a broken registry can outlast a restart:
         # its cause is named once a process and cause, where a person reading the log looks.

@@ -272,6 +272,28 @@ def test_chat_inject_reviewed_skill_cannot_bind_panic_owner(tmp_path: pathlib.Pa
     assert not bridge.stopped.is_set()
 
 
+@pytest.mark.parametrize("ids,code,stopped", [((17, 17), 202, True), ((0, 0), 503, False), ((17, -1005), 503, False)])
+def test_first_panic_on_a_fresh_install_stops_and_binds_nobody(tmp_path: pathlib.Path, panic_bridge, ids, code,
+                                                                stopped) -> None:
+    from supervisor import state
+
+    _seed_token(tmp_path, permissions=["inject_chat"])
+    state.init(tmp_path)
+    state.init_state()
+    fresh = state.load_state()
+    assert fresh.get("owner_external_id") is None and fresh.get("initialization_id")
+    panic_bridge.panic.observe_owner(fresh)  # what the server does when it publishes the bridge
+    client = TestClient(create_host_service_app(tmp_path, bridge_getter=lambda: panic_bridge))
+
+    response = client.post("/chat/inject", headers={"X-Skill-Token": "token"},
+                           json={"text": "/panic", "user_id": ids[0], "chat_id": ids[1]})
+
+    assert response.status_code == code, response.text
+    assert panic_bridge.stopped.wait(2) is stopped
+    assert panic_bridge.messages == []
+    assert state.load_state().get("owner_external_id") is None  # the emergency path wrote no owner
+
+
 def test_presence_turn_resolves_binding_and_returns_typed_result(tmp_path: pathlib.Path) -> None:
     _seed_token(
         tmp_path,

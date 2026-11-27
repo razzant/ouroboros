@@ -476,11 +476,23 @@ def test_non_ascii_and_control_character_paths_are_read_whole_and_outputs_stay_o
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "base")
     base = git(repo, "rev-parse", "HEAD")
-    (repo / "web/настройки.css").write_text("1")
-    (repo / "web/tab\tname.css").write_text("1")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "head")
-    [commit] = sel.window_commits(base, "HEAD", cwd=repo)
+    # A TAB is not a legal Windows file name character, and git for Windows refuses it in the index: build the head
+    # commit from tree objects only (`mktree -z`, `commit-tree`), so git holds the exact path bytes the parser must
+    # read whole on every platform without the file ever existing on disk or in an index.
+    def plumbing(*args, data=b""):
+        return subprocess.run(["git", *args], cwd=repo, input=data, check=True, capture_output=True).stdout.decode().strip()
+
+    def blob(text):
+        return plumbing("hash-object", "-w", "--stdin", data=text.encode())
+
+    def tree(*entries):
+        return plumbing("mktree", "-z", data=b"".join(
+            f"{mode} {kind} {sha}\t{name}".encode() + b"\0" for mode, kind, sha, name in entries))
+
+    web = tree(("100644", "blob", blob("0"), "a.css"), ("100644", "blob", blob("1"), "настройки.css"),
+               ("100644", "blob", blob("1"), "tab\tname.css"))
+    head = plumbing("commit-tree", "-p", base, "-m", "head", tree(("040000", "tree", web, "web")))
+    [commit] = sel.window_commits(base, head, cwd=repo)
     assert commit["files"] == ["web/tab\tname.css", "web/настройки.css"]
     applies, why = sel.applicability(["web/a\nb=1.css"], {})
     assert applies and "\n" not in sel.one_line(why) and sel.one_line(why).endswith("web/a\\nb=1.css")

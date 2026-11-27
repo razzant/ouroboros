@@ -1120,7 +1120,8 @@ def test_sm1_changes_the_shared_palette_for_both_documents():
     assert len(text.splitlines()) == len(original.splitlines())
     palette = scenarios.sm1_palette_tokens(text)
     assert scenarios.SM1_REQUIRED_PALETTE <= palette.keys() and all(palette.values())
-    assert all(f"--accent-{alpha}" in palette for alpha in ("08", "10", "12", "14", "18", "22", "25", "35", "45", "55"))
+    # The ladder the shared sheet defines; --accent-35 retired with its last reader, the staged-file rim (#4366).
+    assert all(f"--accent-{alpha}" in palette for alpha in ("08", "10", "12", "14", "18", "22", "25", "45", "55"))
     for document, prefix in (("web/index.html", "/static"), ("web/onboarding_template.html", "/onboarding/static")):
         assert f'href="{prefix}/ui.css"' in (REPO_ROOT / document).read_text(encoding="utf-8")
 
