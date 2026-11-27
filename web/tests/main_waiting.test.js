@@ -371,6 +371,12 @@ test('a wake held at its daily share says what its Resume may add beside it; not
     const off = held({ resume_additional_usd: 5 });
     main.waiting.snapshot({ ...off, bg_consciousness_enabled: false });
     assert.equal(reason('wake-held'), budget, 'consciousness off: nothing promised');
+    // Held by the total budget, its card names that budget and what resumes it; another task keeps the general words.
+    main.waiting.snapshot(held({ cause: 'total_budget', ceiling_usd: null }));
+    assert.equal(reason('wake-held'), 'Paused: the total budget was spent. Raise Total budget in Costs, then Resume.');
+    assert.equal(reason('other-task'), budget);
+    main.waiting.snapshot({ ...held({ cause: 'total_budget', ceiling_usd: null }), bg_consciousness_enabled: false });
+    assert.equal(reason('wake-held'), budget, 'consciousness off: no wake is proven held');
 });
 
 test('the reason names what the task needs from the owner', t => {
