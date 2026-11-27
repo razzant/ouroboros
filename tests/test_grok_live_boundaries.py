@@ -198,3 +198,101 @@ def test_a_message_of_several_text_parts_is_one_part_on_the_wire():
     assert item_matches(sent, {**sent, 'status': 'completed', 'content': [dict(sent['content'][0])]})
     [single] = item_rows({'role': 'user', 'content': 'Exact words'})
     assert single['content'] == [{'type': 'input_text', 'text': 'Exact words'}]
+
+
+# xAI's session.updated echo as recorded by the paid probe of 27.11.2026 (sprint call-fit-20261125,
+# probes/grok/sessions/g01-mem-75k-r1/events.jsonl, t=3.601 and t=3.947). Instructions and tools are
+# left to the fake wire's own echo; these are the fields the recording holds verbatim.
+RECORDED_TUNING = {"threshold": 0.85, "silence_duration_ms": 500, "prefix_padding_ms": 333}
+RECORDED_FIRST_ECHO = {
+    "turn_detection": {"type": "client_controlled", **RECORDED_TUNING},
+    "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "transport": "json",
+                        "turn_detection": {"type": "client_controlled", **RECORDED_TUNING}},
+              "output": {"format": {"type": "audio/pcm", "rate": 24000}, "transport": "json", "voice": "Ara"}},
+    "reasoning": {"effort": "none"}, "voice": "Ara", "model": "grok-voice-3.0",
+}
+RECORDED_SECOND_ECHO = {
+    **RECORDED_FIRST_ECHO,
+    "turn_detection": {"type": "server_vad", **RECORDED_TUNING},
+    "audio": {"input": {**RECORDED_FIRST_ECHO["audio"]["input"],
+                        "turn_detection": {"type": "server_vad", **RECORDED_TUNING}},
+              "output": RECORDED_FIRST_ECHO["audio"]["output"]},
+}
+
+
+def _changed(echo, path, value):
+    echo = copy.deepcopy(echo)
+    *parents, last = path
+    node = echo
+    for key in parents:
+        node = node[key]
+    node[last] = value
+    return echo
+
+
+class RecordedEchoWire(AddedWire):
+    """Answers each session.update with the fake's echo overlaid by the recorded xAI fields."""
+
+    def __init__(self, first=RECORDED_FIRST_ECHO, second=RECORDED_SECOND_ECHO, tools=None):
+        super().__init__()
+        self.answers = [first, second]
+        self.tools = tools
+
+    def put(self, value):
+        if value.get("type") == "session.updated" and self.answers:
+            session = {**value["session"], **copy.deepcopy(self.answers.pop(0))}
+            if self.tools is not None and "tools" in session:
+                session["tools"] = self.tools
+            value = {"type": "session.updated", "session": session}
+        super().put(value)
+
+
+def test_recorded_echo_opens_a_session(providers, captured):
+    async def run():
+        adapter = make(providers, RecordedEchoWire(), captured)
+        try:
+            await asyncio.wait_for(adapter.open(), 1)
+            assert (await adapter.receive())[0].kind == "ready"
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("first,second,changed", [
+    (_changed(RECORDED_FIRST_ECHO, ("audio", "input", "format", "rate"), 16000), RECORDED_SECOND_ECHO, "audio"),
+    (_changed(RECORDED_FIRST_ECHO, ("audio", "output", "format", "rate"), 16000), RECORDED_SECOND_ECHO, "audio"),
+    (_changed(RECORDED_FIRST_ECHO, ("audio", "input", "format", "type"), "audio/pcmu"), RECORDED_SECOND_ECHO, "audio"),
+    (_changed(RECORDED_FIRST_ECHO, ("audio", "output", "transport"), "binary"), RECORDED_SECOND_ECHO, "audio"),
+    (_changed(RECORDED_FIRST_ECHO, ("turn_detection", "type"), "server_vad"), RECORDED_SECOND_ECHO, "turn_detection"),
+    (_changed(RECORDED_FIRST_ECHO, ("audio", "input", "turn_detection", "type"), "server_vad"),
+     RECORDED_SECOND_ECHO, "audio"),
+    (RECORDED_FIRST_ECHO, _changed(RECORDED_SECOND_ECHO, ("turn_detection", "type"), "client_controlled"),
+     "turn_detection"),
+    (RECORDED_FIRST_ECHO, _changed(RECORDED_SECOND_ECHO, ("turn_detection",), None), "turn_detection"),
+    (RECORDED_FIRST_ECHO, RECORDED_SECOND_ECHO, "tools"),
+])
+def test_recorded_echo_dialect_still_refuses_a_changed_session(providers, captured, first, second, changed):
+    async def run():
+        tools = [{"type": "function", "name": "invented_tool", "parameters": {}}] if changed == "tools" else None
+        adapter = make(providers, RecordedEchoWire(first, second, tools), captured)
+        try:
+            with pytest.raises(RealtimeSetupError, match=f"session_mismatch.*Grok changed {changed}"):
+                await asyncio.wait_for(adapter.open(), 1)
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+def test_recorded_echo_at_the_check_seam(providers):
+    module = providers["grok"].module
+    requested = {"turn_detection": None, "reasoning": {"effort": "none"},
+                 "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}},
+                           "output": {"format": {"type": "audio/pcm", "rate": 24000}}}}
+    module.check_session_echo(requested, RECORDED_FIRST_ECHO)
+    module.check_session_echo({"turn_detection": {"type": "server_vad"}}, RECORDED_SECOND_ECHO)
+    with pytest.raises(RealtimeSetupError, match="session_mismatch.*turn_detection"):
+        module.check_session_echo(requested, {**RECORDED_FIRST_ECHO, "turn_detection": RECORDED_SECOND_ECHO["turn_detection"]})
+    with pytest.raises(RealtimeSetupError, match="session_mismatch.*audio"):
+        module.check_session_echo(requested, {**RECORDED_FIRST_ECHO, "audio": RECORDED_SECOND_ECHO["audio"]})
+    with pytest.raises(RealtimeSetupError, match="session_mismatch.*audio"):
+        module.check_session_echo(requested, _changed(RECORDED_FIRST_ECHO, ("audio", "output"), {"transport": "json"}))

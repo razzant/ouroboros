@@ -2,6 +2,8 @@
 
 Protocol: https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech
 Read 2026-10-21; R6 observed outer response.done.usage is retained verbatim.
+Probe 2026-11-27: session.updated echoes a requested null turn_detection as an undocumented
+client_controlled block with tuning fields, and adds turn_detection under audio.input and voice under audio.output.
 """
 from __future__ import annotations
 import base64
@@ -49,25 +51,58 @@ def functions(raw):
 
 
 def session_echo_value(key, value):
-    """Normalize only the two representations observed in xAI session echoes."""
+    """Normalize the observed xAI tool representation in session echoes."""
     if key == 'tools' and isinstance(value, list):
         return [({'type': 'function', **tool['function']}
                  if isinstance(tool, dict) and set(tool) == {'type', 'function'}
                  and tool['type'] == 'function' and isinstance(tool['function'], dict)
                  and 'type' not in tool['function'] else tool) for tool in value]
-    if key == 'audio' and isinstance(value, dict):
-        return {direction: ({k: v for k, v in fields.items()
-                             if not (k == 'transport' and v == 'json')}
-                            if direction in {'input', 'output'} and isinstance(fields, dict)
-                            else fields) for direction, fields in value.items()}
     return value
+
+
+ABSENT = object()
+
+
+def turn_detection_echoed(requested, echoed):
+    # 27.11 probe: null (manual turns) comes back as client_controlled, and a requested
+    # type comes back with xAI's tuning fields added. server_vad never stands for a requested null.
+    if requested is None:
+        return echoed is None or (isinstance(echoed, dict) and echoed.get('type') == 'client_controlled')
+    return isinstance(echoed, dict) and all(k in echoed and echoed[k] == v for k, v in requested.items())
+
+
+def audio_echoed(requested, echoed, turn_detection):
+    # Requested fields (format type and rate) stay exact; of the fields xAI adds, a non-JSON
+    # transport or a nested turn_detection that contradicts the requested one still refuses.
+    if not isinstance(requested, dict) or not isinstance(echoed, dict):
+        return requested == echoed
+    for direction, fields in requested.items():
+        actual = echoed.get(direction)
+        if not isinstance(fields, dict) or not isinstance(actual, dict):
+            if actual != fields:
+                return False
+            continue
+        if (any(k not in actual or actual[k] != v for k, v in fields.items())
+                or actual.get('transport', 'json') != fields.get('transport', 'json')
+                or (turn_detection is not ABSENT and 'turn_detection' in actual
+                    and not turn_detection_echoed(turn_detection, actual['turn_detection']))):
+            return False
+    return True
 
 
 def check_session_echo(requested, actual):
     # Sparse top-level echoes already occur on xAI. For fields it does echo,
-    # keep exact schema/format comparison after the observed shape normalization.
+    # compare what was requested after the observed dialect normalization.
     for key, value in requested.items():
-        if key in actual and session_echo_value(key, actual[key]) != session_echo_value(key, value):
+        if key not in actual:
+            continue
+        if key == 'turn_detection':
+            same = turn_detection_echoed(value, actual[key])
+        elif key == 'audio':
+            same = audio_echoed(value, actual[key], requested.get('turn_detection', ABSENT))
+        else:
+            same = session_echo_value(key, actual[key]) == session_echo_value(key, value)
+        if not same:
             raise RealtimeSetupError('session_mismatch', f'Grok changed {key}')
 
 
@@ -229,15 +264,13 @@ class GrokSession(JsonSession):
                     raise RealtimeSetupError('setup_response', 'Grok responded before input admission completed')
                 if kind in {'conversation.item.deleted', 'conversation.item.truncated'}:
                     raise RealtimeSetupError('provider_truncation', 'Grok removed selected input during setup')
-        await self.write({'type': 'session.update', 'session': {'turn_detection': {'type': 'server_vad'}}})
+        vad = {'turn_detection': {'type': 'server_vad'}}
+        await self.write({'type': 'session.update', 'session': vad})
         while True:
             incoming = await self.read()
             kind = incoming.get('type')
             if kind == 'session.updated':
-                actual = incoming.get('session', {})
-                vad = actual.get('turn_detection')
-                if 'turn_detection' in actual and (not isinstance(vad, dict) or vad.get('type') != 'server_vad'):
-                    raise RealtimeSetupError('session_mismatch', 'Grok changed turn_detection')
+                check_session_echo(vad, incoming.get('session', {}))
                 break
             if kind and kind.startswith('response.'):
                 raise RealtimeSetupError('setup_response', 'Grok responded before input admission completed')
