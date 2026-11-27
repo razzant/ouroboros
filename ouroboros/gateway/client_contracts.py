@@ -231,20 +231,101 @@ class SettingsRestartState(TypedDict, total=False):
     running: Dict[str, Any]
 
 
+class SettingsNetworkMeta(TypedDict):
+    bind_host: str
+    bind_port: int
+    lan_ip: str
+    reachability: Literal["loopback_only", "lan_reachable", "host_ip_unknown"]
+    recommended_url: str
+    warning: str
+
+
+class AvailableSubagentsSettingsMeta(TypedDict, total=False):
+    """Saved/migrated intent returned beside ``GET /api/settings``.
+
+    ``candidate`` is an unsaved canonical object.  Absence stays ``None``; a
+    read never materializes the value on disk.  ``automatic``: the catalog is
+    the read's own, following Main and access until an edit saves one.
+    """
+
+    source: str
+    diagnostic: str
+    diagnostics: list[Dict[str, Any]]
+    candidate: Optional[Dict[str, Any]]
+    automatic: bool
+
+
+class SettingsPolicyAxis(TypedDict, total=False):
+    """Configured/effective owner policy values shown by Settings."""
+
+    configured: str
+    effective: str
+    restart_required: bool
+    pending: bool
+    applies: Literal["restart", "next_task"]
+
+
+class NanoPublicationSettingsMeta(TypedDict, total=False):
+    """Passive Nano 80k facts from ``nano_publication.read_root_sample``.
+
+    ``protecting`` is scoped to checking new memory at the same built-in Main
+    background, independently of the dated exact measurement. The latter prices
+    one root request; it proves neither current room nor future growth. See
+    CLIENT_CONTRACT §9 for unavailable, changed and out-of-scope cases.
+    """
+
+    status: Literal["not_claimed", "protecting"]
+    reason: str
+    protection_scope: Literal["unchanged_main_background"]
+    protection_observed_at: str
+    qualified_background_tokens: int
+    qualified_reply_floor_tokens: int
+    measurement: Literal["exact", "unavailable"]
+    current_sample: Literal["within_limits", "outside_limits", "work_floor_unconfirmed", "unavailable"]
+    pressure: Optional[Dict[str, int]]
+    scope: str
+    observed_at: str
+    observation: Literal["prepared"]
+    context_window: int
+    memory_tokens: int
+    whole_memory_tokens: int
+    reply_floor_tokens: int
+    minimum_reply_allowance_tokens: int
+    minimum_work_headroom_at_reply_floor_tokens: int
+    minimum_work_headroom_at_wire_allowance_tokens: int
+    minimum_input_tokens: int
+    sent_max_tokens: int
+    actual_input_tokens: int
+    actual_work_headroom_at_wire_allowance_tokens: int
+
+
+class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):  # `_meta` of `GET /api/settings`.
+    custom_secret_keys: list[str]
+    setup_contract: Dict[str, Any]
+    available_subagents: AvailableSubagentsSettingsMeta
+    policy_state: SettingsPolicyState
+    restart_state: SettingsRestartState  # Component application and source uncertainty.
+    connections: list[Dict[str, Any]]  # every API connection as the picker shows it, with its opaque ``revision`` (owner_settings): {kind, name, label, builtin, enabled, configured, source, id, display, revision?}
+    main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
+    known_spend_gaps: list[str]  # display labels of groups with unknown prices (pricing.spend_coverage), e.g. model roles, Web search or Agents
+    partly_counted_spend: list[Dict[str, str]]  # {name, condition}: counted only under a price condition (the same), e.g. off_peak_usd or usd
+    nano_publication: NanoPublicationSettingsMeta  # Only when Nano is selected; display, not write authority.
+
+
 class SettingsReadResponse(TypedDict, total=False):
     """``GET /api/settings``: every effective setting key with its value (secrets masked: a
     password-class key reads as the configured placeholder, others as a short prefix plus
     ``...``) and ``_meta``. Sending a masked value back means "unchanged"; ``""`` clears."""
 
-    _meta: _contracts.SettingsMeta
+    _meta: SettingsMeta
 
 
 class SettingsPolicyState(TypedDict):
     """``_meta.policy_state`` of ``GET /api/settings``: configured versus effective Access and Supervisor
     (``gateway.settings._build_policy_state``), plus what a managed deployment's policy fixes."""
 
-    access: _contracts.SettingsPolicyAxis
-    supervisor: _contracts.SettingsPolicyAxis
+    access: SettingsPolicyAxis
+    supervisor: SettingsPolicyAxis
     running_task_snapshot: bool
     deployment: NotRequired[SettingsDeploymentPolicy]  # absent outside a managed deployment
 
@@ -412,6 +493,18 @@ class OwnerSafetyRulesRequest(TypedDict):
 class OwnerSafetyRulesResponse(SettingsReceipt):
     ok: bool
     rules: str
+
+
+class OwnerSafetyRulesNanoRefusal(TypedDict):
+    """The owner-only Save refusal echoes input; the server has not saved a draft."""
+
+    error: str
+    saved: Literal[False]
+    code: Literal["nano_publication_over_capacity", "nano_publication_busy",
+                  "nano_publication_unavailable", "nano_publication_stale",
+                  "nano_publication_bootstrap_pending", "nano_publication_incomplete"]
+    proposed_rules: str
+    nano_reason: str
 
 
 class OwnerSafetyModelRequest(TypedDict):
@@ -922,13 +1015,20 @@ class ScheduleActionRequest(TypedDict):
 # `accept_unknown` returns the opaque IDs of the refusal's `acceptable_unknown`, never reconstructed ones;
 # accepting a delegated start (it needs `reason`) means its external work and costs may continue.
 # `expected_panic_hold_id` comes from `panic_recovery[].panic_hold_id`; a changed or used stop answers 409
-# `panic_selection_changed`.
+# `panic_selection_changed`. `context_choice` is sent alone, about a task held because its saved work does not fit
+# the model's window. It sends `stop_identity` from `current_stop.identity`, `pause_id` and `pause_generation`
+# from `current_stop.window`, and one action: `try_again: true` retries as saved; `end_attempt: true` ends with
+# its recorded cause, sending nothing, after which
+# Continue is the ordinary one; `overview_revision` (that hold's `overview.current_revision`) asks the next park to
+# hold the current overview if the held one is refused again. Malformed: 400 `invalid_context_choice`; another hold
+# or an offer it did not make: 409 `context_choice_not_offered`, nothing changed.
 class TaskResumeRequest(TypedDict, total=False):
     """Resume one saved task. A Panic group selection sends only the observed hold ID."""
 
     accept_unknown: List[str]
     reason: str
     expected_panic_hold_id: str
+    context_choice: Dict[str, Any]
 
 
 class TaskResumeResponse(TypedDict, total=False):
@@ -965,8 +1065,7 @@ class TaskResumeResponse(TypedDict, total=False):
     message: str
 
 
-# Resolve shared shapes after either module has finished loading.
-from ouroboros.gateway import contracts as _contracts  # noqa: E402
+# Resolve the shared project shape after either module has finished loading.
 from ouroboros.gateway.contracts import ProjectEntry  # noqa: E402
 
 __all__ = [
@@ -977,6 +1076,7 @@ __all__ = [
     "SettingsSaveRequest", "SettingsChange", "SettingsReceipt", "SettingsTiming", "SettingsRestartState",
     "SettingsReadResponse", "SettingsPolicyState", "SettingsDeploymentChecker", "SettingsDeploymentRequirement", "SettingsDeploymentExtensions",
     "SettingsDeploymentPolicy", "SettingsWriteRefusal",
+    "OwnerSafetyRulesNanoRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
     "MainBindingConditions",

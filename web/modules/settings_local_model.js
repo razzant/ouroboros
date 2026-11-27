@@ -4,6 +4,7 @@
  *  is on screen. */
 import { apiFetch, fetchJson } from './api_client.js';
 import { bindSettingRows, setButtonBusy, settingsRow } from './settings_controls.js';
+import { currentLanguage, fmt } from './i18n.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { checkerUses, deploymentOf } from './settings_policy.js';
 import { rowsOf } from './settings_rows.js';
@@ -13,6 +14,66 @@ const PAGE = 'models/local';
 const POLL_MS = 3000;
 // The fields a deployment's checker binds when it answers from this model (`deployment_policy.local_launch_refusal`).
 const FIXED_KEYS = ['LOCAL_MODEL_SOURCE', 'LOCAL_MODEL_FILENAME', 'LOCAL_MODEL_PORT', 'LOCAL_MODEL_CHAT_FORMAT'];
+
+const NANO_REASONS = {
+    unsupported_route: 'Only the built-in local Main model can check new memory here.',
+    outside_qualified_window: 'These memory checks are only supported at an 80,000-token window.',
+    serving_binding_changed: 'The local model or its context window changed. The earlier count no longer applies.',
+    counted_rules_changed: 'Your rules changed. The earlier count no longer applies.',
+    publication_scope_unqualified: 'The last measurement did not establish that new memory can be checked.',
+    confirmed_counter_unavailable: 'The exact counter is unavailable. Affected edits may be refused.',
+    exact_counter_unproven: 'An exact counter has not been confirmed for this local model.',
+};
+const NANO_SCOPES = { cold_start: 'cold start', cold_resume: 'cold resume', continue: 'continuation',
+    cold_resume_of_continue: 'resumed continuation' };
+
+/** Model Settings words from one passive fact, never authority for memory writes. */
+export function nanoMemoryWords(fact, locale = currentLanguage() || undefined) {
+    if (!fact || !fact.status) return null;
+    const number = (value) => Number.isInteger(value) ? value.toLocaleString(locale) : null;
+    const date = (value) => {
+        const at = new Date(value || '');
+        return Number.isNaN(at.getTime()) ? '' : at.toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' });
+    };
+    const protecting = fact.status === 'protecting' && fact.reason === 'checked_controlled_growth'
+        && fact.protection_scope === 'unchanged_main_background';
+    const counterUnavailable = fact.reason === 'confirmed_counter_unavailable' && !protecting;
+    const exact = fact.measurement === 'exact' && fact.reason !== 'serving_binding_changed' && fact.reason !== 'unsupported_route';
+    const outside = exact && fact.current_sample === 'outside_limits';
+    const status = protecting ? 'new memory is checked' : counterUnavailable ? 'memory check unavailable' : 'new memory checks not confirmed';
+    const text = outside ? fmt('Nano 80k: {status}; prepared input outside limits.', { status: fmt(status) })
+        : fmt('Nano 80k: {status}.', { status: fmt(status) });
+    const detail = [fmt('For the built-in local Main model at 80,000 tokens, this check targets up to 20,000 for memory and at least 15,000 for work input in total, with a minimum reply reserved.')];
+    if (protecting) {
+        detail.push(fmt('This check covers a new task started in Main with the same setup. A direct chat reply or a project task can have less room.'));
+        const checkedAt = date(fact.protection_observed_at);
+        if (checkedAt) detail.push(fmt('Memory checks confirmed {date}.', { date: checkedAt }));
+    } else {
+        detail.push(fmt(NANO_REASONS[fact.reason] || 'The memory check status could not be read.'));
+    }
+    if (exact) {
+        const scope = fmt(NANO_SCOPES[fact.scope] || 'root request');
+        const at = date(fact.observed_at);
+        detail.push(at ? fmt('Last exact count of a prepared Main input: {scope}, {date}.', { scope, date: at })
+            : fmt('Last exact count of a prepared Main input: {scope}.', { scope }));
+        const numbers = [
+            ['context_window', 'Context window: {tokens} tokens.'],
+            ['minimum_input_tokens', 'Smallest measured input: {tokens} tokens.'],
+            ['whole_memory_tokens', 'Memory with the full index: {tokens} tokens.'],
+            ['memory_tokens', 'Memory: {tokens} tokens.'],
+            ['minimum_work_headroom_at_reply_floor_tokens', 'Room left after the measured input with the minimum reply: {tokens} tokens.'],
+            ['sent_max_tokens', 'Prepared reply limit: {tokens} tokens.'],
+            ['actual_work_headroom_at_wire_allowance_tokens', 'Room left on the prepared input: {tokens} tokens.'],
+        ];
+        for (const [key, words] of numbers) {
+            const tokens = number(fact[key]);
+            if (tokens !== null) detail.push(fmt(words, { tokens }));
+        }
+    } else {
+        detail.push(fmt('No exact measurement for the current local model and window.'));
+    }
+    return { text, detail: detail.join(' '), warn: Boolean(outside || counterUnavailable || fact.reason === 'settings_read_failed') };
+}
 
 /** A deployment checker answering locally binds this server's identity: those fields read only, its note shown
  *  (the Start endpoint refuses any other launch). */

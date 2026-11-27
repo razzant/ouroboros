@@ -1,4 +1,4 @@
-import { readState } from './api_client.js';
+import { noteWindowHolds, readState } from './api_client.js';
 import { carryOpenQuestions } from './question_presentation.js';
 
 /**
@@ -120,6 +120,7 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
                 const own = withBindings(data);  // the body as it came: the Project rows it carries itself
                 latest = data = carryOpenQuestions(asked, heldFeed(asked, own));
                 changed = true;
+                noteWindowHolds(data);  // the body the cards are painted from says which of them a window holds
                 if (data?.rooms && Array.isArray(data.works)) {
                     const fed = Array.isArray(data.projects);
                     asked = { rooms: data.rooms, projects: fed ? data.projects : asked?.projects,

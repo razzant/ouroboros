@@ -129,6 +129,8 @@ def settle(drive_root: Any) -> bool:
 
 def _write(address: knowledge.KnowledgeAddress, initialization: str) -> tuple[str, str]:
     """``(outcome, why)``: ``written`` or ``collision``, else ``("", the writer's reason)``, decided under the shelf lock."""
+    from ouroboros.nano_host_publication import host_admission
+
     decided: dict = {}
 
     def judge(current: Any, rows: Any) -> str:
@@ -140,7 +142,8 @@ def _write(address: knowledge.KnowledgeAddress, initialization: str) -> tuple[st
     result = knowledge.write_knowledge_note(
         address, SEED_NOTE, "overwrite", writer=knowledge.SEED_WRITER, focus={"role": "host"}, reason=_REASON,
         precondition=judge, writer_input_ref={"kind": "factory_text", "source": "ouroboros/own_time_seed.py",
-                                              "sha256": SEED_REVISION, "initialization_id": initialization})
+                                              "sha256": SEED_REVISION, "initialization_id": initialization},
+        admission=host_admission(address.canonical_root))
     if result.ok:
         return WRITTEN, ""
     return (decided["outcome"], "") if decided.get("outcome") else ("", result.reason)

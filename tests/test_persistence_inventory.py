@@ -1048,7 +1048,8 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``record_owed``, read back at a start by ``owed_refs``), in the same per-link row.
 # 506 -> 508: my messages to a link still unsettled, ``state/peer_links/*/sent`` and ``state/peer_links/*/sent/*.json``
 # (``record_sending`` before a send's POST, read back at a start by ``sending_records``), in the same per-link row.
-EXPECTED_SCAN_PATHS = 508
+# 508 -> 512: Nano publication fence/receipt, fresh Main sample and immutable refused proposal source.
+EXPECTED_SCAN_PATHS = 512
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1066,6 +1067,10 @@ SENTINELS = frozenset({
     "logs/events.jsonl",
     "logs/chat.jsonl",
     "memory/identity.md",
+    "memory/.nano-publication.name.lock",
+    "memory/.nano-publication.revision",
+    "state/nano_minimum_latest.json",
+    "task_results/artifacts/*/source_handles/context_checkpoints/nano-proposed-memory-*.json",
     "task_results/artifacts/*",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-reentry-*.json",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-transport-queue-*.json",

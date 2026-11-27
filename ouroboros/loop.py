@@ -29,7 +29,7 @@ from ouroboros.llm_claudexor import ModelTurnState
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.loop_completion_schema import refused_door_end, resolve_completion_selection
 from ouroboros._usage_wait import receiver_abandonable
-from ouroboros import loop_output_exhaustion as output_recovery, working_checkpoint
+from ouroboros import cold_return, loop_output_exhaustion as output_recovery, working_checkpoint
 from ouroboros.context import build_user_content  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
@@ -476,6 +476,7 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
         if saved:
             resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
         elif saved_pause:
+            cold_return.carry_choice(saved_pause["usage"], saved_pause.get("_pause_row"))  # before its grant is spent
             resumed = resume_paused_loop(tools, saved_pause, messages, trace, usage, seen,
                                          budget_remaining_usd=budget_remaining_usd)
             no_tool = saved_pause.get("resume_point", {}).get("budget_tail") == "no_tool"
@@ -498,6 +499,7 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
         from ouroboros.headless import reopen_capture_at_entry  # entered: an earlier capture becomes history
         reopen_capture_at_entry(canonical_data_root(tools._ctx), str(getattr(tools._ctx, "task_id", "") or ""))
         tools._ctx._round_prologue = section_spans()
+    cold_return.arm(tools._ctx, usage, saved or saved_pause or saved_working)  # a returned work's exact window refusal parks it
     return resumed
 
 
@@ -683,7 +685,7 @@ def run_llm_loop(
                 if (budget_result := _finish_no_tool_round_budget(limit_ctx, budget_remaining_usd, cost_ceiling)) is not None:
                     return budget_result
 
-            if (refused := refused_door_end(tools, limit_ctx)) is not None:
+            if (refused := refused_door_end(tools, limit_ctx) or cold_return.end_chosen(limit_ctx)) is not None:
                 return refused
             model_call = None  # this round's call, once it starts: a yield before it keeps the loop's own state
             try:
@@ -772,8 +774,8 @@ def run_llm_loop(
                 emit_progress=emit_progress, incoming_messages=incoming_messages, owner_msg_seen=_owner_msg_seen):
                 free_redial = True
                 continue
-            from ouroboros.context_renewal import renew_after_refusal
-            if msg is None and renew_after_refusal(limit_ctx, tools):  # owner Q1=A: the same task in a fresh view
+            from ouroboros.context_renewal import renew_after_refusal  # owner Q1=A: the same task in a fresh view;
+            if msg is None and (renew_after_refusal(limit_ctx, tools) or cold_return.park_refused(limit_ctx)):  # else a return may park (it unwinds)
                 continue
             if msg is None:
                 # Exact actor routes skip generic substitution and fail as infrastructure.

@@ -29,6 +29,9 @@ recorded in its own ``fallback_refusal:<unit>`` scan-state key; an available res
 body is retained. An exact rejected draft is skipped until input or route changes. The helper never nominates
 knowledge, writes ``overview`` or touches the old dialogue files. Nothing here activates
 the chronicle: before activation the writer makes no call and creates no file.
+
+A Nano refusal concerns publication, not drafting. The next matching pass retries
+publication of the retained answer (even after ``over_capacity``), without another call.
 """
 from __future__ import annotations
 
@@ -332,12 +335,13 @@ def select_unit(root: Any, store: ChronicleStore, shortage: Optional[ShortageFac
             if draft is None:
                 break
             keys = _suppression_keys(unit)
-            suppressed = any(isinstance(receipt := refusals.get(key), dict)
-                             and receipt.get("input_sha256") == draft.input_sha256
-                             and receipt.get("light_binding") == dict(binding) for key in keys)
-            if not suppressed and not any(store.rejected_input(unit.room_id, key, draft.input_sha256, binding)
-                                          for key in keys):
-                return unit, draft
+            matching = [(key, receipt) for key in keys if isinstance(receipt := refusals.get(key), dict)
+                        and receipt.get("input_sha256") == draft.input_sha256
+                        and receipt.get("light_binding") == dict(binding)]
+            pending = next(((key, receipt) for key, receipt in matching if receipt.get("publication_pending")), None)
+            if (not matching or pending) and not any(
+                    store.rejected_input(unit.room_id, key, draft.input_sha256, binding) for key in keys):
+                return unit, replace(draft, pending_publication=pending) if pending else draft
             # Only the fitted prefix was attempted. Never retry its overlapping
             # subsets; the untouched suffix can still be useful in this pass.
             unit = _untouched_suffix(unit, draft)
@@ -391,6 +395,7 @@ class WriterInput:
     stamp: Optional[Dict[str, Any]] = None  # a page's host stamp, a part's ``part_stamp``
     member_ids: Tuple[str, ...] = ()  # a part's members (a prefix of the unit's when the window is short)
     fitted_to: Optional[Dict[str, Any]] = None  # last row in a page input, including address-only rows
+    pending_publication: Optional[Tuple[str, Dict[str, Any]]] = None  # existing scan key and paid answer receipt
 
 
 def _remembering(root: pathlib.Path) -> str:
@@ -780,6 +785,34 @@ def _refuse(root: pathlib.Path, store: ChronicleStore, run: FallbackRun, draft: 
     return run
 
 
+def _retry_answer(root: pathlib.Path, receipt: Dict[str, Any]) -> str:
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    ref = receipt.get("response_ref")
+    if not isinstance(ref, dict) or ref.get("canonical_root") != str(root.resolve()) or not ref.get("task_id"):
+        raise ValueError("missing retained fallback answer")
+    return read_actor_source_bytes(root, ref["task_id"], ref).decode("utf-8")
+
+
+def _defer_publication(root: pathlib.Path, store: ChronicleStore, run: FallbackRun, draft: WriterInput,
+                       reason: str, binding: Dict[str, Any], task_id: str, text: str, usage: Dict[str, Any]) -> None:
+    from ouroboros.knowledge import observed_route_stamp
+
+    kind = f"nano_{reason}"
+    if draft.pending_publication:
+        key, receipt = draft.pending_publication
+        if receipt.get("kind") != kind:
+            _set_refusal(store, key, {**receipt, "kind": kind, "at": utc_now_iso()})
+    else:
+        ref = chat_chain.retain_memory_source(SimpleNamespace(drive_root=root, task_id=task_id),
+                                              "memory_fallback_response", text.encode("utf-8"))
+        _set_refusal(store, run.unit.key, {"input_sha256": draft.input_sha256, "light_binding": binding,
+                                          "kind": kind, "at": utc_now_iso(), "task_id": task_id,
+                                          "response_ref": ref, "observed_route": observed_route_stamp(usage),
+                                          "publication_pending": True})
+    run.outcome, run.kind = "refused", kind
+
+
 def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: Any, trace: Any) -> FallbackRun:
     """At most one Light call: draft the chosen unit and publish it, or record why it was refused."""
     if not fallback_active():
@@ -788,6 +821,7 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
     store = ChronicleStore(root)
     if not store.log_path.exists() or not store.activation():
         return FallbackRun("not_activated")  # the writer reads the chronicle, it never creates it
+    from ouroboros.nano_publication import NanoPublicationRefused
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
     # The unit is chosen under the lock: a choice made outside it could pay again for an input
@@ -812,14 +846,26 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
         if chosen is None:
             return FallbackRun("nothing")
         unit, draft = chosen
-        from ouroboros import consolidator
+        key, pending = draft.pending_publication or (unit.key, None)
+        task_id = str(task.get("id") or task.get("task_id") or "")
+        if pending is not None:
+            try:
+                text = _retry_answer(root, pending)
+            except (OSError, ValueError) as error:
+                # No fresh dispatch can repair lost bytes for a matching paid draft.
+                kind = "retained_answer_unreadable"
+                return FallbackRun("refused", unit, kind=kind, input_tokens=draft.input_tokens,
+                                   errors=[{"kind": kind, "label": LABEL, "message": str(error)}])
+            usage = {}  # no charge for trying publication again
+        else:
+            from ouroboros import consolidator
 
-        text, usage = consolidator._call_consolidation_llm(llm, draft.prompt, LABEL, reasoning_effort="low")
+            text, usage = consolidator._call_consolidation_llm(llm, draft.prompt, LABEL, reasoning_effort="low")
         errors = [row for row in usage.get("_consolidation_errors") or [] if isinstance(row, dict)]
         run = FallbackRun("failed", unit, usage=usage, errors=errors, input_tokens=draft.input_tokens)
         phase = "binding_failed"
         try:
-            bound, task_id = light_binding(), str(task.get("id") or task.get("task_id") or "")
+            bound = binding if pending is not None else light_binding()
             phase = "receipt_failed"
             if errors:
                 run.kind = str(errors[-1].get("kind") or "")
@@ -830,7 +876,13 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
             if answer.get("keep_original"):
                 return _refuse(root, store, run, draft, "keep_original", bound, task_id, text, outcome="kept_original")
             phase = "publish_failed"
-            result = _publish(root, store, unit, draft, answer, usage, bound)
+            publication_usage = usage if pending is None else {"_observed_route": pending.get("observed_route")}
+            try:
+                result = _publish(root, store, unit, draft, answer, publication_usage, bound)
+            except NanoPublicationRefused as error:
+                phase = "receipt_failed"
+                _defer_publication(root, store, run, draft, error.reason, binding, task_id, text, usage)
+                return run
             if result.ok:
                 run.outcome, run.record_id = "published", str((result.record or {}).get("id") or "")
                 if unit.kind == "part":
@@ -839,7 +891,7 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
                     run.effect = fold_receipt(result.record, lambda: part_lines(store, result.record,
                                                                                 "a helper draft folded"))
                 phase = "receipt_clear_failed"
-                _set_refusal(store, unit.key, None)
+                _set_refusal(store, key, None)
             elif result.reason in CONFLICT_REASONS:
                 run.outcome, run.kind = "conflict", result.reason
             else:

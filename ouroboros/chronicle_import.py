@@ -310,7 +310,7 @@ def _import(store: Any) -> Dict[str, Any]:
                             "legacy_files_unchanged": True, "lineage_epoch": epoch, "chain_end": chain_end,
                             "dialogue_gaps": skipped}}
     # The records, their receipt and the frontier become visible together; ids are deterministic.
-    result = store.publish([*records, receipt], scan_state={"legacy_frontier": frontier})
+    result = store.publish_legacy_import([*records, receipt], scan_state={"legacy_frontier": frontier})
     if not result.ok:
         return {"kind": "import_refused", "reason": result.reason, "detail": result.detail,
                 "conflict_ids": list(result.conflict_ids)}

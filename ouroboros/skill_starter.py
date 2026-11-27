@@ -30,7 +30,8 @@ log = logging.getLogger(__name__)
 
 STARTER_SETTING = "OUROBOROS_STARTER_SKILLS"
 MARKER_FILENAME = "skill_starter.json"
-_RETRY_CODES = frozenset({"fetch_failed", "source_unread"})
+_NANO_RETRY_CODES = frozenset({"nano_publication_busy", "nano_publication_stale"})
+_RETRY_CODES = frozenset({"fetch_failed", "source_unread"}) | _NANO_RETRY_CODES
 # A marker in one of these states has its starter list behind it: a completed setup's ticks change nothing there.
 _LIST_RAN = frozenset({"done", "running", "pending", "upgrade"})
 _LOCK = threading.Lock()
@@ -253,7 +254,7 @@ def _install_ticked(drive_root: pathlib.Path, item_id: str, rows: List[Dict[str,
     if result.get("already_installed") and turn_on and name \
             and not (skill_state_dir_path(drive_root, name) / "enabled.json").exists():
         update_install_record(drive_root, name, turn_on_when_ready=True)
-        result = {**result, "turn_on": accept_and_turn_on(drive_root, name, repo_dir=repo_dir).get("turn_on", "")}
+        result = {**result, "acceptance": accept_and_turn_on(drive_root, name, repo_dir=repo_dir)}
     return result
 
 
@@ -273,7 +274,11 @@ def _install_one(drive_root: pathlib.Path, item_id: str, rows: List[Dict[str, An
         return {"status": "pending", "code": "error", "error": f"{type(exc).__name__}: {exc}"[:300]}
     if result.get("needs_review"):
         start_review(drive_root, result["name"], repo_dir=repo_dir)
-    return {"status": "installed", "name": result.get("name", ""), "basis": result.get("basis", "")}
+    turn_on = (result.get("acceptance") or {}).get("turn_on_result") or {}
+    code = next((code for code in turn_on.get("missing", []) if code.startswith("nano_publication_")), "")
+    return {"status": "pending" if code in _NANO_RETRY_CODES else "installed",
+            "name": result.get("name", ""), "basis": result.get("basis", ""),
+            **({"code": code, "error": str(turn_on.get("error") or "")[:300]} if code else {})}
 
 
 def _onboarding_defaults(offer: List[Dict[str, Any]], settings: Dict[str, Any], supported: set[frozenset[str]],
@@ -325,8 +330,11 @@ def run_starter(drive_root: pathlib.Path, ids: Optional[List[str]], *, origin: s
                                **({"voice_defaults_skipped": sorted(skipped)} if voice_defaults else {}))
         _record_presented_defaults(drive_root, repo_dir)
         results = dict(marker.get("results") or {})
+        tried: set[str] = set()
+
         def install(item_id: str) -> None:
-            if (results.get(item_id) or {}).get("status") not in {"installed", "skipped", "failed"}:
+            if item_id not in tried and (results.get(item_id) or {}).get("status") not in {"installed", "skipped", "failed"}:
+                tried.add(item_id)
                 results[item_id] = _install_one(drive_root, item_id, rows, repo_dir)
                 _write_marker(drive_root, results=results)
 

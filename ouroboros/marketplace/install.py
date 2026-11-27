@@ -690,6 +690,8 @@ def install_skill(
         repair_partial_existing = _has_repairable_clawhub_partial(
             drive_root, adapter_result.sanitized_name, target_dir, slug=cleaned_slug, route_url=route_url,
             version=target_version, sha256=archive.sha256, digest=expected_digest)
+    from ouroboros.nano_activation import catalogue_write_fence, prepare_skill_landing, refusal_words
+    from ouroboros.nano_publication import NanoPublicationRefused
     from ouroboros.skill_install_record import (keep_previous_payload, retain_update_snapshot,
                                                restore_update_snapshot, write_install_record)
 
@@ -699,8 +701,10 @@ def install_skill(
         if landed_record.get("pending_update"):
             restore_update_snapshot(drive_root, adapter_result.sanitized_name, "landing_failed")
         elif rollback_snapshot is not None:
-            restore_payload_state(rollback_snapshot, restore_state_provenance=True)
+            with catalogue_write_fence(drive_root):
+                restore_payload_state(rollback_snapshot, restore_state_provenance=True)
 
+    failed = "Could not land skill into data plane"
     try:
         landed_record = _registry_install_record(drive_root, adapter_result.sanitized_name, staged.staging_dir,
                                                  slug=cleaned_slug, version=target_version, record=install_record,
@@ -710,34 +714,34 @@ def install_skill(
             return fail("ClawHub now offers different bytes; look at the release again.",
                         sanitized_name=adapter_result.sanitized_name, error_code="candidate_changed",
                         error_status=409, candidate=landed_record["release"], **package)
+        provenance = _registry_install_provenance(adapter_result, summary, route_url, cleaned_slug, target_version)
+        commit = prepare_skill_landing(drive_root, target_dir, staged.staging_dir, adapter_result.sanitized_name,
+                                       landed_record, keeps_snapshot=retain_update)
         rollback_snapshot = snapshot_payload_state(drive_root, adapter_result.sanitized_name, target_dir,
                                                    include_state_provenance=True)
-        if retain_update:
-            retain_update_snapshot(rollback_snapshot, landed_record)
-        _land_staged_into_data_plane(staged, target_dir, overwrite=overwrite or repair_partial_existing)
+        with commit():  # the payload and its record change what a fresh Main reads together
+            if retain_update:
+                retain_update_snapshot(rollback_snapshot, landed_record)
+            _land_staged_into_data_plane(staged, target_dir, overwrite=overwrite or repair_partial_existing)
+            try:
+                write_provenance(drive_root, adapter_result.sanitized_name, provenance)
+            except Exception:
+                log.warning("Failed to persist provenance for %s", adapter_result.sanitized_name, exc_info=True)
+            failed = "Could not record the install of the landed skill"
+            write_install_record(drive_root, adapter_result.sanitized_name, landed_record)
+    except NanoPublicationRefused as exc:  # refused before any byte moved: only the unused copy goes
+        if rollback_snapshot is not None:
+            discard_payload_snapshot(rollback_snapshot)
+        staged.cleanup()
+        happened, step = refusal_words(exc)
+        return fail(f"The skill was not installed or updated. {happened}; {step}. {exc.detail}",
+                    sanitized_name=adapter_result.sanitized_name, error_code=f"nano_publication_{exc.reason}",
+                    error_status=409, candidate=landed_record["release"], **package)
     except Exception as exc:
         restore()
         staged.cleanup()
-        log.exception("Failed to land staged skill into data plane")
-        return fail(
-            f"Could not land skill into data plane: {exc}",
-            sanitized_name=adapter_result.sanitized_name,
-            **package,
-        )
-    # Do not repoint staged.staging_dir to target_dir: cleanup() rmtrees it.
-    # Persist provenance before review so reviewers can cross-check origin.
-    provenance = _registry_install_provenance(adapter_result, summary, route_url, cleaned_slug, target_version)
-    try:
-        write_provenance(drive_root, adapter_result.sanitized_name, provenance)
-    except Exception:
-        log.warning("Failed to persist provenance for %s", adapter_result.sanitized_name, exc_info=True)
-    try:
-        write_install_record(drive_root, adapter_result.sanitized_name, landed_record)
-    except Exception as exc:
-        restore()
-        staged.cleanup()
-        return fail(f"Could not record the install of the landed skill: {exc}",
-                    sanitized_name=adapter_result.sanitized_name, **package)
+        log.exception("%s: %s", failed, adapter_result.sanitized_name)
+        return fail(f"{failed}: {exc}", sanitized_name=adapter_result.sanitized_name, **package)
 
     # Seed grants.json for core settings so the owner-grant bridge has one file.
     try:
@@ -1000,12 +1004,11 @@ def update_skill(
     from ouroboros.skill_install_record import read_install_record, settle_pending_update
     from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
 
-    with _lifecycle_lock_for(sanitized_name):
-        if refusal := realtime_load_refusal(sanitized_name):
-            return InstallResult(False, sanitized_name,
-                                 error="A live call is using this skill; retry after it ends.",
-                                 error_code=refusal, error_status=409)
-        settlement = settle_pending_update(drive_root, sanitized_name, force=True)
+    settlement = ({"code": refusal} if (refusal := realtime_load_refusal(sanitized_name))
+                  else settle_pending_update(drive_root, sanitized_name, force=True, refuse_live_call=True))
+    if settlement.get("code") == "live_call_active":
+        return InstallResult(False, sanitized_name, error="A live call is using this skill; retry after it ends.",
+                             error_code="live_call_active", error_status=409)
     if settlement.get("status") == "restore_failed":
         return InstallResult(False, sanitized_name, error="The previous update could not be restored; its evidence was kept.",
                              error_code="restore_failed", error_status=409)

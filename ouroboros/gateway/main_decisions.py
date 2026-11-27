@@ -109,8 +109,11 @@ def owner_actions(activity: dict) -> tuple[dict, bool]:
     from ouroboros.work_stop import activity_stop_view
 
     view = activity_stop_view(activity)
-    return waits, (phase in {"budget_paused", "budget_pausing"} and not activity.get("live")
-                   and view["resumable"] and view["pause_cause"] != "authority" and activity.get("can_resume") is True)
+    from ouroboros.cold_return import RAIL_CONTEXT_WINDOW  # the one technical park only the owner's Resume returns
+
+    return waits, (phase in {"budget_paused", "budget_pausing"} and not activity.get("live") and view["resumable"]
+                   and (view["pause_cause"] != "authority" or view["stop"].get("rail") == RAIL_CONTEXT_WINDOW)
+                   and activity.get("can_resume") is True)
 
 
 def question_waits(row: dict) -> bool:

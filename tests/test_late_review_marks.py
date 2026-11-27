@@ -136,6 +136,36 @@ def test_a_store_that_cannot_serve_is_a_failure_the_writer_keeps_never_an_except
     assert publish_late_review(tmp_path, record).status == "saved"
 
 
+def test_a_review_that_does_not_fit_remains_readable_and_owed(tmp_path, monkeypatch):
+    from ouroboros import nano_host_publication, nano_publication
+    from ouroboros.chronicle_store import capture
+    from ouroboros.late_review_marks import replay_owed_late_reviews
+    from tests.test_nano_knowledge_chronicle_publication import Probe
+
+    shared.world(tmp_path)
+    record = _record(tmp_path, 'main1', 1, 'a real review finding', outcome={'verdict': 'FAIL', 'critical': 1})
+    reject = True
+
+    def observe(_changes):
+        with capture(tmp_path, tail='none'):
+            assert len(_late_marks(tmp_path)) == 1
+        if reject:
+            raise nano_publication.NanoPublicationRefused('over_capacity', 'Synthetic mark limit')
+
+    monkeypatch.setattr(nano_host_publication, 'host_admission', lambda *_: Probe(tmp_path, observe))
+    result = publish_late_review(tmp_path, record)
+    assert result.status == 'capacity_held' and not _late_marks(tmp_path)
+    listed = _memory_read(_ctx(tmp_path, 'main1'), room_id='late_reviews')
+    assert 'FAIL, 1 critical' in listed and 'Not active in memory' in listed and 'Synthetic mark limit' in listed
+    ref = {**record['source_ref'], 'task_id': record['task_id']}
+    assert repr(ref['task_id']) in listed and 'source_ref=' in listed
+    assert 'a real review finding' in _memory_read(_ctx(tmp_path, 'main1'), source_ref=ref)
+    reject = False
+    assert replay_owed_late_reviews(tmp_path)['settled'] == 1
+    assert _late_marks(tmp_path)[0]['id'] == result.mark_id
+    assert 'Not active in memory' not in _memory_read(_ctx(tmp_path, 'main1'), room_id='late_reviews')
+
+
 def test_the_text_is_the_writers_words_bounded_with_a_disclosed_omission(tmp_path):
     shared.world(tmp_path)
     record = _record(tmp_path, "main1", 1, "x")

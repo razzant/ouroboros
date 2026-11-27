@@ -4,6 +4,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import asdict, dataclass, fields, replace
 from inspect import signature
 from pathlib import Path
@@ -21,6 +24,7 @@ _HEADING = "## Held knowledge notes"
 _HEAD_END = re.compile(rb"^## ", re.MULTILINE)
 _INDEX_FIELDS = ("topic", "title", "state", "archive_error", "read_error", "parse_error")
 CAPTURE_KEY = "held_note_capture"
+_HOLD: ContextVar[Taking | None] = ContextVar("held_overview_instead", default=None)
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -157,6 +161,9 @@ def continuation_capture(plan: Any, mode: str | None) -> dict:
     from ouroboros.memory_floor import BOOK_MAPS
 
     core = getattr(plan, "core", None)
+    taking = _HOLD.get()
+    if taking is not None:
+        taking.seen, taking.decided = "", None
     entries = [part for part in getattr(core, "dynamic_sections", ()) if isinstance(part, HeldNoteSection)]
     low_facts = getattr(getattr(plan, "low_projection", None), "memory_facts", None) or {}
     book_maps = [row for row in low_facts.get("host_sections_addressed", ())
@@ -173,8 +180,15 @@ def continuation_capture(plan: Any, mode: str | None) -> dict:
     facts = projection.memory_facts
     request_tokens = facts.get("held_note_request_tokens")
     carried = {part.section_id: list(part.carried_by) for part in entries if part.carried_by}
-    return {CAPTURE_KEY: {
-        "entries": [{key: value for key, value in asdict(part).items() if key != "carried_by"} for part in entries],
+    saved = [_saved(part) for part in entries]
+    messages = None
+    if taking is not None and "shared_understanding" in companions and taking.accepts():  # its forms were never fitted
+        hold = taking.decided["hold"]  # the values fixed under the lock, not the park's later ones
+        saved = [hold["entry"] if row["topic"] == knowledge.OVERVIEW_TOPIC else row for row in saved]
+        companions["shared_understanding"], request_tokens, facts = hold["companion"], None, {}
+        messages = taking.decided["messages"]  # the saved transcript only: the live one is not changed
+    return {**({"messages": messages} if messages is not None else {}), CAPTURE_KEY: {
+        "entries": saved,
         **({"carried": carried} if carried else {}), **({"book_maps": book_maps} if book_maps else {}),
         "companions": companions,
         "frame": frame_key(mode, plan.preferred_mode, plan.window_tokens, plan.window_record, reserve,
@@ -182,6 +196,155 @@ def continuation_capture(plan: Any, mode: str | None) -> dict:
         "receipts": [row for row in facts.get("host_sections_addressed", ())
                      if row.get("held_note_form") or row["section_id"] == "knowledge_index"],
     }}
+
+
+def _saved(part: HeldNoteSection) -> dict:
+    return {key: value for key, value in asdict(part).items() if key != "carried_by"}
+
+
+class Taking:
+    """A window park whose Resume chose the current overview: what its save takes of it (``cold_return.park_refused``).
+
+    ``forms`` are ``current_overview``'s answer as counted before the park, ``rows`` the live transcript the save
+    copies and ``notice`` the one host row it adds. Three moments are separate: the counts end before the park; the
+    wait for live producers, their receipts and a retried publication follow with nothing held here; the decision
+    is made where ``continuation_capture`` builds the saved state (``accepts``), which fixes the pins, rows and
+    transcript the save carries and so cannot be undone. ``seen`` is the last such decision: ``accepted``, ``moved``
+    (the shelf holds another revision) or ``unavailable`` (the check could not be made); ``decided`` holds, for an
+    accepted one, the values it fixed (``hold``: a copy of the counted pins; ``messages``: a copy of the transcript
+    with the host's row)."""
+
+    def __init__(self, ctx: Any, forms: Mapping[str, Any], rows: list, notice: Mapping[str, Any]):
+        self.ctx, self.forms, self.rows, self.notice, self.seen, self.decided = ctx, forms, rows, notice, "", None
+
+    def accepts(self) -> bool:
+        """Whether the overview still stands at the revision the park counted, and the decision itself.
+
+        Under the shelf lock an overview write takes just before it replaces the note (``knowledge.knowledge_write_lock``;
+        a writer holds its installation fence first, this takes none) the one note is read, its revision compared with
+        the counted one, and in that same lock ``seen`` and, if accepted, the pins and transcript the save will carry
+        are fixed: a write after the lock is a later write to a point already decided, and a publication of that point
+        may follow outside it. The shelf, its claims and its history are never read, nor any count, custody or wait.
+        A path, read or lock that is unavailable (``OSError``, an undecodable note) is a refusal like a moved
+        revision: the save keeps the pins and transcript it held and the park stays an ordinary window park. Any
+        other error is not this check's and propagates."""
+        from ouroboros.tool_access_paths import canonical_data_root
+
+        self.seen, self.decided = "", None
+        try:
+            address = knowledge.resolve_knowledge_address(canonical_data_root(self.ctx), knowledge.OVERVIEW_TOPIC, "global")
+            with knowledge.knowledge_write_lock(address.shelf):
+                note = knowledge.read_knowledge_note(address)
+                if note.state == "active" and note.revision == self.forms["current"]:
+                    self.decided = {"hold": deepcopy(dict(self.forms["hold"])), "messages": [*self.rows, self.notice]}
+                    self.seen = "accepted"
+                else:
+                    self.seen = "moved"
+        except (OSError, UnicodeDecodeError):
+            log.warning("The chosen overview's revision could not be checked at the save", exc_info=True)
+            self.seen, self.decided = "unavailable", None
+        return self.decided is not None
+
+
+def current_taking() -> Taking | None:
+    return _HOLD.get()
+
+
+@contextmanager
+def holding(taking: Taking | None):
+    """While bound, a saved continuation takes ``taking``'s overview if it is still the shelf's: the one save of a
+    window park that carries the owner's choice."""
+    token = _HOLD.set(taking)
+    try:
+        yield
+    finally:
+        _HOLD.reset(token)
+
+
+def current_overview(ctx: Any) -> dict | None:
+    """Where this restored work holds the overview at an older revision than the shelf's: what a start now carries
+    in the held forms' place, else ``None``.
+
+    ``held`` and ``current`` are the two revisions. ``swaps`` pairs each text of its request the held overview
+    reaches with the same section holding the current one, made by its own producer: the pinned section, the
+    overview's reference entry for the names this work holds heads by, and the knowledge index in the form the
+    request shows it (``_index_exchange``). ``hold`` is the same forms as a capture keeps them (``holding``).
+    ``None`` too when the current overview is unauthored, unreadable or archived, no longer claims this work's
+    situation, has no exact reader here, or its index row cannot be placed in the form shown: such a start would
+    not hold it, or nothing comparable could be rendered."""
+    from ouroboros.context_sections import _shared_understanding
+    from ouroboros.memory_view_events import helper_names
+    from ouroboros.tool_access_paths import canonical_data_root
+
+    plan = getattr(ctx, "context_fit_plan", None)
+    core = getattr(plan, "core", None)
+    held = next((part for part in getattr(core, "dynamic_sections", ())
+                 if isinstance(part, HeldNoteSection) and part.topic == knowledge.OVERVIEW_TOPIC), None)
+    pinned = ((getattr(ctx, "_held_note_capture", None) or {}).get("companions") or {}).get("shared_understanding")
+    if held is None or not pinned:
+        return None
+    root = canonical_data_root(ctx)
+    address = knowledge.resolve_knowledge_address(root, knowledge.OVERVIEW_TOPIC, "global")
+    section, note = _shared_understanding(address)
+    if (not isinstance(section, HostSection) or note is None or note.source is None or note.state != "active"
+            or note.revision == held.revision):
+        return None
+    claims, written = knowledge.active_claims(root), set(knowledge_versions.claim_names(note.metadata.get("claims")))
+    matched = [name for name in helper_names(ctx, root) if name in written and address in claims.get(name, ())]
+    row = next((row for row in knowledge.inventory_knowledge(address, navigation=True, known_note=note)
+                if row["topic"] == knowledge.OVERVIEW_TOPIC), None)
+    if not matched or row is None:
+        return None
+    entry = _entry(note, matched, first=held.full_text.startswith(_HEADING), ctx=ctx).with_index(row, {})
+    if not entry.reader:
+        return None
+    index = _index_exchange(ctx, plan, held, entry)
+    if index is None:
+        return None
+    return {"held": held.revision, "current": note.revision,
+            "swaps": [(core.dynamic_head_sections[0].full_text, section.full_text), (held.full_text, entry.full_text),
+                      *index],
+            "hold": {"entry": _saved(entry), "companion": asdict(section)}}
+
+
+def _index_exchange(ctx: Any, plan: Any, held: HeldNoteSection, entry: HeldNoteSection) -> list | None:
+    """The knowledge index as this work's request shows it, paired with the same section holding ``entry``'s row.
+
+    The exchanged section is the captured one with the overview's entry rendered from the current row in both of
+    its forms. Shown whole, the pair is the two full texts. Shown by its outline, each side is that outline beside
+    the address of its own full text: the held one's as its receipt recorded it, the exchanged one's where its
+    capture would publish those bytes (``section_floor.predicted_section``; nothing is written). ``[]`` where the
+    rows render alike or the capture has no index; ``None`` where a form does not carry the held entry exactly once."""
+    from ouroboros.section_floor import predicted_section
+
+    section = next((part for part in plan.core.dynamic_head_sections
+                    if getattr(part, "section_id", "") == "knowledge_index"), None)
+    if section is None or not held.index_row or not entry.index_row:
+        return []
+
+    def moved(text: str | None, render: Any) -> str | None:
+        old, new = render(held.index_row), render(entry.index_row)
+        if text is None or old == new:
+            return text
+        framed = f"\n{text}\n"  # an entry is whole lines, the text's first and last too
+        return framed.replace(f"\n{old}\n", f"\n{new}\n")[1:-1] if framed.count(f"\n{old}\n") == 1 else None
+
+    full, outline = moved(section.full_text, knowledge.index_entry), moved(section.operative_view, knowledge.outline_entry)
+    if full is None or (outline is None) != (section.operative_view is None):
+        return None
+    exchanged = replace(section, full_text=full, operative_view=outline)
+    mode = getattr(ctx, "active_context_mode", None) or plan.initial_mode
+    receipts = {row["section_id"]: row for row in (plan.projection(mode).memory_facts or {}).get("host_sections_addressed", ())
+                if not row.get("predicted")}
+    row = receipts.get("knowledge_index")
+    if row is None:
+        pair = (section.full_text, exchanged.full_text)
+    else:
+        reader = predicted_section(exchanged)["reader"]
+        pair = (section.view_for_receipt(row, receipts), exchanged.view_for_receipt({**row, "reader": reader}, receipts))
+    if pair[0] is None or pair[1] is None:
+        return None
+    return [pair] if pair[0] != pair[1] else []
 
 
 # Stands after the heads a helper holds, native or external; the reader line of a head an external session receives.
@@ -366,7 +529,8 @@ def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ct
     reader = f"knowledge_read(topic={topic!r}, scope='global', version={revision!r})"
     length = len(note.text)
     restriction = _reader_restriction(ctx, note.address.canonical_root, topic, revision, length)
-    if not restriction:
+    prospective_notes, _ = knowledge.publication_view(note.address.canonical_root)
+    if not restriction and not prospective_notes:
         try:
             knowledge_versions.retain_held_version(note, revision)
         except OSError:

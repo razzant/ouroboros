@@ -683,7 +683,7 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
     the field is never created. An exact shortfall is the typed local overflow before
     any send, carrying this candidate's facts; an estimate never refuses.
     """
-    from ouroboros.context_budget import LocalContextTooLargeError
+    from ouroboros.context_budget import LocalContextTooLargeError, _reply_floor
     from ouroboros.llm_helper_window import window_reply_candidate
 
     context = current_physical_attempt_context()
@@ -705,12 +705,15 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
         payload, field, context, window, measured, helper=helper)
     if shortfall:
         request = _attempt_request(target, priced_for(candidate, context) if helper else candidate)
+        _, floor = _reply_floor(payload[field], True)
         error = LocalContextTooLargeError(
             f"the model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
-            f"after {input_tokens} exact input tokens, "
-            f"below the floor of {min(payload[field], 8_192)}")
+            f"after {input_tokens} exact input tokens, below the floor of {floor}")
+        from ouroboros.cold_return import nano_reply_floor_proof
+
         error.refused_candidate = refused_candidate_facts(
-            request, input_tokens=input_tokens, context_window_tokens=int(window))
+            request, input_tokens=input_tokens, context_window_tokens=int(window),
+            nano_reply_floor=nano_reply_floor_proof(request, target, candidate, measured, floor))
         raise error
     return priced_for(candidate, context) if helper else candidate
 
@@ -757,6 +760,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 "bible_witness": getattr(request.physical_context, "bible_source", None),
                 "assembly_witnesses": getattr(request.physical_context, "assembly_witnesses", ()),
                 "contribution_input": getattr(request.physical_context, "contribution_input", None),
+                **({"nano_minimum": floor} if (floor := getattr(request.physical_context, "nano_floor_evidence", None)) else {}),
             },
         )
         host_step("physical_candidate")

@@ -97,17 +97,6 @@ def _authority_source_terminal(refusal: Dict[str, Any], *, prepared: bool = Fals
     return text, usage, {"reasoning_notes": [reason], "tool_calls": [], **unknown}
 
 
-def _worker_immediate_stop(error: BaseException, waiter: Any) -> bool:
-    """An owner's immediate Stop that ended a worker task: no worker-authored terminal before its
-    confirmed death; the supervisor's cancellation kills and settles the task (``_handle_task_scoped``)."""
-    from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
-
-    if getattr(error, "control_reason", None) != "cancelled" or waiter is None or not waiter.worker_slot_held:
-        return False
-    intent = active_intent(waiter.canonical_root, waiter.task_id)
-    return isinstance(intent, dict) and stop_policy(intent) == STOP_POLICY_IMMEDIATE
-
-
 def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, drive_logs: pathlib.Path,
                              *, keep_terminal: bool = False):
     """Project captured loop evidence, or its explicit absence, without recovery.
@@ -1107,6 +1096,7 @@ class OuroborosAgent:
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ouroboros.context_fit import MinimumViewUnfit
         from ouroboros.delegate_resume import finish_selected_answer
+        from ouroboros.llm_attempt import PhysicalDispatchInterrupted
         from ouroboros.llm_ollama import OllamaUpgradeRequired
 
         def finished(text: Any, usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
@@ -1276,6 +1266,9 @@ class OuroborosAgent:
             events = finished(text, usage, llm_trace, ctx)
             _retire_working_checkpoint(self.tools._ctx, task)  # retire only after durable persistence readback
             return events
+
+        except PhysicalDispatchInterrupted as control:
+            return _settle_nano_start_control(task, control, finished)
 
         except (MinimumViewUnfit, OllamaUpgradeRequired) as refusal:
             if inline_execution(task):
@@ -1584,7 +1577,7 @@ def make_agent(
 from ouroboros.agent_dispatch import (  # noqa: E402, F401 -- intentional public re-exports
     _record_executor_resolution,
     _blocked_executor_terminal,
-    _start_refusal_terminal,
+    _start_refusal_terminal, _settle_nano_start_control, _worker_immediate_stop,
     _persist_early_origin_stub,
     _budget_exhausted_message,
     _budget_resume_policy,

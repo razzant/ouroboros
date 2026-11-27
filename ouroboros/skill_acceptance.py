@@ -34,14 +34,14 @@ OWNER_EDIT_FILENAME = "owner_edit.json"
 OWNER_EDIT_SCHEMA_VERSION = 1
 
 
-def load_acceptance_facts(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
-    """Read-only projection of the acceptance facts for one skill name."""
+def load_acceptance_facts(drive_root: pathlib.Path, name: str, *, install_record: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Read acceptance for one name, optionally with a verified prospective landing."""
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import skill_state_dir_path
     from ouroboros.utils import read_json_dict
 
     facts: Dict[str, Any] = {}
-    record = read_install_record(pathlib.Path(drive_root), name)
+    record = read_install_record(pathlib.Path(drive_root), name) if install_record is None else install_record
     if record:
         release = record.get("release") if isinstance(record.get("release"), dict) else {}
         basis = str(record.get("basis") or "")
@@ -125,23 +125,33 @@ def record_owner_edit(
     """Record that the current bytes of ``skill_dir`` are an owner edit; returns the digest.
 
     The admitted edit supplies its verified resulting digest; a changed payload is not stamped.
-    No grant is rewritten here. Never raises.
+    An On skill whose edited text does not pass the Nano capacity check is not recorded either.
+    Unlike a managed update this is not atomic: the edit already replaced the files, so the
+    former revision is not kept and the new one stays on disk, not acting, until a smaller edit
+    or an acceptance fits. No grant is rewritten here. Never raises.
     """
     try:
         from ouroboros.contracts.schema_versions import with_schema_version
+        from ouroboros.nano_activation import review_publication
+        from ouroboros.nano_publication import NanoPublicationRefused
         from ouroboros.skill_loader import load_skill, skill_state_dir
         from ouroboros.utils import atomic_write_json, utc_now_iso
 
         skill = load_skill(pathlib.Path(skill_dir), pathlib.Path(drive_root))
         if not expected_digest or skill is None or skill.load_error or skill.content_hash != expected_digest:
             return None
-        atomic_write_json(skill_state_dir(pathlib.Path(drive_root), skill.name) / OWNER_EDIT_FILENAME,
-                          with_schema_version({
-                              "digest": skill.content_hash,
-                              "task_id": str(task_id or ""),
-                              "attribution": str(attribution or ""),
-                              "recorded_at": utc_now_iso(),
-                          }, OWNER_EDIT_SCHEMA_VERSION))
+        try:
+            with review_publication(pathlib.Path(drive_root), skill, facts={"owner_edit_digest": skill.content_hash}):
+                atomic_write_json(skill_state_dir(pathlib.Path(drive_root), skill.name) / OWNER_EDIT_FILENAME,
+                                  with_schema_version({
+                                      "digest": skill.content_hash,
+                                      "task_id": str(task_id or ""),
+                                      "attribution": str(attribution or ""),
+                                      "recorded_at": utc_now_iso(),
+                                  }, OWNER_EDIT_SCHEMA_VERSION))
+        except NanoPublicationRefused as exc:
+            log.warning("Owner edit of %s is saved but not accepted (%s): %s", skill.name, exc.reason, exc.detail)
+            return None
         return skill.content_hash
     except Exception:
         log.warning("Owner edit record failed for %s", skill_dir, exc_info=True)

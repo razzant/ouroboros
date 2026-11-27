@@ -540,12 +540,13 @@ class LocalModelManager:
                 raise RuntimeError(self._error)
 
             try:
+                from ouroboros.local_model_server import with_last_position_logits  # the logits default, in a copy
                 _popen_kwargs = {
                     "stdout": subprocess.DEVNULL,
                     "stderr": subprocess.PIPE,
                     "stdin": subprocess.DEVNULL,
-                    "env": {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (
-                        str(pathlib.Path(__file__).resolve().parent.parent), os.environ.get("PYTHONPATH", ""))))},
+                    "env": with_last_position_logits({**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (
+                        str(pathlib.Path(__file__).resolve().parent.parent), os.environ.get("PYTHONPATH", ""))))}),
                     **subprocess_new_group_kwargs(),
                 }
                 self._proc = subprocess.Popen(cmd, **_with_hidden_subprocess(_popen_kwargs))

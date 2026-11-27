@@ -2,12 +2,15 @@
 import asyncio
 import copy
 import os
+import sys
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from ouroboros.local_model_server import input_fingerprint, measure_chat_input, with_measurement_route
+from ouroboros.local_model_server import (
+    input_fingerprint, launched_n_ctx, measure_chat_input, with_measurement_route,
+)
 
 
 @pytest.fixture
@@ -108,3 +111,41 @@ def test_count_waits_for_generation_without_using_its_interrupt_lock(native_mode
             assert not inner.locked() and not outer.locked()
 
     asyncio.run(run())
+
+
+def test_launched_n_ctx_reads_this_process_launch_argument(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["python", "-m", "ouroboros.local_model_server",
+                                      "--model", "m.gguf", "--port", "1",
+                                      "--n_gpu_layers", "-1", "--n_ctx", "80000"])
+    assert launched_n_ctx() == 80_000
+    monkeypatch.setattr(sys, "argv", ["--n_ctx=80000", "--model", "m.gguf"])
+    assert launched_n_ctx() == 80_000
+    monkeypatch.setattr(sys, "argv", ["python", "-m", "ouroboros.local_model_server"])
+    assert launched_n_ctx() == 0
+
+
+def test_the_count_names_the_effective_window_beside_the_raw_allocation(native_model, monkeypatch):
+    """Synthetic fixture numbers: the model's ``n_ctx()`` (81,920) stands for the backend's
+    padded allocation of a launched 80,000, as measured releases showed 80,000 -> 80,128."""
+    monkeypatch.setattr(sys, "argv", ["python", "-m", "ouroboros.local_model_server",
+                                      "--model", "m.gguf", "--port", "1", "--n_ctx", "80000"])
+    payload = {"model": "local-model", "messages": [{"role": "user", "content": "exact"}]}
+    result = measure_chat_input(native_model, payload)
+    assert result["input_tokens"] == 60_826
+    assert result["context_window"] == 80_000  # the launched effective limit, both sides name it
+    assert result["raw_context_window"] == 81_920  # the same instance's allocation rides beside it
+    assert result["tokenizer_template_provenance"]["launched_n_ctx"] == 80_000
+
+
+def test_an_allocation_smaller_than_requested_caps_the_effective_window(native_model, monkeypatch):
+    """Never claim more room than the backend actually allocated."""
+    monkeypatch.setattr(sys, "argv", ["--n_ctx", "90000"])
+    result = measure_chat_input(native_model, {"messages": []})
+    assert result["context_window"] == result["raw_context_window"] == 81_920
+
+
+def test_without_a_launch_argument_the_raw_allocation_stands_alone(native_model, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["python", "-m", "ouroboros.local_model_server", "--model", "m.gguf"])
+    result = measure_chat_input(native_model, {"messages": []})
+    assert result["context_window"] == result["raw_context_window"] == 81_920
+    assert result["tokenizer_template_provenance"]["launched_n_ctx"] == 0

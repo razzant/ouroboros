@@ -176,7 +176,10 @@ def _run_deterministic_preflight(
             raw_result=outcome.raw_result,
             raw_actor_records=[],
         )
-        save_review_state(drive_root, skill.name, review_state)
+        from ouroboros.nano_activation import catalogue_write_fence
+
+        with catalogue_write_fence(drive_root):
+            save_review_state(drive_root, skill.name, review_state)
         skill.review = review_state
         # Record what the skill requests (transparency in the review block) but
         # NEVER auto-grant a skill that FAILED the deterministic preflight gate
@@ -232,7 +235,10 @@ def plugin_api_admission_refusal_outcome(skill: Any, drive_root: pathlib.Path, *
     if persist and not live_pass:
         review_state = SkillReviewState(status=outcome.status, content_hash=content_hash, findings=findings,
                                         reviewer_models=outcome.reviewer_models, timestamp=utc_now_iso())
-        save_review_state(drive_root, skill.name, review_state)
+        from ouroboros.nano_activation import catalogue_write_fence
+
+        with catalogue_write_fence(drive_root):
+            save_review_state(drive_root, skill.name, review_state)
         skill.review = review_state
     return outcome
 
@@ -250,6 +256,33 @@ def _admission_gate(skill: Any, drive_root: pathlib.Path, content_hash: str, per
 
 
 # --- The wave and its projection -----------------------------------------------------------------
+
+def save_accepted_review(drive_root: pathlib.Path, skill: Any, state: SkillReviewState) -> None:
+    """Save an acceptance made without a wave (author finish) under the Nano capacity rule.
+
+    A refusal raises with nothing written: the earlier review stays the saved one.
+    """
+    from ouroboros.nano_activation import refusal_words, review_publication
+    from ouroboros.nano_publication import NanoPublicationRefused
+    from ouroboros.skill_loader import save_review_state
+
+    try:
+        with review_publication(drive_root, skill, state):
+            save_review_state(drive_root, skill.name, state)
+    except NanoPublicationRefused as exc:
+        happened, step = refusal_words(exc)
+        raise NanoPublicationRefused(exc.reason, f"the acceptance was not saved. {happened}; {step}. {exc.detail}") from exc
+
+
+def _note_unactivated(drive_root: pathlib.Path, name: str, digest: str, refusal: Any) -> None:
+    """A kept update whose review finished but could not act is restored for that cause."""
+    from ouroboros.skill_install_record import note_rejection_reason
+
+    try:
+        note_rejection_reason(drive_root, name, digest, f"nano_publication_{refusal.reason}")
+    except OSError:
+        log.warning("Could not record why the update of %s was not activated", name, exc_info=True)
+
 
 def _pending(skill_name: str, error: str, *, content_hash: str = "", code: str = "") -> SkillReviewOutcome:
     return SkillReviewOutcome(skill_name=skill_name, status=STATUS_PENDING, content_hash=content_hash, error=error,
@@ -477,8 +510,23 @@ def _persist_projection(ctx: Any, skill: Any, drive_root: pathlib.Path, outcome:
             cost_usd=outcome.cost_usd, raw_result="", raw_actor_records=list(outcome.raw_actor_records),
             review_profile=outcome.review_profile, panel=dict(outcome.panel), record_id=outcome.record_id,
             governance=dict(outcome.governance), seats=list(outcome.seats))
+        from ouroboros.nano_activation import review_publication
+        from ouroboros.nano_publication import NanoPublicationRefused
+
         try:
-            save_review_state(drive_root, skill.name, state)
+            with review_publication(drive_root, skill, state, critic=True):
+                # The count may have lent the lane to a later lifecycle job.
+                if getattr(ctx, "_skill_review_lifecycle_guard", False) and not _can_persist_review_outcome(
+                        drive_root, skill.name, outcome.content_hash,
+                        expected_job_id=str(getattr(ctx, "_skill_review_lifecycle_job_id", "") or "")):
+                    raise NanoPublicationRefused("stale", "the review no longer owns this publication")
+                save_review_state(drive_root, skill.name, state)
+        except NanoPublicationRefused as exc:
+            # Keep the independent ledger outcome. The saved projection is left as it
+            # was; a pending update's existing settlement restores its base.
+            outcome.error = f"Skill not activated ({exc.reason}): {exc.detail}; review record {outcome.record_id} stands"
+            _note_unactivated(drive_root, skill.name, outcome.content_hash, exc)
+            return
         except OSError as exc:  # recoverable by record identity: the next call finds the settled record and re-projects
             log.warning("review.json of %s not written for record %s: %s", skill.name, outcome.record_id, exc)
             outcome.error = f"{outcome.error}; the projection into review.json failed ({exc}); record {outcome.record_id} stands".strip("; ")

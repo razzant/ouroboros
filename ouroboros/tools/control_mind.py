@@ -607,7 +607,10 @@ def mind_tool_entries() -> list:
         ToolEntry("resume_task", _accepting_schema(_list_schema(_control_schema("resume_task",
              "Request Resume of listed paused work through the owner's existing grants. "
              "A technical pause waits for the named billing or control record to become readable. "
-             "The host rechecks the saved task's controls then. Resume a deliberate Pause when its named return "
+             "The host rechecks the saved task's controls then. The window dialog (cause context_nonfit) "
+             "binds each choice (end the attempt, take "
+             "the current overview, or try again as it is) to that hold; a newer Pause supersedes the "
+             "choice. Resume a deliberate Pause when its named return "
              "has come or its author asks. A sleep wakes on what it chose. Your human's general word to "
              "continue returns what their general request paused; work they paused by name waits for their word "
              "about it or the return they named. "
