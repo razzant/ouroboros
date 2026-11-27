@@ -13,7 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import mcp_client
-from ouroboros.tool_connections import NanoConnections, connection_views
+from ouroboros.section_floor import HostSection
+from ouroboros.tool_connections import connection_views, nano_connections_type
 from ouroboros.tool_policy import initial_tool_schemas
 from ouroboros.tools.tool_discovery import bind_resident_schemas, list_available_tools, resolve_gateway_call
 from tests import _memory_scale_fixture as scale
@@ -72,7 +73,7 @@ def test_the_nano_map_keeps_every_name_and_its_size_does_not_depend_on_instructi
         views[factor] = connection_views(registry, helper=False), guides
     (low_max, nano), guides = views[1]
     (long_low_max, long_nano), long_guides = views[10]
-    assert isinstance(nano, NanoConnections) and nano.section_id == "connections"
+    assert isinstance(nano, nano_connections_type()) and isinstance(nano, HostSection) and nano.section_id == "connections"
     assert str(nano) == str(long_nano) and len(long_low_max) > len(low_max)
     assert nano.guides == long_nano.guides == tuple(sorted(guides))
     assert nano.reader == 'list_available_tools(namespace="mcp_<server>")' and nano.operative_view is None
@@ -184,7 +185,7 @@ def test_the_ordinary_build_carries_the_nano_form_and_max_keeps_the_guides(tmp_p
                                           tool_schemas=scale.tools(), tool_registry=registry,
                                           route_resolver=scale.route_resolver(1_000_000, "provider", None))
     nano = plan.core.connections[1]
-    assert isinstance(nano, NanoConnections) and nano.guides == tuple(sorted(guides))
+    assert isinstance(nano, nano_connections_type()) and isinstance(nano, HostSection) and nano.guides == tuple(sorted(guides))
     flat = {mode: json.dumps(plan.messages_for(mode), ensure_ascii=False) for mode in ("max", "nano")}
     for guide in guides.values():
         assert json.dumps(" ".join(guide.split()), ensure_ascii=False)[1:-1] in flat["max"]

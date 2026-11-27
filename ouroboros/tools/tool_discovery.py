@@ -97,7 +97,7 @@ def owed_guides(ctx: Any, names: Any) -> List[str]:
 
 def handed_guides(registry: "ToolRegistry", ctx: Any, names: Any) -> str:
     """The instructions of each MCP server among ``names`` that this actor's current Nano map leaves to the reader
-    (``tool_connections.NanoConnections.guides``) and this session has not handed over yet, raw, each once; ``""``
+    (``tool_connections.nano_connections_type``: ``guides``) and this session has not handed over yet, raw, each once; ``""``
     when none is owed (Low/Max and an actor whose map keeps them read them there). A body longer than the frame holds
     reaches the mind head and tail with its exact source (``tool_result_delivery``), and the reader returns it whole."""
     owed = owed_guides(ctx, names)
