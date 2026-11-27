@@ -5,7 +5,7 @@ import { clearReloadParams } from './layers.js';
 import { fluentIcon, renderSkillIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, roomBarHtml } from './chat_header.js';
-import { ROOM_EDGE_HTML } from './page_header.js';
+import { placeRoomEdges, ROOM_EDGE_HTML, watchRoomEdges } from './page_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
 import { roomCovered, roomNotice, watchRoomCover } from './room_notice.js';
@@ -172,6 +172,7 @@ import {
 const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'interrupted', ...TERMINAL_SUBAGENT_EVENTS]);
 // Details and Reviews use the shared control glyph; ::after remains the touch hit area.
 const CHEVRON = renderSkillIcon('chevron', { size: 14, className: 'chat-live-chevron' });
+
 
 export function initChat(ctx) {
     // Back-compat main-chat entry: one full-page instance bound to chat 1.
@@ -2626,6 +2627,7 @@ export function createChatInstance({
                     + box(inputArea).height - box(input).height)}px`);
             }
         }
+        placeRoomEdges(pageHeader, inputArea);  // a room's edges end at its capsules (page_header.js)
         if (changes.length || shortMoved) {
             const write = () => { for (const [name, value] of changes) page.style.setProperty(name, value); };
             const apply = () => preserveStickiness ? withStableViewport(write) : write();
@@ -2669,6 +2671,7 @@ export function createChatInstance({
     const syncComposerReserve = () => updateMessagesPadding();
     inputArea?.addEventListener('ouro:composer-reserve', syncComposerReserve);
     installChatResizeObservers();
+    const unwatchEdges = watchRoomEdges(globalThis.window, () => placeRoomEdges(pageHeader, inputArea));
 
     // Open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners
     // (style.css): a pointer in panel quiets them; any key restores them (Back to reading from the
@@ -3489,6 +3492,7 @@ export function createChatInstance({
             inputArea?.removeEventListener('ouro:composer-reserve', syncComposerReserve);
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
+            unwatchEdges();
             historyResyncScheduler.cancel();
             preview.destroy();
             for (const id of liveCardRecords.keys()) disposeLiveCard(id);
