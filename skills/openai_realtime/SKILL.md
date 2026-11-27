@@ -15,11 +15,12 @@ env_from_settings: [OPENAI_API_KEY]
 Registers `openai_realtime:openai` for `gpt-realtime-2.1`. The host selects
 memory, roles, tools and output allowance. The provider owns wire layout,
 acknowledgements, captions, usage axes and its catalog. The route's window is
-290,666 input tokens, measured on this route on 2026-11-27: whole spoken calls kept
+290,666 input tokens, measured on one account on 2026-11-27: whole spoken calls kept
 the spoken fact and the late recall there (2 of 2 near 290k, 3 of 3 near 231k). The
-vendor documents a 128,000 context, which this route did not enforce; 493,554 was
+vendor documents a 128,000 context, which that account did not enforce; 493,554 was
 accepted over three turns and is recorded as accepted input, a lower bound. First
-answers on a large room wait for the uncached prefill (about 18-19 s at 290k).
+answers on a large room wait for the uncached prefill (about 18-19 s at 290k, from
+the end of the person's first words).
 Automatic truncation is disabled.
 Text fields preserve every character and role across the observed 256000-character
 item limit. Images remain native input. Unsupported content fails explicitly.

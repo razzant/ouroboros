@@ -35,8 +35,10 @@ CATALOG = ProviderCatalog(
     models=(CatalogModel(
         'grok-voice-3.0', 'grok-voice-3.0 \u2014 xAI\u2019s voice model',
         RouteFacts(conversation_window_tokens=80_000, working_reserve_tokens=10_000, basis='estimator',
-                   source='measured spoken-retention bound of session.instructions (operator probes 21.10)',
-                   observed='2026-10-21'),
+                   source='measured spoken-retention bound of the whole setup (operator probes 21.10 and 27.11.2026: '
+                          'spoken turns kept up to about 98,300 o200k tokens and lost from about 99,700, whatever the '
+                          'text); counted in the host estimate, which nothing calibrates against Grok\'s tokenizer',
+                   observed='2026-11-27'),
         default=True, silent_tool_results=True, voices=(CatalogVoice('eve', 'Eve'), CatalogVoice('xai_ara', 'Ara')),
         thinking_levels=('none', 'high'), honours=frozenset({'languages', 'thinking'}),
         notes=(('pause', 'Grok Voice decides itself when your turn has ended.'),

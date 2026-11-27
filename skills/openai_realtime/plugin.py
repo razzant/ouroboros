@@ -12,26 +12,26 @@ from ouroboros.contracts.realtime import (
 # One address for both the connection and the declared route identity.
 ENDPOINT = "wss://api.openai.com/v1/realtime"
 ROUTE = RealtimeRoute(accounting_provider="openai_realtime", endpoint=ENDPOINT, model_prefix="openai::")
-# Measured on this route 27.11.2026: 20 spoken calls through this adapter's own open(), 9k to 494k
+# Measured on one account 27.11.2026: 20 spoken calls through this adapter's own open(), 9k to 494k
 # input tokens, no setup refusal, error, truncation or context-length error at any size; the vendor
-# documents a 128,000 context, which this route did not enforce. The window is the largest size at
-# which whole calls kept the spoken fact and answered the late recall: 290,666 (2 of 2 sessions at
-# ~290k; 3 of 3 at ~231k). 493,554 was accepted and kept the fact over three turns (one session)
-# and is recorded as accepted input. By the owner's rule (20.10) a successful request is a lower
-# bound, never a ceiling below it: a larger accepted input in a real call is recorded as evidence.
-# First answers pay the uncached prefill (the source says how long); later answers come from cache.
+# documents a 128,000 context, which that account did not enforce (another account may). The window
+# is the largest size at which whole calls kept the spoken fact and answered the late recall: 290,666
+# (2 of 2 sessions at ~290k; 3 of 3 at ~231k). 493,554 was accepted and kept the fact over three
+# turns (one session) and is recorded as accepted input. By the owner's rule (20.10) a successful
+# request is a lower bound, never a ceiling below it: a larger accepted input in a real call is
+# recorded as evidence. First answers pay the uncached prefill (the source says how long).
 CATALOG = ProviderCatalog(
     label="OpenAI", credential_settings=("OPENAI_API_KEY",),
     privacy="Call audio and the frames you show go to OpenAI.",
     models=(CatalogModel(
         "gpt-realtime-2.1", "gpt-realtime-2.1 \u2014 OpenAI\u2019s realtime voice model",
         RouteFacts(conversation_window_tokens=290_666, accepted_input_tokens=493_554, acceptance_can_raise=True, working_reserve_tokens=10_000,
-                   basis="provider", source="measured on this route 27.11.2026 (the vendor documents a 128,000 "
-                   "context, not enforced here): whole spoken calls kept the spoken fact and the late recall at "
-                   "290,666 input tokens (2 of 2 sessions near 290k, 3 of 3 near 231k); 493,554 accepted with the "
-                   "fact kept over three turns (one session); no truncation or context error in 20 sessions. "
-                   "Measured first answer about 5 s at 100k input tokens, 10 s at 198k, 15-17 s at 231k, 18-19 s "
-                   "at 290k; later answers 1-3 s",
+                   basis="provider", source="the vendor documents a 128,000 context; on the measuring account on "
+                   "27.11.2026 calls of this size were served: whole spoken calls kept the spoken fact and the late "
+                   "recall at 290,666 input tokens (2 of 2 sessions near 290k, 3 of 3 near 231k), 493,554 was "
+                   "accepted with the fact kept over three turns (one session), no truncation or context error in 20 "
+                   "sessions. First answer, from the end of the person's first words: about 5 s at 100k input "
+                   "tokens, 10 s at 198k, 15-17 s at 231k, 18-19 s at 290k; later answers 1-3 s",
                    observed="2026-11-27"),
         default=True, vision=True, silent_tool_results=True,
         voices=tuple(CatalogVoice(name, name.capitalize()) for name in (
