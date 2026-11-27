@@ -1225,7 +1225,8 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
     for stale in ("_last_llm_error", "_last_llm_error_kind", "_last_llm_failure", "_acting_route_failure", "_last_llm_retry_same_request",
                   "_last_llm_status_code", "_last_llm_provider_code", "_last_llm_provider_message",
                   "_last_llm_provider_fields", "_last_llm_provider_answer", "_last_llm_provider_message_cut", "_last_llm_resource_refusal",
-                  "_last_llm_output_exhausted", "_last_llm_attempt_custody", "_last_llm_size_refusal"):
+                  "_last_llm_output_exhausted", "_last_llm_attempt_custody", "_last_llm_size_refusal",
+                  "_last_llm_route_withheld"):
         accumulated_usage.pop(stale, None)
     from ouroboros.loop_transport import take_route_facts
     take_route_facts(usage, accumulated_usage)
@@ -1557,6 +1558,11 @@ def call_llm_with_retry(
                 note_route_caution(accumulated_usage, e.route_caution_used[0], route=e.route_caution_used[1])
             if getattr(e, "route_caution", None):
                 route_caution = (e.route_caution, bool(getattr(e, "route_withheld", False)), getattr(e, "route_caution_key", ""))
+            # The last failure's own words when the host withheld the send (``llm_ollama_guard``): the terminal text
+            # of the turn says them instead of the provider-failure frame; any later failure replaces or clears it.
+            accumulated_usage.pop("_last_llm_route_withheld", None)
+            if route_caution[1] and route_caution[0]:
+                accumulated_usage["_last_llm_route_withheld"] = route_caution[0]
             if letter:
                 capture = _own_capture(physical_attempt_capture_from_exception(e), prior)
                 if letter.settle(capture) and not local_consideration:  # provably unsent: the plain request goes
