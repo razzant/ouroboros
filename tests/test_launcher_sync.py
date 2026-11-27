@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import types
+from dataclasses import replace
 
 import pytest
 
@@ -109,6 +110,27 @@ def _write_bundle(repo_src, bundle_dir):
         text=True,
         env=_scrubbed_env(),
     )
+
+
+@pytest.mark.parametrize("root_field", ["repo_dir", "data_dir"])
+def test_ensure_managed_repo_refuses_empty_root(tmp_path, monkeypatch, root_field):
+    monkeypatch.chdir(tmp_path)
+    sentinel = tmp_path / "keep.txt"
+    sentinel.write_bytes(b"preserve working folder\n")
+    context = _make_context(tmp_path / "bundle", tmp_path / "repo")
+    context.repo_dir.mkdir()
+    context = replace(context, **{root_field: pathlib.Path("")})
+
+    def unexpected_install(*args, **kwargs):
+        pytest.fail("An invalid root reached the archive/clone path")
+
+    monkeypatch.setattr(bootstrap_module, "load_bundle_manifest", lambda _: {})
+    monkeypatch.setattr(bootstrap_module, "_install_managed_repo", unexpected_install)
+    with pytest.raises(RuntimeError, match="OUROBOROS_REPO_DIR.*OUROBOROS_DATA_DIR.*nothing was moved"):
+        bootstrap_module.ensure_managed_repo(context)
+    assert sentinel.read_bytes() == b"preserve working folder\n"
+    assert not (tmp_path / "archive").exists()
+    assert not (tmp_path / "data").exists()
 
 
 def test_ensure_managed_repo_clones_from_embedded_bundle(tmp_path):

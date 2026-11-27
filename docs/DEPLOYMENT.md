@@ -147,9 +147,10 @@ Desktop (macOS, Windows, Linux):
 1. In the installed app, run Dashboard → Updates. It stays on Python 3.10.
 2. Quit Ouroboros. For a way back, keep the old app: rename `Ouroboros.app`, or
    rename the old Windows ZIP or Linux tar.gz folder and extract the new one into
-   an empty folder, never over the old one. `.deb`, `.rpm` and Homebrew replace
-   the app in place; their way back is the previous package (or a copy of
-   `Ouroboros.app` made before `brew upgrade`).
+   an empty folder, never over the old one. The Windows per-user Setup installer,
+   `.deb`, `.rpm` and Homebrew replace the installed program in place (keeping
+   `~/Ouroboros` data and checkout); their way back is the previous installer or
+   package (or a copy of `Ouroboros.app` made before `brew upgrade`).
 3. Install and start the new app. It keeps the checkout, data and settings,
    runs on the packages it bundles and installs only what the checkout's lock
    adds, into `state/python-userbase/lib/python3.12` (Windows `Python312`).

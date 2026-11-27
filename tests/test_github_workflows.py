@@ -63,6 +63,14 @@ class FakeGh:
         kind = self.kind(args, capture_to)
         if kind in self.failing:
             return self.failing[kind]
+        if kind == "run_rest":
+            # GitHub's REST spelling of one run; the metadata read now takes every run fact from this answer.
+            return _answer({"id": self.run.get("databaseId"), "run_attempt": self.run.get("attempt"),
+                            "html_url": self.run.get("url"), "status": self.run.get("status"),
+                            "conclusion": self.run.get("conclusion"), "head_sha": self.run.get("headSha"),
+                            "name": self.run.get("workflowName")})
+        if kind == "run_jobs":
+            return _answer(self.run)
         if kind == "run_json":
             return _answer(self.run)
         if kind == "log":
@@ -78,15 +86,32 @@ class FakeGh:
     @staticmethod
     def kind(args, capture_to):
         if args[:2] == ["run", "view"]:
-            return "log" if capture_to is not None else "run_json"
+            if capture_to is not None:
+                return "log"
+            return "run_jobs" if "jobs" in args[-1] else "run_json"
         if args[:2] == ["repo", "view"]:
             return "repo"
         if args[0] == "api":
-            return "zip" if args[1].endswith("/zip") else "artifacts" if "/runs/" in args[1] else "artifact"
+            route = args[1].split("?", 1)[0]
+            if route.endswith("/zip"):
+                return "zip"
+            if route.endswith("/artifacts"):
+                return "artifacts"
+            if route.endswith("/logs"):
+                return "log"
+            if "/actions/runs/" in route:
+                return "run_rest"
+            return "artifact"
         raise AssertionError(args)
 
     def kinds(self):
         return [self.kind(call.args, call.capture_to) for call in self.calls]
+
+
+def _pin_selected_target(monkeypatch):
+    """The run metadata read names the run's repository through ``github._selected_target``; keep that read local."""
+    monkeypatch.setattr(github, "_selected_target",
+                        lambda ctx, **kwargs: (github.GhTarget("github.example", "owner", "selected"), None))
 
 
 @pytest.fixture
@@ -96,6 +121,7 @@ def fake(monkeypatch):
     def install(**kwargs):
         gh = FakeGh(**kwargs)
         monkeypatch.setattr(github_workflows, "_gh_run", gh)
+        _pin_selected_target(monkeypatch)
         return gh
     return install
 
@@ -144,6 +170,36 @@ def _typed(ctx):
 
 # --- github_read get run with log -----------------------------------------------------------------------------------
 
+def test_run_log_missing_run_id_refusal_keeps_the_selected_repo_in_its_one_recovery(fake, ctx):
+    """A missing run id gets one recovery example: the REST runs-of-a-commit route, with the explicitly selected
+    [HOST/]OWNER/REPO riding along so the suggested discovery call cannot drift to another repository."""
+    fake()
+
+    text = _read(ctx, "get", "run", run_id=0, repo="github.example/corp/secret")
+
+    assert text.startswith("⚠️ TOOL_ARG_ERROR: target names the workflow run")
+    assert ("github_read(method='api', route='repos/{owner}/{repo}/actions/runs?head_sha=<commit SHA>', "
+            "repo='github.example/corp/secret') lists the runs of a commit") in text
+    assert "checks" not in text, "the recovery example no longer detours through checks"
+
+    plain = _read(ctx, "get", "run", run_id=0, repo="")
+
+    assert "route='repos/{owner}/{repo}/actions/runs?head_sha=<commit SHA>'" in plain and "repo=" not in plain
+
+
+def test_list_kind_run_refusal_offers_the_same_repo_aware_recovery(fake, ctx):
+    """list(kind='run') is not a list surface; its refusal offers the same one repo-aware REST recovery as the get
+    entry instead of a checks detour, whose gh run list --json attempt field the installed gh 2.45 cannot export."""
+    fake()
+
+    text = _read(ctx, "list", "run", repo="github.example/corp/secret")
+
+    assert text.startswith("⚠️ TOOL_ARG_ERROR: get(kind='run', target=run_id) reads a run")
+    assert ("github_read(method='api', route='repos/{owner}/{repo}/actions/runs?head_sha=<commit SHA>', "
+            "repo='github.example/corp/secret') lists a commit's runs") in text
+    assert "checks" not in text
+
+
 def test_run_log_resolves_identity_retains_exact_bytes_and_shows_the_tail(fake, ctx):
     """Paired benefit over ``gh run view 11 --log`` read as text: one call names the repository, attempt, source command
     and exact byte count, retains the bytes with their sha256 at a read_file address, and shows the tail."""
@@ -151,23 +207,34 @@ def test_run_log_resolves_identity_retains_exact_bytes_and_shows_the_tail(fake, 
 
     text = _read(ctx, "get", "run", run_id=11, repo="")
 
-    assert gh.kinds() == ["run_json", "log"]
+    assert gh.kinds() == ["run_rest", "log"]
     assert gh.calls[1].args == ["run", "view", "11", "--log", "--attempt", "1"], "pinned to the attempt the metadata read observed"
-    assert gh.calls[1].repo == "" and gh.calls[1].max_bytes == github_workflows.LOG_MAX_BYTES_DEFAULT
+    assert gh.calls[0].repo == "" and gh.calls[1].repo == "github.example/owner/selected"
+    assert gh.calls[1].max_bytes == github_workflows.LOG_MAX_BYTES_DEFAULT
     assert text.startswith("GitHub Actions log — owner/selected run 11 attempt 1\n")
-    assert f"Source: gh run view 11 --log --attempt 1; captured {len(LOG)} bytes exactly\n" in text
+    assert f"Source: gh run view 11 --log --attempt 1 --repo github.example/owner/selected; captured {len(LOG)} bytes exactly\n" in text
     assert hashlib.sha256(LOG).hexdigest() in text
     assert _retained(ctx, text).read_bytes() == LOG, "the retained file holds the bytes as captured, CRLF and final newline included"
     assert "Lines: 2; showing the last 2" in text
     assert text.endswith("---\n" + LOG.decode().replace("\r\n", "\n").rstrip("\n"))
     assert (_typed(ctx).status, _typed(ctx).code, _typed(ctx).meta["operation_outcome"]) == ("ok", "OK", "completed_no_effect")
 
+    progress = b"setup started\r\nprogress 10%\rprogress 99%\rdone\r\n"
+    gh.log = progress
+    text = _read(ctx, "get", "run", run_id=11, repo="")
+    # One physical LF line holds the whole self-overwriting progress update: the bare CRs keep their visible
+    # escapes, the count still names the two lines the retained bytes hold, and the bytes stay exact.
+    assert "Lines: 2; showing the last 2" in text
+    assert "progress 10%\\x0dprogress 99%\\x0ddone" in text
+    assert _retained(ctx, text).read_bytes() == progress
+
 
 def test_run_log_job_validates_membership_and_reads_by_job_id(fake, ctx):
     gh = fake()
     text = _read(ctx, "get", "run", run_id=11, job_id=55, failed_only=True, repo="github.example/owner/selected")
-    assert gh.calls[1].args == ["run", "view", "--log-failed", "--job", "55", "--attempt", "1"]
-    assert gh.calls[1].repo == "github.example/owner/selected"
+    assert gh.calls[1].args == ["run", "view", "11", "--attempt", "1", "--json", "databaseId,url,jobs"]
+    assert gh.calls[2].args == ["run", "view", "--log-failed", "--job", "55", "--attempt", "1"]
+    assert gh.calls[2].repo == "github.example/owner/selected"
     assert text.startswith("GitHub Actions log — owner/selected run 11 attempt 1, job 55 test (failure)\n")
     assert "Format: gh CLI plain-text stdout; selection: failed steps only (--log-failed)" in text
 
@@ -180,10 +247,35 @@ def test_run_log_reads_a_completed_job_before_the_parent_run_finishes(fake, ctx,
 
     text = _read(ctx, "get", "run", run_id=11, job_id=55)
 
-    assert gh.kinds() == ["run_json", "log"]
-    assert gh.calls[1].args == ["run", "view", "--log", "--job", "55", "--attempt", "1"]
+    assert gh.kinds() == ["run_rest", "run_jobs", "log"]
+    assert gh.calls[2].args == ["api", "repos/owner/selected/actions/jobs/55/logs", "--hostname", "github.example"]
+    assert gh.calls[2].repo == "github.example/owner/selected" and gh.calls[2].max_bytes == github_workflows.LOG_MAX_BYTES_DEFAULT
+    assert (f"Source: gh api repos/owner/selected/actions/jobs/55/logs --hostname github.example; "
+            f"captured {len(LOG)} bytes exactly") in text
+    assert hashlib.sha256(LOG).hexdigest() in text and _retained(ctx, text).read_bytes() == LOG
     assert "run 11 attempt 1, job 55 test (success)" in text
-    assert "selection: full run/job log (--log)" in text
+    assert "selection: the job's own log from the documented jobs endpoint" in text
+
+
+def test_run_log_refuses_a_cap_truncated_job_log_of_a_run_still_in_progress(fake, ctx):
+    """The documented jobs endpoint serves this completed job's whole final log or a typed refusal: what the
+    cap observes is that the log exceeded max_bytes — whether gh was still downloading or had already
+    finished — so unlike the legacy CLI log paths no partial prefix is retained as a confirmed job log."""
+    gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": "in_progress",
+                   "attempt": 1, "headSha": SHA, "workflowName": "CI",
+                   "jobs": [{"databaseId": 55, "name": "test", "status": "completed", "conclusion": "failure"}]},
+              log=(b"2026-11-01T00:00:00.0000000Z fixture-broken\n") * 300)
+
+    text = _read(ctx, "get", "run", run_id=11, job_id=55, max_bytes=1234)
+
+    assert gh.kinds() == ["run_rest", "run_jobs", "log"]
+    assert gh.calls[2].args == ["api", "repos/owner/selected/actions/jobs/55/logs", "--hostname", "github.example"]
+    assert gh.calls[2].max_bytes == 1234, "the refusal names this bounded request, not a smaller default"
+    assert text.startswith("⚠️ TOOL_ERROR: job 55's own log from the documented jobs endpoint exceeded max_bytes=1234")
+    assert "the partial bytes were discarded" in text and "Raise max_bytes deliberately" in text
+    assert "wait for run 11 to complete and read its CLI job log" in text
+    assert "Retained:" not in text, "the partial prefix is discarded, not retained as the job's log"
+    assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ERROR")
 
 
 @pytest.mark.parametrize("job_status", ["queued", "in_progress"])
@@ -194,7 +286,7 @@ def test_run_log_refuses_a_noncompleted_job_even_when_parent_is_in_progress(fake
 
     text = _read(ctx, "get", "run", run_id=11, job_id=55)
 
-    assert gh.kinds() == ["run_json"]
+    assert gh.kinds() == ["run_rest", "run_jobs"]
     assert text == (f"⚠️ TOOL_ERROR: job 55 test in run 11 attempt 1 in owner/selected is {job_status}; "
                     "GitHub serves a job log only after that job is completed, so no log was requested.")
     assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ERROR")
@@ -207,7 +299,7 @@ def test_run_log_keeps_whole_run_completed_only_with_completed_jobs(fake, ctx):
 
     text = _read(ctx, "get", "run", run_id=11)
 
-    assert gh.kinds() == ["run_json"]
+    assert gh.kinds() == ["run_rest"]
     assert "is in_progress; GitHub serves the log of a completed run only" in text
 
 
@@ -217,7 +309,7 @@ def test_run_log_failed_only_cli_failure_is_typed_without_rest_fallback(fake, ct
 
     text = _read(ctx, "get", "run", run_id=11, failed_only=True)
 
-    assert gh.kinds() == ["run_json", "log"]
+    assert gh.kinds() == ["run_rest", "log"]
     assert text.startswith("⚠️ TOOL_ERROR: failed_only requires GitHub CLI --log-failed output")
     assert "no REST fallback was used" in text and forbidden.text in text
     assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ERROR")
@@ -228,7 +320,7 @@ def test_run_log_retention_failure_is_typed_incomplete_with_capture_facts(fake, 
     monkeypatch.setattr(github_workflows, "_retain", lambda *_a, **_k: "OSError: store unavailable")
     text = _read(ctx, "get", "run", run_id=11)
     result = _typed(ctx)
-    assert gh.kinds() == ["run_json", "log"]
+    assert gh.kinds() == ["run_rest", "log"]
     assert (result.status, result.code, result.meta["operation_outcome"]) == ("error", "TOOL_ERROR", "incomplete")
     assert "run 11 attempt 1" in text and "Source: gh run view 11 --log --attempt 1" in text
     assert f"captured {len(LOG)} bytes exactly, sha256 {hashlib.sha256(LOG).hexdigest()}" in text
@@ -238,7 +330,7 @@ def test_run_log_retention_failure_is_typed_incomplete_with_capture_facts(fake, 
 def test_run_log_refuses_a_job_outside_the_run_before_any_download(fake, ctx):
     gh = fake()
     text = _read(ctx, "get", "run", run_id=11, job_id=99)
-    assert gh.kinds() == ["run_json"]
+    assert gh.kinds() == ["run_rest", "run_jobs"]
     assert text == "⚠️ TOOL_ARG_ERROR: job 99 is not a job of run 11 attempt 1 in owner/selected; its jobs: 55 test."
     assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ARG_ERROR")
 
@@ -246,7 +338,7 @@ def test_run_log_refuses_a_job_outside_the_run_before_any_download(fake, ctx):
 def test_run_log_of_an_unfinished_run_is_refused_without_a_download(fake, ctx):
     gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": "in_progress", "attempt": 1, "jobs": []})
     text = _read(ctx, "get", "run", run_id=11)
-    assert gh.kinds() == ["run_json"]
+    assert gh.kinds() == ["run_rest"]
     assert text == ("⚠️ TOOL_ERROR: run 11 attempt 1 in owner/selected is in_progress; GitHub serves the log of a completed run "
                     "only, so no log was requested.")
 
@@ -255,7 +347,7 @@ def test_run_log_attempt_is_read_and_passed_to_the_capture(fake, ctx):
     gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": "completed", "conclusion": "success",
                    "attempt": 2, "headSha": SHA, "workflowName": "CI", "jobs": []})
     text = _read(ctx, "get", "run", run_id=11, attempt=2)
-    assert gh.calls[0].args == ["run", "view", "11", "--attempt", "2", "--json", github_workflows._RUN_FIELDS + ",jobs"]
+    assert gh.calls[0].args == ["api", "repos/owner/selected/actions/runs/11/attempts/2", "--hostname", "github.example"]
     assert gh.calls[1].args == ["run", "view", "11", "--log", "--attempt", "2"]
     assert "run 11 attempt 2" in text
 
@@ -269,7 +361,7 @@ def test_run_log_never_invents_the_run_or_attempt_it_reads(fake, ctx, run, attem
     """A later re-run must not relabel bytes: the observed id and attempt are validated, never defaulted to 1."""
     gh = fake(run={"url": f"{BASE}/actions/runs/11", "status": "completed", "jobs": [], **run})
     text = _read(ctx, "get", "run", run_id=11, attempt=attempt)
-    assert gh.kinds() == ["run_json"] and text.startswith("⚠️ TOOL_ERROR: ") and fragment in text
+    assert gh.kinds() == ["run_rest"] and text.startswith("⚠️ TOOL_ERROR: ") and fragment in text
     assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ERROR")
 
 
@@ -312,12 +404,12 @@ def test_run_log_argument_refusals_launch_nothing(fake, ctx, kwargs, fragment):
 
 
 def test_run_log_malformed_json_and_transport_failures_are_reported_not_guessed(fake, ctx):
-    gh = fake(failing={"run_json": github.GhResult(True, "not json", 0, None, "")})
+    gh = fake(failing={"run_rest": github.GhResult(True, "not json", 0, None, "")})
     assert _read(ctx, "get", "run", run_id=11).startswith("⚠️ TOOL_ERROR: failed to parse the workflow run JSON")
     forbidden = github.GhResult(False, "⚠️ GH_ERROR: gh: Resource not accessible (HTTP 403)", 1, 403, "exit")
     gh = fake(failing={"log": forbidden})
     assert _read(ctx, "get", "run", run_id=11) == forbidden.text
-    assert gh.kinds() == ["run_json", "log"]
+    assert gh.kinds() == ["run_rest", "log"]
 
 
 # --- github_read list artifact -------------------------------------------------------------------------------------
@@ -560,6 +652,7 @@ def test_registered_reader_reports_retention_failure_as_incomplete(tmp_path, mon
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
     gh = FakeGh(artifact=_DIST, archive=ARCHIVE)
     monkeypatch.setattr(github_workflows, "_gh_run", gh)
+    _pin_selected_target(monkeypatch)
     monkeypatch.setattr(github_workflows, "_retain", lambda *_a, **_k: "OSError: store unavailable")
     ctx, _ = _context(tmp_path, "queued")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
@@ -567,7 +660,7 @@ def test_registered_reader_reports_retention_failure_as_incomplete(tmp_path, mon
     result = registry.execute_result(name, args)
     assert (result.status, result.code, result.meta["operation_outcome"]) == ("error", "TOOL_ERROR", "incomplete")
     assert "NOT retained (OSError: store unavailable)" in result.text
-    assert gh.kinds() == (["run_json", "log"] if args["method"] == "get" else ["repo", "artifact", "zip"])
+    assert gh.kinds() == (["run_rest", "log"] if args["method"] == "get" else ["repo", "artifact", "zip"])
 
 
 def test_artifact_page_preview_keeps_every_omitted_record_addressable(fake, ctx, monkeypatch):
@@ -613,11 +706,11 @@ def test_old_job_requires_its_explicit_attempt(fake, ctx):
     gh.run = second
     refused = _read(ctx, "get", "run", run_id=11, job_id=55)
     assert "not a job of run 11 attempt 2" in refused
-    assert gh.kinds() == ["run_json"]
+    assert gh.kinds() == ["run_rest", "run_jobs"]
     gh = fake(run=first)
     text = _read(ctx, "get", "run", run_id=11, job_id=55, attempt=1)
     assert text.startswith("GitHub Actions log — owner/selected run 11 attempt 1, job 55")
-    assert gh.calls[0].args[3:5] == ["--attempt", "1"]
+    assert gh.calls[0].args == ["api", "repos/owner/selected/actions/runs/11/attempts/1", "--hostname", "github.example"]
     assert gh.calls[-1].args[-2:] == ["--attempt", "1"]
 
 
@@ -628,7 +721,7 @@ def test_run_metadata_without_log_uses_shared_projection_and_never_captures(fake
     payload = json.loads(text.partition("\n")[2])
     assert payload["item"] == {"databaseId": 11, "headSha": SHA}
     assert payload["complete"] is True and payload["next_cursor"] == "" and "capture" not in payload
-    assert gh.kinds() == ["run_json"]
+    assert gh.kinds() == ["run_rest"]
 
 
 def test_artifact_page_uses_shared_cursor_limit_projection_and_explicit_filter_note(fake, ctx):
@@ -665,6 +758,7 @@ def test_gh_run_readers_add_run_identity_exact_capture_and_artifact_id(tmp_path,
     ctx._active_builtin_tool_result = None
     driver = FakeGh(artifacts=[_DIST], artifact=_DIST, archive=_zip({"out.txt": b"ok"}))
     monkeypatch.setattr(github_workflows, "_gh_run", driver)
+    _pin_selected_target(monkeypatch)
     listing = _read(ctx, "list", "artifact", run_id=11)
     assert "owner/selected run 11:" in listing and "github_read(method='download', kind='artifact', target=501" in listing
     assert "attempt 1" not in listing  # artifact API is run-scoped, not attempt-scoped
@@ -691,6 +785,7 @@ def test_gh_readers_reach_readonly_child_that_cannot_use_shell(tmp_path, monkeyp
     monkeypatch.setattr(github, "github_cli_configured", lambda: True)
     driver = FakeGh(artifacts=[_DIST], artifact=_DIST, archive=_zip({"out.txt": b"ok"}))
     monkeypatch.setattr(github_workflows, "_gh_run", driver)
+    _pin_selected_target(monkeypatch)
     assert registry.get_schema_by_name("run_command") is None
     for name, args, content in (
         ("github_read", {"method": "get", "kind": "run", "target": 11, "include": ["log"]}, "run 11 attempt 1"),
@@ -732,6 +827,7 @@ def test_retained_reader_reaches_the_canonical_file_through_this_tasks_own_tools
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
     monkeypatch.setattr(safety, "check_safety", lambda *_a, **_kw: (True, ""))
     monkeypatch.setattr(github_workflows, "_gh_run", FakeGh(artifacts=[_DIST], artifact=_DIST, archive=ARCHIVE))
+    _pin_selected_target(monkeypatch)
     ctx = ToolContext(repo_dir=system, drive_root=drive, budget_drive_root=str(canonical) if forked else "",
                       task_id="task-fixture")
     registry = ToolRegistry(repo_dir=system, drive_root=drive)

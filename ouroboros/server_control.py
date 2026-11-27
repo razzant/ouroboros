@@ -93,11 +93,17 @@ def dispatch_accepted_restart(bridge, text: str, *, callback=None, **message) ->
     threading.Thread(target=execute, name="startup-owner-restart", daemon=True).start()
 
 
+_EXTERNAL_OWNER_FREE = object()
+
+
 class PanicIngress:
     """One bridge generation's emergency door, independent of ordinary intake.
 
     A positively observed external binding is immutable until owner Reset. Keep
     that pair through state outages; never derive one from an unknown/empty slot.
+    A slot positively observed free has nobody to compare a sender with: a
+    positive private sender's Panic stops, and nothing is bound or written on
+    this path (the ordinary writer still binds the pair; this cell follows it).
     Reset closes this generation before disk work. Readers already holding its
     old cell cannot republish into the new, closed cell.
     """
@@ -110,12 +116,14 @@ class PanicIngress:
         from supervisor.state import control_value
 
         cell = self._owner
-        if not cell[0] or cell[1] is not None or not isinstance(state, dict) or not state.get("initialization_id"):
+        if not cell[0] or type(cell[1]) is tuple or not isinstance(state, dict) or not state.get("initialization_id"):
             return
         user_known, user = control_value(state, "owner_external_id")
         chat_known, chat = control_value(state, "owner_external_chat_id")
         if user_known and chat_known and type(user) is int and type(chat) is int and user > 0 and chat > 0:
             cell[1] = (user, chat)
+        elif user_known and chat_known and user is None and chat is None:
+            cell[1] = _EXTERNAL_OWNER_FREE  # positively observed free: nobody to compare a sender with yet
 
     def invalidate_owner(self) -> None:
         self._owner = [False, None]
@@ -124,8 +132,10 @@ class PanicIngress:
         if self._stop is None or not str(text).strip().lower().startswith("/panic"):
             return False
         pair = self._owner[1]
-        if source != "web" and (pair is None or pair != (user_id, chat_id)):
-            return False
+        if source != "web":
+            positive = type(user_id) is int and type(chat_id) is int and user_id > 0 and chat_id > 0
+            if pair is None or not positive or (pair is not _EXTERNAL_OWNER_FREE and pair != (user_id, chat_id)):
+                return False
         global _restart_stop_requested
         # Claim termination before the callback is scheduled: the restart
         # watcher must leave Panic time to persist its stop even if it runs first.
@@ -156,7 +166,8 @@ def request_panic(bridge, text: str, *, startup_owner_command=None, evidence=Non
     """Accept an emergency through its owner, never ordinary command admission.
 
     Only authenticated web ingress may use the startup callback. External
-    senders need the bridge's positively bound owner pair even during startup.
+    senders need the bridge's positively bound owner pair even during startup,
+    or a slot the door observed positively free (``PanicIngress``).
     """
     panic = getattr(bridge, "panic", None)
     identity = {"source": source, "user_id": user_id, "chat_id": chat_id}

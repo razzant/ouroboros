@@ -55,6 +55,10 @@ def test_restored_readonly_definite_unrun_can_record_only_its_receipt(
         result = registry.execute("verify_and_record", args)
         assert "local_readonly_subagent" in result
         assert read_verification_receipts(tmp_path, ctx.task_id) == []
+    missing = registry.execute_result("verify_and_record", {"contract_kind": "explicit_command"})
+    assert (missing.status, missing.code) == ("blocked", "ACCESS_BLOCKED")
+    assert "delegation_zero_run" in missing.text and "requires `check`" not in missing.text
+    assert read_verification_receipts(tmp_path, ctx.task_id) == []
     result = registry.execute("verify_and_record", _receipt_args(decision))
     assert decision.upper() in result and "typed host receipt recorded" in result
     receipts = read_verification_receipts(tmp_path, task["id"])

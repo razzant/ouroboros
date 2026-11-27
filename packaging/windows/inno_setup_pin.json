@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "version": "7.1.1",
+  "installer": "innosetup-7.1.1-x64.exe",
+  "url": "https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe",
+  "sizeBytes": 14336568,
+  "sha256": "8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0",
+  "compilerSha256": {
+    "ISCC.exe": "e0f9f1dc32032650c6629f6dee41eb6d20ba140e4e3c07c25d8a24f9ba781644",
+    "ISCmplr.dll": "7bf5943088e20ab95863a640d99c0234cf98e57850af82cdb465589f994d87de"
+  }
+}

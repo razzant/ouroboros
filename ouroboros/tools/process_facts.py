@@ -250,7 +250,7 @@ def _offered_read(ctx, reader, target, rows, end):
         # No real tool record: nothing here prepared these arguments and nothing can run them — a refusal, never a
         # bypass of the skipped checks into an advertised call.
         return args, "", "admission_unknown", "read_file is not registered in this process's tool set."
-    if arg_error := tool_resolution._prepare_public_builtin_args(entry, args):
+    if arg_error := tool_resolution._prepare_public_builtin_args(entry, args, ctx=ctx):
         return args, "", "arg_refused", said(arg_error)
     tool_resolution._normalize_dispatch_path_args_result(ctx, "read_file", args)  # rewrites args in place, as dispatch reads them
     root, binding, refusal = read_admission(ctx, args.get("root"), args.get("path"),
@@ -282,6 +282,7 @@ def _offered_read(ctx, reader, target, rows, end):
 def process_environment_scope(ctx, name, arguments):
     """One current Settings selection at dispatch, shared by nested launchers."""
     from ouroboros.config import load_settings, selection_settings
+    from ouroboros.shell_parse import VERIFY_RUN_KINDS
     from ouroboros.workspace_executor import resolve_process_env, validate_process_env
     from ouroboros.tools.tool_result import ToolResult
 
@@ -291,7 +292,8 @@ def process_environment_scope(ctx, name, arguments):
     if prior is None and name in {"run_command", "run_script", "verify_and_record"}:
         try:
             refs = validate_process_env(arguments.get("env_from_settings"))
-            if refs and name == "verify_and_record" and arguments.get("contract_kind") not in {"visible_verifier", "explicit_command", "explicit_metric"}:
+            # Settings selection still requires a canonical spelling.
+            if refs and name == "verify_and_record" and arguments.get("contract_kind") not in VERIFY_RUN_KINDS:
                 raise ValueError("env_from_settings applies only to run-kind verification")
             if refs and not settings_environment_allowed(ctx):
                 error = ToolResult(status="blocked", code="ACCESS_BLOCKED",

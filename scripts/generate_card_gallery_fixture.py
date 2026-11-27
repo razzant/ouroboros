@@ -415,7 +415,6 @@ def _task_case(task_id, *, state="done", answer=LONG_TEXT, usage=None):
     running or paused one as the queue keeps it; then what the page reads (history, census, the task's detail) from
     the gateway's own readers. A running task's next narration is its live frame."""
     from ouroboros import agent_task_pipeline
-    from ouroboros.dialogue_import import export_for_older_body
     from ouroboros.gateway import tasks as task_gateway
     from ouroboros.gateway.history import make_chat_history_endpoint
     from ouroboros.post_task_checkpoint import set_root_post_task_checkpoint
@@ -447,7 +446,6 @@ def _task_case(task_id, *, state="done", answer=LONG_TEXT, usage=None):
             # The root's post-task work done (its free host-facts row is left out: the stored row names the
             # recording's temporary folders, files_rescued, so its row address would differ on every machine).
             set_root_post_task_checkpoint(env, task, "completed")
-        export_for_older_body(root)  # the history reader still reads the chain files
         history = asyncio.run(make_chat_history_endpoint(root)(SimpleNamespace(query_params={"limit": "50"})))
         detail = task_gateway._task_get_response(_request(root, task_id=task_id))
         census = {"supervisor_ready": True, **state_fields(root)}

@@ -435,7 +435,7 @@ ouroboros/ — agent core and shared runtime (§6)
     clawhub.py, fetcher.py, adapter.py, install.py, install_specs.py, isolated_deps.py, provenance.py — registry, fetch, adapt, specs, isolated deps, receipts
   launcher_bootstrap.py, runtime_venv.py, launcher_onboarding.py — bootstrap/source handoff, runtime venv, desktop `/onboarding` (§2)
   launcher_readiness.py — `/api/health` probe (§2 Boot order)
-  launcher_windows_runtime.py — Windows runtime, pre-import legacy GUI handoff (§2)
+  launcher_windows_runtime.py — Windows runtime, Setup-owned identity/handoff, pre-import legacy GUI repair (§2)
   launcher_server_reaper.py — strays, close/Panic/Job cleanup, Quit stop (§9)
   launcher_background.py — desktop consent, close/quit, `DesktopApi` (MainApi methods: §3)
   panic_source.py, platform_peer.py — diagnostic Panic source, peer lookup (§9)
