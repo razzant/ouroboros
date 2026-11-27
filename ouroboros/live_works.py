@@ -1,7 +1,8 @@
 """One read-only present for new heads, derived from the independent-root roster.
 
 Focus is the model's authored account of its work. It is deliberately distinct
-from the web card's latest visible narration and never supplies routing authority.
+from the web card's latest visible narration and never supplies routing authority. The source it retained reads
+with ``get_task_result(task_id=<author>, include_focus_source=True, focus_source_sha256=…)``.
 
 ``works`` holds one row per listed root: its id, title, room, state, ``started_at``,
 open questions, waiting and hold facts, ``tails`` (what of it still runs) and focus.
