@@ -28,7 +28,10 @@ human's words and registers no directive. What was stated is read back from the 
 view (journal sequence and mark): a latest change no intact row states is stated when it
 came after the capture my block shows, when a row in view names its mark, or when my block
 does not show its mark (released while I was paused); so again after a fold took its row,
-and nothing repeats. My own change is stated only once the memory_mark result that
+and nothing repeats. A row every mark of which a later intact row states at an equal or newer
+sequence is a superseded copy (``superseded_change_rows``): it may leave like other superseded
+host state, and nothing is stated again for it.
+My own change is stated only once the memory_mark result that
 reported it is no longer in view, never for a mark I made myself that neither my block nor
 a row shows. Another task's change also drops the anchored-marks cache. Each round costs a
 journal size check and a lookup of the room my task is bound to (the anchored cache's own
@@ -184,13 +187,34 @@ def anchored_note(ctx: Any, tool: str, args: Any) -> str:
         return ""
 
 
-def _stated(messages: List[Dict[str, Any]]) -> Dict[int, str]:
-    """``{journal sequence: mark id}`` of the changes the intact change rows in view state."""
+def _row_changes(row: Any) -> List[tuple]:
+    """``(journal sequence, mark id)`` of each change an intact change row states; none for any other row."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, host_row_intact
 
-    return {int(sequence): mark for row in messages if isinstance(row, dict)
-            and row.get(HOST_CONTEXT_KIND_KEY) == MARK_CHANGES_KIND and host_row_intact(row)
-            for sequence, mark in _STATED.findall(row["content"])}
+    if not (isinstance(row, dict) and row.get(HOST_CONTEXT_KIND_KEY) == MARK_CHANGES_KIND and host_row_intact(row)):
+        return []
+    return [(int(sequence), mark) for sequence, mark in _STATED.findall(row["content"])]
+
+
+def _stated(messages: List[Dict[str, Any]]) -> Dict[int, str]:
+    """``{journal sequence: mark id}`` of the changes the intact change rows in view state."""
+    return {sequence: mark for row in messages for sequence, mark in _row_changes(row)}
+
+
+def superseded_change_rows(messages: List[Dict[str, Any]]) -> set:
+    """Positions of intact change rows every mark of which a later intact row states again at an equal or newer
+    journal sequence. Only each mark's latest change no row in view states is ever stated again
+    (``append_mark_changes``), so such a row leaving sends nothing more; a row that is still the only witness of any
+    mark it names stays current, whatever else it states."""
+    newest: Dict[str, int] = {}
+    superseded = set()
+    for position in range(len(messages) - 1, -1, -1):
+        changes = _row_changes(messages[position])
+        if changes and all(newest.get(mark, -1) >= sequence for sequence, mark in changes):
+            superseded.add(position)
+        for sequence, mark in changes:
+            newest[mark] = max(newest.get(mark, -1), sequence)
+    return superseded
 
 
 def _change_lines(change: Dict[str, Any], label: Any) -> List[str]:

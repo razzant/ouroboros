@@ -44,13 +44,14 @@ def _obsolete_host_rows(messages: Sequence[Mapping[str, Any]]) -> set[int]:
 
     A facts, clock or roster row counts only while it is still exactly what its
     producer wrote (``context_budget.host_row_intact``): a row written before that
-    binding, or changed since, stays whole for the mind to fold. Review copies and
-    skill snapshots follow their producers' own supersession (typed from birth,
-    never merged into). Legacy/unlabelled prose stays raw, and neither an old
+    binding, or changed since, stays whole for the mind to fold. Review copies,
+    skill snapshots and mark changes follow their producers' own supersession (typed
+    from birth, never merged into). Legacy/unlabelled prose stays raw, and neither an old
     warning nor a peer message is obsolete merely because the mind has already
     seen it. Provenance is typed; no text is matched.
     """
     from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+    from ouroboros.mark_anchors import superseded_change_rows
     from ouroboros.peer_roster import ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME
     from ouroboros.review_history_view import obsolete_review_index_positions
     from ouroboros.send_clock import CLOCK_ROW_NAME
@@ -66,7 +67,8 @@ def _obsolete_host_rows(messages: Sequence[Mapping[str, Any]]) -> set[int]:
         obsolete.update(i for i, row in enumerate(messages[:max(0, latest)])
                         if row.get("role") == "user" and row.get(HOST_CONTEXT_KIND_KEY) in names
                         and host_row_intact(row))
-    return obsolete | set(obsolete_review_index_positions(messages)) | obsolete_snapshot_positions(messages)
+    return (obsolete | set(obsolete_review_index_positions(messages)) | obsolete_snapshot_positions(messages)
+            | superseded_change_rows(messages))
 
 
 
@@ -232,7 +234,9 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit, *, err
     lines, texts = [f"Unit {unit.unit_id}: tool, {unit.context_size_tokens} tokens estimated"], []
     results = {str(row.get("tool_call_id") or ""): row for row in rows if str(row.get("role") or "") == "tool"}
     for call in rows[0].get("tool_calls") or []:
-        function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
+        if not (isinstance(call, Mapping) and isinstance(call.get("function"), Mapping)):
+            continue  # no call the unit scanner would accept (a departing physical exchange may hold one)
+        function = call["function"]
         call_id, arguments = str(call.get("id") or ""), str(function.get("arguments") or "")
         shown = (arguments if len(arguments) <= _FACT_ARGUMENTS_CHARS
                  else f"<arguments {len(arguments)} chars, sha256 {compaction._sha256(arguments)[:16]}>")
@@ -260,28 +264,44 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit, *, err
     return "\n".join(lines)
 
 
-def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
-    """Explicitly chosen bodies that fit known usable input alone (every chosen body when it is unknown)."""
+def _holds_chosen_read(messages, start, end, *, usable_input=None, density=1.0) -> bool:
+    """Whether the exchange from its call row ``start`` to ``end`` holds an explicitly chosen body that fits known
+    usable input alone (any size when it is unknown). Only its tool rows are results, read in place: a row the batch
+    attached between the call and them (an image a viewing call appended) changes nothing."""
     from ouroboros.tool_capabilities import requested_call_view
 
-    protected = set()
-    for unit in units:
-        rows = messages[unit.start:unit.end + 1]
-        results = {str(row.get("tool_call_id") or ""): row for row in rows if row.get("role") == "tool"}
-        for call in rows[0].get("tool_calls") or ():
-            try:
-                arguments = json.loads(call.get("function", {}).get("arguments") or "{}")
-            except (ValueError, TypeError, RecursionError):  # nesting past the decoder's depth chose no read
-                continue
-            row = results.get(str(call.get("id") or ""))
-            if (row is None or requested_call_view(str(call.get("function", {}).get("name") or ""), arguments) is None
-                    or read_tool_result_record(row)["state"] == "not_started"):  # only a chosen read's result is hashed
-                continue
-            cost = compaction._context_tokens_for_messages([row], density) - compaction._context_tokens_for_messages(
-                [{**row, "content": ""}], density)
-            if usable_input is None or cost <= usable_input:
-                protected.add(unit.unit_id)
-    return protected
+    rows = messages[start:end + 1]
+    results = {str(row.get("tool_call_id") or ""): row for row in rows if row.get("role") == "tool"}
+    for call in rows[0].get("tool_calls") or ():
+        if not (isinstance(call, Mapping) and isinstance(call.get("function"), Mapping)):
+            continue  # no call the unit scanner would accept (``context_compaction._atomic_units``): no chosen read
+        try:
+            arguments = json.loads(call.get("function", {}).get("arguments") or "{}")
+        except (ValueError, TypeError, RecursionError):  # nesting past the decoder's depth chose no read
+            continue
+        row = results.get(str(call.get("id") or ""))
+        if (row is None or requested_call_view(str(call.get("function", {}).get("name") or ""), arguments) is None
+                or read_tool_result_record(row)["state"] == "not_started"):  # only a chosen read's result is hashed
+            continue
+        cost = compaction._context_tokens_for_messages([row], density) - compaction._context_tokens_for_messages(
+            [{**row, "content": ""}], density)
+        if usable_input is None or cost <= usable_input:
+            return True
+    return False
+
+
+def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
+    """Explicitly chosen bodies that fit known usable input alone (every chosen body when it is unknown)."""
+    return {unit.unit_id for unit in units
+            if _holds_chosen_read(messages, unit.start, unit.end, usable_input=usable_input, density=density)}
+
+
+def chosen_read_rows(messages, spans, *, usable_input=None, density=1.0) -> set[int]:
+    """Every row of each physical exchange in ``spans`` (``{call row: last result row}``, whether or not the mind may
+    fold it) that holds an explicitly chosen body, by ``chosen_read_units``' rules, at its original positions."""
+    return {i for start, end in spans.items()
+            if _holds_chosen_read(messages, start, end, usable_input=usable_input, density=density)
+            for i in range(start, end + 1)}
 
 
 def emergency_address_view(
