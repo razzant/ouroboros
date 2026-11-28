@@ -25,11 +25,13 @@ work it would have done inline anyway) that its last pass did not see. That is r
 frame headers (``store.log_identity``; the log carries no lock), never by opening a store to count, never from its index
 (closing any descriptor of the ``-shm`` drops this process's locks on it: ``store.is_wal_index``) and never by a
 clock alone. The look reads them before the job's row (``backlog``, ``maintenance.FACT_FIRST``): while no log holds
-that many frames it opens no store, so a quiet install, or one whose stores keep a rollback journal, takes no store
-lock for it. The server's 20 s duty ``wal_checkpoint_look`` (``server_maintenance``) only asks the lane to look, and
-the lane looks again after each pass that left the job done (``maintenance._look_again``), spawning while it is due.
-A store a pass finds held (contention, or SQLite's ``busy``: another checkpointer held the log) keeps its last entry
-and so stays due; the pass says ``pending``.
+that many frames past the baseline the row held for its store when a look last read it (kept in memory: a pass copies
+a log without emptying it, so a quiet log keeps frames a pass already saw), it opens no store, so a quiet install,
+or one whose stores keep a rollback journal, takes no store lock for it. The server's 20 s duty
+``wal_checkpoint_look`` (``server_maintenance``) only asks the lane to look, and the lane looks again after each pass
+that left the job done (``maintenance._look_again``), spawning while it is due. A store a pass finds held
+(contention, or SQLite's ``busy``: another checkpointer held the log) keeps its last entry and so stays due; the pass
+says ``pending``.
 
 A pass records, per store kind (``store_timing.KINDS``), SQLite's three numbers (``busy``; ``log``: frames in the
 log; ``checkpointed``: frames now in the database), the checkpoint's wall ``seconds`` and the ``wal`` it met
@@ -56,6 +58,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import logging
+import os
 import pathlib
 import sqlite3
 import threading
@@ -69,6 +72,7 @@ _LOG_HEADER, _FRAME_HEADER = 32, 24  # the WAL log's header and each frame's hea
 NAME = "wal_checkpoint"  # the maintenance job and its row (``maintenance_jobs``)
 _LOOKS: Dict[str, Any] = {"looks": 0, "max": {}}  # the looks since the last ``drain_frames`` and what they saw
 _LOOKS_LOCK = threading.Lock()
+_SEEN: Dict[str, Any] = {}  # store path -> its job-row entry's ``wal`` at the last look that read it (three per root)
 
 
 def ceiling(page_size: int) -> int:
@@ -130,15 +134,18 @@ def unseen(log: list, seen: Any) -> int:
 
 
 def backlog(root: Any) -> bool:
-    """A log of ROOT holds ``inline_frames`` committed frames, more than any pass may have left unseen: the look's
-    first step (``maintenance.FACT_FIRST``), from the logs' headers alone, before the job's row is read. Each look
-    notes the committed frames of every log it read, in memory (``drain_frames``)."""
-    frames = [(kind, log[1]) for kind, _path, _tier, log in _logs(pathlib.Path(root))]
+    """A log of ROOT holds ``inline_frames`` committed frames past the baseline its store's entry on the job's row held
+    when a look in this process last read it (``_SEEN``; none known: all its committed frames): the look's first step
+    (``maintenance.FACT_FIRST``), from the logs' headers alone, before the job's row is read. A pass only moves a
+    baseline on, so a remembered one reads the row as often or more, never less; a log a writer reset, or a store file
+    replaced, begins a generation no baseline matches. Each look notes the committed frames of every log it read, in
+    memory (``drain_frames``)."""
+    logs = [(kind, os.fspath(path), log) for kind, path, _tier, log in _logs(pathlib.Path(root))]
     with _LOOKS_LOCK:
         _LOOKS["looks"] += 1
-        for kind, count in frames:
-            _LOOKS["max"][kind] = max(count, _LOOKS["max"].get(kind, 0))
-    return any(count >= inline_frames() for _kind, count in frames)
+        for kind, _path, log in logs:
+            _LOOKS["max"][kind] = max(log[1], _LOOKS["max"].get(kind, 0))
+    return any(unseen(log, _SEEN.get(path)) >= inline_frames() for _kind, path, log in logs)
 
 
 def drain_frames() -> Dict[str, Any]:
@@ -154,10 +161,13 @@ def drain_frames() -> Dict[str, Any]:
 
 
 def due(root: Any, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
-    """A store's log holds ``inline_frames`` committed frames the job's last pass did not see (module docstring)."""
-    stores = row.get("stores") or {}
-    return any(unseen(log, (stores.get(kind) or {}).get("wal")) >= inline_frames()
-               for kind, _path, _tier, log in _logs(pathlib.Path(root)))
+    """A store's log holds ``inline_frames`` committed frames the job's last pass did not see (module docstring); the
+    baseline the row holds for each store with a log is kept for the next look's ``backlog``."""
+    stores, counts = row.get("stores") or {}, []
+    for kind, path, _tier, log in _logs(pathlib.Path(root)):
+        _SEEN[os.fspath(path)] = seen = (stores.get(kind) or {}).get("wal")
+        counts.append(unseen(log, seen))
+    return any(count >= inline_frames() for count in counts)
 
 
 def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:

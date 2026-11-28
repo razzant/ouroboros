@@ -320,6 +320,33 @@ def test_the_dispatcher_s_look_opens_no_store_until_a_log_holds_the_threshold(tm
             held.close()
 
 
+def test_a_quiet_log_a_pass_already_saw_opens_no_store_at_the_next_looks(root, monkeypatch):
+    """A PASSIVE pass copies a log without emptying it: until its store's next commit the log keeps the frames the
+    pass saw, past SQLite's threshold, while a connection stays open (the server holds its dialog and usage stores).
+    The look compares each log with the baseline the job's row held for its store when a look last read it, kept in
+    memory: after the look that read the pass's entry, a quiet install's looks open no store. A commit into the copied
+    log begins a generation no baseline matches, and once it holds the threshold the look reads the row again."""
+    path = dialogue_store.path(root)
+    with contextlib.closing(_dialog_writer(root)) as writer:
+        _commit(writer)
+        assert maintenance.due(root, lane="checkpoint") == [store_checkpoint.NAME]
+        assert maintenance.run_job(root, store_checkpoint.NAME)["state"] == "done"
+        seen = store.log_identity(path)[:2]
+        assert seen[1] >= store_checkpoint.inline_frames() and _job(root)["stores"]["dialog"]["wal"] == seen
+        assert maintenance.due(root, lane="checkpoint") == []  # the look that reads the pass's entry
+        store.close_connections()  # no handle cached here: any store read must open one
+        connects, locks = [], []
+        real_connect, real_lock = sqlite3.connect, store.name_lock
+        monkeypatch.setattr(sqlite3, "connect", lambda *args, **kw: connects.append(args[0]) or real_connect(*args, **kw))
+        monkeypatch.setattr(store, "name_lock", lambda *args, **kw: locks.append(args[1]) or real_lock(*args, **kw))
+        for _look in range(2):
+            assert maintenance.due(root, lane="checkpoint") == [] and connects == locks == [], (connects, locks)
+        assert store.log_identity(path)[:2] == seen, "the quiet log still holds the frames the pass saw"
+        _commit(writer)
+        assert store.log_identity(path)[0] != seen[0]
+        assert maintenance.due(root, lane="checkpoint") == [store_checkpoint.NAME] and connects, "the row is read"
+
+
 def test_each_look_notes_how_long_the_logs_were_for_the_minute_row_from_memory(root, monkeypatch):
     """The lane's looks (the dispatcher's, on its own thread) note each store kind's committed frames; the
     ``supervisor_load`` row of each busy minute drains the most one look saw (``wal_frames``), so a long COMMIT stands
