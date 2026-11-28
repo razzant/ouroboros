@@ -183,7 +183,10 @@ def test_a_low_no_form_can_fit_is_not_walked_and_a_low_its_walk_might_fit_is(tmp
     """On a window that holds Nano while Low's provable minimum cannot fit, the shipped fit renders no Low memory (the
     cold fit walks Low and leaves it) and reads alike; one token wider the bound no longer proves it, the walk runs as
     before and still reads alike. Both sides of today's own line (the window where Low's walk first holds) read alike
-    too, with the walk run, because the bound never claims what only the walk can decide."""
+    too, with the walk run, because the bound never claims what only the walk can decide: at that line the walk keeps
+    Low only by turning this room's uncovered owner rows into addresses under physical pressure (F7), below the level
+    its shortest walk stops at, so a bound pricing memory at that shortest level would have sent this start to Nano
+    (on this core: 170,020 against a window of 170,019 that Low holds)."""
     core = _core(tmp_path, connections=240_000)
 
     def lows(window):
@@ -208,6 +211,7 @@ def test_a_low_no_form_can_fit_is_not_walked_and_a_low_its_walk_might_fit_is(tmp
         now, then, shipped, before = both(fit_on(_env(core), core, window=window, mode="max"))
         assert now == then and now[1].initial_mode == mode, window
         assert shipped["low"] == before["low"] > 0, (window, shipped, before)
+    assert "F7" in now[1].projection("low").memory_facts["floor"]["steps"]
 
 
 def test_generated_shapes_read_alike_with_and_without_the_skip_and_the_memo(tmp_path, monkeypatch):
@@ -234,11 +238,13 @@ def test_one_fit_prices_a_level_once_and_its_prices_never_reach_another_fit(tmp_
     """The memo prices a level's floor note and the owner-word level its start-room line weighs once per fit (fewer of
     each priced, the same plan), and a second fit of a changed snapshot in the same process reads exactly as a cold fit
     of that snapshot: nothing priced for the first snapshot answers for the second."""
-    first = _core(tmp_path / "first", connections=2_000)
+    first = _core(tmp_path / "first", connections=2_000, snap=_snapshot(marks=12))
     now, then, shipped, before = both(fit_on(_env(first), first, window=150_000, mode="max"))
     assert now == then and 0 < shipped["notes"] < before["notes"] and 0 < shipped["owners"] < before["owners"], (
         shipped, before)
-    changed = _core(tmp_path / "second", connections=2_000, snap=_snapshot(60, 40, 12))
+    # The same rooms and story, so every level the walks meet names the same elements, beside more marks: each level's
+    # price differs, and a price kept from the first fit would answer wrongly here.
+    changed = _core(tmp_path / "second", connections=2_000, snap=_snapshot(marks=400))
     again = outcome(fit_on(_env(changed), changed, window=150_000, mode="max"))
     with cold():
         fresh = outcome(fit_on(_env(changed), changed, window=150_000, mode="max"))
