@@ -112,11 +112,15 @@ class NativeWire(VoiceWire):
         else:
             self.put({'type': 'input_audio_buffer.speech_stopped', 'item_id': item})
             self.put({'type': 'input_audio_buffer.committed', 'item_id': item})
-            self.put({'type': 'conversation.item.input_audio_transcription.completed', 'item_id': item,
-                'transcript': text, 'status': 'completed', 'usage': {'type': 'tokens', 'input_tokens': 10, 'output_tokens': 3,
-                    'input_token_details': {'text_tokens': 2, 'audio_tokens': 8}}})
             if self.engine == 'grok':
+                # xAI's shape on 28.11.2026: one completed per utterance, no status and no usage.
+                self.put({'type': 'conversation.item.input_audio_transcription.completed', 'item_id': item,
+                          'transcript': text, 'content_index': 0})
                 self.answer()  # xAI VAD owns this response, not an extra host response.create
+            else:
+                self.put({'type': 'conversation.item.input_audio_transcription.completed', 'item_id': item,
+                    'transcript': text, 'status': 'completed', 'usage': {'type': 'tokens', 'input_tokens': 10,
+                        'output_tokens': 3, 'input_token_details': {'text_tokens': 2, 'audio_tokens': 8}}})
 
     async def send(self, raw):
         event = json.loads(raw)
