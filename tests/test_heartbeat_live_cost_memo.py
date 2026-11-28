@@ -201,11 +201,11 @@ def test_a_failed_figure_read_keeps_the_last_figure_and_retries_no_sooner_than_t
     assert memo.fields(tmp_path, "root", task)["accounted_upper_bound_usd_with_children"] == 3.0
 
 
-def test_a_mark_during_a_read_supersedes_it_and_a_figure_goes_only_to_the_carrier_it_was_read_for(tmp_path, monkeypatch):
-    """The loop takes the due roots and the display-projection duty reads them, while the loop keeps marking
-    and heartbeats keep naming carriers. A mark made during a read supersedes it: nothing is published (the
-    last accepted figure, or none, stays) and the root is read again by the next pass; a heartbeat's first look
-    during a read is no mark. A root whose carrier changed meanwhile (a hard-timeout retry runs under a fresh
+def test_a_read_a_mark_overtook_is_published_the_root_read_again_and_a_figure_goes_only_to_its_carrier(tmp_path, monkeypatch):
+    """The loop takes the due roots and the display-projection duty reads them, one read at a time, while the loop
+    keeps marking and heartbeats keep naming carriers. A read a mark overtook is still newer than the figure shown:
+    it is published, and that mark keeps the root due, so the next pass reads for it (the figure trails the latest
+    mark by one read, never more). A root whose carrier changed meanwhile (a hard-timeout retry runs under a fresh
     physical id) gets nothing from the old carrier's read and is read again for the new one."""
     from ouroboros import cost_projection, usage_accounting
 
@@ -229,24 +229,20 @@ def test_a_mark_during_a_read_supersedes_it_and_a_figure_goes_only_to_the_carrie
     assert figure("root", first) is None  # first sight: due
     during.append(lambda: memo.mark(tmp_path, "root"))  # the subtree's usage arrives during the read
     memo.read(memo.take({"root": {"task": first}}, tmp_path), tmp_path)
-    assert figure("root", first) is None, "the read that mark superseded published nothing"
+    assert figure("root", first) == 1.0, "newer than the none shown: the read a mark overtook is published"
     (due,) = memo.take({"root": {"task": first}}, tmp_path)  # the mark made during the read: due again
     during.append(lambda: memo.fields(tmp_path, "root-retry", retry))  # the retry's heartbeat names its carrier
     memo.read((due,), tmp_path)
-    assert figure("root-retry", retry) is None, "the old carrier's read published nothing"
+    assert figure("root-retry", retry) == 1.0, "the old carrier's read published nothing: the earlier figure stays"
     (due,) = memo.take({"root-retry": {"task": retry}}, tmp_path)
     assert (due.carrier, due.task["timeout_retry_from"]) == ("root-retry", "root")
     memo.read((due,), tmp_path)
     assert figure("root-retry", retry) == 3.0 and reads == ["root"] * 3
     assert memo.take({"root-retry": {"task": retry}}, tmp_path) == (), "read for its carrier: the root rests"
-    memo.mark(tmp_path, "root")  # with a figure accepted, a superseded read keeps it
+    memo.mark(tmp_path, "root")  # with a figure shown, a read a mark overtook replaces it and the root stays due
     during.append(lambda: memo.mark(tmp_path, "root"))
     memo.read(memo.take({"root-retry": {"task": retry}}, tmp_path), tmp_path)
-    assert figure("root-retry", retry) == 3.0, "the last accepted figure stays"
+    assert figure("root-retry", retry) == 4.0, "one read behind the latest mark, never older than the figure shown"
     memo.read(memo.take({"root-retry": {"task": retry}}, tmp_path), tmp_path)
     assert figure("root-retry", retry) == 5.0 and reads == ["root"] * 5
-    other = {"id": "other", "type": "task", "root_task_id": "other"}
-    assert figure("other", other) is None
-    during.append(lambda: figure("other", other))  # its heartbeat looks again during the first read: no mark
-    memo.read(memo.take({"other": {"task": other}}, tmp_path), tmp_path)
-    assert figure("other", other) == 6.0 and reads[-1] == "other"
+    assert memo.take({"root-retry": {"task": retry}}, tmp_path) == (), "read for the latest mark: the root rests"
