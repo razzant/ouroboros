@@ -224,12 +224,13 @@ def _preflight_check(commit_message: str, staged_files: str,
         if bare:
             problems.append(f"no module docstring (the map's lead for the module) in: {bare[:5]}")
         if problems or unread:
-            head = ("PREFLIGHT_UNAVAILABLE: the subject's index could not be read to check that a new module in "
-                    "ouroboros/ or supervisor/ is a row of the body's live map (Bible P6):" if unread else
-                    "PREFLIGHT_BLOCKED: a new module in ouroboros/ or supervisor/ is not yet a row of the body's "
-                    "live map (Bible P6):")
-            return (f"⚠️ {head}\n" + "\n".join(f"  - {line}" for line in (*problems, *(f"Unavailable: {u}" for u in unread)))
+            rows = ("\n".join(f"  - {line}" for line in (*problems, *(f"Unavailable: {u}" for u in unread)))
                     + f"\n  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}")
+            if unread:  # each marker a literal first line: an interpolated one could be recorded as a success
+                return ("⚠️ PREFLIGHT_UNAVAILABLE: the subject's index could not be read to check that a new module "
+                        "in ouroboros/ or supervisor/ is a row of the body's live map (Bible P6):\n" + rows)
+            return ("⚠️ PREFLIGHT_BLOCKED: a new module in ouroboros/ or supervisor/ is not yet a row of the body's "
+                    "live map (Bible P6):\n" + rows)
 
     # conftest.py must not contain collectable module-level tests.
     conftest_files = [f for f in active_staged if pathlib.Path(f).name == "conftest.py"]
