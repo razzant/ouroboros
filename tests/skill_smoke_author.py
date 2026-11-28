@@ -267,7 +267,7 @@ def assert_review_evidence(data: Path, name: str, original_hash: str, task_id: s
     assert len(contracts) == 1, "review panel/contract drift"
     assert not paid[0].get("rebuttal_sha256"), "initial review was replaced by a rebuttal"
     if len(paid) == 2 and not retried:
-        assert paid[0]["status"] == "blockers" and paid[1].get("rebuttal_sha256"), "not one substantive rebuttal"
+        assert paid[0]["status"] in {"blockers", "warnings"} and paid[1].get("rebuttal_sha256"), "not one substantive rebuttal"
     review_path = data / "state" / "skills" / name / "review.json"
     review = json.loads(review_path.read_text(encoding="utf-8"))
     assert review.get("content_hash") == original_hash, "persisted review hash mismatch"

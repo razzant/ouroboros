@@ -46,8 +46,10 @@ def _wave(data, raw, *, status="clean", operation="settled", record_id="rl-curre
         subject={"skill": NAME, "tree_sha": skill.content_hash, "root": str(skill.skill_dir.resolve())},
         brief={"skill": {"group_id": f"task:{TASK}:{NAME}"}},
         fingerprints={"review_contract": "contract"},
-        verdict={"aggregate": {"clean": "PASS", "pending": "QUORUM_FAILED", "blockers": "FAIL"}[status]},
+        verdict={"aggregate": {"clean": "PASS", "warnings": "PASS", "pending": "QUORUM_FAILED", "blockers": "FAIL"}[status]},
         rows=[seat])
+    if status == "warnings":
+        record.verdict["advisory_findings"] = [{"seat_id": "critic", "part": "skill", "summary": raw}]
     ledger.write_record(data, record)
     update_state(data, lambda state: state.attempts.append(CommitAttemptRecord(
         ts="2026-10-22T00:00:00Z", commit_message="", status="reviewed", task_id=TASK,
@@ -282,3 +284,27 @@ def test_smoke_author_preserves_original_wave_and_requires_settlement(tmp_path, 
         [] if case == "missing_history" else ["rl-current", "rl-reassessment"]
         if case in {"grounded_rebuttal", "unjustified_reroll"} else ["rl-current", "rl-retry"]
         if case in RETRIES else ["rl-current"])
+
+
+@pytest.mark.parametrize("final_status,rebuttal,error", [
+    (None, "", None),
+    ("clean", "source-grounded-argument", None),
+    ("warnings", "source-grounded-argument", None),
+    ("clean", "", "not one substantive rebuttal"),
+    ("blockers", "source-grounded-argument", "independent criticism remains unresolved"),
+])
+def test_smoke_author_initial_warnings(tmp_path, final_status, rebuttal, error):
+    data = tmp_path / "data"
+    skill = _payload(data)
+    record_id = "rl-current"
+    _wave(data, "Advisory finding", status="warnings")
+    if final_status:
+        record_id = "rl-reassessment"
+        _wave(data, "Second review", status=final_status, record_id=record_id, rebuttal=rebuttal)
+    status = final_status or "warnings"
+    _save_review(data, status=status, record_id=record_id)
+    if error:
+        with pytest.raises(AssertionError, match=error):
+            author.assert_review_evidence(data, NAME, skill.content_hash, TASK, MODEL)
+    else:
+        assert author.assert_review_evidence(data, NAME, skill.content_hash, TASK, MODEL)["status"] == status
