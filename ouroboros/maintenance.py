@@ -12,8 +12,9 @@ Server half: ``child`` (``MaintenanceChildren``, one dispatch slot per lane). Th
 The dispatcher reserves the slot; the lane thread reads the due facts and spawns only for due work.
 The trash lane retries unchanged holds on the reconcile cadence (``request(retry=True)``), looks
 only at its own facts, and requests an ordinary look for retirement after its child runs. The
-checkpoint lane looks when the server's 20 s duty asks it by name (``request(lane="checkpoint")``);
-its job's due rule reads each WAL log's header beside its own row (``store_checkpoint``).
+checkpoint lane looks when the server's 20 s duty asks it by name (``request(lane="checkpoint")``) and
+again after each child that left its job done (``_look_again``); the look reads the WAL logs' headers
+before its job's row (``FACT_FIRST``, ``store_checkpoint``).
 Providerless boot uses the ordinary slot for dialogue alone, retrying contention until the job rests.
 The spawn is the existing custodied one (``startup_historical_audit.
 spawn_maintenance_job``: session custody, its own process group, a parent lifeline; ``stop`` and
@@ -466,6 +467,9 @@ JOB_NAMES = tuple(JOBS)
 # The lanes beside the ordinary one, each with a child of its own; their jobs read no store facts.
 OWN_LANES = {"trash": ("custody_trash",), "checkpoint": (store_checkpoint.NAME,)}
 LANES = ("ordinary", *OWN_LANES)
+# A job whose physical fact can show, before its row is read, that it has no work: while that fact says so, the
+# dispatcher's look reads no row for it, so a quiet install, or one whose stores keep no WAL log, opens no store.
+FACT_FIRST = {store_checkpoint.NAME: store_checkpoint.backlog}
 
 
 def lane_of(name: str) -> str:
@@ -483,9 +487,11 @@ def lane_jobs(lane: Optional[str] = None) -> tuple:
 def due(root: Any, *, lane: Optional[str] = None, child: bool = False) -> List[str]:
     """Read job facts, replaying owed producer wakes before dispatch; no history walk. LANE limits the look to
     its jobs; CHILD looks as the child does (only the trash lane's cadence retry asks it); a lane of its own reads
-    no store facts, so its look replays no ordinary producer's owed wake."""
-    root, names = pathlib.Path(root), lane_jobs(lane)
-    rows = maintenance_jobs.jobs(root, names)
+    no store facts, so its look replays no ordinary producer's owed wake. A ``FACT_FIRST`` job is looked at by
+    its physical fact first: its row is read only past it."""
+    root = pathlib.Path(root)
+    names = [name for name in lane_jobs(lane) if name not in FACT_FIRST or FACT_FIRST[name](root)]
+    rows = maintenance_jobs.jobs(root, names)  # no names: no store opened
     facts = {} if lane in OWN_LANES else _store_facts(root)
     return [name for name in names if JOBS[name][0](root, rows.get(name) or {}, facts, child)]
 
@@ -573,6 +579,15 @@ def _report_fields(raw: bytes) -> Dict[str, Any]:
         return fields
     except (ValueError, UnicodeError, TypeError, AttributeError):
         return {}
+
+
+def _look_again(lane: Optional[str], fields: Any) -> bool:
+    """The checkpoint lane looks again at once after a child whose report says its job is done: logs a busy install
+    fills while the child copies them would otherwise wait for the server's next 20 s look, which a stalled supervisor
+    loop never asks for. After contention (``pending``), a failure or no report it waits for that look instead, so a
+    held store never turns the lane into a spawn loop; the look spawns again only while the job is due."""
+    jobs = (fields or {}).get("jobs") or {}
+    return lane == "checkpoint" and (jobs.get(store_checkpoint.NAME) or {}).get("state") == "done"
 
 
 class MaintenanceChild:
@@ -691,27 +706,31 @@ class MaintenanceChild:
         record = _record if lane in (None, "ordinary") else (
             lambda root, phase, **facts: _record(root, phase, lane=lane, **facts))
         try:
-            try:
-                with store.acquisition_budget(0):  # contention defers to the next look, never waits
-                    names = due(data_root, **select)
-            except Exception:
-                if retry:  # a look the store refused keeps its retry window
-                    self.retry_look()
-                log.debug("Maintenance job facts unavailable; the next look retries", exc_info=True)
-                return
-            if not names or self._stopped.is_set():
-                return
-            args = {} if lane is None else {"args": ("--lane", lane)}
-            process = spawn_maintenance_job(data_root, repo_dir, PURPOSE, **args)
-            finish_maintenance_job(self, process, data_root, started, _report_fields, record)
-            if self._stopped.is_set():  # nothing more after Stop or Panic
-                return
-            if lane == "trash":  # a removal owes the ordinary lane a look (retirement of the removed tree's bytecode)
-                if self.sibling is not None:
-                    self.sibling.request()
-            elif lane in (None, "ordinary"):  # the one-time walks' receipts
-                delegate_result_taken.deliver_receipt(data_root)
-                historical_retirement.deliver_receipt(data_root)
+            while True:  # one look; the checkpoint lane looks again after a pass that left its job done (_look_again)
+                try:
+                    with store.acquisition_budget(0):  # contention defers to the next look, never waits
+                        names = due(data_root, **select)
+                except Exception:
+                    if retry:  # a look the store refused keeps its retry window
+                        self.retry_look()
+                    log.debug("Maintenance job facts unavailable; the next look retries", exc_info=True)
+                    return
+                if not names or self._stopped.is_set():
+                    return
+                args = {} if lane is None else {"args": ("--lane", lane)}
+                process = spawn_maintenance_job(data_root, repo_dir, PURPOSE, **args)
+                fields = finish_maintenance_job(self, process, data_root, started, _report_fields, record)
+                if self._stopped.is_set():  # nothing more after Stop or Panic
+                    return
+                if lane == "trash":  # a removal owes the ordinary lane a look (retirement of the removed tree's bytecode)
+                    if self.sibling is not None:
+                        self.sibling.request()
+                elif lane in (None, "ordinary"):  # the one-time walks' receipts
+                    delegate_result_taken.deliver_receipt(data_root)
+                    historical_retirement.deliver_receipt(data_root)
+                if not _look_again(lane, fields):
+                    return
+                started = time.monotonic()
         except Exception as exc:
             with contextlib.suppress(Exception):
                 record(data_root, phase="failed", exception_class=type(exc).__name__,

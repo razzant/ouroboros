@@ -24,7 +24,11 @@ for both). The job is due when a store's log holds ``inline_frames`` committed f
 work it would have done inline anyway) that its last pass did not see. That is read from the log's own header and
 frame headers (``store.log_identity``; the log carries no lock), never by opening a store to count, never from its index
 (closing any descriptor of the ``-shm`` drops this process's locks on it: ``store.is_wal_index``) and never by a
-clock alone; the server's 20 s duty ``wal_checkpoint_look`` (``server_maintenance``) only asks the lane to look.
+clock alone. The look reads them before the job's row (``backlog``, ``maintenance.FACT_FIRST``): while no log holds
+that many frames it opens no store, so a quiet install, or one whose stores keep a rollback journal, takes no store
+lock for it. The server's 20 s duty ``wal_checkpoint_look`` (``server_maintenance``) only asks the lane to look, and
+the lane looks again after each pass that left the job done (``maintenance._look_again``), spawning while it is due.
+A store a pass finds held (contention) keeps its last entry and so stays due; the pass says ``pending``.
 
 A pass records, per store kind (``store_timing.KINDS``), SQLite's three numbers (``busy``; ``log``: frames in the
 log; ``checkpointed``: frames now in the database) and the checkpoint's wall ``seconds``, on the job's row and as
@@ -36,7 +40,10 @@ growing pass after pass though each pass copied it all: a reader was on the log 
 The worse worst case, disclosed: when the job is down, late, starved or held back by a reader, the log grows to the
 ceiling and the next interactive COMMIT copies its frames inline, about 64 MiB (more past a large transaction or a
 pinned reader, as above), more than any inline checkpoint before (about 16 times the old 4 MiB); a last close and
-crash recovery meet the same log. ``store.hand_off`` and the export seam still truncate the log.
+crash recovery meet the same log. The look rides the supervisor loop's tick: while that loop stalls, the lane looks
+only after a pass of its own and stops at the first look that finds the job at rest, and at the night rates measured
+on a busy install (3,000 to 5,000 committed frames a minute into the usage store) the ceiling is then 3 to 5 minutes
+away. ``store.hand_off`` and the export seam still truncate the log.
 """
 from __future__ import annotations
 
@@ -112,6 +119,12 @@ def unseen(log: list, seen: Any) -> int:
     return end
 
 
+def backlog(root: Any) -> bool:
+    """A log of ROOT holds ``inline_frames`` committed frames, more than any pass may have left unseen: the look's
+    first step (``maintenance.FACT_FIRST``), from the logs' headers alone, before the job's row is read."""
+    return any(log[1] >= inline_frames() for _kind, _path, _tier, log in _logs(pathlib.Path(root)))
+
+
 def due(root: Any, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
     """A store's log holds ``inline_frames`` committed frames the job's last pass did not see (module docstring)."""
     stores = row.get("stores") or {}
@@ -123,13 +136,15 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
     """One PASSIVE checkpoint of each WAL store whose log holds a commit the last pass did not see, through the
     store's own connection (its tier, ``synchronous=FULL``); the row keeps per store the numbers and the log it saw.
     A store that cannot be opened or checkpointed keeps its error class there instead, at the log it met, so it is
-    tried again when its log moves on, never on a clock."""
+    tried again when its log moves on, never on a clock. A store found held (contention, as ``maintenance._contention``
+    reads it) is no fault: it keeps the entry its last pass left, so it stays due, and the pass says ``pending``."""
     from ouroboros import maintenance_jobs, store
     from ouroboros.utils import utc_now_iso
 
     root = pathlib.Path(root)
     stores = dict((maintenance_jobs.job(root, NAME) or {}).get("stores") or {})  # the store's foreign-root check first
     passed: Dict[str, Dict[str, Any]] = {}
+    held = set()
     for kind, path, tier, log in _logs(root):
         if should_stop():
             break
@@ -143,9 +158,14 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
                          "seconds": round(time.monotonic() - began, 3)}
         except (sqlite3.Error, store.StoreError, OSError) as exc:
             facts = {"error": type(exc).__name__}
+            if isinstance(exc, store.StoreBusy) or (isinstance(exc, sqlite3.Error) and store.busy(exc)):
+                held.add(kind)
         passed[kind] = facts
-        stores[kind] = {**facts, "wal": log, "at": utc_now_iso()}
+        if kind not in held:
+            stores[kind] = {**facts, "wal": log, "at": utc_now_iso()}
+    state = "pending" if held else "done"
+    if set(passed) - held:  # a held store alone changes no entry: nothing to write
+        maintenance_jobs.record(root, NAME, state=state, stores=stores)
     if passed:
-        maintenance_jobs.record(root, NAME, state="done", stores=stores)
         store.supervisor_row(root, NAME, {"stores": passed})
-    return {"state": "done", "items": len(passed)}
+    return {"state": state, "items": len(passed)}

@@ -846,6 +846,7 @@ def test_a_busy_ordinary_lane_never_holds_a_lane_of_its_own_and_each_lane_is_one
     (data / "state" / "custody_trash" / "moved-0123456789ab").mkdir(parents=True)
     (data / "logs").mkdir(exist_ok=True)
     maintenance_jobs.record(data, "legacy_reconcile", state="pending")  # an ordinary job is due
+    monkeypatch.setitem(maintenance.FACT_FIRST, "wal_checkpoint", lambda root: True)
     monkeypatch.setitem(maintenance.JOBS, "wal_checkpoint", (lambda *_a: True, maintenance.JOBS["wal_checkpoint"][1]))
     release, entered, spawns = threading.Event(), threading.Event(), []
 
@@ -867,6 +868,33 @@ def test_a_busy_ordinary_lane_never_holds_a_lane_of_its_own_and_each_lane_is_one
     release.set()
     unit.ordinary._thread.join(10)
     assert sorted(spawns) == ["checkpoint", "ordinary", "trash"] and unit.live_children() == []
+
+
+@pytest.mark.parametrize("report,looks,spawned", [
+    ({"status": "completed", "jobs": {"wal_checkpoint": {"state": "done", "items": 1}}}, [True, True, False], 2),
+    ({"status": "completed", "jobs": {"wal_checkpoint": {"state": "pending", "items": 1}}}, [True, True], 1),
+    ({"status": "failed", "jobs": {"wal_checkpoint": {"state": "failed", "items": 0}}}, [True, True], 1),
+    (None, [True, True], 1),
+], ids=["done", "contended", "failed", "no-report"])
+def test_the_checkpoint_lane_looks_again_after_a_pass_that_left_its_job_done(data, monkeypatch, report, looks, spawned):
+    """The lane's look rides the server's 20 s duty, which a stalled supervisor loop never asks for: after a child
+    that left the job done the lane looks again at once and spawns while the job is still due (a busy install filled
+    the log again while the child copied it), so a backlog keeps its passes coming without the loop. After contention
+    (``pending``), a failure or a child that reported nothing it waits for the next asked look: no spawn loop."""
+    from tests.test_evidence_packs import REPO, _FakeChild
+
+    (data / "logs").mkdir(exist_ok=True)
+    asked, spawns = list(looks), []
+    monkeypatch.setitem(maintenance.FACT_FIRST, "wal_checkpoint", lambda root: True)
+    monkeypatch.setitem(maintenance.JOBS, "wal_checkpoint", (lambda *_a: asked.pop(0), maintenance.JOBS["wal_checkpoint"][1]))
+    monkeypatch.setattr(maintenance, "spawn_maintenance_job", lambda root, repo, purpose, **kw: spawns.append(kw["args"]) or
+                        _FakeChild(b"" if report is None else json.dumps(report).encode()))
+    unit = maintenance.MaintenanceChild("checkpoint")
+    assert unit.tick(data, REPO)
+    unit._thread.join(10)
+    assert not unit._thread.is_alive() and unit.live_children() == []
+    assert spawns == [("--lane", "checkpoint")] * spawned, spawns
+    assert asked == ([] if spawned == 2 else [True]), "a look happens only after a pass that left the job done"
 
 
 def test_an_unchanged_hold_is_retried_only_on_the_reconcile_cadence_then_removed(data, monkeypatch):

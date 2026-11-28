@@ -156,6 +156,69 @@ def test_a_store_that_fails_its_pass_keeps_its_error_at_the_log_it_met_and_waits
     assert store_checkpoint.due(root, _job(root), {}, False)
 
 
+@pytest.mark.parametrize("held", [lambda: store.StoreBusy("current store held", reason="contention"),
+                                  lambda: sqlite3.OperationalError("database is locked")], ids=["StoreBusy", "locked"])
+def test_a_store_found_held_keeps_its_last_entry_and_stays_due(root, monkeypatch, held):
+    """Contention is no fault (``maintenance._contention``): a store whose open meets a held lock keeps the entry its
+    last pass left, so the next look is due for it again, and the pass says ``pending`` and writes no row it would
+    not change. Once the store is free, a pass records it and the job rests. (A fault other than contention records
+    its error at the log it met: the test above.)"""
+    real = store_journal.root_stores
+
+    def busy():
+        raise held()
+
+    _backlog(root)
+    maintenance.run_job(root, store_checkpoint.NAME)
+    before = _job(root)
+    _backlog(root, key="more")
+    monkeypatch.setattr(store_journal, "root_stores", lambda drive: (
+        (real(drive)[0][0], busy, real(drive)[0][2]), *real(drive)[1:]))
+    assert maintenance.run_job(root, store_checkpoint.NAME) == {"state": "pending", "items": 1}
+    assert _job(root) == before and store_checkpoint.due(root, before, {}, False), "the held store is due again"
+    monkeypatch.setattr(store_journal, "root_stores", real)
+    assert maintenance.run_job(root, store_checkpoint.NAME)["state"] == "done"
+    assert _job(root)["stores"]["current"]["wal"] != before["stores"]["current"]["wal"]
+    assert not store_checkpoint.due(root, _job(root), {}, False)
+
+
+@pytest.mark.parametrize("mode,tier", [("WAL", store.TIER_ENFORCED), ("PERSIST", store.TIER_ENFORCED),
+                                       ("PERSIST", store.TIER_NAME)], ids=["wal", "persist", "name-tier"])
+def test_the_dispatcher_s_look_opens_no_store_until_a_log_holds_the_threshold(tmp_path, monkeypatch, mode, tier):
+    """The server's lane thread asks ``maintenance.due(root, lane="checkpoint")`` at every look: while no log holds
+    SQLite's own threshold of committed frames it reads the logs' headers and nothing else (no SQLite connection, no
+    name-tier lock), whatever the job's row says, so a quiet install, or one whose stores keep a rollback journal or
+    sit on the name tier, opens no store for it. A log holding the threshold makes the look read the row and find
+    the job due."""
+    if tier == store.TIER_NAME:
+        use_journal(monkeypatch, mode)
+        data = tmp_path / "data"
+        data.mkdir()
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
+        publish(data, tier=tier)
+    else:
+        data = _root(tmp_path, monkeypatch, mode)
+    store_checkpoint.inline_frames()  # read once per process from a memory database, never a store
+    held = sqlite3.connect(store.store_path(data), isolation_level=None) if mode == "WAL" else None
+    try:
+        if held is not None:  # another open connection: no last close copies the log away
+            held.execute("SELECT 1 FROM meta").fetchone()
+        store.close_connections()  # no handle cached here: any store read must open one
+        connects, locks = [], []
+        real_connect, real_lock = sqlite3.connect, store.name_lock
+        monkeypatch.setattr(sqlite3, "connect", lambda *args, **kw: connects.append(args[0]) or real_connect(*args, **kw))
+        monkeypatch.setattr(store, "name_lock", lambda *args, **kw: locks.append(args[1]) or real_lock(*args, **kw))
+        assert maintenance.due(data, lane="checkpoint") == [] and connects == [] and locks == [], (connects, locks)
+        if held is not None:
+            _backlog(data)
+            store.close_connections()
+            connects.clear()
+            assert maintenance.due(data, lane="checkpoint") == [store_checkpoint.NAME] and connects, "the row is read"
+    finally:
+        if held is not None:
+            held.close()
+
+
 def test_a_rollback_journal_store_has_no_log_and_the_job_leaves_it_alone(tmp_path, monkeypatch):
     """PERSIST (and the name tier) keep no WAL log: whatever is committed, the look is never due and a pass opens
     nothing and records nothing."""
