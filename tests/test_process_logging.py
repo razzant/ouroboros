@@ -429,18 +429,20 @@ def test_the_bootstrap_is_inert_inside_the_pytest_process(tmp_path):
 
 
 class _HeldSink(logging.Handler):
-    """A log sink that waits for ``release`` before every write, as a stalled disk would."""
+    """A log sink that waits for its ``gate`` before every write, as a stalled disk would. The event is not
+    named ``release``: that would shadow ``logging.Handler.release``, leave the handler lock held after a write and
+    hang the interpreter's exit when a test fails."""
 
     def __init__(self) -> None:
         super().__init__(logging.DEBUG)
         self.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
-        self.entered, self.release = threading.Event(), threading.Event()
+        self.entered, self.gate = threading.Event(), threading.Event()
         self.records: list[logging.LogRecord] = []
         self.lines: list[str] = []
 
     def emit(self, record):
         self.entered.set()
-        assert self.release.wait(10), "the test never released the sink"
+        assert self.gate.wait(10), "the test never released the sink"
         self.records.append(record)
         self.lines.append(self.format(record))
 
@@ -475,10 +477,10 @@ def test_a_record_handoff_never_waits_for_its_sink_and_keeps_order_time_thread_a
         handoff.log(logger, logging.INFO, "third")
         returned = time.time()
         assert sink.entered.wait(5) and sink.records == [], "the caller went on while the sink was held"
-        sink.release.set()
+        sink.gate.set()
         _settled(lambda: len(sink.records) == 3 and handoff.thread is None)
     finally:
-        sink.release.set()
+        sink.gate.set()
         logger.removeHandler(sink)
     assert [record.getMessage() for record in sink.records] == ["first 1", "second", "third"]
     assert all(record.created <= returned for record in sink.records), "each keeps its own creation time"
@@ -495,10 +497,10 @@ def test_records_past_the_bound_are_counted_and_said_once_at_their_place():
         assert sink.entered.wait(5), "the writer holds the first record at the sink"
         for message in ("bbbb", "cccc", "dddd", "eeee", "ff"):  # 4 + 4 fit, 4 and 4 do not, then 2 fit
             handoff.log(logger, logging.INFO, message)
-        sink.release.set()
+        sink.gate.set()
         _settled(lambda: len(sink.records) == 5 and handoff.thread is None)
     finally:
-        sink.release.set()
+        sink.gate.set()
         logger.removeHandler(sink)
     assert [record.getMessage() for record in sink.records] == [
         "aaaa", "bbbb", "cccc",
@@ -540,10 +542,10 @@ def test_a_queued_record_holds_text_never_the_exception_its_traceback_or_its_arg
         handoff.log(logger, logging.INFO, "broken %d format", "text")
         gc.collect()
         assert held[0]() is None, "a queued record kept the failed frame's locals alive"
-        sink.release.set()
+        sink.gate.set()
         _settled(lambda: len(sink.records) == 4 and handoff.thread is None)
     finally:
-        sink.release.set()
+        sink.gate.set()
         logger.removeHandler(sink)
     assert all(record.args is None and record.exc_info is None for record in sink.records)
     assert sink.lines[1] == "WARNING WebSocket error: closed"
@@ -563,7 +565,7 @@ def test_an_exit_waits_for_the_queued_lines_inside_half_the_time_left_and_no_lon
     nothing waits."""
     process_logging, logger, sink = _held_logger("tests.record_handoff.exit")
     handoff = process_logging.RecordHandoff("test-record-handoff-exit")
-    release = threading.Timer(0.3, sink.release.set)
+    release = threading.Timer(0.3, sink.gate.set)
     try:
         handoff.log(logger, logging.INFO, "first")
         handoff.log(logger, logging.INFO, "second")
@@ -580,7 +582,7 @@ def test_an_exit_waits_for_the_queued_lines_inside_half_the_time_left_and_no_lon
         assert [record.getMessage() for record in sink.records] == ["first", "second", "third"]
         assert handoff.thread is None
     finally:
-        sink.release.set()
+        sink.gate.set()
         release.cancel()
         logger.removeHandler(sink)
 

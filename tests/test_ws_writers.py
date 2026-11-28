@@ -291,16 +291,17 @@ def test_the_browser_watchdog_closes_with_the_code_and_fields_this_module_parses
 
 
 class _HeldSink(logging.Handler):
-    """A log sink that waits for ``release`` before every write, and notes the registry at that moment."""
+    """A log sink that waits for its ``gate`` before every write, and notes the registry at that moment (an event
+    named ``release`` would shadow ``logging.Handler.release`` and keep the handler lock held after a write)."""
 
     def __init__(self) -> None:
         super().__init__(logging.DEBUG)
-        self.release = threading.Event()
+        self.gate = threading.Event()
         self.lines: list[str] = []
         self.registry: list[list] = []
 
     def emit(self, record):
-        assert self.release.wait(10), "the test never released the sink"
+        assert self.gate.wait(10), "the test never released the sink"
         self.lines.append(record.getMessage())
         self.registry.append(list(ws._ws_clients))
 
@@ -324,10 +325,10 @@ def test_a_held_log_sink_never_holds_the_loop_and_a_retired_client_has_left_befo
             ws.broadcast_ws_sync(frame)
         _until(lambda: len(good.sent) == 3)
         assert sink.lines == [], "the loop served on while its failure line waited for the sink"
-        sink.release.set()
+        sink.gate.set()
         _until(lambda: sink.lines)
     finally:
-        sink.release.set()
+        sink.gate.set()
         ws.log.removeHandler(sink)
     [line] = sink.lines
     assert line == f"WebSocket send failed for msg type=log; dropped client {dead.serial} (RuntimeError) (total: 1)"
