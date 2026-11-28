@@ -1,0 +1,184 @@
+# One-shot diagnostic QA layer, never part of a product PR.
+name: Nano guarded memory 80k on Ubuntu (one shot)
+on:
+  push:
+    branches: ['qa/nano-guarded-memory-80k']
+
+permissions:
+  contents: read
+
+jobs:
+  qualification:
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [reference, sender]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NANO_BASE: '7981018bb40eeda8584bbc8c8821f09f60b8b426'
+      NANO_BASE_TREE: 'c385293c7637a64528f0b90e01874d72f47a2514'
+      NANO_PRODUCT: '7efcfc22f10aac875637e7b29fc23885c4af86f4'
+      NANO_PRODUCT_TREE: '1cbd4603ef0af1497a2fb007189728f34f185c70'
+      NANO_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the exact product and the three QA-only files
+        id: bind
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL=file GIT_NO_REPLACE_OBJECTS=1
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/qa/nano-guarded-memory-80k
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          for value in "$NANO_BASE" "$NANO_BASE_TREE" "$NANO_PRODUCT" "$NANO_PRODUCT_TREE" "$GITHUB_SHA"; do
+            [[ "$value" =~ ^[0-9a-f]{40}$ ]]
+          done
+          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$NANO_PRODUCT"
+          test "$(git show -s --format=%P "$NANO_PRODUCT")" = "$NANO_BASE"
+          test "$(git rev-parse "$NANO_BASE^{tree}")" = "$NANO_BASE_TREE"
+          test "$(git rev-parse "$NANO_PRODUCT^{tree}")" = "$NANO_PRODUCT_TREE"
+          test "$(git diff-tree --no-renames -r --no-commit-id --name-status "$NANO_PRODUCT" "$GITHUB_SHA")" = \
+            "$(printf 'A\t.github/workflows/nano-final-ubuntu-once.yml\nA\tscripts/nano-reference-diag.py\nA\tscripts/nano_ubuntu_once.py')"
+          git ls-tree HEAD .github/workflows/nano-final-ubuntu-once.yml scripts/nano-reference-diag.py scripts/nano_ubuntu_once.py |
+            awk '$1 == "100644" && $2 == "blob" {n++} END {exit n != 3}'
+          test -z "$(git status --porcelain --untracked-files=all)"
+          install -m 600 scripts/nano_ubuntu_once.py "$RUNNER_TEMP/nano_ubuntu_once.py"
+          install -m 600 scripts/nano-reference-diag.py "$RUNNER_TEMP/nano-reference-diag.py"
+          git switch --quiet --detach "$NANO_PRODUCT"
+          test "$(git rev-parse HEAD^{tree})" = "$NANO_PRODUCT_TREE"
+      - uses: ./.github/actions/setup-python-env
+        id: python
+        with:
+          install-project: 'false'
+      - name: Stage only the existing public count-only pins
+        id: stage
+        if: matrix.lane == 'reference'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip --isolated --disable-pip-version-check install --no-deps --require-hashes \
+            --target "$RUNNER_TEMP/nano-reference-wheels" -r scripts/nano_reference_requirements.txt
+          python -I -S "$RUNNER_TEMP/nano_ubuntu_once.py" stage-reference "$RUNNER_TEMP/nano-reference-assets"
+      - name: Count the same profiles and run every negative control in the isolated namespace
+        id: reference
+        if: matrix.lane == 'reference'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"; python="$(command -v python)"
+          scratch="$(mktemp -d "$RUNNER_TEMP/nano-reference-XXXXXX")"
+          mkdir -m 700 "$scratch/home" "$scratch/tmp" "$RUNNER_TEMP/nano-proof"
+          proof="$RUNNER_TEMP/nano-proof"
+          printf 'overlay=%s\nrun_id=%s\nrun_attempt=%s\nbase=%s\nbase_tree=%s\nproduct=%s\nproduct_tree=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$NANO_BASE" "$NANO_BASE_TREE" "$NANO_PRODUCT" "$NANO_PRODUCT_TREE" \
+            >"$proof/reference-subject.txt"
+          outside="$(readlink /proc/self/ns/net)"
+          status=0
+          sudo -n unshare --net -- /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs \
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME="$scratch/home" TMPDIR="$scratch/tmp" \
+            PYTHONPATH="$RUNNER_TEMP/nano-reference-wheels" PYTHONDONTWRITEBYTECODE=1 \
+            /usr/bin/timeout --signal=TERM --kill-after=10s 1950s /bin/bash -eu -o pipefail -s -- "$outside" "$python" "$RUNNER_TEMP/nano-reference-assets" "$scratch" "$proof" "$RUNNER_TEMP" \
+            <<'OFFLINE' || status=$?
+          test "$(readlink /proc/self/ns/net)" != "$1"
+          test "$(tail -n +2 /proc/net/route | wc -l)" = 0
+          test "$(/usr/sbin/ip -o link show | wc -l)" = 1
+          /usr/sbin/ip -o link show dev lo | grep -q 'state DOWN'
+          PY="$2"; pins="$3"; private="$4"; proof="$5"; runner="$6"
+          printf 'isolated_net_namespace=verified\n' >>"$proof/reference-subject.txt"
+          call() {
+            local variant="$1" code=0; shift
+            "$PY" "$runner/nano-reference-diag.py" "$proof/$variant.diag.json" "$@" \
+              >"$private/$variant.json" 2>"$private/$variant.stderr" || code=$?
+            printf '%s=%s\n' "$variant" "$code" >>"$proof/reference-exits.txt"
+            result="$code"
+          }
+          call normal --cache "$pins"; positive="$result"
+          call growth --cache "$pins" --negative-control growth; growth="$result"
+          call missing_instruction --cache "$pins" --negative-control missing-instruction; instruction="$result"
+          call missing_reference_pins --cache "$private/absent-reference-pins"; incomplete="$result"
+          checked=not_run; normal_json=empty; growth_json=empty
+          for variant in normal growth missing_instruction missing_reference_pins; do
+            state=empty
+            if test -s "$private/$variant.json"; then
+              state=invalid
+              if "$PY" -m json.tool "$private/$variant.json" >"$private/$variant.pretty" 2>"$private/$variant.decode.stderr"; then
+                state=valid
+                case "$variant" in
+                  normal) install -m 600 "$private/$variant.pretty" "$proof/reference.json"
+                    rm -f -- "$proof/$variant.diag.json" ;;
+                  growth) install -m 600 "$private/$variant.pretty" "$proof/reference-growth.json"
+                    rm -f -- "$proof/$variant.diag.json" ;;
+                esac
+              fi
+            fi
+            printf '%s=%s\n' "$variant" "$state" >>"$proof/reference-json-status.txt"
+            case "$variant" in normal) normal_json="$state" ;; growth) growth_json="$state" ;; esac
+          done
+          if test "$normal_json" = valid; then
+            checked=0
+            "$PY" -I -S "$runner/nano_ubuntu_once.py" check-reference "$proof/reference.json" \
+              >"$private/check-reference.stdout" 2>"$private/check-reference.stderr" || checked=$?
+          fi
+          printf 'joint_report_check=%s\n' "$checked" >>"$proof/reference-exits.txt"
+          growth_reason=not_matched; instruction_reason=not_matched
+          if grep -q 'shipped governance exceeds the reference growth allowance' "$private/growth.stderr"; then growth_reason=matched; fi
+          if grep -Eq '(framing is incorrect|exact public anti-slop bodies)' "$private/missing_instruction.stderr"; then instruction_reason=matched; fi
+          printf 'growth_reason=%s\nmissing_instruction_reason=%s\n' "$growth_reason" "$instruction_reason" >"$proof/reference-controls.txt"
+          test "$positive:$growth:$instruction:$checked:$incomplete" = '0:1:2:0:2'
+          test "$growth_json" = valid
+          test ! -s "$private/missing_instruction.json"
+          test ! -s "$private/missing_reference_pins.json"
+          test "$growth_reason:$instruction_reason" = matched:matched
+          "$PY" -I -S "$runner/nano_ubuntu_once.py" check-reference-controls \
+            "$proof/missing_instruction.diag.json" "$proof/missing_reference_pins.diag.json" \
+            >"$private/check-reference-controls.stdout" 2>"$private/check-reference-controls.stderr"
+          OFFLINE
+          printf 'offline_process_exit=%s\n' "$status" >>"$proof/reference-exits.txt"
+          test "$status" = 0
+          test -z "$(git status --porcelain --untracked-files=all)"
+          printf 'accepted=true\n' >>"$proof/reference-subject.txt"
+      - name: Run the two exact sender cases
+        id: cases
+        if: matrix.lane == 'sender'
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          python -I -S scripts/safe_test.py --timeout 1950 --evidence-dir "$RUNNER_TEMP/nano-private" -- \
+            "$(command -v python)" "$RUNNER_TEMP/nano_ubuntu_once.py" "$NANO_LANE" "$RUNNER_TEMP" \
+            "$NANO_BASE" "$NANO_BASE_TREE" "$NANO_PRODUCT" "$NANO_PRODUCT_TREE" "$GITHUB_SHA" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >"$RUNNER_TEMP/nano-runner.private.log" 2>&1 || status=$?
+          mkdir -p "$RUNNER_TEMP/nano-proof"
+          printf '%s\n' "$status" >"$RUNNER_TEMP/nano-proof/safe-test.exit"
+          exit "$status"
+      - name: Retain outcomes even if an earlier step failed
+        if: always()
+        shell: bash
+        env:
+          CHECKOUT: ${{ steps.checkout.outcome }}
+          BIND: ${{ steps.bind.outcome }}
+          PYTHON_SETUP: ${{ steps.python.outcome }}
+          REFERENCE_SETUP: ${{ steps.stage.outcome }}
+          REFERENCE: ${{ steps.reference.outcome }}
+          CASES: ${{ steps.cases.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nano-proof"
+          printf 'run_id=%s\nrun_attempt=%s\noverlay=%s\nrequested_product=%s\ncheckout=%s\nbind=%s\npython=%s\nreference_setup=%s\nreference=%s\ncases=%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$NANO_PRODUCT" \
+            "$CHECKOUT" "$BIND" "$PYTHON_SETUP" "$REFERENCE_SETUP" "$REFERENCE" "$CASES" >"$RUNNER_TEMP/nano-proof/stages.txt"
+      - name: Upload checked synthetic proof and sanitized reference diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nano-guarded-memory-80k-${{ matrix.lane }}
+          path: ${{ runner.temp }}/nano-proof
+          if-no-files-found: error
+          retention-days: 3
