@@ -255,7 +255,9 @@ def restart_current_process(
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
         if _restart_stop_requested:
             return  # the watcher parks in exit_after_shutdown; Panic keeps its thread and writes
-        _drain_projections()  # the exec ends this image as an exit would
+        drain_display_projections()  # the exec ends this image as an exit would: its last display pass first
+        if _restart_stop_requested:
+            return  # a Panic accepted during that wait owns the exit as well
         try:
             os.execvpe(sys.executable, argv, env)
             return  # exec does not return; only a test double of it reaches this line
@@ -353,11 +355,11 @@ def exit_after_shutdown(exit_code: int) -> None:
     parks the caller until its own flag/control writes and exit finish; Panic
     never waits for this caller. Ordinary imported main()/ASGI shutdown returns.
     Before the exit the display projections' last pass and then the output relay's handover to a
-    reading launcher finish, each bounded inside the ordinary stop's own deadline (``_drain_projections``,
+    reading launcher finish, each bounded inside the ordinary stop's own deadline (``drain_display_projections``,
     ``finish_output_relay``); Panic and the backstops never wait for either.
     """
     if not _restart_stop_requested:
-        _drain_projections()
+        drain_display_projections()
         try:
             from ouroboros.owned_shutdown import stop_deadline
             from ouroboros.process_logging import finish_output_relay
@@ -377,16 +379,18 @@ def exit_after_shutdown(exit_code: int) -> None:
 exit_after_restart = exit_after_shutdown
 
 
-def _drain_projections() -> None:
-    """The display-projection duty's last pass before this process image ends (``display_projections.drain``:
-    at most half of the stop grace left); it never stands between the exit and the process's end."""
+def drain_display_projections() -> bool:
+    """The display-projection duty's last pass before this process image ends (``display_projections.drain``: once,
+    at most half of the stop grace left): the restart census takes it before the store switch, else the exit or
+    the direct re-exec. True when no pass is left running; it never raises, and an error reads as a pass still
+    running, so the store switch refuses rather than run beside one."""
     try:
         from ouroboros.display_projections import drain
         from ouroboros.owned_shutdown import stop_deadline
 
-        drain(stop_deadline())
+        return drain(stop_deadline())
     except Exception:
-        pass
+        return False
 
 
 def execute_panic_stop(

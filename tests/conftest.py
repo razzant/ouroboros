@@ -929,12 +929,16 @@ def _reset_display_projection_memory_between_tests(monkeypatch):
     """The display-projection duty's process memory belongs to the test that made it: the stall rows a
     watchdog queued and an after-update observation not yet published (an owner turn's first dispatch).
     Left behind, they make the next test's maintenance tick find that duty due and start a pass that
-    test never set up (``display_projections``). Read from ``sys.modules``: a test that never imported
-    them has nothing to reset, and importing them here would load the server's process facts."""
+    test never set up (``display_projections``); so do the loop context a supervisor run bound and the
+    close an exit's last pass made (a restart census), which would leave every later look starting
+    nothing. Read from ``sys.modules``: a test that never imported them has nothing to reset, and
+    importing them here would load the server's process facts."""
     from collections import deque
 
     if (projections := sys.modules.get("ouroboros.display_projections")) is not None:
         monkeypatch.setattr(projections, "_ROWS", deque())
+        monkeypatch.setattr(projections, "_CONTEXT", None)
+        monkeypatch.setattr(projections, "_CLOSED", threading.Event())
     if (facts := sys.modules.get("ouroboros.update_generation_facts")) is not None:
         monkeypatch.setattr(facts, "_pending", False)
 

@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 from starlette.applications import Starlette
 from starlette.routing import Route
 import uvicorn
-from ouroboros.server_control import (PanicIngress, execute_panic_stop as _execute_panic_stop_impl,
+from ouroboros.server_control import (PanicIngress, drain_display_projections, execute_panic_stop as _execute_panic_stop_impl,
                                       exit_after_shutdown, panic_termination_requested,
                                       restart_current_process as _restart_current_process_impl)  # noqa: F401 — restart lifecycle binding
 from ouroboros.owned_shutdown import (begin_owned_stop, finish_unconfirmed_stops, start_inherited_import,
@@ -37,7 +37,7 @@ from ouroboros.server_entrypoint import (ResetLaunch, ServerAdmissionRefused, ad
                                          find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
                                          shorten_switch_interval, unisolated_test_root, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption, consciousness_clock, host_notice, places, process_scope, server_boot, store_switch
+from ouroboros import body_adoption, consciousness_clock, display_projections, host_notice, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
@@ -91,7 +91,7 @@ from ouroboros.server_maintenance import (  # noqa: F401
     _migrate_startup_cancel_latches,
     _startup_worker_pids,
     _installed_skill_names,
-    _periodic_supervisor_maintenance, dispatch_display_projections,
+    _periodic_supervisor_maintenance,
     _prune_delegated_snapshots,
     _prune_worktrees,
     _reconcile_delegated_runs,
@@ -808,6 +808,7 @@ def _run_supervisor(settings: dict) -> None:
     # The watchdog was started before startup recovery; never start another here.
     tick_publisher_started()  # queue marks publish on this loop's tick while it lives (queue_publication)
     start_queue_writer()  # ...and their documents are written on the publisher thread, never on this one
+    display_projections.bind(_event_ctx)  # the exit's last display pass takes a mark no tick took (drain)
     while not _restart_requested.is_set() and not _supervisor_stop.is_set() and not _exit_signalled.is_set():
         try:
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "events", new_tick=True), time.monotonic()
@@ -830,8 +831,7 @@ def _run_supervisor(settings: dict) -> None:
             )
 
             if _restart_requested.is_set():
-                dispatch_display_projections(_event_ctx)  # this turn's drained llm_usage still reaches state.json, off the loop
-                break
+                break  # this turn's drained llm_usage reaches state.json in the restart census's last display pass
 
             # WS3: intake new bridge messages EARLY — before the heavy steps
             # (enforce_task_timeouts / assign_tasks / evolution) — so a later
@@ -1420,7 +1420,7 @@ def _emergency_process_cleanup() -> dict:
         panic_kill_all()
     except Exception:
         pass
-    return {"worker_exits": worker_exits, "owned_stop": owned_stop,
+    return {"worker_exits": worker_exits, "owned_stop": owned_stop, "display_pass_alive": not drain_display_projections(),
             "live_children": multiprocessing.active_children() + live_background_children(background)}
 
 def main() -> int:

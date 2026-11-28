@@ -432,7 +432,7 @@ def _periodic_supervisor_maintenance(
 
 def dispatch_display_projections(ctx: Any = None) -> None:
     """Start the display-projection pass when it has work (``display_projections.dispatch``): its snapshot
-    is taken on the calling thread, the loop's (each tick's end, and the restart turn's last step)."""
+    is taken on the calling thread, the loop's, at each tick's end (the exit's last pass: ``drain``)."""
     display_projections.dispatch(ctx, _start_maintenance_thread, _duty_busy)
 
 
