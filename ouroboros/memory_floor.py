@@ -224,6 +224,37 @@ def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Opt
             "budget": budget}
 
 
+def level_free_chars(snapshot: mv.MemoryViewSnapshot) -> int:
+    """What every room text of this snapshot holds whatever its floor level: the pieces ``memory_view._room_parts``
+    draws without reading the level (a helper's words of my human, an inactive room's line, late reviews, marks),
+    joined as ``memory_view.room_chars`` joins pieces; every other piece and the floor receipt only add to it."""
+    whole = ("owner_words", "inactive_room", "late_reviews", "marks")
+    chars = [count for count in mv._room_parts(snapshot, {}, lambda key, make: snapshot.piece(key, make)
+                                               if key[0] in whole else 0) if count]
+    return sum(chars) + 4 * max(0, len(chars) - 1)
+
+
+def frame_can_hold(snapshot: Optional[mv.MemoryViewSnapshot], sections: Iterable[Any],
+                   measure: Callable[[Mapping[str, str]], int], limits: Tuple[Any, int, int, Any], ratio: float,
+                   core: Any) -> bool:
+    """False only when no request a start frame can send fits its known window (``limits``: the frame's target,
+    reserve, window and record), priced as ``context_fit._view_projections``'s ``overflows``: ``ceil((fixed + story +
+    room tokens) * ratio) + reserve``, each section that may step at its shortest form (``_host_steps`` adds a pointer
+    to an operative view; with no reader to publish, an optional section keeps its heading and a note), memory at the
+    room's ``level_free_chars``, the story at nothing: every host form and memory level the frame's own walk can choose
+    is at least as long. A shortest memory level is no such bound: beside other host forms a walk can end below it."""
+    _target, reserve, window, _record = limits
+    readers = bool(core.section_root and core.section_task_id)
+    shortest = {}
+    for part in sections:
+        if part.section_id not in PROTECTED and part.operative_view is not None:
+            forms = (part.full_text, part.operative_view,
+                     *((relocated_text(part, ""),) if not readers and part.section_id in OPTIONAL_STEPS else ()))
+            shortest[part.section_id] = min(forms, key=mv.json_chars)
+    memory = tokens_of(level_free_chars(snapshot)) if snapshot else 0
+    return math.ceil((measure(shortest) + memory) * ratio) + reserve <= window
+
+
 def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: int, fixed: int,
                   schemas: int, window: int, reserve: int, work: int, ratio: float, allowance: Optional[int],
                   addressed: Optional[Mapping[str, str]] = None) -> Optional[Dict[str, Any]]:

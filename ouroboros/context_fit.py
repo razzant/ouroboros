@@ -38,7 +38,6 @@ from ouroboros.reference_books import ReferenceBook
 from ouroboros import context_budget
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
-from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.context_timing import adopt, another_pass, apart, counted, timed, timed_section
 
 log = logging.getLogger(__name__)
@@ -1119,7 +1118,12 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
         return sent, fixed, reserve, window, boundary, allowances
 
-    sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
+    def framed(selected):  # ``(mode, its frame)``: a start's Low that no host form and memory level fit is not walked
+        if selected == "low" and kept is None and not (held_heads or cold_resume) and known_window and not floor.frame_can_hold(
+                snapshot, sections["low"], lambda forms: measure("low", tools_for("low"), forms), limits("low"), ratio, core):
+            selected = "nano"  # every render of that Low would overflow below, so Nano follows (``floor.frame_can_hold``)
+        return selected, timed(f"fit.frame_{selected}", frame, selected)
+    mode, (sent, fixed, reserve, window, boundary, allowances) = framed(mode)
     def work():
         target = context_budget.context_mode_limits(mode, preferred, output_reserve)[0]
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
@@ -1139,8 +1143,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                               and not telling_fits(mode, sent, section_views(sections[mode], receipts),
                                                    window, boundary, reserve, start_room=False))
     if (room_fact and floor.max_room_lost(room_fact)) or running_max_needs_maps:
-        mode = "low"
-        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
+        mode, (sent, fixed, reserve, window, boundary, allowances) = framed("low")
 
     running_shown = None
     def render(forms=None, *, level=None, telling_floor=False):
@@ -1175,8 +1178,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         running_shown = render(telling_floor=True)
         if misses_running_goal(running_shown):
             if books_save(running_shown.level, window, boundary):
-                mode = "low"
-                sent, fixed, reserve, window, boundary, allowances = timed("fit.frame_low", frame, mode)
+                mode, (sent, fixed, reserve, window, boundary, allowances) = framed("low")
                 # Walk Low from the held level, not from the discarded Max trial's tellings.
                 running_shown = render(telling_floor=True)
             if misses_running_goal(running_shown):
@@ -1196,8 +1198,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         if (running or mode == "low") and kept is not None and admitted:
             prior_view = (running_shown or render()) if shown is floor.NO_VIEW else shown
             last = (sent, fixed, reserve, window, boundary, allowances, receipts, prior_view, wire_room(prior_view), mode)
-        mode, running_shown = ("low" if mode == "max" and not running else "nano"), None
-        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
+        mode, (sent, fixed, reserve, window, boundary, allowances) = framed("low" if mode == "max" and not running else "nano")
+        running_shown = None
     if held_heads and mode == "nano" and overflows(shown):
         emergency_level = shown.level
         if floor._held_note_steps(sections[mode], receipts, form="reader",
