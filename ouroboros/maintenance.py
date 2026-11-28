@@ -594,15 +594,19 @@ def _look_again(lane: Optional[str], fields: Any) -> bool:
 def _unclean_only(record: Callable[..., None]) -> Callable[..., None]:
     """The checkpoint lane's child rows: a clean run (one to three a minute on a busy install) writes none, its pass
     being a row of the store-timing journal (``store_checkpoint``); an unclean end (failed, unknown, stopped) writes
-    its one row, with the ``pid`` its ``started`` row would have carried."""
+    its one row, with the ``pid`` its ``started`` row would have carried. A run's facts end with it: a later spawn
+    that fails before a child exists names no earlier child."""
     began: Dict[str, Any] = {}
 
     def write(root: Any, phase: str, **facts: Any) -> None:
         if phase == "started":
             began.clear()
             began.update(facts)
-        elif phase != "completed":
-            record(root, phase, **{**began, **facts})
+            return
+        facts = {**began, **facts}
+        began.clear()
+        if phase != "completed":
+            record(root, phase, **facts)
     return write
 
 

@@ -904,6 +904,34 @@ def test_the_checkpoint_lane_looks_again_after_a_pass_that_left_its_job_done(dat
         ("maintenance", phase, "checkpoint", 4242) for phase in rows], written
 
 
+def test_a_spawn_that_fails_after_a_clean_pass_names_no_earlier_child(data, monkeypatch):
+    """The lane looks again after a clean pass (no row) and its next spawn fails before any child exists (the
+    process or memory exhaustion of a busy install): the one row that failure writes names no pid, not the clean
+    child's before it (an unclean child's own end keeps its pid: the test above)."""
+    from tests.test_evidence_packs import REPO, _FakeChild
+
+    (data / "logs").mkdir(exist_ok=True)
+    done = {"status": "completed", "jobs": {"wal_checkpoint": {"state": "done", "items": 1}}}
+    children = [_FakeChild(json.dumps(done).encode())]
+
+    def spawn(root, repo, purpose, **kw):
+        if not children:
+            raise OSError("no process for the next pass")
+        return children.pop()
+
+    monkeypatch.setitem(maintenance.FACT_FIRST, "wal_checkpoint", lambda root: True)
+    monkeypatch.setitem(maintenance.JOBS, "wal_checkpoint", (lambda *_a: True, maintenance.JOBS["wal_checkpoint"][1]))
+    monkeypatch.setattr(maintenance, "spawn_maintenance_job", spawn)
+    unit = maintenance.MaintenanceChild("checkpoint")
+    assert unit.tick(data, REPO)
+    unit._thread.join(10)
+    assert not unit._thread.is_alive() and not children
+    journal = data / "logs" / "supervisor.jsonl"
+    written = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert [(row["phase"], row["lane"], row.get("pid"), row["exception_class"]) for row in written] == [
+        ("failed", "checkpoint", None, "OSError")], written
+
+
 def test_an_unchanged_hold_is_retried_only_on_the_reconcile_cadence_then_removed(data, monkeypatch):
     from ouroboros import session_scratch
     from tests.test_evidence_packs import REPO, _FakeChild
