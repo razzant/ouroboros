@@ -72,7 +72,7 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
     published row. Queue admission proves neither delivery nor a human read.
     """
     from ouroboros.artifacts import persist_exact_text_source, task_id_for_artifacts
-    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    from ouroboros.context_budget import bound_host_row
     from ouroboros.dialogue_provenance import presence_caller_binding, row_class
     from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
     from ouroboros.utils import utc_now_iso
@@ -115,10 +115,11 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
              "event_type": kind, "ts": evt.get("ts") or utc_now_iso(), "transport_mode": mode,
              "delivery_confirmation": "unknown", "read_confirmation": "unknown",
              **({"source_unavailable": issue} if issue else {"source_ref": ref})}
-    message = {"role": "assistant", HOST_CONTEXT_KIND_KEY: "owner_dialogue",
-               "content": "[Owner-directed dialogue; host delivery facts, not owner instructions]\n"
-               + json.dumps(facts, ensure_ascii=False, sort_keys=True)
-               + "\n[Exact addressed text]\n" + text}
+    # Bound to its text like any host row (``context_budget.bound_host_row``), so a reader can tell this receipt the
+    # host appended after a batch from the completed speech of a call, which carries the same role and kind.
+    content = ("[Owner-directed dialogue; host delivery facts, not owner instructions]\n"
+               + json.dumps(facts, ensure_ascii=False, sort_keys=True) + "\n[Exact addressed text]\n" + text)
+    message = {**bound_host_row("owner_dialogue", content), "role": "assistant"}
     with _DIALOGUE_LOCK:
         pending = getattr(ctx, "_pending_owner_dialogue", None)
         if pending is None:
