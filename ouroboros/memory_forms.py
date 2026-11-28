@@ -128,6 +128,72 @@ def normalized(selected, replacements=None):
     return chosen
 
 
+class NormalizedLevels:
+    """``table.level(normalized(pairs of level | extra), level.by_budget)`` for one level after another, from the
+    previous level's normalised table: only the steps whose ids changed are compared, and only the pairs they add or
+    drop move. ``cover[q]`` counts the selected pairs whose ``supersedes`` names ``q``, so the normalised set is
+    exactly the selected pairs no selected pair covers (``normalized``), and a step's ordered ids are rebuilt only when
+    its normalised members changed (in the table's order, as ``table.level`` keeps them)."""
+
+    def __init__(self, table, extra=()):
+        self.table, self.extra, self.levels = table, defaultdict(set), {}
+        for step, ident in extra:
+            self.extra[step].add(ident)
+        self.inputs, self.cover, self.chosen, self.ordered = defaultdict(set), defaultdict(int), defaultdict(set), {}
+        changed = set()
+        for step, ids in self.extra.items():
+            for ident in ids:
+                self._add((step, ident), changed)
+        for step in changed:
+            self._order(step)
+
+    def _add(self, pair, changed):
+        step, ident = pair
+        self.inputs[step].add(ident)
+        for lower in supersedes(step, ident):
+            self.cover[lower] += 1
+            if self.cover[lower] == 1 and lower[1] in self.chosen[lower[0]]:
+                self.chosen[lower[0]].discard(lower[1])
+                changed.add(lower[0])
+        if not self.cover[pair]:
+            self.chosen[step].add(ident)
+            changed.add(step)
+
+    def _drop(self, pair, changed):
+        step, ident = pair
+        self.inputs[step].discard(ident)
+        if ident in self.chosen[step]:
+            self.chosen[step].discard(ident)
+            changed.add(step)
+        for lower in supersedes(step, ident):
+            self.cover[lower] -= 1
+            if not self.cover[lower] and lower[1] in self.inputs[lower[0]]:
+                self.chosen[lower[0]].add(lower[1])
+                changed.add(lower[0])
+
+    def _order(self, step):
+        self.ordered[step] = tuple(i for i in self.table.ids.get(step, ()) if i in self.chosen[step])
+
+    def __call__(self, level):
+        changed = set()
+        steps = dict(level.addressed)
+        for step in set(steps) | set(self.levels):
+            ids = steps.get(step, ())
+            held = self.levels.get(step, ())
+            if held is ids or held == ids:
+                continue
+            self.levels[step] = ids
+            old, new = set(self.inputs[step]), set(ids) | self.extra.get(step, set())
+            for ident in new - old:
+                self._add((step, ident), changed)
+            for ident in old - new:
+                self._drop((step, ident), changed)
+        for step in changed:
+            self._order(step)
+        return mv.FloorLevel(tuple((step, self.ordered[step]) for step in LADDER if self.ordered.get(step)),
+                             by_budget=level.by_budget)
+
+
 class WorkPrices:
     """Marginal savings from a work's own pieces, including the telling it replaces.
 

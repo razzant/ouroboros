@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import context_fit as cf, memory_floor as mf, memory_form_facts as ff, memory_view as mv
+from ouroboros import context_fit as cf, memory_floor as mf, memory_form_facts as ff, memory_forms as forms, memory_view as mv
 from tests import _memory_scale_fixture as scale
 from tests import _memory_view_synthetic as syn
 from tests.test_first_contact_seams import _hinted_start, seam  # noqa: F401 (the fixture the hinted start reads)
@@ -49,8 +49,8 @@ def cold():
 @contextlib.contextmanager
 def counting(counts):
     """Count the memory renders of each mode (``counts[mode]``), the floor notes priced (``counts['notes']``) and the
-    owner-word levels the start-room line weighs (``counts['owners']``)."""
-    render, note, owners = mf.render_view_for_mode, mf.floor_note, mf.level_with
+    owner-word levels the start-room line weighs (``counts['owners']``: by ``level_with``, or from the previous level)."""
+    render, note, owners, previous = mf.render_view_for_mode, mf.floor_note, mf.level_with, mf.NormalizedLevels
 
     def rendered(*a, **kw):
         counts[kw["mode"]] += 1
@@ -63,10 +63,16 @@ def counting(counts):
     def weighed(*a, **kw):
         counts["owners"] += 1
         return owners(*a, **kw)
+
+    class Weighed(previous):
+        def __call__(self, level):
+            counts["owners"] += 1
+            return super().__call__(level)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(mf, "render_view_for_mode", rendered)
         patch.setattr(mf, "floor_note", noted)
         patch.setattr(mf, "level_with", weighed)
+        patch.setattr(mf, "NormalizedLevels", Weighed)
         yield
 
 
@@ -77,7 +83,31 @@ def whole():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(mv, "room_block_chars", lambda snapshot, gone: mv.json_chars(mv._room_text(snapshot.room, gone)))
         patch.setattr(ff, "_kept", lambda _snapshot, _key, make: make())
+        _owner_levels(patch, lambda _incremental, scratch: scratch())
         yield
+
+
+def _owner_levels(patch, choose):
+    """Route the owner probe's levels through ``choose(incremental, from_scratch)``: from scratch is
+    ``memory_floor.level_with`` of the level and every uncovered owner row not in it, as the receipt asked before."""
+    tables, elements, real = {}, mf._elements, mf.NormalizedLevels
+
+    def listed(snapshot):
+        table = elements(snapshot)
+        tables[id(table)] = snapshot
+        return table
+
+    class Probe:
+        def __init__(self, table, extra):
+            self.snapshot, self.incremental = tables[id(table)], real(table, extra)
+            self.uncovered = mf.uncovered_owner_rows(self.snapshot)  # read again here, not from what the floor passed
+
+        def __call__(self, level):
+            shown = dict(level.addressed).get("F7", ())
+            return choose(lambda: self.incremental(level), lambda: mf.level_with(self.snapshot, level, [
+                f"F7:{ident}" for _step, ident, *_ in self.uncovered if ident not in shown], owner_note=True))
+    patch.setattr(mf, "_elements", listed)
+    patch.setattr(mf, "NormalizedLevels", Probe)
 
 
 def _ordered(value):
@@ -105,6 +135,12 @@ def oracle(checked):
             checked["counts"] += 1
         return got
 
+    def owner(incremental, scratch):
+        got = incremental()
+        assert got == scratch()
+        checked["owners"] += 1
+        return got
+
     def held(snapshot, level):
         got = holding(snapshot, level)
         if ("holding", id(snapshot), level) not in seen:
@@ -124,6 +160,7 @@ def oracle(checked):
         patch.setattr(mv, "room_chars", room)
         patch.setattr(mf, "form_counts", counted)
         patch.setattr(mf, "holding_room", held)
+        _owner_levels(patch, owner)
         yield
 
 
@@ -254,6 +291,10 @@ def test_one_fit_prices_a_level_once_and_drops_its_prices_with_the_fit(tmp_path)
     with counting(again):
         assert outcome(fit) == now
     assert (again["notes"], again["owners"]) == (shipped["notes"], shipped["owners"])
+    checked = collections.Counter()
+    with oracle(checked):  # its owner-word levels, taken from the previous level, equal level_with's at every level
+        assert outcome(fit) == now
+    assert checked["owners"] == shipped["owners"] > 0
 
 
 def test_a_list_of_tool_names_prices_as_its_tuple(tmp_path):
@@ -501,3 +542,30 @@ def test_a_row_range_priced_again_reads_its_new_members():
         assert _ordered(ff._holding_room(snapshot, level)) == _ordered(ff._holding_room(replace(snapshot), level)), k
         gone = dict(level.addressed)
         assert mv.room_block_chars(snapshot, gone) == mv.json_chars(mv._room_text(snapshot.room, gone)), k
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_the_owner_probe_level_from_the_previous_one_equals_level_with(seed):
+    """The start-room line's owner level (every uncovered owner row added to the priced level), kept from the previous
+    level's normalised table, equals ``level_with`` from scratch over a random sequence of levels - walk-like ones and
+    ones no walk builds (a form beside the form that supersedes it: bare rows, a work's final beside its progress, a page
+    beside its lead, a conversation's line beside its events) - including a level priced again after others."""
+    import random
+
+    rng = random.Random(seed)
+    for snapshot in (_changing_room(seed), scale.snapshot(rows=40 + seed, pages=12)):
+        table = mf._elements(snapshot)
+        uncovered = mf.uncovered_owner_rows(snapshot)
+        assert uncovered
+        probe = forms.NormalizedLevels(table, {("F7", ident) for _step, ident, *_ in uncovered})
+        levels = _random_levels(snapshot, rng) if snapshot.room["notes"] is not None else []
+        pairs = [(step, ident) for step, ident, *_ in table.listed]
+        taken = set()
+        for _ in range(40):  # every listed form, uppers beside their lowers, toggled a few at a time
+            taken.symmetric_difference_update(rng.sample(pairs, 4))
+            levels.append(mv.FloorLevel(tuple((step, tuple(i for i in table.ids.get(step, ()) if (step, i) in taken))
+                                              for step in mf.LADDER if any(s == step for s, _ in taken)), by_budget=seed))
+        for level in levels + levels[::-3]:
+            shown = dict(level.addressed).get("F7", ())
+            held = [f"F7:{ident}" for _step, ident, *_ in uncovered if ident not in shown]
+            assert probe(level) == mf.level_with(snapshot, level, held, owner_note=True), level

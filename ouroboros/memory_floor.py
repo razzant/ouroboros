@@ -26,7 +26,7 @@ from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
-                                    form_counts, holding_room, Selection, supersedes, WorkPrices, restore,
+                                    form_counts, holding_room, NormalizedLevels, Selection, supersedes, WorkPrices, restore,
                                     ORDINARY_STAGES, TELLING_STAGES, ROOM_STEPS)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
 from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD, has_program_history, model_room as model_room
@@ -945,6 +945,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     room_bound = allowances["window"] if binds else allowances["margin"]  # a target's miss is its own fact, below
     uncovered = uncovered_owner_rows(snapshot)
+    owned = {("F7", ident) for _step, ident, *_ in uncovered}  # level_with of every uncovered row, owner_note given
     def total(level, note):  # the whole request with this view and its receipt, as the target counts it
         return math.ceil((non_memory_tokens + measure_text(mv.story_chars(snapshot, level),
                                                            mv.room_chars(snapshot, level, floor_note=note))) * ratio) + reserve
@@ -970,10 +971,11 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                      f"about {need:,}{telling}, "
                      f"{math.ceil(non_memory_tokens * ratio) + reserve:,} with no memory at all.")
         if room_bound is not None and once(("size", id(snapshot), level), lambda: size(level)) > room_bound:
-            gone = dict(level.addressed)
-            held = [f"F7:{ident}" for step, ident, *_ in uncovered if ident not in gone.get(step, ())]
-            owners = held and once(("owners", id(snapshot), level),
-                                   lambda: size(level_with(snapshot, level, held, owner_note=True))) <= room_bound
+            shown = set(dict(level.addressed).get("F7", ()))  # every uncovered owner row is an F7 element
+            held = [f"F7:{ident}" for _step, ident, *_ in uncovered if ident not in shown]
+            owners = held and once(("owners", id(snapshot), level), lambda: size(
+                level_with(snapshot, level, held, owner_note=True) if prices is None else once(  # from the last level's
+                    ("owner levels", id(snapshot)), lambda: NormalizedLevels(_elements(snapshot), owned))(level))) <= room_bound
             note += "\nStart room is smaller than requested: " + (
                 "uncovered owner words remain in view; only physical pressure can turn their oldest rows into named addresses."
                 if owners else "what my memory shows even in its shortest forms exceeds it.")
