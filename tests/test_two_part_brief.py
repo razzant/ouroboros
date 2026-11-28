@@ -592,8 +592,8 @@ def test_a_packet_sendable_with_the_resident_opening_selected_stays_sendable(mon
 def test_a_many_file_change_gets_every_full_body_at_its_measured_window(tmp_path, monkeypatch):
     """Thirteen synthetic web modules with one trailing comment each: at 263,750, the smallest 250-token step where
     this packet fits them (``MEASURED_DELIVERY``'s comment; the target before #4325 and at ca7009c149c1: 262,750),
-    it sends all thirteen full bodies, its changed-files list pointing at the file headings it already carries
-    instead of repeating thirteen paths."""
+    it sends all thirteen full bodies, each under its own heading, its changed-files list pointing at the file
+    headings it already carries instead of repeating thirteen paths."""
     from ouroboros.tools import review as review_tool
     from ouroboros.tools.review_admission import CHANGED_FILES_ARE_HEADINGS
     from ouroboros.tools.registry import ToolContext
@@ -601,9 +601,9 @@ def test_a_many_file_change_gets_every_full_body_at_its_measured_window(tmp_path
     root = pathlib.Path(__file__).resolve().parents[1]
     paths = [f"web/modules/many_{index:02d}.js" for index in range(13)]
     _installed, subject = _installed_and_subject(tmp_path)
-    for path in paths:
+    for index, path in enumerate(paths):  # each file's bytes are its own: a body under another's heading is seen
         (subject / path).parent.mkdir(parents=True, exist_ok=True)
-        (subject / path).write_text("".join(f"// many line {k:05d}: " + "x" * 60 + "\n" for k in range(300)),
+        (subject / path).write_text("".join(f"// many{index:02d} ln {k:05d}: " + "x" * 60 + "\n" for k in range(300)),
                                     encoding="utf-8")
     _git(subject, "add", "-A")
     _git(subject, "commit", "-qm", "base")
@@ -617,8 +617,13 @@ def test_a_many_file_change_gets_every_full_body_at_its_measured_window(tmp_path
                                                    governance_root=str(root), layer="body"))
     monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 263_750)
     text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
-    assert "Full post-change snapshots were omitted" not in text
-    assert all(f"\n### {path}\n" in text for path in paths) and CHANGED_FILES_ARE_HEADINGS in text
+    assert "Full post-change snapshots were omitted" not in text and CHANGED_FILES_ARE_HEADINGS in text
+    bodies = {path: (subject / path).read_text(encoding="utf-8").rstrip("\n") for path in paths}
+    assert len(set(bodies.values())) == len(paths)
+    for path in paths:  # its own heading once, and under it its own whole bytes, up to the next file's heading
+        assert text.count(f"\n### {path}\n") == 1, path
+        under = text.split(f"\n### {path}\n", 1)[1].split("\n### ", 1)[0]
+        assert bodies[path] in under, path
 
 
 def test_the_fallback_step_buys_no_second_density_probe(monkeypatch):
