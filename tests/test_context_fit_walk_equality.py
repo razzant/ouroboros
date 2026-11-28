@@ -201,6 +201,38 @@ def test_a_list_of_tool_names_prices_as_its_tuple(tmp_path):
         assert (listed.level, listed.note, listed.facts) == (plain.level, plain.note, plain.facts)
 
 
+# What the development branch's render (origin/ouroboros f508dbec3, memory_floor.py before the memo) gives for a walked
+# Nano view of the list test's snapshot whose tool names come as a one-shot iterator or generator: the first level's
+# note reads the names and every later note sees none, so the final note says memory_read was absent. Taken by loading
+# that file as ouroboros.memory_floor and running this same render (level, note, facts and room by SHA-256).
+ONE_SHOT_RENDER = {"steps": {"F1": 162, "F5l": 35, "F6g": 226}, "by_budget": 423,
+                   "note": "f4db3d6655a011a261d3f1a70af09695b15ac224d8bf73682b8279eca3a4c600",
+                   "facts": "81c7199600ba7510dcd513287581bfab3bf3b4e362150de447cf8483022b386f",
+                   "room": "f159c9d48681be22d5d1b003d0e8e94750c169b09e32147cbee70604f3df743c"}
+
+
+def test_one_shot_tool_names_are_read_where_each_note_read_them():
+    """A walked render whose tool names are a one-shot iterable reads them where each level's receipt always did, with
+    or without the memo: level, note, facts and room are the development branch's (``ONE_SHOT_RENDER``); a memo that
+    read the names once for the whole render would show them to every later note (F6g 225, by_budget 422)."""
+    import hashlib
+
+    def digest(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def generated():
+        yield "enable_tools"
+    snap = _snapshot(rows=60, pages=40, marks=12)
+    args = dict(mode="nano", owner_mode="nano", window_tokens=120_000, known_window=True, output_reserve=16_384,
+                ratio=1.0, non_memory_tokens=500, level=None)
+    for make in (lambda: iter(("enable_tools",)), generated):
+        for prices in (None, {}):
+            shown = mf.render_view_for_mode(snap, tool_names=make(), prices=prices, **args)
+            assert {"steps": dict(shown.level.steps), "by_budget": shown.level.by_budget, "note": digest(shown.note),
+                    "facts": digest(json.dumps(shown.facts, sort_keys=True, default=str)),
+                    "room": digest(shown.room)} == ONE_SHOT_RENDER, prices
+
+
 def test_a_transient_publication_failure_reads_alike_with_and_without_the_memo(tmp_path):
     """A source whose first publication fails once (a transient write error): today's walk meets it in the Low frame it
     then leaves, Nano publishes that source again and the start fits at 82,260 (and keeps its pointer at 120,000). The

@@ -951,8 +951,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     asked_at = None  # the level a first send's soft ask (``start_saving``) walks on from, so its own cuts are named
     def softly(level):
         return dict(asked_at.steps) if asked_at is not None and level.steps != asked_at.steps else None
-    names = None if tool_names is None else tuple(tool_names)  # one sequence for the memo's key and every note
-    called = (id(snapshot), named, mode, target, lowered_from, names, owner_mode, repr(max_room))
+    called = (id(snapshot), named, mode, target, lowered_from, owner_mode, repr(max_room))
     def once(key, price):  # a pure price of this snapshot and level, from this fit's memo when it keeps one
         if prices is None:
             return price()
@@ -960,8 +959,9 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
             prices[key] = price()
         return prices[key]
     def receipt(level):
+        names = None if tool_names is None else tuple(tool_names)  # read where each note read them: a one-shot once
         preference = softly(level)
-        note = once(("note", called, level, repr(preference)), lambda: floor_note(
+        note = once(("note", called, names, level, repr(preference)), lambda: floor_note(
             level, window_tokens=named, mode=mode, target_tokens=target, lowered_from=lowered_from, tool_names=names,
             budget_mode=owner_mode, max_room=max_room, snapshot=snapshot, preference=preference))
         if reports_miss and (need := total(level, note)) > target:
