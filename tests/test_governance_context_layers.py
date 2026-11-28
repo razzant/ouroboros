@@ -163,9 +163,9 @@ def test_a_packet_is_the_same_bytes_wherever_its_governance_root_lies(governance
     file of its own root."""
     import shutil
 
-    deeper = tmp_path / ("a_much_deeper_checkout_folder_" * 4) / "system_repo"
+    deeper = tmp_path / "a_deeper_checkout" / "of_the_same_body" / "system_repo"  # short enough for any system's paths
     shutil.copytree(governance_root, deeper)
-    assert len(str(deeper)) - len(str(governance_root)) > 100
+    assert len(str(deeper)) - len(str(governance_root)) > 30
     near, far = (_packet_prompt(root, layer="body") for root in (governance_root, deeper))
     assert near == far and "Source: docs/DESIGN.md." in near
     assert str(governance_root) not in near and str(deeper) not in far
