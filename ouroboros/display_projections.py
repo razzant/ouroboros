@@ -33,9 +33,11 @@ and receipts keep their synchronous owners and read ``usage.sqlite``, never ``st
 overrunning pass.
 
 Each lifespan's end takes ONE last pass (``drain``), in its teardown right after the supervisor stopped and
-the terminal custody was written, after the pass in flight and inside the stop grace: the loop's context
-(``bind``) gives it the budget mark of a turn a stop or a restart ended before its look, beside the queued
-rows and newer after-update facts. No pass starts after it. A later drain (the restart census before the
+the terminal custody was written, after the pass in flight and inside the share of the stop grace its door
+gives it and the socket lines together (``server_control.finish_display_and_socket_lines``: half of what is
+left, so the owned stop after it keeps the larger part): the loop's context (``bind``) gives it the budget
+mark of a turn a stop or a restart ended before its look, beside the queued rows and newer after-update
+facts. No pass starts after it. A later drain (the restart census before the
 store switch, the exit, the direct re-exec) waits for that one and reads whether a pass still runs, and the
 store switch refuses while one does; it takes the last pass itself only where no teardown did. A new
 lifespan in this interpreter opens the duty again (``reopen``). What stays unwritten (a pass that outlived
@@ -249,15 +251,15 @@ def drain(deadline: Optional[float] = None) -> bool:
     context's due budget mark (``bind``), the queued rows and newer after-update facts, again while rows arrive
     meanwhile (another duty's end row); root figures are heartbeat display and end with the process. A later call
     waits for that first one to end, then only reads whether a pass still runs; Panic waits for nothing. Each caller
-    waits at most half of the stop grace left (``deadline``, the bound ``server_process.end_task_runs`` keeps; without
-    a started grace no last pass runs), and no pass starts that there is no time left to wait for. True when no pass
-    is left running: one that is stays unjoined, its unwritten work the exit's loss."""
+    waits until its ``deadline`` at most (monotonic: the share of the stop grace its door takes, half of what is left,
+    ``server_control``; without a started grace no last pass runs), and no pass starts that there is no time left to
+    wait for. True when no pass is left running: one that is stays unjoined, its unwritten work the exit's loss."""
     from ouroboros import update_generation_facts
     from ouroboros.server_control import panic_termination_requested
 
     if panic_termination_requested():
         return not LATCH.locked()
-    wait = max(0.0, (deadline - time.monotonic()) / 2) if deadline is not None else 0.0
+    wait = max(0.0, deadline - time.monotonic()) if deadline is not None else 0.0
     cutoff = time.monotonic() + wait
     if not _END.acquire(timeout=wait):
         return False  # the drain taking the last pass outlived this caller's share: a pass may still run

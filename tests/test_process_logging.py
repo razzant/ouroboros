@@ -561,8 +561,8 @@ def test_a_queued_record_holds_text_never_the_exception_its_traceback_or_its_arg
 def test_an_exit_waits_for_the_queued_lines_inside_half_the_time_left_and_no_longer():
     """``finish_record_handoffs`` (an ordinary exit's and the direct re-exec's, before the relay's handover): what a
     handoff still holds, a line queued after an earlier wait included, reaches the sink before it returns; a sink
-    that stands is waited for at most half of the time left before the stop's deadline; without a started grace
-    nothing waits."""
+    that stands is waited for until the deadline it gets at most, its door's share of the stop grace (half of the
+    time left, beside the display projections' last pass: here 1 s of 2); without a started grace nothing waits."""
     process_logging, logger, sink = _held_logger("tests.record_handoff.exit")
     handoff = process_logging.RecordHandoff("test-record-handoff-exit")
     release = threading.Timer(0.3, sink.gate.set)
@@ -571,8 +571,8 @@ def test_an_exit_waits_for_the_queued_lines_inside_half_the_time_left_and_no_lon
         handoff.log(logger, logging.INFO, "second")
         assert sink.entered.wait(5)
         started = time.monotonic()
-        process_logging.finish_record_handoffs(started + 2.0)
-        assert 0.9 <= time.monotonic() - started < 2.0 and sink.records == [], "half of the time left, no more"
+        process_logging.finish_record_handoffs(started + 1.0)
+        assert 0.9 <= time.monotonic() - started < 2.0 and sink.records == [], "until its deadline, no more"
         started = time.monotonic()
         process_logging.finish_record_handoffs(None)
         assert time.monotonic() - started < 0.5 and sink.records == [], "no grace: no wait"

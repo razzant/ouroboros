@@ -7,6 +7,7 @@ import os
 import json
 import pathlib
 import sys
+import time
 from typing import Any
 
 from ouroboros.platform_layer import IS_WINDOWS
@@ -383,36 +384,50 @@ exit_after_restart = exit_after_shutdown
 def finish_display_and_socket_lines() -> None:
     """An ordinary end of this image's serving, at each door that has one (the lifespan teardown right after its
     terminal custody, the exit, the direct re-exec): the display projections' last pass (``drain_display_projections``),
-    then the socket lifecycle lines still queued (``_finish_record_handoffs``), each within half of the stop grace
-    left. An accepted Panic owns the exit and waits for neither; it never raises."""
+    then the socket lifecycle lines still queued (``_finish_record_handoffs``), both inside ONE share of the stop grace
+    taken here once, half of what is left, so what follows the door keeps the larger part (the owned stop after the
+    teardown's call, the output relay's handover after the exit's). An accepted Panic owns the exit and waits for
+    neither; it never raises."""
     if not _restart_stop_requested:
-        drain_display_projections()
-        _finish_record_handoffs()
+        try:
+            share = _half_of_the_grace_left()
+        except Exception:
+            share = None  # no grace known: neither waits
+        drain_display_projections(share)
+        _finish_record_handoffs(share)
 
 
-def drain_display_projections() -> bool:
-    """The display-projection duty's last pass of this lifespan (``display_projections.drain``, at most half of the
-    stop grace left): its teardown takes it (``finish_display_and_socket_lines``); a later call, the restart census
-    before the store switch among them, waits for that pass and reads, and takes it only where no teardown did. True
-    when no pass is left running; it never raises, and an error reads as a pass still running, so the store switch
-    refuses rather than run beside one."""
+def drain_display_projections(share: float | None = None) -> bool:
+    """The display-projection duty's last pass of this lifespan (``display_projections.drain``) until ``share``, the one
+    its door took for the pass and the socket lines (``finish_display_and_socket_lines``), or else half of the stop
+    grace left at this call (the restart census before the store switch): the teardown takes the pass; a later call
+    waits for it and reads, and takes it only where no teardown did. True when no pass is left running; it never
+    raises, and an error reads as a pass still running, so the store switch refuses rather than run beside one."""
     try:
         from ouroboros.display_projections import drain
-        from ouroboros.owned_shutdown import stop_deadline
 
-        return drain(stop_deadline())
+        return drain(_half_of_the_grace_left() if share is None else share)
     except Exception:
         return False
 
 
-def _finish_record_handoffs() -> None:
+def _half_of_the_grace_left() -> float | None:
+    """The monotonic end of half of the ordinary stop's grace still left (``owned_shutdown.stop_deadline``; the bound
+    ``server_process.end_task_runs`` keeps, so the owned stop keeps the rest), or None before a door started that
+    grace: nothing waits then."""
+    from ouroboros.owned_shutdown import stop_deadline
+
+    deadline, now = stop_deadline(), time.monotonic()
+    return None if deadline is None else now + max(0.0, (deadline - now) / 2)
+
+
+def _finish_record_handoffs(deadline: float | None) -> None:
     """What the record handoffs still hold (the socket lifecycle lines: ``process_logging.finish_record_handoffs``),
-    bounded inside the ordinary stop's own deadline; it never stands between this image and its end."""
+    until ``deadline`` at most; it never stands between this image and its end."""
     try:
-        from ouroboros.owned_shutdown import stop_deadline
         from ouroboros.process_logging import finish_record_handoffs
 
-        finish_record_handoffs(stop_deadline())
+        finish_record_handoffs(deadline)
     except Exception:
         pass
 

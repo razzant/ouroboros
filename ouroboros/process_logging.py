@@ -314,14 +314,15 @@ class RecordHandoff:
                 return False
 
 
-def finish_record_handoffs(stop_deadline: float | None) -> None:
-    """Before an ordinary exit or the direct re-exec (``server_control``, ahead of ``finish_output_relay``): each
-    handoff's writer gets at most half of the time left before ``stop_deadline`` (monotonic; the bound
-    ``server_process.end_task_runs`` keeps, so the relay's handover keeps the rest) to hand its queue to the
-    handlers. Without a started grace nothing waits; never raises. Panic and the backstops never call it."""
-    if stop_deadline is None:
+def finish_record_handoffs(deadline: float | None) -> None:
+    """At each door that ends this image's serving (``server_control.finish_display_and_socket_lines``: the lifespan
+    teardown, and an ordinary exit or the direct re-exec ahead of ``finish_output_relay``): each handoff's writer gets
+    until ``deadline`` (monotonic; the one share of the stop grace, half of what is left, that the door gives the
+    display projections' last pass and these lines together, so the owned stop and the relay's handover keep the
+    rest) to hand its queue to the handlers. Without a started grace nothing waits; never raises. Panic and the
+    backstops never call it."""
+    if deadline is None:
         return
-    deadline = time.monotonic() + max(0.0, (stop_deadline - time.monotonic()) / 2)
     for handoff in list(_HANDOFFS):
         try:
             handoff.finish(deadline)

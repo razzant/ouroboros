@@ -418,6 +418,44 @@ def test_each_lifespan_of_an_imported_host_takes_its_last_pass_and_hands_its_soc
         logger.removeHandler(sink)
 
 
+def test_the_last_pass_and_the_socket_lines_share_half_of_the_grace_left_and_the_census_takes_its_own(monkeypatch):
+    """Each door that ends this image's serving (the lifespan teardown, ahead of the owned-work stop; the exit and the
+    direct re-exec, ahead of the output relay's handover) gives its display projections' last pass and its socket lines
+    ONE share of the stop grace, half of what is left, taken once: each waits until that share's end at most, so the two
+    together end by it and what follows the door keeps the larger part. (Each taking half of what it found left, they
+    took three quarters on a stalled disk: of 4.00 s, 0.99 s stayed for the owned stop.) The restart census, with no
+    socket lines behind it, takes half of what is left at its own call."""
+    from ouroboros import owned_shutdown, process_logging, server_control
+
+    grace_end = time.monotonic() + 8.0
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: grace_end)
+    received = []
+
+    def half(at):  # the end of half of the grace left at ``at``, as the door computes it
+        return at + (grace_end - at) / 2
+
+    def drain(deadline):  # the last pass stands a while, as on a stalled disk
+        received.append(("display projections", deadline))
+        time.sleep(0.05)
+        return True
+
+    monkeypatch.setattr(display_projections, "drain", drain)
+    monkeypatch.setattr(process_logging, "finish_record_handoffs",
+                        lambda deadline: received.append(("socket lines", deadline)))
+    started = time.monotonic()
+    server_control.finish_display_and_socket_lines()
+    ended = time.monotonic()
+    (first, share), (then, lines) = received
+    assert (first, then) == ("display projections", "socket lines") and lines == share, "one share, taken once"
+    assert half(started) <= share <= half(ended), "half of the grace left, not the whole of it"
+    received.clear()
+    started = time.monotonic()
+    assert server_control.drain_display_projections() is True  # the restart census before the store switch
+    ended = time.monotonic()
+    ((_name, census),) = received
+    assert half(started) <= census <= half(ended)
+
+
 def test_a_look_that_raises_frees_the_latch_for_the_next_tick(monkeypatch, caplog):
     """``take`` reads memory only, yet a look that raised once kept the latch for the generation: no pass, no
     stall row (the watchdog had no entry), every later look skipped. The latch is free again and the next look
@@ -575,9 +613,10 @@ def test_the_exit_takes_one_last_pass_with_the_queued_rows_and_the_bound_mark_an
 
 
 def test_the_exit_leaves_a_pass_that_stands_past_half_the_grace_and_waits_for_nothing_without_one(monkeypatch):
-    """A pass in flight at the process's end is waited for at most half of the stop grace left; one that stands
-    is left unjoined, its write never recorded as done, and the drain says so (the restart census reports it).
-    Without a started grace, or once Panic owns the exit, nothing waits and no last pass runs."""
+    """A pass in flight at the process's end is waited for until the drain's deadline at most, its door's share of the
+    stop grace (half of what is left: here 1 s of 2); one that stands is left unjoined, its write never recorded as
+    done, and the drain says so (the restart census reports it). Without a started grace, or once Panic owns the exit,
+    nothing waits and no last pass runs."""
     from ouroboros import server_control
 
     held, release, hold, _holding = _held_seam()
@@ -589,8 +628,8 @@ def test_the_exit_leaves_a_pass_that_stands_past_half_the_grace_and_waits_for_no
     try:
         assert held.wait(10)
         started = time.monotonic()
-        assert display_projections.drain(started + 2.0) is False
-        assert 0.9 <= time.monotonic() - started < 2.0, "at most half of the grace left"
+        assert display_projections.drain(started + 1.0) is False
+        assert 0.9 <= time.monotonic() - started < 2.0, "until its deadline, no longer"
         assert display_projections.drain(started + 10) is False, "once: a later drain only reads, the first ended"
         assert time.monotonic() - started < 2.0
         assert not hasattr(ctx, "budget_projection_retry_at"), "the stood write's outcome is not recorded"
@@ -643,7 +682,7 @@ def test_no_last_pass_starts_that_the_drain_has_no_time_left_to_wait_for(monkeyp
         assert held.wait(10)
         ctx.budget_projection_dirty = True  # the turn's newer mark
         ender.start()
-        assert display_projections.drain(1010.0) is True  # half of the grace left: 5 s, to 1005
+        assert display_projections.drain(1005.0) is True  # its share of the grace: to 1005
         assert writes == ["pass-in-flight"] and ctx.budget_projection_dirty is True, "no last pass started"
         assert not display_projections.LATCH.locked()
     finally:
