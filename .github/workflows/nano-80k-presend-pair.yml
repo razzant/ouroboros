@@ -1,0 +1,111 @@
+name: Nano 80k · paired Web Main preparation (one-shot QA)
+on:
+  push:
+    branches: [qa/nano-80k-presend-pair]
+permissions:
+  contents: read
+concurrency:
+  group: nano-80k-presend-pair
+  cancel-in-progress: false
+jobs:
+  compare:
+    if: github.repository == 'razzant/ouroboros' && github.event.created && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BASE: 1e2ad9737e25a1b8d438dd7dfc1f028728f66816
+      PR_HEAD: 6209ad9191dcb1ff6d8ec478829bdccce96711be
+      PRODUCT: b176d771eeee6ad32905a29bd32943b979f32fdb
+      PRODUCT_TREE: bb1a03790a01208a8187d777fcb3dd5fd88b01a3
+    steps:
+      - name: Start the shared clock and initialize partial evidence
+        run: |
+          q="$RUNNER_TEMP/nano-presend-pair"
+          mkdir -m 700 "$q"
+          mkdir "$q/out"
+          printf 'QA_DIR=%s\nQA_CUTOFF=%s\n' "$q" "$(($(date +%s) + 780))" >> "$GITHUB_ENV"
+          printf '{"stage":"checkout","run_attempt":1}\n' > "$q/out/job.json"
+          for side in base candidate; do
+            printf '{"case":"%s","outcome":"not_started"}\n' "$side" > "$q/out/$side.json"
+          done
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - name: Verify exact subjects, install the shared disposable counter
+        shell: bash
+        run: |
+          printf '{"stage":"verify_subjects"}\n' > "$QA_DIR/out/job.json"
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT"
+          test "$(git show -s --format=%P "$PRODUCT")" = "$PR_HEAD $BASE"
+          test "$(git rev-parse "$PRODUCT^{tree}")" = "$PRODUCT_TREE"
+          test "$(git rev-parse "$BASE^{tree}")" = 52120a3dd3f1aa8f564082b5667a1aba7249c3d3
+          test "$(git diff --name-status --no-renames "$PRODUCT" HEAD)" = "$(printf 'A\t.github/workflows/nano-80k-presend-pair.yml\nA\tscripts/qa_nano_80k_presend_pair.py')"
+          test "$(git rev-parse "$BASE:requirements-runtime.lock")" = "$(git rev-parse "$PRODUCT:requirements-runtime.lock")"
+          test "$(uname -m)" = x86_64
+          test "$(nproc)" -le 4
+          test -x /usr/bin/google-chrome
+          remaining=$((QA_CUTOFF - $(date +%s) - 250))
+          test "$remaining" -gt 0
+          printf '{"stage":"prepare_shared_counter_and_sources"}\n' > "$QA_DIR/out/job.json"
+          timeout --signal=TERM --kill-after=3 "${remaining}s" bash -euo pipefail -c '
+            git worktree add --quiet --detach "$QA_DIR/source-base" "$BASE"
+            git worktree add --quiet --detach "$QA_DIR/source-candidate" "$PRODUCT"
+            model=Qwen3.5-0.8B-Q4_K_M.gguf
+            wheel=llama_cpp_python-0.3.38-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+            cd "$QA_DIR"
+            curl -fLsS --proto "=https" --proto-redir "=https" -o "$model" "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/$model"
+            curl -fLsS --proto "=https" --proto-redir "=https" -o "$wheel" "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.38/$wheel"
+            test "$(stat -c %s "$model")" = 532517120
+            test "$(stat -c %s "$wheel")" = 33067224
+            printf "%s  %s\n" bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517 "$model" 9a27213ff2b65614f3a25d87cf1721829588ed475650e84ded16a8dedb033426 "$wheel" | sha256sum -c
+            python3 -m venv "$QA_DIR/venv"
+            "$QA_DIR/venv/bin/pip" install --disable-pip-version-check -r "$QA_DIR/source-base/requirements-runtime.lock" "$QA_DIR/$wheel[server]"
+            "$QA_DIR/venv/bin/python" "$GITHUB_WORKSPACE/scripts/qa_nano_80k_presend_pair.py" prepare "$QA_DIR"
+          ' > "$QA_DIR/private-setup.log" 2>&1
+      - name: Observe both new Main turns, with equal bounded slices
+        shell: bash
+        run: |
+          script="$GITHUB_WORKSPACE/scripts/qa_nano_80k_presend_pair.py"
+          now=$(date +%s)
+          slice=$(((QA_CUTOFF - now - 20) / 2))
+          test "$slice" -ge 100
+          printf '{"stage":"observing_pair","case_wall_budget_seconds":%s,"qa_commit":"%s"}\n' "$slice" "$GITHUB_SHA" > "$QA_DIR/out/job.json"
+          bad=0
+          for side in base candidate; do
+            # Each unit has its own loopback namespace, fresh HOME/data, real CLI, and no credentials.
+            # Do not fall back to a regular process. Allow the second side even if the first failed.
+            dir="$QA_DIR/$side"
+            mkdir -m 700 "$dir"
+            limit=$(( $(date +%s) + slice ))
+            rc=0
+            timeout --signal=TERM --kill-after=2 "$((slice + 7))s" \
+              sudo systemd-run --quiet --wait --collect --service-type=exec \
+              --property="User=$(id -un)" --property=PrivateNetwork=yes --property=MemoryMax=8G \
+              --property=CPUQuota=400% --property=KillMode=control-group --property=TimeoutStopSec=4s \
+              --property="RuntimeMaxSec=${slice}s" --property=StandardOutput=null --property=StandardError=null \
+              --working-directory="$QA_DIR/source-$side" \
+              /usr/bin/env -i LANG=C.UTF-8 PATH="$QA_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin" \
+              LOGITS_ALL=false \
+              NANO_PRESEND_CASE="$dir" "$QA_DIR/venv/bin/python" "$script" probe "$QA_DIR" "$side" "$limit" \
+              > "$dir/private-unit.log" 2>&1 || rc=$?
+            printf '%s\n' "$rc" > "$dir/unit-exit"
+            if [ "$rc" -ne 0 ]; then bad=1; fi
+          done
+          exit "$bad"
+      - name: Reconcile only the safe checkpoints after the units stop
+        if: always()
+        shell: bash
+        run: |
+          script="$GITHUB_WORKSPACE/scripts/qa_nano_80k_presend_pair.py"
+          if [ -d "${QA_DIR:-/nonexistent}/out" ] && [ -f "$script" ]; then
+            timeout --signal=TERM --kill-after=1 8s python3 "$script" collect "$QA_DIR"
+          fi
+      - name: Upload only the allowlisted evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nano-80k-presend-pair-facts
+          path: ${{ runner.temp }}/nano-presend-pair/out/*.json
+          retention-days: 5
+          if-no-files-found: warn
