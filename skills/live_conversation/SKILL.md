@@ -1,7 +1,7 @@
 ---
 name: live_conversation
 description: Talk with Ouroboros using this room's ordinary memory, tools and controls.
-version: 0.1.40
+version: 0.1.41
 type: extension
 runtime: python3
 entry: plugin.py
@@ -46,6 +46,10 @@ The ordinary shared spending limit is the only money limit; there is no call
 time cap or per-call reserve. The driver uses only LiveHost, greets once through
 Respond, and renews at a quiet boundary. Its call-local tools remember BCP-47
 recognition languages per owner/Presence binding and end after goodbye playback.
+A session that offers `update_languages` takes a newly recorded list in place
+and its tool result says what recognition took; with none, or when the engine
+refuses or does not acknowledge it, the list is applied by a renewal at the next
+quiet moment. Later calls start with the recorded list.
 The engine-neutral Live calls instructions belong to this feature and precede
 the owner's call instructions on every connection.
 

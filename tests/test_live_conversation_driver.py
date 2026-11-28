@@ -241,11 +241,40 @@ def install_tools(host, state_dir):
     return tools
 
 
-def test_language_tool_refits_at_next_boundary_and_later_calls_start_with_record(tmp_path):
+class InPlaceSession(Session):
+    """An engine that changes recognition in place answers with the tags it took, or None when it refused."""
+    def __init__(self, answer):
+        super().__init__()
+        self.answer, self.asked = answer, []
+
+    async def update_languages(self, languages):
+        self.asked.append(languages)
+        return self.answer(languages)
+
+
+@pytest.mark.parametrize('engine,languages,said,renews', [
+    ('no method', ['ru-RU'], 'expects ru-RU after a short reconnection at the next pause', True),
+    ('refuses', ['ru-RU'], 'expects ru-RU after a short reconnection at the next pause', True),
+    ('takes', ['ru-RU'], 'now expects ru-RU, and later calls start with it', False),
+    ('takes', ['ru-RU', 'en-US'], 'detects the language of each utterance itself', False),
+])
+def test_language_tool_takes_languages_in_place_or_renews_and_later_calls_start_with_record(
+        tmp_path, engine, languages, said, renews):
+    import json
     from ouroboros.contracts.live_conversation import ToolOutputs
+    answers = {'refuses': lambda tags: None, 'takes': lambda tags: tags if len(tags) == 1 else ()}
     async def scenario():
         host = Host()
         host.model = replace(host.model, honours=frozenset({'languages'}))
+        if engine != 'no method':
+            opened = host.session
+            async def session(consume, options):
+                original, globals()['Session'] = Session, lambda: InPlaceSession(answers[engine])
+                try:
+                    return await opened(consume, options)
+                finally:
+                    globals()['Session'] = original
+            host.session = session
         tools = install_tools(host, tmp_path)
         assert not tools['set_call_languages'].silent
         task, session = await started(host, state_dir=tmp_path)
@@ -254,29 +283,70 @@ def test_language_tool_refits_at_next_boundary_and_later_calls_start_with_record
             session.emit('ready', input_rate=24000, output_rate=24000)
             session.renewal_ready = False
             session.emit('response_done', response_id='tool-response', usage={}, raw_usage={}, status='completed', continues=True)
-            session.emit('tool_call', call_id='lang', name='set_call_languages', arguments='{"languages":["ru-RU"]}')
+            session.emit('tool_call', call_id='lang', name='set_call_languages', arguments=json.dumps({'languages': languages}))
             await until(lambda: any(isinstance(x, ToolOutputs) for x in session.sent))
             outputs = next(x for x in session.sent if isinstance(x, ToolOutputs))
             assert outputs.silent == ()
-            assert 'expects ru-RU' in outputs.messages[0]['content']
+            assert said in outputs.messages[0]['content']
+            assert getattr(session, 'asked', [tuple(languages)]) == [tuple(languages)]
+            assert host.state['languages'] == tuple(languages)  # any later connection carries the list
             # The result leaves the turn open: the engine answers it before the boundary that applies the languages.
             session.emit('response_started', response_id='after-languages')
             session.emit('response_done', response_id='after-languages', usage={}, raw_usage={}, status='completed')
             assert len(host.sessions) == 1
             session.renewal_ready = True
-            await until(lambda: len(host.sessions) == 2)
-            assert host.options[1].languages == ('ru-RU',)
-            assert host.options[1].resume_handle == ''
-            assert 'Speech recognition expects ru-RU' in host.options[1].instructions
+            if renews:
+                await until(lambda: len(host.sessions) == 2)
+                assert host.options[1].languages == tuple(languages)
+                assert host.options[1].resume_handle == ''
+                assert 'You recorded ru-RU' in host.options[1].instructions
+            else:
+                await asyncio.sleep(.1)
+                assert len(host.sessions) == 1 and not host.state.get('refit_after_answer')
         finally:
             host.hub.ended_by_owner = True
             await asyncio.wait_for(task, 2)
         later = Host()
         later.model = host.model
         task, _ = await started(later, state_dir=tmp_path)
-        assert later.options[0].languages == ('ru-RU',)
+        assert later.options[0].languages == tuple(languages)
         later.hub.ended_by_owner = True
         await asyncio.wait_for(task, 2)
+    asyncio.run(scenario())
+
+
+def test_language_change_that_gets_no_acknowledgement_goes_the_renewal_way(tmp_path, monkeypatch):
+    import json
+    from skills.live_conversation import driver
+    from ouroboros.contracts.live_conversation import ToolOutputs
+    monkeypatch.setattr(driver, 'LANGUAGE_ECHO_S', .05)
+    async def scenario():
+        host = Host()
+        host.model = replace(host.model, honours=frozenset({'languages'}))
+        never = asyncio.Event()
+        class Silent(Session):
+            async def update_languages(self, languages):
+                await never.wait()
+        opened = host.session
+        async def session(consume, options):
+            original, globals()['Session'] = Session, Silent
+            try:
+                return await opened(consume, options)
+            finally:
+                globals()['Session'] = original
+        host.session = session
+        install_tools(host, tmp_path)
+        task, session = await started(host, state_dir=tmp_path)
+        try:
+            session.emit('ready', input_rate=24000, output_rate=24000)
+            session.emit('tool_call', call_id='lang', name='set_call_languages', arguments=json.dumps({'languages': ['de-DE']}))
+            await until(lambda: any(isinstance(x, ToolOutputs) for x in session.sent))
+            outputs = next(x for x in session.sent if isinstance(x, ToolOutputs))
+            assert 'after a short reconnection at the next pause' in outputs.messages[0]['content']
+            assert host.state.get('refit_after_answer')
+        finally:
+            host.hub.ended_by_owner = True
+            await asyncio.wait_for(task, 2)
     asyncio.run(scenario())
 
 
@@ -1126,7 +1196,7 @@ def test_call_text_allows_initiative_and_silence_and_keeps_the_language_caveat()
     assert "so I never say I cannot do something before I have looked" in text
     assert "never changes the language I speak" in text
     recorded = languages_opening_sentence(["ru-RU"])
-    assert "expects ru-RU" in recorded and "ask rather than switch" in recorded
+    assert "You recorded ru-RU" in recorded and "ask rather than switch" in recorded
     assert "ask when unsure" in languages_opening_sentence([])
 
 

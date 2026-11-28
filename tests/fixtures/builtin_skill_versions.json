@@ -20,8 +20,8 @@
   "version": "0.1.17"
  },
  "live_conversation": {
-  "content_hash": "d4a5c90537b98f482cdb29c0431a88df4f066e9ccf66f62244ad592e8ab7519c",
-  "version": "0.1.40"
+  "content_hash": "8e98de3db44850e0fc0ecb52258573b887ba589e7ca5cb205ab88fc3d4d5b250",
+  "version": "0.1.41"
  },
  "openai_realtime": {
   "content_hash": "28075eb7d62922b1c5a10bb9200f5fe432887d59857ae26adb6172f9922b8811",

@@ -48,6 +48,36 @@ def test_full_stack_host_window_renews_with_pending_canonical_facts(host_world, 
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('engine', ['openai', 'grok', 'gemini'])
+def test_first_call_recording_its_languages_keeps_one_connection_where_the_engine_takes_them_in_place(
+        host_world, monkeypatch, engine):
+    """#4426: a first call's set_call_languages renewed the whole connection on every engine. OpenAI and Grok now take
+    the list in place over the same socket; Gemini, which has no in-place path, still renews at the next quiet."""
+    async def scenario():
+        async with stack(host_world, monkeypatch, engine, languages=True) as run:
+            await run.wait(lambda: any('opening-language' in wire.outputs for wire in run.provider.connections)
+                           or engine == 'gemini' and len(run.provider.connections) > 1)
+            await run.quiet()
+            run.provider.script.append(('say', 'Synthetic answer on the same connection.'))
+            await run.owner_says('Synthetic first real turn.')
+            await run.quiet()
+            assert run.host.state['languages'] == ('en-US',)
+            if engine == 'gemini':  # today's renewal: a second connection carries the list
+                await run.wait(lambda: len(run.provider.connections) == 2)
+                await run.quiet()
+                assert not run.host.state.get('refit_after_answer')
+                return
+            assert len(run.provider.connections) == 1 and not run.host.state.get('refit_after_answer')
+            updates = [event['session'] for event in run.wire.sent if event.get('type') == 'session.update'
+                       and 'transcription' in event['session'].get('audio', {}).get('input', {})]
+            hint = ({'model': 'gpt-4o-transcribe', 'language': 'en'} if engine == 'openai' else {'language_hint': 'en-US'})
+            assert [update['audio']['input']['transcription'] for update in updates][-1] == hint
+            result = run.wire.outputs['opening-language']
+            assert 'now expects en-US' in (result['output'] if isinstance(result, dict) else result)
+        assert run.result[1]['execution_status'] == 'ok', run.result
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('engine', ['grok', 'openai', 'gemini'])
 def test_full_stack_unfit_room_mail_ends_typed_instead_of_silently_waiting(host_world, monkeypatch, engine):
     async def scenario():

@@ -39,6 +39,9 @@ INITIAL_TOOLS = ("send_user_message", "schedule_subagent", "get_task_result")
 # How long a call waits for its peers before ending: nobody joining is `not_connected`, everyone
 # leaving is `peers_left` (a transport bound, not a judgment).
 EMPTY_CALL_GRACE_S = 15
+# How long a recognition-language change waits for its engine's acknowledgement before the list goes the renewal way
+# (a transport bound on one echo, not a judgment).
+LANGUAGE_ECHO_S = 10
 
 CALL_INSTRUCTIONS = """## Live calls
 
@@ -82,7 +85,7 @@ def engine_sentence(model):
 
 def languages_opening_sentence(languages):
     if languages:
-        return (f"Speech recognition expects {', '.join(languages)}, as you recorded for these calls; the first is "
+        return (f"You recorded {', '.join(languages)} for these calls' speech recognition; the first is "
                 f"the owner's language, so greet in it and stay in the spoken language. When someone "
                 "speaks a language that is not listed, record the new list with set_call_languages. Recognition "
                 "can still take one language for another: when unsure, ask rather than switch.")
@@ -141,12 +144,18 @@ def call_tools(state_dir):
         if not isinstance(arguments, dict) or set(arguments) != {"languages"}:
             raise ValueError("set_call_languages takes a languages list")
         languages = record_call_languages(state_dir, arguments["languages"], binding_id=host.hub.spec.presence_binding_id)
-        if languages != host.state.get("languages", ()):
-            host.state.update(languages=languages, refit_after_answer=True)
-        if not languages:
-            return "Recorded: no languages. Speech recognition guesses each utterance again from the next pause."
-        return (f"Recorded: speech recognition expects {', '.join(languages)} from the next pause, "
-                "and later calls start with it.")
+        if languages == host.state.get("languages", ()):
+            return languages_result(languages, None if host.state.get("refit_after_answer") else "unchanged")
+        # The list is the call's from now on: any later connection carries it. The serving one takes it in place
+        # when its engine can (#4426); otherwise a renewal at the next quiet moment applies it, as before.
+        host.state["languages"] = languages
+        take = host.state.get("take_languages")
+        taken = await take(languages) if take is not None else None
+        if taken is None:
+            host.state["refit_after_answer"] = True
+        else:
+            host.state.pop("refit_after_answer", None)  # the serving connection holds the newest list
+        return languages_result(languages, taken)
 
     return (
         CallTool("end_call", CALL_ENDING_GUIDANCE + " Say your goodbye first; the call ends once it has been heard.",
@@ -154,12 +163,31 @@ def call_tools(state_dir):
         CallTool("set_call_languages", "Record the languages speech recognition should expect in calls with these people, the most "
                  "spoken first, as BCP-47 tags such as ru-RU or en-US; an empty list lets recognition guess "
                  "each utterance again. Judge them from the correspondence and your memory, and add a language "
-                 "you hear someone use. Recognition takes the list at the next pause and later calls start "
-                 "with it. It never decides the language you answer in.",
+                 "you hear someone use. Recognition takes the list at once where the engine can, otherwise after a "
+                 "short reconnection at the next pause, and later calls start with it. It never decides the "
+                 "language you answer in.",
                  {"type": "object", "properties": {"languages": {"type": "array", "items": {"type": "string"}}},
                   "required": ["languages"], "additionalProperties": False}, set_languages),
         attend_tool(),
     )
+
+
+def languages_result(languages, taken):
+    """What the tool tells the mind, from what the serving session reported (``taken``: the tags recognition takes now,
+    None when nothing was applied yet, "unchanged"), never from the engine's name."""
+    listed = ", ".join(languages)
+    if taken == "unchanged":
+        return f"Recorded: unchanged ({listed or 'no languages'}); later calls start with it."
+    if taken is None:
+        return (f"Recorded: speech recognition expects {listed} after a short reconnection at the next pause, and "
+                "later calls start with it." if languages else "Recorded: no languages. Speech recognition guesses "
+                "each utterance again after a short reconnection at the next pause.")
+    if tuple(taken) == languages:
+        return (f"Recorded: speech recognition now expects {listed}, and later calls start with it." if languages
+                else "Recorded: no languages. Speech recognition now guesses each utterance.")
+    now = (f"takes only {', '.join(taken)} of them now" if taken
+           else "takes no list, so it now detects the language of each utterance itself")
+    return f"Recorded {listed} for these calls. This engine's recognition {now}; later calls start with the list."
 
 
 def session_options(host, resume_handle=""):
@@ -210,6 +238,7 @@ class _Call:
         self.tool_refit = asyncio.Event()
         self.pending_offers = []
         self.attention = host.state["attention"] = Attention(host)
+        host.state["take_languages"] = self.take_languages
         self.participants, self.meeting_speakers = {}, set()
         self.session = self.last_session = None
         self.played, self.audio_ms, self.pending_spoken = {}, {}, {}
@@ -577,6 +606,24 @@ class _Call:
         if within is not None:
             deadline = time.monotonic() + float(within)
             self.renewal_deadline = min(self.renewal_deadline, deadline) if self.renewal_deadline else deadline
+
+    async def take_languages(self, languages):
+        """The serving connection takes recorded languages in place when its adapter offers ``update_languages``;
+        None leaves them to a renewal. The wait ends at its answer, the connection's end or LANGUAGE_ECHO_S."""
+        session, ended = self.session, self.session_ended
+        update = getattr(session, "update_languages", None)
+        if update is None or not self.connected.is_set():
+            return None
+        asked, gone = asyncio.ensure_future(update(languages)), asyncio.ensure_future(ended.wait())
+        try:
+            await asyncio.wait((asked, gone), timeout=LANGUAGE_ECHO_S, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (asked, gone):
+                task.cancel()
+            await asyncio.gather(asked, gone, return_exceptions=True)
+        if asked.cancelled() or asked.exception() is not None or self.session is not session:
+            return None  # a refused write is the reader's to classify; the list goes the renewal way
+        return asked.result()
 
     def preparation_ready(self):
         return self.preparing is None or (self.preparing.done() and not self.preparing.cancelled()
