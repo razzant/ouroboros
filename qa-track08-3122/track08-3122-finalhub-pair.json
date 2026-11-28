@@ -1,0 +1,355 @@
+{
+  "core": {
+    "base": "35292e87a1436abe499c8589737e29bad4274969",
+    "commit": "a02300e5de3583c1d56ab40e30aab776a5a77016",
+    "patch_sha256": "9acbedc66bf63411ef9ca6ee3b6db79d5943d68e07f140581c160f47a083f8ae",
+    "tree": "f86ad013ae9a85253648d009152edb4b021e3dba"
+  },
+  "hub": {
+    "commit": "b971afb79d0ee9dd0f2d042cfdaa0ba703ef3435",
+    "computed_release_digest": "01de635a5c7aa95f72207a42a1b0b437e72a883319b356de4bc70f0ef7a68ac9",
+    "package_files": {
+      "CHANGELOG.md": {
+        "blob": "0a48970918adcd7b8c719e1257924626885c34ab",
+        "bytes": 33196,
+        "mode": "100644",
+        "sha256": "c7bf1d6d2ad81ce676f4a7c57a05a135905c9a8b90991cdcec79d1101d2e6def"
+      },
+      "FORMATTER_PROVENANCE.md": {
+        "blob": "f70f80eb9a778e0bf4bdfc0046da091333803cfb",
+        "bytes": 1162,
+        "mode": "100644",
+        "sha256": "c8813153c8dc88e4785acd6de68aeec30a877d4af3e632037232f5371de51f77"
+      },
+      "LICENSE.formatting": {
+        "blob": "e4ba1da327315c26569ef94ac75d89b69970c0d2",
+        "bytes": 1073,
+        "mode": "100644",
+        "sha256": "471f75bc6ef38333696dd6549c4355adef05291a74135649131f0a5728f5a45c"
+      },
+      "README.md": {
+        "blob": "1fee86f141f8945ea16296b0301ff68164c8a488",
+        "bytes": 3349,
+        "mode": "100644",
+        "sha256": "214628d4fb866e831525f34bb85e701f51a1ed5480454faa58e2b4447da4142c"
+      },
+      "SKILL.md": {
+        "blob": "1da658c74a06d3878613a2ea07dc429d0da1cb89",
+        "bytes": 61553,
+        "mode": "100644",
+        "sha256": "90da092f3d1a69793602d8b3a8d90ab20954dfcebc9401c330809eeda5e7a2a8"
+      },
+      "plugin.py": {
+        "blob": "5741bd9fc129ae2b5915fb148efe13317aac8305",
+        "bytes": 32762,
+        "mode": "100644",
+        "sha256": "ebfbb7a22a22409bd845b9ca62400e292716eee6e88bd790fa8eac8652841159"
+      },
+      "telegram_bot/__init__.py": {
+        "blob": "8727803ff351032a05b06ae9e1fb4bcd0cab38aa",
+        "bytes": 205,
+        "mode": "100644",
+        "sha256": "9fc56903a2bc6198e49b95d019175d2739f08c82f28d4465fcfc6e5ca7e57f99"
+      },
+      "telegram_bot/api.py": {
+        "blob": "c35dbbc0a6b9f69b0036a4c4d926450f695bca61",
+        "bytes": 41014,
+        "mode": "100644",
+        "sha256": "7165b0015e498b1397bd3b2f33ebf299eb7f0fa15ba7ad958137ea8a5bd4a93b"
+      },
+      "telegram_bot/custody.py": {
+        "blob": "ce20700d249fbb89945882eaaea8246bb11d8b78",
+        "bytes": 106500,
+        "mode": "100644",
+        "sha256": "b21be107fd66c5bedec0614a968aa431346eed0f3ae28f73d55737d4cded810a"
+      },
+      "telegram_bot/delivery.py": {
+        "blob": "8e753e9453258d0ad098f64818c633050bf428fd",
+        "bytes": 7173,
+        "mode": "100644",
+        "sha256": "fb1d4ab3bb8c83312dc9d7068c7b2e544fb3815f8277ea9c0a5c877c72d0120a"
+      },
+      "telegram_bot/discovery.py": {
+        "blob": "43c94142ea952e02ce85490679bee3497bdd97a3",
+        "bytes": 12825,
+        "mode": "100644",
+        "sha256": "933d1586d30b539ac2a2b5d49ba072cc9dde32064b6158698feb32bcf5500b4b"
+      },
+      "telegram_bot/events.py": {
+        "blob": "6efbd31716b78111eb57b84f28330b6c563c4c88",
+        "bytes": 30984,
+        "mode": "100644",
+        "sha256": "f77e5f1e9cd4ccbd7cfe3c7e6ca36a70e5439c3e22cf4496a4c751aae32a338d"
+      },
+      "telegram_bot/formatting.py": {
+        "blob": "9150e14a48ac9cba23b8e0cbad7809698e7372fa",
+        "bytes": 19417,
+        "mode": "100644",
+        "sha256": "92d054215be5e69a9e247930e675894706aa38465af8890f9dad46cf609447b4"
+      },
+      "telegram_bot/host.py": {
+        "blob": "2202806d3b30177b41d6ea10ff5e7359ea3785b5",
+        "bytes": 41437,
+        "mode": "100644",
+        "sha256": "c66f7bc092087ebb3052ff10bf7447746e581379320b70a240b7aafdb174d959"
+      },
+      "telegram_bot/outbox_files.py": {
+        "blob": "316758146e4650a856d363e3ad1cbf3e7223f64c",
+        "bytes": 4458,
+        "mode": "100644",
+        "sha256": "a41c785d77c66a4005b1772506ebb8dfbb1ad8ad788ca375e03cd73dcfe53958"
+      },
+      "telegram_bot/owner_feed.py": {
+        "blob": "7f7b0227bd672528ff4f1a58fbc5bac2a6a02222",
+        "bytes": 40222,
+        "mode": "100644",
+        "sha256": "ed9dce95cba77fd0080ea8084f36698731e1eaaf0716514bf6182fbc51c2a608"
+      },
+      "telegram_bot/runtime.py": {
+        "blob": "1b239e424b170818152cfe8a942c41f7b89ec69e",
+        "bytes": 148545,
+        "mode": "100644",
+        "sha256": "982f0bd2ac667a57d7a87b92304868220184bf5484ff50b344d7463708ddff4f"
+      },
+      "telegram_bot/settings.py": {
+        "blob": "86c95617250bb08cff53a5e80fc688b2c70f1a3f",
+        "bytes": 770,
+        "mode": "100644",
+        "sha256": "fc47eaeed4cef556df7473154db51b4cbb390e9a362ed434d58f94c58b0e5cd1"
+      },
+      "telegram_bot/status_summary.py": {
+        "blob": "087f575bc0de2092eb8ab682855da7a54235591f",
+        "bytes": 21915,
+        "mode": "100644",
+        "sha256": "f98cc6ece5013521761ba18d9c2fb6d0d9c9b6c67c245a55a318a5d0d87b6e0d"
+      },
+      "telegram_bot/tools.py": {
+        "blob": "45ac556aee5a312f90eb7c5d9eaac67795ea637c",
+        "bytes": 51386,
+        "mode": "100644",
+        "sha256": "199bad47749cd413665fc4e36636383ef994274e7398bfc9629041c79c9f2a5c"
+      },
+      "tests/conftest.py": {
+        "blob": "11e984b20cd197e349aa7fa970e36d55247e612b",
+        "bytes": 236,
+        "mode": "100644",
+        "sha256": "8078258e03839bb1d325f812bb83839aa3b905c12ebcabe35945a13eb736b0af"
+      },
+      "tests/fake_bot_api.py": {
+        "blob": "22a8b611dab93d2986147cf9e2f5e77c8c75e5e3",
+        "bytes": 7162,
+        "mode": "100644",
+        "sha256": "fe953cca43505c4b1ace6a8f52d1521416b861c82955ff5242bac540649e27b7"
+      },
+      "tests/test_api.py": {
+        "blob": "f7f785275c8f8c702993b21e5d290999858ed127",
+        "bytes": 6070,
+        "mode": "100644",
+        "sha256": "0b9de7ceb88a7beea7f56f0beb44596f3b5d617f767ef7993935189c2852224e"
+      },
+      "tests/test_context.py": {
+        "blob": "d29b26a9f1551319e63515861243975d809434f3",
+        "bytes": 7249,
+        "mode": "100644",
+        "sha256": "561dff3b77a2cbea7043edaea0fdd2f5462d82202802c3ab4c225cfeaeb02f18"
+      },
+      "tests/test_custody.py": {
+        "blob": "63405cc1ceb8a53dbf2ae6a3a6d5931e1ae08ab0",
+        "bytes": 15635,
+        "mode": "100644",
+        "sha256": "db24d5aed8d030a24eb1d80defafa785729b99d6d5c686b726d5c2a9af3537cf"
+      },
+      "tests/test_delivery_reports.py": {
+        "blob": "8b4de3066fdacb63465cbc4d7508f2afd3f715fa",
+        "bytes": 13048,
+        "mode": "100644",
+        "sha256": "c07a1b2f14982f91e4d19a3df504e0d3a4097b762babde279c3df183ac9e4331"
+      },
+      "tests/test_download_outcomes.py": {
+        "blob": "bb11bd67dbdf6d3935459d17403139e8674fa4d9",
+        "bytes": 23961,
+        "mode": "100644",
+        "sha256": "29cc4f288ca3c667657ecc3052e052cedc0f468e69fdca0df2704e1a3398ac4c"
+      },
+      "tests/test_events.py": {
+        "blob": "6bc4e6d7e2934cb38c95e9e4c24e784240bf4b82",
+        "bytes": 10700,
+        "mode": "100644",
+        "sha256": "4f018352970f27c1f09febc4172a0350c32e17c2671464a36d662124e9a79296"
+      },
+      "tests/test_formatted_delivery.py": {
+        "blob": "69e0ae4e53881dbf3b44b572bb0dc012eebac1a4",
+        "bytes": 11664,
+        "mode": "100644",
+        "sha256": "d2976fd2de849818074d6f3418def7aea08a0e311c6bff1e51010f63294c195d"
+      },
+      "tests/test_formatting.py": {
+        "blob": "0b8071ff75c6d1957ffce10fe8b4678fbda8d8bd",
+        "bytes": 3067,
+        "mode": "100644",
+        "sha256": "125b168b28a88acff3eca354af45f900ec8091a673d55e8e17a07df13bee4525"
+      },
+      "tests/test_group_discovery.py": {
+        "blob": "ab3321436a8374ea8dd54f763eb40eae9881319e",
+        "bytes": 34092,
+        "mode": "100644",
+        "sha256": "10fdcbba0dbeda714ca3fa287030894929bebdd350a72f3fb1e6afecc5fe7778"
+      },
+      "tests/test_host.py": {
+        "blob": "90c547c503a1f2d4ec33c22ce5d4f1596bbd65a2",
+        "bytes": 6575,
+        "mode": "100644",
+        "sha256": "de769903ac26b6f8d6e45cbde39f24ee9c68de2ba3f22c7c5ebbe6e0dc152f36"
+      },
+      "tests/test_identity.py": {
+        "blob": "6f8bbb2058a330c01bb3aa5e912a129894088f9d",
+        "bytes": 3696,
+        "mode": "100644",
+        "sha256": "35da29261ced3cc0843c91c5752b590909d9ab73563a236e80d3d6acd765ac72"
+      },
+      "tests/test_inbound_kinds.py": {
+        "blob": "55114023683322552b8d254ff5c2a2322a6a725b",
+        "bytes": 15669,
+        "mode": "100644",
+        "sha256": "7eebb213b26d19d26cc31aa59d97e6cfc29031b71ec3a7b392b7dcb83737fd34"
+      },
+      "tests/test_kept_connection.py": {
+        "blob": "d9c15ae89faafe5ff306d1728d1aeb55fe56e83c",
+        "bytes": 14871,
+        "mode": "100644",
+        "sha256": "4c73e59e1796e53ebb6f106b16fd04f2a0fe852210800c59b8556a3cdd101bc1"
+      },
+      "tests/test_moderation.py": {
+        "blob": "8c2159f61acf32c54d49ef739527a6177a7dba42",
+        "bytes": 5392,
+        "mode": "100644",
+        "sha256": "3d5bc3167f8523f174f4ecd489de33ebeb196f548d829ce2392fa10fb87f7bb0"
+      },
+      "tests/test_outbound_media.py": {
+        "blob": "8ea7bf0bbfac2adeb9056df95f609f97b5f34390",
+        "bytes": 19380,
+        "mode": "100644",
+        "sha256": "0e5b68b9c2b46fb93a69383d3161a153c290b72857c4ff56e7adce1666ed9f27"
+      },
+      "tests/test_owner_feed_contracts.py": {
+        "blob": "4ef4898c93185cecbffa8cbf366af79e144876d3",
+        "bytes": 40962,
+        "mode": "100644",
+        "sha256": "177d9d0ecc85b8bb94308d3d44745e0372f04eb28b53c9597c8d2685eeb89072"
+      },
+      "tests/test_owner_group_feed.py": {
+        "blob": "b920c3d2762bbf0a50730e9f16ec8a8255e32cf2",
+        "bytes": 125770,
+        "mode": "100644",
+        "sha256": "c952e6d3d6195dcfda1582c8aceb2e77cf0ce1acf8621c3e2db10d5eb08339d2"
+      },
+      "tests/test_places.py": {
+        "blob": "11242b48d9cfd51d7ad321763ab60030c585ded2",
+        "bytes": 13462,
+        "mode": "100644",
+        "sha256": "935431bfab81b455c8a4f4d5a42983810eb18b63f354b82485f7f5ae1e69ea65"
+      },
+      "tests/test_plugin.py": {
+        "blob": "12e04fd43fad9d08b9cb45039c03956442ed8f51",
+        "bytes": 10163,
+        "mode": "100644",
+        "sha256": "e4c550d99f98990e098dc44e250eb4af3c363ac3cd0431179a94e2eff7be40a9"
+      },
+      "tests/test_presence_continuation.py": {
+        "blob": "ebd9f433621ddaed1be0dd01f2680ae2d5e6d0af",
+        "bytes": 56430,
+        "mode": "100644",
+        "sha256": "5d8b0de714a3eb432768478c279f83ff6f7e5115f81bee746e00ef1e369b3c12"
+      },
+      "tests/test_reactions.py": {
+        "blob": "65a766fe7a79c63d81d065cd241874045fb33072",
+        "bytes": 110762,
+        "mode": "100644",
+        "sha256": "a1bc166af185f93169026ff5611efa857e8f6a156e19b02f9ef1b99c01477154"
+      },
+      "tests/test_retained_custody.py": {
+        "blob": "6e3488fb638adb951eb69a3beadfe4ac5476363c",
+        "bytes": 24263,
+        "mode": "100644",
+        "sha256": "3348c56325dc3518b99f095deeaf2cc1b93f3bf0897afd2d8a1d8b2e9d13fda0"
+      },
+      "tests/test_runtime.py": {
+        "blob": "902c1fd42ff437a9f6d780a6ea0d653dfe9706d8",
+        "bytes": 23682,
+        "mode": "100644",
+        "sha256": "7944478054e85fd0bf17d0536b98bfded5fa4ed39a9400f96713c2cae5509a00"
+      },
+      "tests/test_secret_text.py": {
+        "blob": "1b3ea24765072d4ee429617ced1abe03cbdc80fe",
+        "bytes": 15424,
+        "mode": "100644",
+        "sha256": "1d37a7c526cfc20f06550995daa865c4b9a44692ce1fc9dc95e3862ad57f667f"
+      },
+      "tests/test_status_card.py": {
+        "blob": "6bfb9bc7d362d469e280e02be8914926e98c49cc",
+        "bytes": 78407,
+        "mode": "100644",
+        "sha256": "b93806a1118dc6385968d268cd1d38c24c94b086b37e74d19ad3c818da5ceee8"
+      },
+      "tests/test_typing.py": {
+        "blob": "655312e8f90e83db22adf0956802c5283b2e15aa",
+        "bytes": 13833,
+        "mode": "100644",
+        "sha256": "ab2e5c44598a4026a9de98d2c3ab13da24224d7edc77e1e054556b0de642d10e"
+      },
+      "tests/test_unknown_outcomes.py": {
+        "blob": "c7372e31a0eedf2aba06ba7c93adb87d718c8232",
+        "bytes": 82914,
+        "mode": "100644",
+        "sha256": "1f865407d63743c74bc98acef031a0d00ee7c13935f46c9f5a23697b78697696"
+      },
+      "tests/test_upload_transfer.py": {
+        "blob": "818807a9bd5a0d0a1c5cc59adc6a0423f0e6a0e4",
+        "bytes": 21887,
+        "mode": "100644",
+        "sha256": "b98d0f1f6474cdfaf65907e7d2f3933d1aab26011ba4c960b031858dc4654c01"
+      },
+      "tests/test_voice_audio.py": {
+        "blob": "21cee00b4fbb3640f64086a9cb4b4980c7b5cb80",
+        "bytes": 11813,
+        "mode": "100644",
+        "sha256": "ba410db016d3d7a253f7ef331014818115bea3e4e77f11b8b2b8f9caa51dfc07"
+      },
+      "tests/test_widget_card.py": {
+        "blob": "98af7c97cfbf8b2d6ff28ed32d1b3c6923e85b17",
+        "bytes": 7646,
+        "mode": "100644",
+        "sha256": "30c5d8934d616554d67b76482c3bceaeb0e3746b5e62ee09a929237526f3b473"
+      },
+      "tests/test_words.py": {
+        "blob": "f49907a5710557d83d334ef10ccfa811e2a0e10c",
+        "bytes": 12054,
+        "mode": "100644",
+        "sha256": "99bcc075ad365cf0297cfb07bb749d8c6785d81cb9485499da1cef621097b0c7"
+      },
+      "tests/test_worker_identity.py": {
+        "blob": "033b4e72b71b3feddba5442073992a7b80f6ab88",
+        "bytes": 21451,
+        "mode": "100644",
+        "sha256": "f4937bd80bf471f3421e7b820bf6b337f0c5104192eee6ad1fc07e096ee09f6c"
+      },
+      "ui/icon.svg": {
+        "blob": "3c5469e08a869dcbcd41049b8c4364d282fec677",
+        "bytes": 217,
+        "mode": "100644",
+        "sha256": "e02f3e17024bcbb581e6293e64888aac3e3b2a675173c9187bb9f527504f7dc7"
+      },
+      "widget.js": {
+        "blob": "aca3ad39a46bd28b87122f9e07522bfbc34d8c5b",
+        "bytes": 74297,
+        "mode": "100644",
+        "sha256": "2f9880cc1dfe749d69c49519284d6237af8acd542a24c6eb2cb042ae1b593dc3"
+      }
+    },
+    "package_tree": "28a719618a348f1e579fec25c5583aa6d2a04002",
+    "patch_sha256": "5f07b11e04e4ad095d6eee8e9461e36c3ea67ec2087efc83ad900dc6cb51df83",
+    "public_base": "70ee4caa22bb08a910645682e2c3b7a5c76375a4",
+    "version": "0.14.1"
+  },
+  "status": "Retained fixture-source Core is provenance; the workflow separately binds the exercised Core commit. Corrected Hub candidate bytes, before stock publication; not a verdict."
+}

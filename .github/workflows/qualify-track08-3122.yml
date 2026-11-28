@@ -1,0 +1,180 @@
+name: '#3122 installed Official qualification'
+run-name: '#3122 installed Official qualification at ${{ github.sha }}'
+on:
+  push:
+    branches: ['qa/track08-3122-stock-b971afb7']
+permissions:
+  contents: read
+
+jobs:
+  ordinary-3122:
+    if: github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/track08-3122-stock-b971afb7' && github.event.deleted == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CORE_HEAD: '41bf465b65fcf725d9e5cb65b8a284cc93d49ee8'
+      CORE_BASE: '9f6fad44a369a1eaf079129a6d4a69539f25dd86'
+      CORE_TREE: '4f28bd37241a2854c35143140d71a111802d37ed'
+      HUB_HEAD: 'b971afb79d0ee9dd0f2d042cfdaa0ba703ef3435'
+      HUB_TREE: '28a719618a348f1e579fec25c5583aa6d2a04002'
+      HUB_RELEASE_DIGEST: '01de635a5c7aa95f72207a42a1b0b437e72a883319b356de4bc70f0ef7a68ac9'
+      FIXTURE_PINS_SHA256: '9c3bd7c9fe48508771f599ab447c8773466745acddae50caab6a51e36acbeafa'
+      QA_DIR: qa-track08-3122
+      PINS: 'track08-3122-finalhub-stock-pins.json'
+      PAIR: 'track08-3122-finalhub-pair.json'
+      DRIVER_STOCK: 'track08-3122-finalhub-stock-driver.py.in'
+      WITNESS_STOCK: 'track08-3122-finalhub-stock-witness.zip'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind the temporary carrier to the reviewed Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { printf '::error::#3122 %s\n' "$1" >&2; exit 1; }
+          for sha in "$CORE_HEAD" "$HUB_HEAD"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail 'EXACT_PRODUCT_COMMITS_REQUIRED'
+          done
+          [[ "$FIXTURE_PINS_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail 'EXACT_FIXTURE_MANIFEST_DIGEST_REQUIRED'
+          [[ "$(git rev-list --parents -n1 HEAD)" == "$GITHUB_SHA $CORE_HEAD" &&
+             "$(git rev-list --parents -n1 "$CORE_HEAD")" == "$CORE_HEAD $CORE_BASE" &&
+             "$(git rev-parse "${CORE_HEAD}^{tree}")" == "$CORE_TREE" ]] || fail 'CARRIER_OR_CORE_BINDING_MISMATCH'
+          expected=$(printf '%s\n' .github/workflows/qualify-track08-3122.yml \
+            "$QA_DIR/$PINS" "$QA_DIR/$PAIR" "$QA_DIR/$DRIVER_STOCK" "$QA_DIR/$WITNESS_STOCK" | LC_ALL=C sort)
+          [[ "$(git diff --name-only --no-renames "$CORE_HEAD" HEAD | LC_ALL=C sort)" == "$expected" ]] \
+            || fail 'CARRIER_HAS_NON_QA_CHANGES_OR_MISSING_FILES'
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.CORE_HEAD }}
+          path: core
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: razzant/OuroborosHub
+          ref: ${{ env.HUB_HEAD }}
+          path: hub
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Observe actual stock installation and one ordinary fictional reply
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '::error::#3122 %s\n' "$1" >&2; exit 1; }
+          sha256() { sha256sum < "$1" | cut -d ' ' -f 1; }
+          DRIVER="$DRIVER_STOCK"; WITNESS="$WITNESS_STOCK"
+          ws="$GITHUB_WORKSPACE"
+          core="$ws/core"; hub="$ws/hub"; qa="$ws/$QA_DIR"; scratch="$ws/scratch-stock"
+          [[ "$(git -C "$core" rev-parse HEAD)" == "$CORE_HEAD" &&
+             "$(git -C "$hub" rev-parse HEAD)" == "$HUB_HEAD" &&
+             "$(git -C "$hub" rev-parse 'HEAD:skills/telegram-bot')" == "$HUB_TREE" ]] \
+            || fail 'PRODUCT_CHECKOUT_MISMATCH'
+          [[ -d "$qa" && ! -L "$qa" && -f "$qa/$PINS" && ! -L "$qa/$PINS" &&
+             "$(sha256 "$qa/$PINS")" == "$FIXTURE_PINS_SHA256" ]] || fail 'FIXTURE_MANIFEST_BYTES_MISMATCH'
+          all_inputs=$(printf '%s\n' "$DRIVER_STOCK" "$WITNESS_STOCK" "$PAIR" | jq -Rsc 'split("\n") | map(select(length>0)) | sort')
+          jq -e --arg cb "$CORE_BASE" --arg ch "$CORE_HEAD" --arg ct "$CORE_TREE" --arg hh "$HUB_HEAD" \
+            --arg ht "$HUB_TREE" --arg hd "$HUB_RELEASE_DIGEST" --argjson inputs "$all_inputs" '
+              [.core_base,.core_head,.core_tree,.hub_head,.hub_tree,.hub_release_digest] == [$cb,$ch,$ct,$hh,$ht,$hd]
+              and (.files | keys) == $inputs' "$qa/$PINS" >/dev/null 2>&1 || fail 'FIXTURE_MANIFEST_BINDING_MISMATCH'
+          for name in "$DRIVER_STOCK" "$WITNESS_STOCK" "$PAIR"; do
+            f="$qa/$name"
+            [[ -f "$f" && ! -L "$f" ]] || fail 'FIXTURE_INPUT_NOT_REGULAR'
+            jq -e --arg k "$name" --arg s "$(sha256 "$f")" --argjson n "$(wc -c < "$f")" \
+              '.files[$k] == {sha256:$s, bytes:$n}' "$qa/$PINS" >/dev/null 2>&1 \
+              || fail 'FIXTURE_INPUT_BYTES_MISMATCH'
+          done
+          python="${VIRTUAL_ENV:-}/bin/python"
+          [[ -n "${VIRTUAL_ENV:-}" && -x "$python" && -x "${OUROBOROS_CI_INTERPRETER:-}" ]] \
+            || fail 'SHIPPED_DEPENDENCY_ENV_UNAVAILABLE'
+          [[ ! -e "$scratch" && ! -L "$scratch" ]] || fail 'SCRATCH_MUST_NOT_EXIST'
+          (( EUID > 0 )) || fail 'ISOLATION_UNAVAILABLE: expected an ordinary runner user'
+          outer_ns=$(readlink /proc/self/ns/net) || fail 'ISOLATION_UNAVAILABLE: no namespace identity'
+          tmp=$(mktemp -d "$RUNNER_TEMP/tg3122.XXXXXXXX")
+          mkdir -m 700 "$tmp/home" "$tmp/tmp"
+          capture="$tmp/stdout"
+          diag="$tmp/diagnostics.json"
+          trap 'rm -f -- "$capture"' EXIT
+
+          # The clean ordinary runner reads only the stock public catalog before network isolation.
+          /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$tmp/home" TMPDIR="$tmp/tmp" \
+            GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+            PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+            "$python" -B "$qa/$DRIVER" --core "$core" --hub "$hub" --core-head "$CORE_HEAD" \
+            --pair "$qa/$PAIR" --witness "$qa/$WITNESS" --scratch "$scratch" --diagnostics "$diag" \
+            --fetch-stock-only >/dev/null 2>&1 || fail 'STOCK_REFRESH_OR_OFFER_FAILED'
+
+          set +e
+          sudo -n -- /usr/bin/unshare --net -- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            /bin/bash -s -- "$outer_ns" "$EUID" "$(id -g)" "$tmp" \
+            "$python" -B "$qa/$DRIVER" --core "$core" --hub "$hub" --core-head "$CORE_HEAD" \
+            --pair "$qa/$PAIR" --witness "$qa/$WITNESS" --scratch "$scratch" --diagnostics "$diag" \
+            2>/dev/null <<'ISOLATED' | /usr/bin/head -c 32769 > "$capture"
+          set -euo pipefail
+          outer_ns=$1; uid=$2; gid=$3; tmp=$4; shift 4
+          ns=$(readlink /proc/self/ns/net)
+          [[ -n "$ns" && "$ns" != "$outer_ns" ]] || exit 70
+          ip link set dev lo up
+          [[ "$(ip -o link show | awk -F': ' '{print $2}')" == lo &&
+             "$(ip -o link show up | awk -F': ' '{print $2}')" == lo ]] || exit 70
+          exec /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+            /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$tmp/home" TMPDIR="$tmp/tmp" \
+            PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+            /bin/bash -c '(( EUID > 0 )) || exit 70; "$@" </dev/null || exit 80' isolated-driver "$@"
+          ISOLATED
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          [[ "${statuses[1]}" == 0 ]] || fail 'EVIDENCE_CAPTURE_FAILED'
+          [[ "$(wc -c < "$capture")" -le 32768 ]] || fail 'EVIDENCE_EXCEEDS_32_KIB'
+          case "${statuses[0]}" in
+            0) ;;
+            80)
+              if [[ -f "$diag" && ! -L "$diag" && "$(wc -c < "$diag")" -le 512 ]]; then
+                detail=$(jq -ce '
+                  select((.phase | type == "string" and test("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))
+                    and (.error_class | type == "string" and test("^[A-Za-z][A-Za-z0-9_]{0,63}$"))
+                    and (.line | type == "number" and . >= 0 and . <= 1000 and floor == .)
+                    and (.http_status | type == "number" and floor == . and (. == 0 or (. >= 400 and . <= 599)))
+                    and (.completed_cases as $x | ($x | type == "array")
+                         and ($x == (["confirmed_auto_reply"][:($x | length)]))))
+                  | {phase, error_class, line, http_status, completed_cases}
+                ' "$diag" 2>/dev/null) && printf 'PINNED_DRIVER_DIAGNOSTIC %s\n' "$detail"
+              fi
+              fail 'PINNED_DRIVER_FAILED: installed stock proof not established' ;;
+            *) fail 'ISOLATION_UNAVAILABLE: namespace or privilege drop failed; no fallback' ;;
+          esac
+
+          proof=$(jq -ces --arg carrier "$GITHUB_SHA" --arg ch "$CORE_HEAD" --arg ct "$CORE_TREE" \
+            --arg hh "$HUB_HEAD" --arg ht "$HUB_TREE" --arg hd "$HUB_RELEASE_DIGEST" --arg p "$FIXTURE_PINS_SHA256" --arg cb "$CORE_BASE" \
+            --argjson inputs "$(jq -c '.files | map_values(.sha256)' "$qa/$PINS")" '
+            if length == 1 then .[0] else error("expected one JSON result") end
+            | if .core_head == $ch and .core_tree_before_origin_proof == $ct
+                 and .core_base == $cb and .completed_cases == ["confirmed_auto_reply"]
+                 and .hub_package_tree == $ht and .hub_release_digest == $hd
+                 and (.materialized_fragments | keys) == ["auto","boot","checks","fixture","ordinary","setup"]
+                 and (.materialized_fragments | all(.[]; type == "string" and test("^[0-9a-f]{64}$")))
+                 and (.cases | keys) == ["confirmed_auto_reply"]
+                 and (.stock_install | .official == true and .digest == $hd and .version == "0.14.1"
+                      and .installed_path == "skills/ouroboroshub/telegram-bot" and .release_path == "skills/telegram-bot"
+                      and (.catalog_commit | test("^[0-9a-f]{40}$")))
+                 and (.cases.confirmed_auto_reply.runtime_version | type == "string" and length > 0)
+                 and (.cases.confirmed_auto_reply.proof | .owner_only_attested == true and .owner_dm_recheck_count == 1
+                      and .host_recheck.positive == true and (.message_id | type == "number" and . > 0))
+              then {carrier_head:$carrier, core_head, core_base, completed_cases, core_tree_before_origin_proof, hub_head:$hh,
+                    hub_package_tree, hub_release_digest, fixture_pins_sha256:$p, input_sha256:$inputs,
+                    materialized_fragments, stock_install,
+                    runtime_version:.cases.confirmed_auto_reply.runtime_version,
+                    proof:.cases.confirmed_auto_reply.proof}
+              else error("source binding or ordinary case missing") end
+            ' "$capture" 2>/dev/null) || fail 'STOCK_PROOF_MISSING_OR_MALFORMED'
+          printf '%s\n' "$proof"

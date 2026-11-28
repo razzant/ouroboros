@@ -1,0 +1,22 @@
+{
+  "core_base": "9f6fad44a369a1eaf079129a6d4a69539f25dd86",
+  "core_head": "41bf465b65fcf725d9e5cb65b8a284cc93d49ee8",
+  "core_tree": "4f28bd37241a2854c35143140d71a111802d37ed",
+  "files": {
+    "track08-3122-finalhub-pair.json": {
+      "bytes": 14270,
+      "sha256": "83f21024b21d806e63eb335b83447e0f36ebe0bbacf9cd9ff3ae9ce5a406aa0a"
+    },
+    "track08-3122-finalhub-stock-driver.py.in": {
+      "bytes": 20752,
+      "sha256": "2bccb217b4240c546fc3ed44f767da53d5651d8b7d603bb6818f3e49a0617955"
+    },
+    "track08-3122-finalhub-stock-witness.zip": {
+      "bytes": 22109,
+      "sha256": "435ab2a55bdc8d7e141f20a557af41d8dc7b3311587787f7032ab1118d478643"
+    }
+  },
+  "hub_head": "b971afb79d0ee9dd0f2d042cfdaa0ba703ef3435",
+  "hub_release_digest": "01de635a5c7aa95f72207a42a1b0b437e72a883319b356de4bc70f0ef7a68ac9",
+  "hub_tree": "28a719618a348f1e579fec25c5583aa6d2a04002"
+}
