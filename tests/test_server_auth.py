@@ -12,11 +12,13 @@ polluted worker fails there, not as a downstream 200/404.
 """
 
 import contextlib
+import os
 import pathlib
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 from starlette.applications import Starlette
@@ -287,6 +289,48 @@ def test_a_password_in_the_environment_takes_no_settings_read_and_no_reader(monk
         assert remote.get("/api/secret", headers={"x-ouroboros-password": "env-secret"}).status_code == 200
     with TestClient(app, client=("127.0.0.1", 50000)) as local:
         assert local.get("/api/secret").status_code == 200, "loopback stays ungated"
+
+
+def test_the_environment_is_read_once_so_a_cleared_password_sends_no_settings_read_onto_the_loop(monkeypatch):
+    """A settings save clears the environment's password between two reads of it: the value that chose the inline
+    path is the value applied, so no settings read follows on the loop (and none waits on the reader)."""
+    key = server_auth.NETWORK_PASSWORD_KEY
+    reads: list[str] = []
+
+    class _ClearedAfterOneRead(dict):
+        def get(self, name, default=None):
+            if name != key:
+                return os.environ.get(name, default)
+            reads.append(name)
+            return " env-secret " if len(reads) == 1 else default
+
+    monkeypatch.setattr(server_auth, "os", SimpleNamespace(environ=_ClearedAfterOneRead(), chmod=os.chmod))
+    monkeypatch.setattr(server_auth, "load_settings", lambda: pytest.fail("settings read after the env decided"))
+    monkeypatch.setattr(server_auth._READER, "submit", lambda read: pytest.fail("the environment's password waited"))
+    app = server_auth.NetworkAuthGate(Starlette(routes=[Route("/api/secret", endpoint=_ok)]))
+    with TestClient(app) as remote:
+        assert remote.get("/api/secret", headers={"x-ouroboros-password": "env-secret"}).status_code == 200
+    assert reads == [key], "one read of the environment per scope"
+
+
+def test_a_malformed_expired_or_future_cookie_never_touches_the_session_key(monkeypatch, tmp_path):
+    """Only a cookie whose shape and age could make it a session brings the key into memory (off the loop); one
+    that cannot is refused without it, as before the key moved off the loop."""
+    from ouroboros import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_auth, "_auth_secret_cache", None)
+    calls: list[str] = []
+    original = server_auth._auth_secret
+    monkeypatch.setattr(server_auth, "_auth_secret",
+                        lambda: calls.append(threading.current_thread().name) or original())
+    now, name = int(time.time()), server_auth.AUTH_COOKIE_NAME
+    with _make_client(monkeypatch) as client:
+        for cookie in ("garbage", "abc.def", f"{now - server_auth._AUTH_SESSION_TTL_SEC - 60}.0", f"{now + 3600}.0"):
+            assert client.get("/api/secret", headers={"cookie": f"{name}={cookie}"}).status_code == 401
+        assert calls == [] and not (tmp_path / "state" / "auth_secret.key").exists(), calls
+        assert client.get("/api/secret", headers={"cookie": f"{name}={now}.0"}).status_code == 401
+    assert calls[:1] == ["auth-gate-reader"], "a cookie that could be a session is checked against the key"
 
 
 def test_the_first_session_key_is_made_off_the_loop_and_only_for_a_cookie_or_a_login(monkeypatch, tmp_path):

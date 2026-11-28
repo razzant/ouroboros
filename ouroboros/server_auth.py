@@ -240,7 +240,7 @@ def _auth_secret() -> bytes:
 
 async def _session_key() -> None:
     """Before a cookie is verified or a session minted: a key not yet in memory is read or created off the loop.
-    A scope without a cookie or a login never touches it."""
+    A scope without a cookie that could be a session (``_cookie_issued``) or a login never touches it."""
     if not _auth_secret_cache:
         await _off_loop(_auth_secret)
 
@@ -254,18 +254,25 @@ def _session_value(password: str, issued_at: int | None = None) -> str:
     return f"{issued}.{signature}"
 
 
-def _cookie_session_valid(cookie_val: str, password: str) -> bool:
+def _cookie_issued(cookie_val: str) -> int | None:
+    """When a cookie whose shape and age could make it a session was issued, else None: the half of the check
+    that needs no key, so a malformed, expired or future cookie is refused without one."""
     issued_text, sep, _signature = (cookie_val or "").partition(".")
     if not sep:
-        return False
+        return None
     try:
         issued = int(issued_text)
     except (TypeError, ValueError):
-        return False
+        return None
     now = time.time()
     if issued > now + 300 or now - issued > _AUTH_SESSION_TTL_SEC:
-        return False
-    return hmac.compare_digest(cookie_val, _session_value(password, issued))
+        return None
+    return issued
+
+
+def _cookie_session_valid(cookie_val: str, password: str) -> bool:
+    issued = _cookie_issued(cookie_val)
+    return issued is not None and hmac.compare_digest(cookie_val, _session_value(password, issued))
 
 
 def _cookie_value(scope: Scope, cookie_name: str) -> str:
@@ -576,18 +583,19 @@ class NetworkAuthGate:
         """The password this scope is judged by and its widget-asset epoch, resolved fresh for every scope.
 
         A non-blank environment value wins with no read (``resolve_network_password``), so nothing waits for it;
-        otherwise the settings document is read on the gate's reader thread while the loop goes on serving. One
-        resolution at a time takes effect, in arrival order, under the serving loop's lock and together with the
-        epoch it implies: an older read never lands after a newer one, so the lease epoch never goes back."""
+        the environment is read once, so the value that chose this path is the one applied (a settings save that
+        clears it meanwhile cannot send a settings read onto the loop). Otherwise the settings document is read on
+        the gate's reader thread while the loop goes on serving. One resolution at a time takes effect, in arrival
+        order, under the serving loop's lock and together with the epoch it implies: an older read never lands
+        after a newer one, so the lease epoch never goes back."""
         loop = asyncio.get_running_loop()
         lock = self._order.get(loop)
         if lock is None:
             lock = self._order[loop] = asyncio.Lock()
         async with lock:
-            if (os.environ.get(NETWORK_PASSWORD_KEY) or "").strip():
-                password = get_configured_network_password()
-            else:
-                password = await _off_loop(get_configured_network_password)
+            env = os.environ.get(NETWORK_PASSWORD_KEY, "")
+            password = (resolve_network_password(env, load_settings) if env.strip()
+                        else await _off_loop(get_configured_network_password))
             epoch = hashlib.sha256(password.encode()).hexdigest()
             self.widget_assets.password_changed(epoch)
         return password, epoch
@@ -604,7 +612,7 @@ class NetworkAuthGate:
         scope["widget_asset_leases"] = self.widget_assets
         scope["widget_asset_epoch"] = epoch
         cookie = _cookie_value(scope, AUTH_COOKIE_NAME)
-        if cookie:
+        if cookie and _cookie_issued(cookie) is not None:
             await _session_key()
         owner = cookie if cookie and _cookie_session_valid(cookie, password) else _candidate_password(scope) or "local"
         scope["widget_asset_owner"] = hashlib.sha256(owner.encode()).hexdigest()
