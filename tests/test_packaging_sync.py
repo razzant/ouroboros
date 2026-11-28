@@ -212,8 +212,9 @@ def test_readme_prioritizes_macos_dmg_install_and_model_access():
         )
     quickstart = readme.split("### Windows quick start", 1)[1].split("### Linux quick start", 1)[0]
     if has_setup:
-        assert readme.index(f"[download-{WINDOWS_SETUP_PROOF_ID}]:") < readme.index(
-            f"[download-{WINDOWS_ZIP_PROOF_ID}]:"
+        # The link definitions start their lines; the quick start's prose also writes "[portable ZIP][download-…]: …".
+        assert readme.index(f"\n[download-{WINDOWS_SETUP_PROOF_ID}]:") < readme.index(
+            f"\n[download-{WINDOWS_ZIP_PROOF_ID}]:"
         )
         assert "Download for Windows (.exe)" in quickstart
         assert "portable ZIP" in quickstart
