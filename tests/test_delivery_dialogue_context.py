@@ -51,6 +51,11 @@ def test_real_send_producer_is_a_separate_exact_row_after_the_completed_batch(ma
     assert facts["author"]["kind"] == "ouroboros"
     assert facts["transport_mode"] == "live"
     assert facts["delivery_confirmation"] == facts["read_confirmation"] == "unknown"
+    from ouroboros.context_budget import host_row_intact
+    from ouroboros.llm_messages import project_wire_messages
+    # Bound to its text at the producer (a call's completed speech, same role and kind, is not); never on the wire.
+    assert row["role"] == "assistant" and host_row_intact(row)
+    assert set(project_wire_messages([row])[0]) <= {"role", "content"}
     assert not pending_owner_dialogue(f.ctx)
     assert all(exact not in str(d) for d in getattr(f.ctx, "_owner_directives", []))
     # Appending explicit dialogue does not rewrite any earlier byte of history; only the seal's

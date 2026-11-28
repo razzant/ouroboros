@@ -14,15 +14,21 @@ any row written before host state was bound to its text, which may hold merged o
 Ouroboros's outward dialogue; the mind's authored notes (actor capsules) and a predecessor's
 notes; the current review decisions; the address records the refusal passes wrote since the
 newest note; and the mind's own prose since its newest note, including the visible text it wrote
-beside a tool call. Chosen read units and explicitly restored sources stay whole. The record lists each removed
-tool unit since the newest note with its typed facts, shown or never shown. Unasked tool units, replies the notes
-already cover, host state the host sends afresh (facts, clock, roster and skill snapshots,
+beside a tool call. Chosen reads (their whole exchange) and explicitly restored sources stay whole; the image a leaving
+batch's viewing call attached before its results leaves with it. The record lists each removed tool exchange since the
+newest note with its typed facts, shown or never shown. Unasked tool units, replies
+the notes already cover, host state the host sends afresh (facts, clock, roster and skill snapshots,
 bound and unchanged), superseded review copies and earlier address records leave the view;
 one host record names the checkpoint that holds them exactly. Owner 29.10 Q1=A:
-if that seed still exceeds the physical window, oldest whole rows of any kind may
-leave by exact address; core, assignment, notes, newest owner turn and current tail
-stay. An irreducible view, or a candidate that does not shrink, still refuses, and so
-does an excess a directly required handbook alone causes (owner 1.11.2026).
+if that seed still exceeds the physical window, the oldest whole rows may leave to an
+exact copy by address and the work continues. Among them host records and tool results
+leave first and the owner's words last (CHECKLISTS item 18; BIBLE P1: operative human
+guidance stays whole; ``_cut_tier``); core, assignment, notes, current review decisions,
+chosen reads, host state its producer would send again unchanged, the newest owner turn,
+the newest exchange and what arrived after the last act stay, and a call leaves only with
+all its results, never while its native replay is unconsumed (``_cut_units``). An
+irreducible view, or a candidate that does not shrink, still refuses, and so does an
+excess a directly required handbook alone causes (owner 1.11.2026).
 """
 from __future__ import annotations
 
@@ -68,50 +74,85 @@ def restored_sources(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
     return [address for row in messages if (address := _restored_address(row))]
 
 
-def units_since_note(messages: Sequence[Dict[str, Any]], observation: Any) -> str:
-    """Typed facts of every tool unit after the newest note, each named shown or never shown to me.
+def units_since_note(messages: Sequence[Dict[str, Any]], observation: Any, *, usable_input: Any = None,
+                     density: float = 1.0) -> str:
+    """Typed facts of every tool exchange that leaves the view after the newest note, each named shown or never shown
+    to me.
 
     Plan item 16 (review r1, 17.10): the record indexes what left the view since the newest note, so a
     renewal never hides which calls ran (a child started, a commit attempted) or which results the mind
-    never saw. The facts are ``context_source_view._unit_facts`` without error texts (the physical floor stays
-    lean; each reader keeps them one read away); exposure is the usable-send evidence
+    never saw. Every physical exchange the seed lets go is named (``_protocol_spans``, with the seed's chosen-read
+    rule), also one the mind may not fold (an image its viewing call attached before the results), by the same
+    positional, hash-bound address as a unit. The facts are ``context_source_view._unit_facts`` without error texts
+    (the physical floor stays lean; each reader keeps them one read away); exposure is the usable-send evidence
     (``_exposed_units``); unknown exposure reads as never shown.
     """
-    from ouroboros import context_compaction as compaction
-    from ouroboros.context_source_view import _exposed_units, _unit_facts
+    from ouroboros.context_source_view import _exposed_units, _unit_facts, chosen_read_rows
 
     newest = _newest_note(messages)
-    units = [unit for unit in compaction.context_units(list(messages), scope="tool")
-             if unit.start > newest and compaction.unit_kind(messages, unit) == "tool"]  # calls, not records
-    from ouroboros.context_source_view import chosen_read_units
-    retained = chosen_read_units(messages, units)
-    units = [unit for unit in units if unit.unit_id not in retained]
+    spans = {start: end for start, end in _protocol_spans(messages).items() if start > newest}
+    kept = chosen_read_rows(messages, spans, usable_input=usable_input, density=density)
+    units = [_exchange_unit(messages, start, end) for start, end in spans.items() if start not in kept]
     shown = _exposed_units(list(messages), units, observation if isinstance(observation, dict) else {})
     return "\n".join(f"{_unit_facts(messages, unit, error_text=False)}\n  {'shown to me' if unit.unit_id in shown else 'never shown to me'}"
                      for unit in units)
 
 
-def renewal_seed(messages: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """``(kept rows in order, counts of the rows that leave the view)``; pure, no I/O."""
+def _exchange_unit(messages, start, end):
+    """The exchange from call row ``start`` to ``end`` as a unit (``context_units`` builds the same one when the mind
+    may fold it); an image without a textual descriptor or embedded image data keeps the address without a source
+    projection."""
+    from ouroboros import context_compaction as compaction
+    from ouroboros.context_budget import _AtomicUnit
+
+    unit = compaction._unit_from_slice(messages, start, end, trace_refs_by_tool_call_id={})
+    if unit is None:
+        rows = list(messages[start:end + 1])
+        raw = compaction._canonical_bytes(rows)
+        sha = compaction._sha256(raw)
+        unit = _AtomicUnit(unit_id=f"unit:{start}:{end}:{sha[:16]}", start=start, end=end, raw_sha256=sha,
+                           raw_size_bytes=len(raw), source_text="", source_sha256="", predicted_reclaim_tokens=0,
+                           context_size_tokens=compaction._context_tokens_for_messages(rows, 1.0), generation=0,
+                           lineage_hashes=(sha,), source_refs=())
+    return unit
+
+
+def _image_attachment(row):
+    """An image the viewing tool attached while its batch ran (``tools/vision.attach_local_image_to_context``): an
+    untyped user row of image blocks, each beside the caption block it records itself (``_caption``). Any other key,
+    block or text makes it a row of its own that stays: a notice the host writes before closing an interrupted call
+    (a Resume's ``budget_pause._resume_disclosure``), a reply merged into the row, a row of another producer."""
+    content = row.get("content")
+    if row.get("role") != "user" or set(row) != {"role", "content"} or not isinstance(content, list):
+        return False
+    images = [block for block in content if isinstance(block, dict) and block.get("type") in ("image_url", "image")]
+    captions = {block.get("_caption") for block in images} - {None, ""}
+    return bool(images) and all(any(block is image for image in images) or (
+        isinstance(block, dict) and set(block) == {"type", "text"} and block["type"] == "text"
+        and isinstance(block["text"], str) and block["text"] in captions) for block in content)
+
+
+def renewal_seed(messages: Sequence[Dict[str, Any]], *, usable_input: Any = None,
+                 density: float = 1.0) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """``(kept rows in order, counts of the rows that leave the view)``; pure, no I/O. A chosen read stays when it fits
+    known usable input alone (every chosen read when that is unknown), as at the address rungs. From inside a leaving
+    exchange only the image its viewing call attached leaves with it (``_image_attachment``); any other row stays."""
     from ouroboros.anthropic_native_custody import custody_private_key
     from ouroboros.context_budget import host_row_intact
     from ouroboros.context_compaction import _capsule_metadata
     from ouroboros.llm_messages import DISPLAY_KEY, shown_content
-    from ouroboros.loop_messages import CONTEXT_FACTS_NAME, _visible_round_text
+    from ouroboros.loop_messages import _visible_round_text
     from ouroboros.main_context_authority import PREDECESSOR_NOTES_NAME
-    from ouroboros.peer_roster import ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME
     from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, obsolete_review_index_positions
+    from ouroboros.context_source_view import chosen_read_rows
+    from ouroboros.context_view_facts import CONTEXT_FACTS_NAME
     from ouroboros.send_clock import CLOCK_ROW_NAME
-    from ouroboros.skill_context_snapshot import SNAPSHOT_KIND
-    from ouroboros import context_compaction as cc
-    from ouroboros.context_source_view import chosen_read_units
 
-    units = cc.context_units(list(messages), scope="tool")
-    chosen = chosen_read_units(messages, units)
-    keep_read = {i for unit in units if unit.unit_id in chosen for i in range(unit.start, unit.end + 1)}
-
-    resent = {CONTEXT_FACTS_NAME, CLOCK_ROW_NAME, ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME, SNAPSHOT_KIND,
-              RENEWAL_RECORD_NAME}
+    spans = _protocol_spans(messages)
+    keep_read = chosen_read_rows(messages, spans, usable_input=usable_input, density=density)
+    attached = {i for start, end in spans.items() if start not in keep_read for i in range(start + 1, end)
+                if _image_attachment(messages[i])}
+    resent = _restated_host_kinds() | {CONTEXT_FACTS_NAME, CLOCK_ROW_NAME, RENEWAL_RECORD_NAME}
 
     note = _is_note
     first_user = next((i for i, row in enumerate(messages) if row.get("role") == "user"), -1)
@@ -141,6 +182,8 @@ def renewal_seed(messages: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
             left["host_rows"] += 1  # older addresses, superseded review copies, state the host sends afresh
         elif role == "assistant" and i <= newest_note:
             left["covered_replies"] += 1
+        elif i in attached:
+            left["tool_rows"] += 1  # the image a leaving batch's viewing call attached before its results
         else:
             kept.append(row)  # every delivered message and my replies since my newest note
     return kept, left
@@ -177,11 +220,13 @@ def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
     if book and (capacity is None or measure(messages) - book + reserve <= capacity):
         usage[REQUIRED_BOOK_UNFIT_KEY] = capacity is not None
         return _cannot_help(limit_ctx, plan)
+    usable = capacity - reserve if capacity is not None else None
     seed, record = renewal_view(messages, observation=getattr(tools._ctx, "_last_context_observation", None),
-                                drive_root=root, task_id=limit_ctx.task_id, measure=measure)
+                                drive_root=root, task_id=limit_ctx.task_id, measure=measure, usable_input=usable,
+                                density=density)
     if capacity is not None and measure(seed) - book + reserve > capacity:
         seed, cut = physical_window_cut(seed, drive_root=root, task_id=limit_ctx.task_id,
-                                        measure=lambda rows: measure(rows) - book, usable=capacity - reserve)
+                                        measure=lambda rows: measure(rows) - book, usable=usable, density=density)
         if cut:
             record = {**(record or {}), "physical_cut": cut}
     if measure(seed) >= measure(messages):
@@ -198,19 +243,19 @@ def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
     return True
 
 
-def renewal_view(messages, *, observation, drive_root, task_id, measure):
+def renewal_view(messages, *, observation, drive_root, task_id, measure, usable_input=None, density=1.0):
     """Pure selection plus exact custody; both drivers price their own final envelope.
 
     No round flags, dispatch, publication or trace pruning belongs here.
     """
     from ouroboros.artifacts import actor_source_reference, store_actor_source_bytes
-    seed, left = renewal_seed(messages)
+    seed, left = renewal_seed(messages, usable_input=usable_input, density=density)
     if not (left["tool_rows"] or left["covered_replies"] or left["restored_sources"] or left["projected_replies"]):
         return messages, None
     raw = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     args = dict(category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(), data=raw, extension="json")
     source = actor_source_reference(**args)
-    index = units_since_note(messages, observation)
+    index = units_since_note(messages, observation, usable_input=usable_input, density=density)
     projected = left["projected_replies"]
     seed.append(bound_host_row(RENEWAL_RECORD_NAME, (
         "[Host record: working view renewed during context-size recovery. Same task; "
@@ -246,52 +291,162 @@ def _current_feedback_positions(messages):
     return unknown | set(latest.values())
 
 
-def _cut_units(messages):
-    """Oldest eligible atomic units; protection is independent of dialogue kind."""
-    from ouroboros import context_compaction as cc
+def _cut_tier(messages, group, superseded):
+    """The order a physical cut spends a whole unit in, by who produced it as far as typed metadata its producer can
+    still vouch for shows (never text): superseded host copies, then host rows still bound to their text and address
+    records with valid metadata, then tool exchanges and recorded review disputes bound to their source, then the mind's
+    prose, and outward dialogue with the owner's and principals' words last, together with any delivered row whose
+    provenance cannot rule out human words: an untyped row, a typed row whose text no longer matches its binding (an
+    older merge appended words to it), an address record or dispute body whose binding fails (CHECKLISTS item 18: the
+    owner's words last; BIBLE P1: operative human guidance stays whole)."""
+    from ouroboros.context_budget import OWNER_ROW_KINDS, REPLY_CITATION_KIND, RETURN_FACTS_KIND, host_row_intact
+    from ouroboros.context_compaction import _capsule_metadata, _review_source_ref
+    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY
+
+    rows = [messages[i] for i in group]
+    kinds = {row.get(HOST_CONTEXT_KIND_KEY) for row in rows}
+    if kinds & (OWNER_ROW_KINDS | {REPLY_CITATION_KIND, RETURN_FACTS_KIND}):
+        return 4
+    if all(i in superseded for i in group):
+        return 0
+    head = rows[0]
+    capsule, meta = _capsule_metadata(head)
+    if capsule:  # a host address record (the mind's notes and restored reads are protected)
+        return 1 if meta is not None else 4
+    if any(row.get('role') == 'tool' or row.get('tool_calls') for row in rows):
+        return 2
+    if head.get(REVIEW_HISTORY_MESSAGE_KEY):
+        return 2 if _review_source_ref(head) is not None else 4
+    if head.get('role') == 'assistant':
+        return 3
+    return 1 if head.get(HOST_CONTEXT_KIND_KEY) and host_row_intact(head) else 4
+
+
+def _restated_host_kinds():
+    """Host state its producer appends again unchanged whenever no visible copy states it: the roster chain and skill
+    snapshots. The facts row and the clock are sampled afresh for every request instead."""
+    from ouroboros.peer_roster import ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME
+    from ouroboros.skill_context_snapshot import SNAPSHOT_KIND
+
+    return frozenset({ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME, SNAPSHOT_KIND})
+
+
+def _protocol_spans(messages):
+    """``{call row: last result row}``: an assistant row with tool calls through the last tool row before the next
+    assistant row, complete or not, with what the host delivered between them (an image a viewing call attached while
+    the batch ran; the wire moves such rows after the results, ``llm_messages._order_complete_tool_episodes``), whether
+    or not the mind may fold it (``context_units`` lists only foldable, contiguous ones)."""
+    spans, i = {}, 0
+    while i < len(messages):
+        calls = messages[i].get('tool_calls')
+        end = i
+        if messages[i].get('role') == 'assistant' and isinstance(calls, list) and calls:
+            cursor = i + 1
+            while cursor < len(messages) and messages[cursor].get('role') != 'assistant':
+                end = cursor if messages[cursor].get('role') == 'tool' else end
+                cursor += 1
+            spans[i] = end
+        i = end + 1
+    return spans
+
+
+def _cut_units(messages, *, usable_input=None, density=1.0):
+    """Eligible whole units in the order a physical cut spends them (``_cut_tier``), oldest first within a tier.
+
+    Protected: the core and assignment, the mind's and a predecessor's notes, chosen reads with their whole exchange
+    (when they fit known usable input alone) and restored reads, current review decisions and feedback, current host
+    state its producer would send again unchanged (the roster chain, skill snapshots and mark changes no later row
+    states anew: cutting them frees nothing; an earlier facts row or clock pays, the next request samples its own),
+    earlier cut records (folded into the new one), the newest owner turn with the citation and return context beside
+    it, the newest exchange (the span holding the mind's last reply or tool result, or the batch the host's bound
+    record of an outward message closed) and every row after that act, a batch nobody answered yet even when the owner
+    spoke after it; before any act, every row after the newest owner turn (with no owner turn either, the last row).
+    A call and all its results, complete or not, are one unit (``_protocol_spans``), and an exchange whose native
+    replay is still unconsumed stays whole wherever it sits. Work after the newest owner turn is not protected for its
+    position: hours of later tool traffic leave before the owner's earlier words do."""
+    from ouroboros.anthropic_native_custody import anthropic_tool_unit_active
     from ouroboros.context_budget import (HOST_TEXT_SHA_KEY, OWNER_WORDS_KIND, REPLY_CITATION_KIND,
                                          REPLY_SOURCE_SHA_KEY, RETURN_FACTS_KIND, host_row_intact)
-    from ouroboros.context_source_view import chosen_read_units
+    from ouroboros.context_source_view import _obsolete_host_rows, chosen_read_rows
     from ouroboros.main_context_authority import LATE_ANSWER_NOTES_NAME, PREDECESSOR_NOTES_NAME
-    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, obsolete_review_index_positions
+    from ouroboros.mark_anchors import MARK_CHANGES_KIND
+    from ouroboros.openai_responses_custody import responses_tool_unit_active
+    from ouroboros.review_history_view import (REVIEW_CONTEXT_INDEX_KEY, REVIEW_HISTORY_MESSAGE_KEY,
+                                               obsolete_review_index_positions)
     first = next((i for i, row in enumerate(messages) if row.get('role') == 'user'), -1)
-    latest = max((i for i, row in enumerate(messages) if i > first
-                  and row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND), default=len(messages) - 1)
-    while latest > first + 1 and messages[latest - 1].get(HOST_CONTEXT_KIND_KEY) in {
-            OWNER_WORDS_KIND, REPLY_CITATION_KIND, RETURN_FACTS_KIND}:  # context beside the newest owner turn
-        latest -= 1
+    newest = max((i for i, row in enumerate(messages) if i > first
+                  and row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND), default=None)
+    turn = set()
+    if newest is not None:
+        start = newest
+        while start > first + 1 and messages[start - 1].get(HOST_CONTEXT_KIND_KEY) in {
+                OWNER_WORDS_KIND, REPLY_CITATION_KIND, RETURN_FACTS_KIND}:  # context beside the newest owner turn
+            start -= 1
+        turn = set(range(start, newest + 1))
     obsolete = set(obsolete_review_index_positions(messages))
     feedback = _current_feedback_positions(messages)
-    protected = {i for i, row in enumerate(messages) if i <= first or i >= latest or row.get('role') == 'system'
+    spans = _protocol_spans(messages)
+    # The newest exchange: the span of the mind's last reply or call when it acted after the newest owner turn (else
+    # the owner turn is the newest thing to act on), and every row that arrived after that act. Nobody has seen what
+    # arrived before a first act.
+    acts = [i for i, row in enumerate(messages) if i > first and row.get('role') in ('assistant', 'tool')]
+    if acts:
+        since = next((start for start, end in spans.items() if start <= acts[-1] <= end), acts[-1])
+        unanswered = messages[acts[-1]].get('role') == 'tool'  # no reply of the mind after its batch's results yet
+
+        def outward_record(row):
+            return row.get(HOST_CONTEXT_KIND_KEY) == 'owner_dialogue' and host_row_intact(row)
+        if since == acts[-1] and outward_record(messages[since]):
+            # After a batch's results the host appends its own rows before any new reply: review updates, then the
+            # record of an outward message (role assistant, bound to its text at ``tools/owner_delivery``), which
+            # answers none of those results; so the batch it closes belongs to the newest exchange too. Completed
+            # speech in a call carries no binding: it is the mind's answer, so the walk stops there and the batch
+            # before it is older work.
+            cursor = since
+            while cursor - 1 > first and (outward_record(messages[cursor - 1])
+                                          or messages[cursor - 1].get(REVIEW_CONTEXT_INDEX_KEY)
+                                          or messages[cursor - 1].get(REVIEW_HISTORY_MESSAGE_KEY)):
+                cursor -= 1
+            closed = next((start for start, end in spans.items() if end == cursor - 1), None)
+            if closed is not None:
+                since, unanswered = closed, True
+        # An unanswered batch stays even when my human spoke after it: the mind has not yet seen its results.
+        exchange = range(since if newest is None or since > newest or unanswered else acts[-1] + 1, len(messages))
+    else:
+        exchange = range(len(messages) - 1 if newest is None else newest + 1, len(messages))
+    superseded = _obsolete_host_rows(messages)
+    restated = _restated_host_kinds() | {MARK_CHANGES_KIND}
+    protected = {i for i, row in enumerate(messages) if i <= first or i in turn or i in exchange or row.get('role') == 'system'
         or _is_note(row) or _restored_address(row)
         or row.get(HOST_CONTEXT_KIND_KEY) in {PREDECESSOR_NOTES_NAME, LATE_ANSWER_NOTES_NAME}
         or i in feedback or (row.get(REVIEW_CONTEXT_INDEX_KEY) and i not in obsolete)
-        or row.get(HOST_CONTEXT_KIND_KEY) == 'context_physical_cut'}
+        or row.get(HOST_CONTEXT_KIND_KEY) == 'context_physical_cut'
+        or (row.get(HOST_CONTEXT_KIND_KEY) in restated and host_row_intact(row) and i not in superseded)}
+    # A provider that still has to replay a call's native reasoning beside its results needs both in the wire request.
+    protected.update(i for start, end in spans.items() if anthropic_tool_unit_active(messages, start, end)
+                     or responses_tool_unit_active(messages, start, end) for i in range(start, end + 1))
+    protected.update(chosen_read_rows(messages, spans, usable_input=usable_input, density=density))
     # A fresh selection may reuse a source delivered many turns ago. Its digest, rather than adjacency,
     # keeps that exact reading (including its files) beside the protected turn.
     needed = {messages[i][REPLY_SOURCE_SHA_KEY] for i in protected if messages[i].get(REPLY_SOURCE_SHA_KEY)}
     protected.update(i for i, row in enumerate(messages) if row.get(HOST_CONTEXT_KIND_KEY) == REPLY_CITATION_KIND
                      and row.get(HOST_TEXT_SHA_KEY) in needed and host_row_intact(row))
-    prior = {i for i, row in enumerate(messages) if first < i < latest
+    prior = {i for i, row in enumerate(messages) if i > first
              and row.get(HOST_CONTEXT_KIND_KEY) == 'context_physical_cut' and host_row_intact(row)}
-    units = cc.context_units(list(messages), scope='tool')
-    chosen = chosen_read_units(messages, units)
-    spans = {unit.start: unit for unit in units}
     groups, i = [], first + 1
-    while i < latest:
-        unit = spans.get(i)
-        end = unit.end if unit else i
+    while i < len(messages):
+        end = spans.get(i, i)
         if messages[i].get(HOST_CONTEXT_KIND_KEY) == REPLY_CITATION_KIND:
             words = i + 1
-            if words < latest and messages[words].get(HOST_CONTEXT_KIND_KEY) == RETURN_FACTS_KIND:
+            if words < len(messages) and messages[words].get(HOST_CONTEXT_KIND_KEY) == RETURN_FACTS_KIND:
                 words += 1  # the drain may insert a host fact before its first owner words
-            if words < latest and messages[words].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND:
+            if words < len(messages) and messages[words].get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND:
                 end = words  # retain or evict the addressed pair together
         group = tuple(range(i, end + 1))
-        if not protected.intersection(group) and not (unit and unit.unit_id in chosen):
-            groups.append(group)
+        if not protected.intersection(group):
+            groups.append((_cut_tier(messages, group, superseded), group))
         i = group[-1] + 1
-    return groups, prior
+    return [group for _tier, group in sorted(groups)], prior
 
 
 def _position_runs(positions):
@@ -304,8 +459,19 @@ def _position_runs(positions):
     return ', '.join(str(a) if a == b else f'{a}-{b}' for a, b in runs)
 
 
-def physical_window_cut(messages, *, drive_root, task_id, measure, usable):
-    """Cut the oldest whole units under physical pressure, never protected judgment.
+def physical_cut_record(positions, prior, source):
+    """The cut's one host record: which positions left, the owner's words last, and the exact checkpoint reader. Every
+    candidate pays for its words, so naming the order costs no more than the older record's opening."""
+    return bound_host_row('context_physical_cut', (
+        "[Host record: this window's physical cut, not a summary or an authored fold.] "
+        f"Rows left the view, owner's words last: zero-based positions {_position_runs(positions)}. "
+        + (f"Earlier physical-cut address records at positions {_position_runs(sorted(prior))} remain exact in that checkpoint. " if prior else '')
+        + "Newest owner turn, assignment, core, notes and last exchange stay. "
+        f"Read the exact original rows in this checkpoint JSON array: {json.dumps(source, sort_keys=True)}."))
+
+
+def physical_window_cut(messages, *, drive_root, task_id, measure, usable, density=1.0):
+    """Cut whole units in ``_cut_units`` order under physical pressure, never protected judgment.
 
     Search prefixes in order, bisecting only intervals with unchanged images.
     Batched image floors can raise the price when an image leaves. An expensive
@@ -315,21 +481,16 @@ def physical_window_cut(messages, *, drive_root, task_id, measure, usable):
     before = measure(messages)
     if before <= usable:
         return messages, None
-    groups, prior = _cut_units(messages)
+    groups, prior = _cut_units(messages, usable_input=usable, density=density)
     if not groups:
         return messages, None
     raw = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')
     args = dict(category='context_checkpoints', source_id=hashlib.sha256(raw).hexdigest(), data=raw, extension='json')
     source = actor_source_reference(**args)
     def candidate(count):
-        positions = [i for group in groups[:count] for i in group]
+        positions = sorted(i for group in groups[:count] for i in group)
         gone = set(positions) | prior
-        address = bound_host_row('context_physical_cut', (
-            "[Host record: this window's physical cut, not a summary or an authored fold.] "
-            f"Oldest whole rows left the working view: zero-based positions {_position_runs(positions)}. "
-            + (f"Earlier physical-cut address records at positions {_position_runs(sorted(prior))} remain exact in that checkpoint. " if prior else '')
-            + "Newest owner turn, assignment, core, notes and current tail stay. "
-            f"Read the exact original rows in this checkpoint JSON array: {json.dumps(source, sort_keys=True)}."))
+        address = physical_cut_record(positions, prior, source)
         rows = [address if i == positions[0] else row for i, row in enumerate(messages)
                 if i == positions[0] or i not in gone]
         return rows, positions, measure(rows)
