@@ -227,10 +227,18 @@ def taken_works(listed, gone):
             yield key, rows, taken, final
 
 
+def work_folds(listed, gone):
+    """``(hidden, shown)``: every reply address any taken work folds (the union over all of them, so a work whose last
+    reply shares its address with another's still hides its own), and at each last address the fold displayed there,
+    ``(key, final, taken)`` of the last listed work ending at it."""
+    hidden, shown = set(), {}
+    for key, rows, taken, final in taken_works(listed, gone):
+        hidden.update(row["address"] for row in taken)
+        shown[rows[-1]["address"]] = (key, final, taken)
+    return hidden, shown
+
+
 def folded_work_rows(room, gone, listed=None):
     """Reply addresses replaced by a work line, and those lines at their work's last reply. ``listed``: the room's works."""
-    hidden, lines = set(), {}
-    for _key, rows, taken, _final in taken_works(works(room) if listed is None else listed, gone):
-        hidden.update(row["address"] for row in taken)
-        lines[rows[-1]["address"]] = work_line(taken)
-    return hidden, lines
+    hidden, shown = work_folds(works(room) if listed is None else listed, gone)
+    return hidden, {address: work_line(taken) for address, (_key, _final, taken) in shown.items()}

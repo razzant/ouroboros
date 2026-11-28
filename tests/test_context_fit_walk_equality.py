@@ -569,3 +569,130 @@ def test_the_owner_probe_level_from_the_previous_one_equals_level_with(seed):
             shown = dict(level.addressed).get("F7", ())
             held = [f"F7:{ident}" for _step, ident, *_ in uncovered if ident not in shown]
             assert probe(level) == mf.level_with(snapshot, level, held, owner_note=True), level
+
+
+def _colliding_works():
+    """Two works whose last replies show one address (two distinct full row references with an equal 12-hex prefix
+    and time; the product abbreviates retained identities for display): each work has an earlier reply of its own."""
+    from ouroboros import chat_chain
+
+    rows = []
+    for n, (task, shared) in enumerate((("A", False), ("A", True), ("B", False), ("B", True))):
+        ts = "2026-11-26T12:00:00Z" if shared else "2026-11-26T11:00:00Z"
+        address = chat_chain.format_address({"chat_id": 1, "ts": ts, "row_sha256": (
+            "fedcba123456" + ("a" if task == "A" else "b") * 52) if shared else str(n + 1) * 64})
+        body = f"{task} {'shared' if shared else 'unique'} " + syn.prose(900, "mine")
+        row = syn.said(n, "ouroboros", body, task_id=task, work_id=task,
+                       gist={"summary": "Completed " + task, "ts": ts, "address": address, "room_id": "1"})
+        row.update(line=body, head=f"[{address}]", address=address, ts=ts)
+        rows.append(row)
+    return syn.snapshot(room_facts=syn.room("1", lane1=rows))
+
+
+def _pinned_cases():
+    """``(name, snapshot, levels)`` whose room bytes ``PINNED_ROOMS`` holds from the development renderer: both work
+    folds (progress and final, a protected reply, two works ending at one shown address), row and note aggregates,
+    project words with the root's frame, sealed rows, retold and transferred records, marks and this room's late
+    review, an empty room; each at the whole view, two built levels and three arbitrary ones."""
+    import random
+
+    late = {"id": "mark-late", "scope": "room", "room": "Main", "text": "A late review: " + syn.prose(200), "by": "host",
+            "date": "2026-09-02", "target": "task t001", "quote": "",
+            "late_review": {"task_id": "t001", "source": "memory_read(source_ref={})", "sha256": "ab" * 32}}
+    cases = []
+    for seed in (0, 1, 3):
+        snap = _changing_room(seed)
+        if seed == 1:
+            snap = replace(snap, marks=(*syn.marks(3), late))
+        cases.append((f"room-{seed}", snap))
+    cases += [("colliding-works", _colliding_works()), ("empty", syn.snapshot(room_facts=syn.room("1")))]
+    out = []
+    for name, snap in cases:
+        snap = mv.snapshot_from_json(mv.snapshot_json(snap))
+        table = mf._elements(snap)
+        listed = [(step, ident) for step, ident, *_ in table.listed]
+        levels = [mv.FULL_VIEW,
+                  table.level({p for p in listed if p[0] in ("F1", "F4", "F8") or p[1].endswith(":progress")}),
+                  table.level({p for p in listed if p[0] in ("F3", "F5", "F5a", "F7", "F7a", "F8", "F8a")
+                               or p[1].endswith(":final")}, 2)]
+        if listed:
+            levels += [_random_levels(snap, random.Random(len(name)))[k] for k in (30, 70, 110)]
+        out.append((name, snap, levels))
+    return out
+
+
+def _room_digests(snap, level):
+    """SHA-256 of the room block as delivered (``render_room``) and as a send carries it (``model_room``: system and
+    program data, joined by a NUL), and of the level's form counts and holding room (their JSON, key order kept)."""
+    import hashlib
+
+    from ouroboros.memory_view_work import model_room
+
+    system, data = model_room(snap, level)
+    fresh = replace(snap)  # the receipts' counts and holding prices, recounted on a snapshot with no stored number
+    return [hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+            for text in (mv.render_room(snap, level), system + "\0" + data, _ordered(ff.form_counts(fresh, level)),
+                         _ordered(ff.holding_room(fresh, level)))]
+
+
+# The room bytes of ``_pinned_cases`` as the development renderer drew them (origin/ouroboros 2e75e2575, before the room
+# was drawn through its runs): each case's snapshot JSON and levels were exported from this module and rendered by that
+# tree's ``render_room`` and ``model_room`` in a scratch process (the export and render scripts are named in the call-fit
+# K14 step-two report, FIX 1). An intentional change of the room's format re-derives them the same way, from the tree
+# before the change, and says so in its commit.
+PINNED_ROOMS = {
+    'room-0': [
+        ["ef87fc82e874975b", "f217b1ba4d43bfc4", "a8962d74f576d549", "a63f73789022a514"],
+        ["5d14dcf740177850", "662221174ca9121c", "4d476a7cfdd8f3d9", "02b224222d9a103d"],
+        ["121e26fafea80e0d", "5b00d5440a2107ce", "17dc549f4e5195f8", "77f733dd6a64177c"],
+        ["a6ef0d65153a80b6", "25e3b220f2f10168", "01ac267ab13dd2a8", "13525532b692d42b"],
+        ["4c559a2b08c98b0c", "77e7aa96f288ad44", "b99f37b017ce560d", "1d8948dc8607cd03"],
+        ["8571b7a395ab3d30", "fcf4c3e437ec18b0", "0e7001c7d4fdf992", "a9b01ee56c47dbf1"],
+    ],
+    'room-1': [
+        ["5f8c6faa072ddd56", "46017f3296b04fda", "a8962d74f576d549", "98884c7bf4d9c0ac"],
+        ["f877bf87d210cc6b", "02bda49e333fc482", "66eaf3d55ab27c5f", "3d1998df609cb1e6"],
+        ["a08ceb072dfe9355", "6db2a74c0ada6003", "d2e973ea64b7010d", "f2dc3d264a3abe4b"],
+        ["afeeb4184faa9d92", "f0b80dd6d18f8fee", "19f89c689cb11edb", "80fbb591df1ff2c9"],
+        ["d70a2af1ea390c8c", "7177a13c4377b690", "1a3be76f809103c4", "fb3cccf5b136782d"],
+        ["e9b9814f6c2aa193", "2fec359f1c661871", "19c45c187213cc04", "d85076641adb0192"],
+    ],
+    'room-3': [
+        ["feba5eeea4110511", "f165aa3c4d829b00", "a8962d74f576d549", "3b0aa7891358cf8a"],
+        ["63eff04089b6948b", "54ba087436e1283c", "eee0b93057125ed4", "978b66bf6f127ae1"],
+        ["b142882afdf82e08", "8ae14c17e835b02d", "db754fa722165fd6", "851c5e46174fc774"],
+        ["fb53571f57d1ef48", "4eda56d2fca7ac04", "221adbe18780fad7", "3ace0543d6cb5fc1"],
+        ["35b4160be7784b44", "2bc64cc562be7793", "bdd91e16f79ca669", "2a7a46460cc74342"],
+        ["866037586f743a62", "dafe4fa25fdbb3f4", "de23857f89c09687", "8571ff7a61f763aa"],
+    ],
+    'colliding-works': [
+        ["3abba7f0cc978467", "8a0397bb70210444", "a8962d74f576d549", "f2ec029436850e0a"],
+        ["e9a801bcb760bcd1", "36e2b75709994c02", "45d422a513dde13c", "f3f07a01a38eabc5"],
+        ["8574219388dc3121", "ebbd875205f51268", "fb53a5c73952079e", "c7a0d5801996a359"],
+        ["74c44f47fa3531f6", "7888d72ce8972c00", "9bec456aff9b4c26", "cd3fe07edc03fac4"],
+        ["8574219388dc3121", "ebbd875205f51268", "fb53a5c73952079e", "c7a0d5801996a359"],
+        ["8574219388dc3121", "ebbd875205f51268", "fb53a5c73952079e", "c7a0d5801996a359"],
+    ],
+    'empty': [
+        ["fe02d11742d31e88", "a75b29cd313c0fce", "a8962d74f576d549", "9b5256476fc0ddb0"],
+        ["fe02d11742d31e88", "a75b29cd313c0fce", "a8962d74f576d549", "9b5256476fc0ddb0"],
+        ["fe02d11742d31e88", "a75b29cd313c0fce", "a8962d74f576d549", "9b5256476fc0ddb0"],
+    ],
+}
+
+
+def test_the_room_draws_the_development_bytes_where_its_runs_move():
+    """Delivery through the runs draws, byte for byte, what the development renderer drew on the same views and
+    levels, including two works ending at one shown address (each hides its own earlier reply), so a change that moves
+    a run's text and its price together still fails here; and the runs price what is drawn."""
+    seen = set()
+    for name, snap, levels in _pinned_cases():
+        assert [_room_digests(snap, level) for level in levels] == PINNED_ROOMS[name], name
+        for level in levels:
+            text = mv.render_room(snap, level)
+            seen |= {marker for marker in ("### Transferred memory", "sealed with the page", "## Late review feedback",
+                                           "## Marks I keep in view", "earlier rows, oldest first", "notes not yet sealed, ",
+                                           "Nothing open", "; work t", "; work B]", "Completed work replies may stand",
+                                           "### Retold before the update") if marker in text}
+            assert mv.json_chars(text) == mv.room_chars(replace(snap), level)
+    assert len(seen) == 11, seen

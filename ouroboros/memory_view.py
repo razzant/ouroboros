@@ -1317,7 +1317,7 @@ def _room_runs(room: Mapping[str, Any], gone: Mapping[str, Any], put: Callable[.
     reads, so equal keys draw equal lines on one snapshot. ``drawn()``: the lines so far. ``works``: the room's works."""
     from ouroboros.owner_words import _FRAMES, _HEADINGS
     from ouroboros.memory_view_work import (task_line, task_gist_line, task_gists_before_work_lines, row_reader,
-                                            taken_works, work_line, works as works_of)
+                                            work_folds, work_line, works as works_of)
 
     works = works_of(room) if works is None else works
     retold, mine, people, facts = (set(gone.get(step, ())) for step in ("F4", "F2", "F7", "F1"))
@@ -1363,8 +1363,7 @@ def _room_runs(room: Mapping[str, Any], gone: Mapping[str, Any], put: Callable[.
         put(("notes",), lambda: ["", "### My notes not yet sealed"])
         _room_note_lines(room["notes"], gone, put=put)
     if room["lane1"]:
-        folds = {rows[-1]["address"]: (key, final, taken) for key, rows, taken, final in taken_works(works, gone)}
-        work_rows = {row["address"] for _key, _final, taken in folds.values() for row in taken}
+        work_rows, folds = work_folds(works, gone)
         addressed = mine | people | work_rows
         members = [n for n, item in enumerate(room['lane1']) if item['address'] in addressed
                    and not item.get('immune')] if gone.get('F7a') else []

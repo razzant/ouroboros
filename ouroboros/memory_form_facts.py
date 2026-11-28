@@ -6,7 +6,7 @@ forms to account for every escaped character, without keeping its words in the m
 """
 from ouroboros import memory_view as mv, memory_view_conversations as conversations, memory_view_legacy as legacy
 from ouroboros.memory_view_work import (works, folded_work_rows, task_line, task_gist_line, task_gists_before_work_lines,
-                                        snapshot_works, taken_works, work_line)
+                                        snapshot_works, work_folds, work_line)
 from ouroboros.memory_view_conversation_forms import folds
 
 
@@ -409,7 +409,7 @@ def _count_forms(snapshot, level):
             entry["sources"] += sources
     add("emergency", "story quotes", 0, len(set(gone.get("F7", ())) & mv.story_quote_rows(snapshot).keys()))
     room, listed = snapshot.room or {}, snapshot_works(snapshot)
-    hidden = {row["address"] for _key, _rows, taken, _final in taken_works(listed, gone) for row in taken}
+    hidden = work_folds(listed, gone)[0]
     addressed = hidden | gone.get("F2", set()) | gone.get("F7", set()) | gone.get("F7p", set())
     addressed |= {i[5:] for i in addressed if i.startswith("bare:")}
     aggregate = [r for r in room.get("lane1", ()) if r["address"] in addressed and not r.get("immune")] if gone.get("F7a") else []
@@ -636,8 +636,7 @@ def _holding_room(snapshot, level):
             hold("notes", "", f"memory_read(node_id='{note['id']}')", label=note["id"], unmarked="lead_rule" not in note,
                  tokens=held(("note", id(note), short), lambda: mv._note_pointer(note) if short else
                              "\n".join(mv._note_lines([note]))))
-    folds = {rows[-1]["address"]: (key, final, taken) for key, rows, taken, final in taken_works(listed, gone)}
-    hidden = {row["address"] for _key, _final, taken in folds.values() for row in taken}
+    hidden, shown = work_folds(listed, gone)
     addressed = hidden | {i.removeprefix("bare:") for step in ("F2", "F7p", "F7") for i in gone.get(step, ())}
     aggregate = [r for r in room.get("lane1", ()) if r["address"] in addressed and not r.get("immune")] if gone.get("F7a") else []
     if aggregate:
@@ -645,7 +644,7 @@ def _holding_room(snapshot, level):
              tokens=held(("room range", tuple(map(id, aggregate))), lambda: mv._rows_line(room, aggregate)))
     else:
         by_address = _kept(snapshot, ("work rows",), lambda: {r["address"]: (key, rows) for key, rows in listed for r in rows})
-        for address, (fold, final, taken) in folds.items():
+        for address, (fold, final, taken) in shown.items():
             key, rows = by_address[address]
             hold("work gists", "", _rows_reader(room["room_id"], [r for r in rows if r["address"] in hidden]),
                  label="work " + key, tokens=held(("work", fold, final), lambda: work_line(taken)))
