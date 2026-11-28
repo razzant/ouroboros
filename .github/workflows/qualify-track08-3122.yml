@@ -1,0 +1,175 @@
+name: '#3122 ordinary Telegram qualification (temporary)'
+run-name: '#3122 ordinary Telegram witnesses on ${{ github.sha }}'
+on:
+  push:
+    branches: ['qa/track08-3122-a02300e5-r7']
+permissions:
+  contents: read
+
+jobs:
+  ordinary-3122:
+    if: github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/track08-3122-a02300e5-r7' && github.event.deleted == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CORE_HEAD: 'a02300e5de3583c1d56ab40e30aab776a5a77016'
+      CORE_BASE: '35292e87a1436abe499c8589737e29bad4274969'
+      CORE_TREE: 'f86ad013ae9a85253648d009152edb4b021e3dba'
+      HUB_HEAD: 'c42c25082128474a27acdf251d3793da6551ee68'
+      HUB_TREE: '941012431d7393d2c97dda18aa3653bc691b7d37'
+      HUB_RELEASE_DIGEST: 'b732f2b1696262ce3889661218f4a8f717a859555d2a4d3562535b769d03e137'
+      FIXTURE_PINS_SHA256: 'e0ab5fa19e77587ef9030b33594a2c6aa8d81d841cafac44db4f19fb4f682348'
+      QA_DIR: qa-track08-3122
+      PINS: 'track08-3122-prepublication-pins.json'
+      DRIVER: 'track08-3122-prepublication-driver.py.in'
+      PAIR: 'track08-3122-prepublication-pair.json'
+      WITNESS: 'track08-3122-prepublication-witness.zip'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind the temporary carrier to the reviewed Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { printf '::error::#3122 %s\n' "$1" >&2; exit 1; }
+          for sha in "$CORE_HEAD" "$HUB_HEAD"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail 'EXACT_PRODUCT_COMMITS_REQUIRED'
+          done
+          [[ "$FIXTURE_PINS_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail 'EXACT_FIXTURE_MANIFEST_DIGEST_REQUIRED'
+          [[ "$(git rev-list --parents -n1 HEAD)" == "$GITHUB_SHA $CORE_HEAD" &&
+             "$(git rev-list --parents -n1 "$CORE_HEAD")" == "$CORE_HEAD $CORE_BASE" &&
+             "$(git rev-parse "${CORE_HEAD}^{tree}")" == "$CORE_TREE" ]] || fail 'CARRIER_OR_CORE_BINDING_MISMATCH'
+          expected=$(printf '%s\n' .github/workflows/qualify-track08-3122.yml \
+            "$QA_DIR/$PINS" "$QA_DIR/$DRIVER" "$QA_DIR/$PAIR" "$QA_DIR/$WITNESS" | LC_ALL=C sort)
+          [[ "$(git diff --name-only --no-renames "$CORE_HEAD" HEAD | LC_ALL=C sort)" == "$expected" ]] \
+            || fail 'CARRIER_HAS_NON_QA_CHANGES_OR_MISSING_FILES'
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.CORE_HEAD }}
+          path: core
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: razzant/OuroborosHub
+          ref: ${{ env.HUB_HEAD }}
+          path: hub
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Observe three ordinary cases in a loopback-only namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '::error::#3122 %s\n' "$1" >&2; exit 1; }
+          sha256() { sha256sum < "$1" | cut -d ' ' -f 1; }
+          ws="$GITHUB_WORKSPACE"
+          core="$ws/core"; hub="$ws/hub"; qa="$ws/$QA_DIR"; scratch="$ws/scratch"
+          [[ "$(git -C "$core" rev-parse HEAD)" == "$CORE_HEAD" &&
+             "$(git -C "$hub" rev-parse HEAD)" == "$HUB_HEAD" &&
+             "$(git -C "$hub" rev-parse 'HEAD:skills/telegram-bot')" == "$HUB_TREE" ]] \
+            || fail 'PRODUCT_CHECKOUT_MISMATCH'
+          [[ -d "$qa" && ! -L "$qa" && -f "$qa/$PINS" && ! -L "$qa/$PINS" &&
+             "$(sha256 "$qa/$PINS")" == "$FIXTURE_PINS_SHA256" ]] || fail 'FIXTURE_MANIFEST_BYTES_MISMATCH'
+          jq -e --arg c "$CORE_TREE" --arg h "$HUB_TREE" --arg d "$DRIVER" --arg p "$PAIR" --arg w "$WITNESS" \
+            '.core_tree == $c and .hub_tree == $h and (.files | keys) == ([$d,$p,$w] | sort)' \
+            "$qa/$PINS" >/dev/null 2>&1 || fail 'FIXTURE_MANIFEST_BINDING_MISMATCH'
+          for name in "$DRIVER" "$PAIR" "$WITNESS"; do
+            f="$qa/$name"
+            [[ -f "$f" && ! -L "$f" ]] || fail 'FIXTURE_INPUT_NOT_REGULAR'
+            jq -e --arg k "$name" --arg s "$(sha256 "$f")" --argjson n "$(wc -c < "$f")" \
+              '.files[$k] == {sha256:$s, bytes:$n}' "$qa/$PINS" >/dev/null 2>&1 \
+              || fail 'FIXTURE_INPUT_BYTES_MISMATCH'
+          done
+          python="${VIRTUAL_ENV:-}/bin/python"
+          [[ -n "${VIRTUAL_ENV:-}" && -x "$python" && -x "${OUROBOROS_CI_INTERPRETER:-}" ]] \
+            || fail 'SHIPPED_DEPENDENCY_ENV_UNAVAILABLE'
+          [[ ! -e "$scratch" && ! -L "$scratch" ]] || fail 'SCRATCH_MUST_NOT_EXIST'
+          (( EUID > 0 )) || fail 'ISOLATION_UNAVAILABLE: expected an ordinary runner user'
+          outer_ns=$(readlink /proc/self/ns/net) || fail 'ISOLATION_UNAVAILABLE: no namespace identity'
+          tmp=$(mktemp -d "$RUNNER_TEMP/tg3122.XXXXXXXX")
+          mkdir -m 700 "$tmp/home" "$tmp/tmp"
+          capture="$tmp/stdout"
+          diag="$tmp/diagnostics.json"
+          trap 'rm -f -- "$capture"' EXIT
+
+          set +e
+          sudo -n -- /usr/bin/unshare --net -- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            /bin/bash -s -- "$outer_ns" "$EUID" "$(id -g)" "$tmp" \
+            "$python" -B "$qa/$DRIVER" --core "$core" --hub "$hub" --core-head "$CORE_HEAD" \
+            --pair "$qa/$PAIR" --witness "$qa/$WITNESS" --scratch "$scratch" --diagnostics "$diag" \
+            2>/dev/null <<'ISOLATED' | /usr/bin/head -c 32769 > "$capture"
+          set -euo pipefail
+          outer_ns=$1; uid=$2; gid=$3; tmp=$4; shift 4
+          ns=$(readlink /proc/self/ns/net)
+          [[ -n "$ns" && "$ns" != "$outer_ns" ]] || exit 70
+          ip link set dev lo up
+          [[ "$(ip -o link show | awk -F': ' '{print $2}')" == lo &&
+             "$(ip -o link show up | awk -F': ' '{print $2}')" == lo ]] || exit 70
+          exec /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+            /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$tmp/home" TMPDIR="$tmp/tmp" \
+            PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+            /bin/bash -c '(( EUID > 0 )) || exit 70; "$@" </dev/null || exit 80' isolated-driver "$@"
+          ISOLATED
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          [[ "${statuses[1]}" == 0 ]] || fail 'EVIDENCE_CAPTURE_FAILED'
+          [[ "$(wc -c < "$capture")" -le 32768 ]] || fail 'EVIDENCE_EXCEEDS_32_KIB'
+          case "${statuses[0]}" in
+            0) ;;
+            80)
+              if [[ -f "$diag" && ! -L "$diag" && "$(wc -c < "$diag")" -le 512 ]]; then
+                detail=$(jq -ce '
+                  select((.phase | type == "string" and test("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))
+                    and (.error_class | type == "string" and test("^[A-Za-z][A-Za-z0-9_]{0,63}$"))
+                    and (.line | type == "number" and . >= 0 and . <= 1000 and floor == .)
+                    and (.http_status | type == "number" and floor == . and (. == 0 or (. >= 400 and . <= 599)))
+                    and (.completed_cases as $x | ($x | type == "array")
+                         and ($x == (["ordinary_send","confirmed_auto_reply","settled_rotation"][:($x | length)]))))
+                  | {phase, error_class, line, http_status, completed_cases}
+                ' "$diag" 2>/dev/null) && printf 'PINNED_DRIVER_DIAGNOSTIC %s\n' "$detail"
+              fi
+              fail 'PINNED_DRIVER_FAILED: three-case proof not established' ;;
+            *) fail 'ISOLATION_UNAVAILABLE: namespace or privilege drop failed; no fallback' ;;
+          esac
+
+          proof=$(jq -ces --arg carrier "$GITHUB_SHA" --arg ch "$CORE_HEAD" --arg ct "$CORE_TREE" \
+            --arg hh "$HUB_HEAD" --arg ht "$HUB_TREE" --arg hd "$HUB_RELEASE_DIGEST" --arg p "$FIXTURE_PINS_SHA256" \
+            --argjson inputs "$(jq -c '.files | map_values(.sha256)' "$qa/$PINS")" '
+            if length == 1 then .[0] else error("expected one JSON result") end
+            | if .core_head == $ch and .core_tree_before_origin_proof == $ct
+                 and .hub_package_tree == $ht and .hub_release_digest == $hd
+                 and (.materialized_fragments | keys) == ["auto","boot","checks","fixture","ordinary","setup"]
+                 and (.materialized_fragments | all(.[]; type == "string" and test("^[0-9a-f]{64}$")))
+                 and (.cases | keys) == ["confirmed_auto_reply","ordinary_send","settled_rotation"]
+                 and (.cases | all(.[]; (.runtime_version | type == "string" and length > 0)
+                                       and (.proof | type == "object" and length > 0)))
+                 and .cases.ordinary_send.proof.message_id != null
+                 and .cases.confirmed_auto_reply.proof.message_id != null
+                 and .cases.confirmed_auto_reply.proof.owner_only_attested == false
+                 and .cases.confirmed_auto_reply.proof.owner_dm_recheck_count == 0
+                 and .cases.settled_rotation.proof.coverage == "settled_rotation_only"
+                 and (.cases.settled_rotation.proof.phases | map(.bot_observation.get_me_observed)) == [true,true,true]
+              then {carrier_head:$carrier, core_head, core_tree_before_origin_proof, hub_head:$hh,
+                    hub_package_tree, hub_release_digest, fixture_pins_sha256:$p, input_sha256:$inputs,
+                    materialized_fragments, cases:(.cases | keys),
+                    owner_only_attested:.cases.confirmed_auto_reply.proof.owner_only_attested,
+                    owner_dm_recheck_count:.cases.confirmed_auto_reply.proof.owner_dm_recheck_count,
+                    auto_reply_message_id:.cases.confirmed_auto_reply.proof.message_id,
+                    auto_reply_subject:"ordinary_direct_chat_without_owner_only_attestation",
+                    auto_reply_proof:"ordinary_send_and_receipt_only",
+                    rotation_coverage:.cases.settled_rotation.proof.coverage,
+                    rotation_phases:(.cases.settled_rotation.proof.phases | length)}
+              else error("source binding or ordinary case missing") end
+            ' "$capture" 2>/dev/null) || fail 'THREE_CASE_PROOF_MISSING_OR_MALFORMED'
+          printf '%s\n' "$proof"
