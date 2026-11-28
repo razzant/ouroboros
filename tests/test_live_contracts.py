@@ -122,10 +122,21 @@ def _plugin_catalog(skill):
     return module.CATALOG
 
 
+def test_openai_states_its_measured_accepted_input_reserve_and_raise():
+    """27.11.2026: the window is a whole spoken call's size; the larger accepted input, the working reserve and the
+    route's ability to raise its record on a larger accepted input are their own facts."""
+    facts = _plugin_catalog("openai_realtime").model("gpt-realtime-2.1").facts
+    assert facts.accepted_input_tokens == 493_554
+    assert facts.working_reserve_tokens == 10_000 and facts.acceptance_can_raise is True and facts.basis == "provider"
+    # Calls settings show the source: the vendor's figure, the measuring account, and the clock the latency used.
+    assert "vendor documents a 128,000" in facts.source and "measuring account" in facts.source
+    assert "end of the probe's sent audio" in facts.source and "typically 1-3 s" in facts.source
+
+
 @pytest.mark.parametrize("skill,window,credential", [
     ("gemini_live", 92_000, "GEMINI_API_KEY"),
     ("grok_realtime", 80_000, "XAI_API_KEY"),
-    ("openai_realtime", 133_554, "OPENAI_API_KEY"),  # the measured acceptance of 20.10, not the documented 128,000
+    ("openai_realtime", 290_666, "OPENAI_API_KEY"),  # a whole spoken call measured 27.11, not the documented 128,000
 ])
 def test_built_in_engines_declare_labelled_dated_windows(skill, window, credential):
     catalog = _plugin_catalog(skill)

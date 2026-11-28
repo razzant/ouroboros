@@ -106,8 +106,8 @@ def test_address_facts_keep_invocation_and_reader_but_not_trace_blob():
     assert 'trace_ref' in rows[-1]['_tool_result_record']
 
 
-@pytest.mark.parametrize('engine,window', [('gemini', 92000), ('openai', 133554), ('grok', 80000)])
-def test_fresh_candidates_outgrow_window_then_continue_by_exact_physical_cut(host_world, packages, engine, window):
+@pytest.mark.parametrize('engine', ['gemini', 'openai', 'grok'])
+def test_fresh_candidates_outgrow_window_then_continue_by_exact_physical_cut(host_world, packages, engine):
     from ouroboros.realtime_setup import loaded_provider, session_candidate
     from ouroboros.context_budget import bound_host_row
     from ouroboros.artifacts import read_actor_source_bytes
@@ -115,6 +115,7 @@ def test_fresh_candidates_outgrow_window_then_continue_by_exact_physical_cut(hos
     name = {'gemini': 'gemini_live', 'openai': 'openai_realtime', 'grok': 'grok_realtime'}[engine]
     provider = loaded_provider(name + ':' + engine)
     host.model = provider['catalog'].models[0]
+    window = host.model.facts.conversation_window_tokens  # the shipped catalogue's own window
     host.turn.native_model = host.model.id
     host._session_opened = True
     original = [bound_host_row(kind, f'{i} exact delivered words. ' * 4000) for i in range(8)

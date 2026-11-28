@@ -21,20 +21,25 @@ from ouroboros.realtime_item_echo import item_matches
 
 ENDPOINT = 'wss://api.x.ai/v1/realtime'
 ROUTE = RealtimeRoute('grok_realtime', ENDPOINT, 'xai::')
-# Measured 21.10.2026: Grok Voice 3.0 keeps earlier spoken turns while session.instructions
-# stays small, whatever the text says. In the host's own estimate (characters / 4) the passes
-# were 105,000 (neutral text) and 75,000 (the owner's Nano), the failures 117,148 and 117,212;
-# in o200k tokens 92,144 and 81,403 passed, 102,804 and 132,132 failed. Grok's usage does not
-# count the instructions, so nothing calibrates a density: the window is in estimator units,
-# 80,000, which also keeps the owner's Nano (1.13 o200k per estimator token) under 92,144 o200k.
+# Measured 27.11.2026 (28 spoken sessions): Grok Voice 3.0 keeps earlier spoken turns while the
+# whole session.update setup stays under about 98,300 o200k tokens (last pass 98,276) and loses
+# them from about 99,700 (first fail), for memory-shaped and neutral text alike: a token limit;
+# a smaller effect of the text's shape is not excluded (the 21.10 passes at 105,000 neutral and
+# 75,000 memory-shaped estimator units and failures at 117k sit on the same cliff). Grok's usage counts no text tokens,
+# so nothing calibrates its tokenizer: the window stays 80,000 in the host's own estimate
+# (characters / 4). Its 70,000 admitted after the reserve is about 87.5k o200k even at 1.25 o200k
+# per estimator token, and the full 80,000 at 1.2 is about 96k, under the last pass.
 # Written facts were recalled from instructions up to 231,828 o200k (19.10): acceptance only.
 CATALOG = ProviderCatalog(
     label='Grok \u00b7 xAI', credential_settings=('XAI_API_KEY',), privacy='Call audio goes to xAI.',
     models=(CatalogModel(
         'grok-voice-3.0', 'grok-voice-3.0 \u2014 xAI\u2019s voice model',
         RouteFacts(conversation_window_tokens=80_000, working_reserve_tokens=10_000, basis='estimator',
-                   source='measured spoken-retention bound of session.instructions (operator probes 21.10)',
-                   observed='2026-10-21'),
+                   source='spoken-turn limit of the whole setup, operator probes 21.10 and 27.11.2026 with '
+                          'memory-shaped and neutral text: last pass 98,276, first failure 99,700 o200k tokens. o200k '
+                          'stands in for Grok\'s own count, which the wire does not report; a smaller effect of text '
+                          'shape is not excluded. Counted in the host estimate',
+                   observed='2026-11-27'),
         default=True, silent_tool_results=True, voices=(CatalogVoice('eve', 'Eve'), CatalogVoice('xai_ara', 'Ara')),
         thinking_levels=('none', 'high'), honours=frozenset({'languages', 'thinking'}),
         notes=(('pause', 'Grok Voice decides itself when your turn has ended.'),
