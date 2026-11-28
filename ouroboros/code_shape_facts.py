@@ -494,6 +494,25 @@ def directory_note(added: Iterable[str], changed: Iterable[str], moved: Optional
     return f"{named}; the hand-kept module directory `{MODULE_DIRECTORY}` is {state}."
 
 
+def contact_notes(shown: Iterable[str], changed: Iterable[str], created: Iterable[str], gone: Iterable[str],
+                  at_base: Mapping[str, Optional[str]], current: Mapping[str, Optional[str]],
+                  invariants: Optional[str], *, locator: str, moved: Optional[Mapping[str, str]] = None) -> list[str]:
+    """What one diff's own two sides say where it touches the body, in the order shown: the owning manuals per
+    shown file (``ownership_note``), the directory fact for the runtime modules it adds (``directory_note``), the
+    governed prose it removed (``removed_prose_note``). All three read the same diff, so "in this change" means
+    one thing in each: ``at_base`` and ``current`` hold that diff's sides of its changed governed texts and of the
+    manifest. A governed text with a side that was not read is unknown, never an addition or a deletion."""
+    shown, changed, created, gone = list(shown), list(changed), set(created), set(gone)
+    governed = [path for path in changed if governed_text(path)]
+    unread = [path for path in governed if at_base.get(path) is None and path not in created
+              or current.get(path) is None and path not in gone]
+    return [ownership_note(shown, changed, current.get(MANIFEST_PATH), invariants,
+                           base_manifest=at_base.get(MANIFEST_PATH), removed=gone),
+            directory_note([path for path in shown if path in created and runtime_module(path)], changed, moved),
+            removed_prose_note(governed, at_base, current, unread=unread, locator=f"{locator} {' '.join(governed)}")
+            if set(governed) & set(shown) else ""]
+
+
 def removed_prose_note(documents: Iterable[str], at_base: Mapping[str, Optional[str]],
                        current: Mapping[str, Optional[str]], *, locator: str, unread: Iterable[str] = (),
                        limit: int = 12, width: int = 240) -> str:

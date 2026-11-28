@@ -642,7 +642,8 @@ def review_subject_pulse(review_root: Any, layer: str, managed: Any = None, froz
     read in its isolated checkout that is not the gate's own (a ``base..head`` range, an index
     or worktree against its parent) is measured from its own parent, so owners, touched flags
     and removed prose speak of the diff its reviewers read; the gate's subject keeps the
-    contribution base, as the commit gate's pulse does."""
+    contribution base for its totals, as the commit gate's pulse does, and reads those three
+    against HEAD (``review.diff_pulse``)."""
     if layer != "body" or managed is not None:
         return ""
     from ouroboros.review import diff_pulse

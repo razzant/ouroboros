@@ -609,6 +609,53 @@ def test_the_pulse_names_each_touched_files_owning_manuals_and_whether_the_chang
     assert "Owning manuals" not in diff_pulse(_touched(_body(tmp_path / "plain")))
 
 
+def test_a_staged_change_after_an_earlier_commit_reads_its_own_manuals_directory_and_removed_prose(tmp_path):
+    """The staged change is one subject inside its contribution: a manual an earlier commit touched, the prose
+    that commit removed and the directory row it added are not this change's, while the totals and the books'
+    balance stay the contribution's under its base. The same facts are this change's when it makes them itself;
+    a contribution's first staged change (no commit behind it) has one scope and no second heading."""
+    one = "# 1. Core\n\nAn earlier instruction.\n\nA kept instruction.\n"
+    repo = _owned_body(tmp_path / "body", {"docs/architecture/01-core.md": one,
+                                          "docs/architecture/01-module-directory.md": "# Modules\n"})
+    base = _git(repo, "rev-parse", "HEAD")
+    heading = "Of the staged change alone, since HEAD"
+    # The first staged change of the contribution: one scope.
+    _write(repo, "ouroboros/core.py", 11)
+    _git(repo, "add", "-A")
+    assert heading not in diff_pulse(repo, staged=True)
+    # An earlier commit rewrites the manual, drops a line of it and adds a module with its directory row.
+    _write(repo, "docs/architecture/01-core.md", 1, "# 1. Core\n\nA kept instruction.\n")
+    _write(repo, "docs/architecture/01-module-directory.md", 1, "# Modules\n\n- `ouroboros/early.py`\n")
+    _write(repo, "ouroboros/early.py", 3)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "an earlier commit of this contribution")
+    head = _git(repo, "rev-parse", "HEAD")
+    # This change: one module edited, one added without its directory row.
+    _write(repo, "ouroboros/core.py", 12)
+    _write(repo, "ouroboros/late.py", 3)
+    _git(repo, "add", "-A")
+    pulse = diff_pulse(repo, staged=True)
+    assert f"Diff pulse since canonical/ouroboros merge-base {base[:12]}: files 5," in pulse  # the contribution's totals
+    assert "new files: ouroboros/early.py, ouroboros/late.py" in pulse
+    assert (f"{heading} {head[:12]} (the totals above and the books' balance below are the contribution's):\n"
+            "Owning manuals") in pulse
+    assert ("- ouroboros/core.py: docs/architecture/01-core.md (not in this change), docs/DESIGN.md (not in this "
+            "change)") in pulse
+    assert "Removed governed prose" not in pulse and "An earlier instruction." not in pulse
+    assert ("New runtime modules: ouroboros/late.py; the hand-kept module directory "
+            "`docs/architecture/01-module-directory.md` is not in this change.") in pulse and "early.py;" not in pulse
+    # The same-change rows: this change touches the manual, drops a line of it and adds the directory row.
+    _write(repo, "docs/architecture/01-core.md", 1, "# 1. Core\n")
+    _write(repo, "docs/architecture/01-module-directory.md", 1, "# Modules\n\n- `ouroboros/early.py`\n- `ouroboros/late.py`\n")
+    _git(repo, "add", "-A")
+    pulse = diff_pulse(repo, staged=True)
+    assert "- ouroboros/core.py: docs/architecture/01-core.md (in this change), docs/DESIGN.md (not in this change)" in pulse
+    assert "Removed governed prose: 1 line" in pulse
+    assert "- docs/architecture/01-core.md: A kept instruction." in pulse and "An earlier instruction." not in pulse
+    assert f"`git diff --cached {head[:12]} -- " in pulse
+    assert "New runtime modules: ouroboros/late.py; the hand-kept module directory `docs/architecture/01-module-directory.md` is in this change." in pulse
+
+
 def test_a_change_that_adds_a_runtime_module_says_whether_the_module_directory_is_in_it(tmp_path):
     """The hand-kept module directory beside a new module: the pulse says whether the directory file is in the
     change, as a literal fact about the diff (no veto), names every added module, and says nothing when the change

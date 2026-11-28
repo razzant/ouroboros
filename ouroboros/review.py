@@ -1413,7 +1413,10 @@ def diff_pulse(
     books' balance, which names its own base, speaks of that subject's two sides. With no diff readable
     at all, the touched books' balance stands alone. ``staged`` reads the index (what a commit or a review
     subject holds) for the diff, the module sizes and the books' balance, otherwise the worktree and its
-    untracked files. ``paths`` names the modules and books shown (an edit's files); omitted, every
+    untracked files. The staged change of a contribution that already has commits is one subject inside
+    it: its owning manuals, directory fact and removed prose are read against HEAD under their own heading
+    (``code_shape_facts.contact_notes``), so an earlier commit's manual or deletion is never called this
+    change's, while the totals and the books' balance stay the contribution's and name its base. ``paths`` names the modules and books shown (an edit's files); omitted, every
     changed path is. A shown test source adds the suite's facts (declared items, new test modules,
     ``serial`` marks, recorded test-seconds, its lines); a shown Python source adds the code-shape line
     (``code_shape_facts``: module handles and the calls through them, re-exported names, a test's patched
@@ -1432,23 +1435,32 @@ def diff_pulse(
         return _git_bytes(root, "--no-optional-locks", "diff", *(("--cached",) if staged else ()),
                           "--no-renames", "-z", *options, base)
 
-    for base in ((subject_parent,) if subject_parent else (merge_base, "HEAD") if merge_base else ("HEAD",)):
+    def sides(base: str) -> tuple[dict[str, tuple[int, int]], list[str], set[str]] | None:
         numstat = diff(base, "--numstat")
         status = diff(base, "--name-status") if numstat is not None else None
-        if status is not None:
+        if status is None:
+            return None
+        counts: dict[str, tuple[int, int]] = {}
+        for row in numstat.decode("utf-8", "replace").split("\0"):
+            plus, _, rest = row.partition("\t")
+            minus, _, path = rest.partition("\t")
+            if path:  # a binary file's "-" counts no lines
+                counts[path] = (int(plus) if plus.isdigit() else 0, int(minus) if minus.isdigit() else 0)
+        fields = status.decode("utf-8", "replace").split("\0")  # `<A|D|M|T>\0<path>\0` per changed path
+        states = dict(zip(fields[1::2], fields[0::2]))
+        return (counts, [path for path, state in states.items() if state == "A"],
+                {path for path, state in states.items() if state == "D"})
+
+    for base in ((subject_parent,) if subject_parent else (merge_base, "HEAD") if merge_base else ("HEAD",)):
+        if (read := sides(base)) is not None:
             break
     else:  # nothing to diff against here; the touched books keep whatever balance they have
         return book_balance_note(root, [str(path) for path in paths or ()], staged=staged)
-    changed: dict[str, tuple[int, int]] = {}
-    for row in numstat.decode("utf-8", "replace").split("\0"):
-        plus, _, rest = row.partition("\t")
-        minus, _, path = rest.partition("\t")
-        if path:  # a binary file's "-" counts no lines
-            changed[path] = (int(plus) if plus.isdigit() else 0, int(minus) if minus.isdigit() else 0)
-    fields = status.decode("utf-8", "replace").split("\0")  # `<A|D|M|T>\0<path>\0` per changed path
-    states = dict(zip(fields[1::2], fields[0::2]))
-    new = [path for path, state in states.items() if state == "A"]
-    gone = {path for path, state in states.items() if state == "D"}
+    changed, new, gone = read
+    # The staged change itself, where the contribution already has commits behind it (the gate's own subject).
+    head = ((_git_bytes(root, "--no-optional-locks", "rev-parse", "--verify", "HEAD") or b"").decode().strip()
+            if staged and base == merge_base else "")
+    own = sides(head) if head and head != base else None
     if not staged:
         untracked = _git_bytes(root, "--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z")
         for path in (untracked or b"").decode("utf-8", "replace").split("\0"):
@@ -1469,7 +1481,8 @@ def diff_pulse(
     gated = [path for path in shown if _sizable_module_path(path)] if staged else []
     from ouroboros import code_shape_facts as shapes
 
-    governed = [path for path in changed if shapes.governed_text(path)]  # every changed one: a move between them is quiet
+    # Every changed governed text (a move between them is quiet); the staged change reads its own below.
+    governed = [] if own else [path for path in changed if shapes.governed_text(path)]
     at_base, current = _change_texts(root, base, staged, [*python, *governed, shapes.MANIFEST_PATH], list(
         dict.fromkeys([*rows, *python, *gated, *governed, shapes.MANIFEST_PATH, INVARIANTS])))
     modules: list[tuple[GatedModule, int, int]] = []
@@ -1489,8 +1502,8 @@ def diff_pulse(
     modules.sort(key=lambda row: (row[2] - row[1], -row[0].line_count, row[0].path))
     created = set(new)
     # A side the file has but that was not read is unknown to both readers, never an addition or a deletion.
-    unread, unread_prose = ([path for path in group if at_base[path] is None and path not in created
-                             or current[path] is None and path not in gone] for group in (python, governed))
+    unread = [path for path in python if at_base[path] is None and path not in created
+              or current[path] is None and path not in gone]
     if rows:
         facts, test_sizes = _suite_facts(rows, at_base, current, new, unread)
         suite = f"; {facts}, test module lines: {listed(test_sizes)}"
@@ -1511,18 +1524,27 @@ def diff_pulse(
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
-    # Where the body is touched the host names its manuals (BIBLE P1): owners per file, then the prose that left.
-    owners = shapes.ownership_note(shown, changed, current[shapes.MANIFEST_PATH], current[INVARIANTS],
-                                   base_manifest=at_base[shapes.MANIFEST_PATH], removed=gone)
-    prose = shapes.removed_prose_note(governed, at_base, current, unread=unread_prose, locator=(
-        f"git diff {'--cached ' if staged else ''}{base[:12]} -- {' '.join(governed)}")) if set(governed) & set(shown) else ""
-    # The directory fact follows the shown files like its sibling notes; Git's own rename detection tells a move.
-    modules, moved = [path for path in shown if path in created and shapes.runtime_module(path)], {}
-    if modules and any(shapes.runtime_module(path) for path in gone):
-        pairs = (diff(base, "--name-status", "-M", "--diff-filter=R") or b"").decode("utf-8", "replace").split("\0")
-        moved = dict(zip(pairs[2::3], pairs[1::3]))
-    return "\n".join(part for part in (fact, shape, owners, shapes.directory_note(modules, changed, moved), prose,
-                                       book_balance_note(root, shown, staged=staged), DIFF_PULSE_QUESTION) if part)
+    # Where the body is touched the host names its manuals (BIBLE P1): owners per file, the directory fact (it
+    # follows the shown files like its siblings; Git's own rename detection tells a move), then the prose that left.
+    def contacts(base, changed, created, gone, shown, at_base, current):
+        moved = {}
+        if any(shapes.runtime_module(path) for path in gone) and any(
+                path in created and shapes.runtime_module(path) for path in shown):
+            pairs = (diff(base, "--name-status", "-M", "--diff-filter=R") or b"").decode("utf-8", "replace").split("\0")
+            moved = dict(zip(pairs[2::3], pairs[1::3]))
+        return shapes.contact_notes(shown, changed, created, gone, at_base, current, current[INVARIANTS], moved=moved,
+                                    locator=f"git diff {'--cached ' if staged else ''}{base[:12]} --")
+
+    if own:
+        prose = [path for path in own[0] if shapes.governed_text(path)]
+        notes = contacts(head, own[0], set(own[1]), own[2], list(own[0]) if paths is None else shown, *_change_texts(
+            root, head, staged, [*prose, shapes.MANIFEST_PATH], [*prose, shapes.MANIFEST_PATH, INVARIANTS]))
+        notes = [f"Of the staged change alone, since HEAD {head[:12]} (the totals above and the books' balance below "
+                 "are the contribution's):", *notes] if any(notes) else []
+    else:
+        notes = contacts(base, changed, created, gone, shown, at_base, current)
+    return "\n".join(part for part in (fact, shape, *notes, book_balance_note(root, shown, staged=staged),
+                                       DIFF_PULSE_QUESTION) if part)
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:

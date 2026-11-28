@@ -463,8 +463,9 @@ def test_base_head_subject_reads_an_isolated_checkout_in_the_data_root(tmp_path)
 
 def test_the_pulse_of_a_frozen_range_speaks_of_that_ranges_own_two_sides(tmp_path):
     """A reviewer of B..C reads B..C: the brief's pulse measures from the frozen parent, so a deletion an earlier
-    commit (A..B) made is not this change's removed prose and a manual only A..B touched is not "in this change";
-    the gate's own index subject keeps the contribution base, as the commit gate's pulse does."""
+    commit (A..B) made is not this change's removed prose and a manual only A..B touched is not "in this change".
+    The gate's own index subject keeps the contribution base for its totals, as the commit gate's pulse does, and
+    reads its manuals and removed prose against HEAD: what the earlier commits did is not the staged change's."""
     from ouroboros.tools.review_admission import build_two_part_brief
 
     manifest = '[domains]\nD01 = "Core"\n[references]\nD01 = ["docs/DESIGN.md"]\n[modules]\n"ouroboros/core.py" = "D01"\n'
@@ -495,12 +496,15 @@ def test_the_pulse_of_a_frozen_range_speaks_of_that_ranges_own_two_sides(tmp_pat
     assert f"Diff pulse since the subject's parent {left[:12]}: files 2, lines +2/-0" in brief
     assert "- ouroboros/new_focus.py: docs/DESIGN.md (not in this change)" in brief
     assert "Removed governed prose" not in brief and "approved old instruction" not in brief
-    # The gate's own subject (the index at HEAD) still grows from the contribution base and names it.
+    # The gate's own subject (the index at HEAD) still grows from the contribution base and names it; the prose it
+    # removed is the staged change's own line, never the one an earlier commit of the contribution dropped.
     (repo / "docs/DESIGN.md").write_text("A third instruction.\n", encoding="utf-8")
     _git(repo, "add", "-A")
     gate = build_two_part_brief(freeze_subject(ctx, _index_spec(repo)), seat, goal="Add a focus.")["system"]
     assert f"Diff pulse since canonical/ouroboros merge-base {official[:12]}" in gate
-    assert "- docs/DESIGN.md: An approved old instruction." in gate
+    assert f"Of the staged change alone, since HEAD {right[:12]}" in gate
+    assert "- docs/DESIGN.md: A different instruction." in gate
+    assert "- docs/DESIGN.md: An approved old instruction." not in gate
 
 def test_base_head_requires_an_ancestor_base(tmp_path):
     system = _system_repo(tmp_path)
