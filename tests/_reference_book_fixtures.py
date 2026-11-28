@@ -52,14 +52,17 @@ def _registry(tmp_path: pathlib.Path, *, external: bool):
     return registry
 
 
-def booked(core, root: pathlib.Path, *, headings: int = 150, body: str = "", development_title: str = "Change"):
+def booked(core, root: pathlib.Path, *, headings: int = 150, body: str = "", development_title: str = "Change",
+           readable: bool = True):
     """``core`` with two real chaptered books and the resident Body Map the real renderer gives them
     (``reference_books.body_map``): ``body_map`` whole and ``body_map_parts``, its parts and addresses, which a
     lowered frame shows with the Map's full text one retained read away (``context_layout.body_map_section``).
     The Architecture chapter's authored opening names ``headings`` mechanisms (``Mechanism {i}: its facts.``, each
     with ``body``), so they size the Map and stand only in its whole form; the Development chapter carries
     ``headings`` rules (``## Rule {i}``, each with ``body``), which only the whole handbook holds. The entrypoint's
-    Reference Atlas gives the Map one Atlas row (``DESIGN.md``)."""
+    Reference Atlas gives the Map one Atlas row (``DESIGN.md``). ``readable`` false: the Map as an actor with no
+    ``read_file`` for these addresses carries it, its reader line saying so (and so with no source of its own to
+    point at where no retained text can be read back)."""
     from dataclasses import replace
 
     from ouroboros.reference_books import body_map, compose_book, load_reference_book
@@ -76,7 +79,7 @@ def booked(core, root: pathlib.Path, *, headings: int = 150, body: str = "", dev
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
         (repo / path).write_text(text, encoding="utf-8", newline="\n")  # LF on every OS, as .gitattributes keeps books
     books = tuple(load_reference_book(repo, book_id) for book_id in ("architecture", "development"))
-    view, parts = body_map(*books)
+    view, parts = body_map(*books, readable=readable)
     return replace(core, reference_books=books, body_map=view.text, body_map_parts=parts,
                    development_md=compose_book(books[1]))
 

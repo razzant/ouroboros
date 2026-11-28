@@ -755,6 +755,49 @@ def test_a_required_book_yields_optional_maps_then_the_body_map_and_never_one_th
     assert memory_floor.yield_for_book([body], [], readerless, maps=True) is None
 
 
+@pytest.mark.parametrize("reader", ["retained", "source", "none"])
+def test_the_maps_parts_point_at_what_their_actor_can_read(tmp_path, monkeypatch, reader):
+    """Where the window takes the Map to its parts, the pointer beside them is one this actor can follow. An actor
+    that reads retained captures back gets the retained full text. One that reads the shipped manuals but no
+    retained capture (a Presence whose ceiling grants ``read_file`` and no artifact-store read) is pointed at the
+    Map's own source in the system repository, and nothing is retained for it. One with no reader at all keeps the
+    Map whole: no pointer it could follow exists. The same three for a refusal's Map rung (``lowered_maps``)."""
+    from ouroboros.context_layout import body_map_section
+    from ouroboros.reference_books import BODY_MAP_NO_READER, BODY_MAP_READER
+    from ouroboros.section_floor import section_views
+
+    line = BODY_MAP_NO_READER if reader == "none" else BODY_MAP_READER
+    whole = "## Body map\n\n" + "What this part gives me and how I reach it. " * 400 + "\n\n" + line
+    body = body_map_section(whole, "## Body map (parts and addresses)\n\n- Core: `docs/architecture/core.md`", steppable=True)
+    source = "read_file(root='system_repo', path='docs/ARCHITECTURE.md')"
+    assert body.reader == ("" if reader == "none" else source)
+    retained = []
+    monkeypatch.setattr(memory_floor, "retain_section", lambda part, **_kw: retained.append(part.section_id) or {
+        "section_id": part.section_id, "source_ref": {"path": "kept.md"}, "reader": "read_file(root='artifact_store', path='kept.md')"})
+    root = "store" if reader == "retained" else ""
+    core = SimpleNamespace(section_root=root, section_task_id="t")
+    price = lambda forms: memory_floor.view_tokens(forms.get("body_map", body.full_text)) + 1_000  # noqa: E731
+    over = price({}) + RESERVE - 500  # the physical window is 500 tokens short of the request beside the whole Map
+    marker = {"retained": "omitted for the physical window; retained full text: read_file(root='artifact_store', path='kept.md').]",
+              "source": f"omitted for the physical window; its source: {source}.]"}
+    for stepped in (memory_floor._host_steps([body], [], measure=price, window=over, reserve=RESERVE, ratio=1.0, saving=0,
+                                             root=root, task_id="t")[0],
+                    memory_floor.lowered_maps([body], core, [])):
+        if reader == "none":
+            assert stepped == [] and section_views([body], stepped) == {}
+            continue
+        [row] = stepped
+        assert row["section_id"] == "body_map" and "start_room" not in row and row["tokens_saved"] > 0
+        text = section_views([body], stepped)["body_map"]
+        assert text.startswith("## Body map (parts and addresses)") and text.endswith(marker[reader])
+        assert (row["source_ref"] is None, row["reader"] == source) == ((True, True) if reader == "source" else (False, False))
+    assert retained == (["body_map", "body_map"] if reader == "retained" else [])
+    # A window that holds the request leaves the Map whole for every one of them.
+    held = memory_floor._host_steps([body], [], measure=price, window=price({}) + RESERVE, reserve=RESERVE, ratio=1.0,
+                                    saving=0, root=root, task_id="t")[0]
+    assert held == []
+
+
 def test_an_unsent_and_a_sent_reprojection_keep_the_whole_body_map_while_the_window_holds_it(tmp_path):
     """Unsent start reprojection (e.g. first text rebind before any send) keeps the whole Body Map of a new Low start
     while tellings fit the physical frame, independent of assistant/user message roles; an already-sent view

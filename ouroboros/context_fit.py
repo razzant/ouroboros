@@ -963,6 +963,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     form = {m: "low" if core.delegated_focus or m == "nano" else m for m in floor.MODES}  # held notes and receipts
     shape = {m: "low" if m == "nano" else m for m in floor.MODES}  # governance: the Body Map steps only below Max
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
+    levels = snapshot.spec.work_room_levels if snapshot else work_room_levels
     held_heads = any(isinstance(part, HeldNoteSection) for part in core.dynamic_sections)
     cold_resume, saved = core.held_note_resume is not None, core.held_note_resume or {}
     saved_rows = {row["section_id"]: row for row in saved.get("receipts", ())}
@@ -1023,7 +1024,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             # The Max room as the receipt settles it (``with_max_room`` decides its cause), so the floor note of a
             # start memory lowered names what holds the room.
             lowered_from=preferred if selected != preferred else None, start_work=start_work,
-            max_room=floor.with_max_room({}, room_fact, selected).get("max_room"),
+            max_room=floor.with_max_room({}, room_fact, selected).get("max_room") or first_contact,
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             stated_window_tokens=stated.get(selected),  # the note names the window as stated, never the admitted frame
             boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed,
@@ -1031,7 +1032,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     stated: Dict[str, Optional[int]] = {}  # each walked mode's window in the start's frame (``frame`` fills it)
 
-    map_parts = partial(floor.lowered_maps, sections["low"], core, retain=retain)  # a lowered frame: the Map at its parts
+    map_parts = partial(floor.lowered_maps, sections["low"], core, retain=retain)  # the Map at its parts and addresses
+    # A start walked in Low with a refusal's rung is a refused first send's frame (``_prefer_first_contact``): its note says so.
+    first_contact = floor.FIRST_CONTACT_ROOM if books_rung and kept is None and mode != preferred else None
     def books_save(level, window, boundary):
         # Only the frame changes: the Map at its parts. A new memory/host concession may not disguise a switch that costs tokens.
         def price(selected, maps):
@@ -1047,8 +1050,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     def telling_fits(selected, sent, window, boundary, reserve, forms, start_room=kept is None, budget=None):
         shown = view(selected, sent, forms, window, boundary, level=floor.telling_level(snapshot)) if snapshot else floor.NO_VIEW
-        work = (math.ceil(min(boundary or window, window) / context_budget.RECLAIM_LOW_WATER_DIVISOR)
-                * (snapshot.spec.work_room_levels if snapshot else work_room_levels) if start_room else 0)
+        work = math.ceil(min(boundary or window, window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * levels if start_room else 0
         price = measure(selected, sent, forms, shown.story_chars, shown.room_chars)
         return math.ceil(price * ratio) + reserve + work <= window and (budget is None or price <= budget)
 
@@ -1065,7 +1067,6 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                 available = tuple(part for part in available if part.section_id != "knowledge_index")
         stated[selected] = record.total_equivalent if record and record.usable is not None else None
         boundary = record.boundary if record else None
-        levels = snapshot.spec.work_room_levels if snapshot else work_room_levels
         host_allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=0, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
@@ -1113,9 +1114,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     def work():
-        target = context_budget.context_mode_limits(mode, preferred, output_reserve)[0]
-        return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
-            snapshot.spec.work_room_levels if snapshot else work_room_levels)
+        return math.ceil(min(boundary or window, limits(mode)[0] or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * levels
 
     if (kept is None or start_work) and mode == "max":
         forms = section_views(sections[mode], receipts)
@@ -1283,9 +1282,11 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
     required handbook and its note are no memory's debt, though every physical comparison counts them. Where my
     human's Max at its folded tellings still stands above a refused Max size that a Body-Map-at-its-parts send
     followed, the start is Low, temporarily, for the window: the same tellings, the Map at its parts and addresses,
-    every tool kept (BIBLE P1: the Map steps down before my memory goes below a telling). It is taken only below
-    every size this wire refused. A fold must also save the ordinary view's reclaim margin. The note names the
-    planned connection, even if a later route keeps the shown view. Unchanged returns ``normal``."""
+    every tool kept (BIBLE P1: the Map steps down before my memory goes below a telling). That frame is walked as
+    Low, so its facts, its floor note and a later selection in it are Low's and name the refusal, never a window that
+    did not fit. It is taken only below every size this wire refused. A fold must also save the ordinary view's
+    reclaim margin. The note names the planned connection, even if a later route keeps the shown view. Unchanged
+    returns ``normal``."""
     from ouroboros.context_measurement import BOOK_NOTE_KEY
     from ouroboros.context_window import text_chat_rows
     from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
@@ -1335,8 +1336,8 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
     selected, size, folds = contents, whole, False
     lowers = initial == preferred == "max" and bool(before_maps) and not core.delegated_focus  # the Map's rung is proven
     if (saving := ordinary_whole - goal) > 0:
-        try:  # with the rung in reach the walk also prepares its Low frame: the same level, the Map at its parts
-            folded, mode = forms(start_saving=saving, books_rung=lowers)
+        try:
+            folded, mode = forms(start_saving=saving)
         except MinimumViewUnfit:  # the optional fold and its own receipt must not refuse an otherwise legal start
             folded, mode = normal
         if mode == initial and folded[mode][1].get("floor", {}).get("runs") != contents[mode][1].get("floor", {}).get("runs"):
@@ -1344,8 +1345,8 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
             if 0 < (smaller := raw(candidate, mode)) and ordinary(smaller, candidate, mode) <= reclaim:
                 selected, size, folds = candidate, smaller, True
     if lowers and ordinary(size, selected, initial) > safe(before_maps):
-        try:
-            lowered = noted(selected if folds else forms(books_rung=True)[0], "low", maps=True)
+        try:  # the Low frame's own walk: the same fold, the Map at its parts
+            lowered = noted(forms(select="low", books_rung=True, **({"start_saving": saving} if folds else {}))[0], "low", maps=True)
         except MinimumViewUnfit:
             lowered = None
         if lowered and 0 < raw(lowered, "low") < min(size, any_form):
@@ -1528,8 +1529,8 @@ def build_context_fit_plan(
 
     def started(source, mode: str) -> Tuple[str, str]:
         facts = source[mode][1]
-        # A further advisory fold in a physically lowered view did not lower it.
-        physical = start_cause(facts) if mode != preferred else ""
+        # A further advisory fold in a physically lowered view did not lower it; a refused first send's Low is its own cause.
+        physical = start_cause(facts) if mode != preferred and facts.get("first_contact_preference") != "maps" else ""
         return mode, physical or FIRST_CONTACT_START.get(facts.get("first_contact_preference"), "") or (
             "unmeasured" if mode == "max" and not known_window else "")
 

@@ -444,12 +444,19 @@ _LOWERED_WORDS = {"memory": "The body map, my memory at the gate's level and the
                             "host's sections and the assignment) and the work's room need")}
 
 
+FIRST_CONTACT_ROOM = {"cause": "first_contact"}  # a Max room no window lowered: a refused first send did
+
+
 def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]] = None) -> str:
-    """Why a start left the owner's mode, in measured parts: facts only, never an instruction or a possibility."""
+    """Why a start left the owner's mode, in measured parts: facts only, never an instruction or a possibility; the
+    window only where it is the cause (a Low a refused first send took names that refusal: ``FIRST_CONTACT_ROOM``)."""
     if mode != "low":
         return (f"The window cannot hold {lowered_from.capitalize()} with even the shortest view of my memory; "
                 f"this task runs in {mode.capitalize()}.")
     head = f"{TEMPORARY_LOW}; my human's mode is {lowered_from.capitalize()}."
+    if fact and fact.get("cause") == FIRST_CONTACT_ROOM["cause"]:
+        return (f"{head} An earlier, larger request was refused on this connection and the refusal stated no window: "
+                "this first send carries the body map at its parts and addresses and my memory as that mode holds it.")
     if not fact:
         return f"{head} The body map, my memory in its shortest tellings and the work's room did not fit the window."
     cause, need = lowered_need(fact)
@@ -1191,7 +1198,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
             return False
         return budget_mode if cuts - untold_forms(mapped.snapshot, mapped.level) else True
 
-    if measure is None or not window or not root or not task_id:
+    rooted = bool(root and task_id)  # this actor reads a retained text back; else only the Map's own source reader
+    if measure is None or not window or not rooted:
         if optional_fits is not None:  # the only reference forms reachable without a measured window or a reader
             addressed = section_views(sections, receipts)
             for part in sections:
@@ -1199,12 +1207,13 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
                     if (whole := keeps(part, addressed)) is not True:
                         saving = max(0, saving - _address_optional(part, receipts, addressed, root=root, task_id=task_id,
                                                                    retain=retain, start_room=whole or False))
-        return finish(saving)
+        if measure is None or not window:
+            return finish(saving)
     addressed = section_views(sections, receipts)
     candidates = [part for part in sections if part.section_id not in addressed
                   and part.section_id not in PROTECTED and not isinstance(part, HeldNoteSection)
-                  and part.operative_view is not None
-                  and len(part.operative_view) < len(part.full_text)]
+                  and part.operative_view is not None and len(part.operative_view) < len(part.full_text)
+                  and (rooted or part.section_id in BOOK_MAPS and part.reader)]
     if not candidates:
         return finish(saving)
     # No step reaches a shorter form (a pointer follows the operative view) and memory only adds to a request.
@@ -1246,31 +1255,22 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         test = maps_told if mapped else told
         if telling and (test(addressed) if test else window_bound is None or current <= window_bound):
             continue  # the window holds it beside my shortest telling and the Body Map: neither yields to it
-        try:
-            row = (retain or retain_section)(part, root=root, task_id=task_id)
-        except (OSError, ValueError):
-            log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
-            continue
         start_room = ((not spared and budget_mode or True) if soft and fits else False) \
             if not telling else False  # spared: the window's own room; told: the window's fact
-        short = relocated_text(part, row["reader"], start_room=start_room)
-        saved = view_tokens(part.full_text) - view_tokens(short)
-        if saved <= 0:
-            continue
-        addressed[part.section_id] = short
-        receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
-        current, fits = measure(addressed), None
+        if _address_optional(part, receipts, addressed, root=root, task_id=task_id, retain=retain, start_room=start_room):
+            current, fits = measure(addressed), None
     return finish(max(0, saving - (initial - current)), outline_left)
 
 
 def _address_optional(part, receipts, addressed, *, root, task_id, retain=None, start_room=False):
-    """Take one optional attachment (or the Body Map) to its shorter view, its full text retained behind a
-    pointer; for an actor with no reader (``root`` empty) only its heading stays, named unavailable to this actor
-    (``relocated_text``). ``start_room``: the mode whose own budget took it, as every host step it paid carries it;
-    else the window's. Returns tokens saved."""
+    """Take one host section to its shorter view, its full text retained behind a pointer; for an actor with no
+    reader of a retained text (``root`` empty) the Body Map is pointed at its own source (``HostSection.reader``) and
+    an optional attachment keeps only its heading, named unavailable to this actor (``relocated_text``).
+    ``start_room``: what the step paid when not the physical window (``_host_steps``). Returns tokens saved; 0 where
+    the capture failed (the section stays whole) or the shorter view saves nothing."""
     if part.operative_view is None or len(part.operative_view) >= len(part.full_text):
         return 0
-    row = {"section_id": part.section_id, "source_ref": None, "reader": ""}
+    row = {"section_id": part.section_id, "source_ref": None, "reader": part.reader if part.section_id in BOOK_MAPS else ""}
     if root and task_id:
         try:
             row = (retain or retain_section)(part, root=root, task_id=task_id)
@@ -1313,13 +1313,13 @@ def lowered_maps(sections, core, receipts, *, retain=None):
     """``receipts`` of a frame the window lowered from my human's Max, the Body Map at its parts and addresses beside
     its retained full text: the step that comes before any of my memory goes below a telling (BIBLE P1), and all the
     ``books`` rung of a refusal still has to give. Unchanged where the Map has no shorter form here or this actor has
-    no reader for its full text; a failed capture keeps the Map whole."""
+    neither a reader of a retained text nor the Map's own source reader; a failed capture keeps the Map whole."""
     root, task_id = core.section_root, core.section_task_id
     stepped, addressed = list(receipts), section_views(sections, receipts)
-    for name in BOOK_MAPS if root and task_id else ():
+    for name in BOOK_MAPS:
         part = next((part for part in sections if part.section_id == name), None)
-        if part is not None and name not in addressed:
-            _address_optional(part, stepped, addressed, root=root, task_id=task_id, retain=retain)
+        if part is not None and name not in addressed and (root and task_id or part.reader):
+            _address_optional(part, stepped, addressed, root=root if task_id else "", task_id=task_id, retain=retain)
     return stepped
 
 

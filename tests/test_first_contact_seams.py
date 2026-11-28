@@ -634,9 +634,10 @@ def test_a_maps_rung_keeps_the_folded_tellings_and_says_why():
     assert folded_data != ordinary_data
     normal = (_contents(800_000, room=held, room_data=ordinary_data), "max")
     rungs = []
-    chosen, _ = _prefer(normal, (90_000, 120_000, 90_000), story_after=200_000, rungs=rungs)
+    chosen, asked = _prefer(normal, (90_000, 120_000, 90_000), story_after=200_000, rungs=rungs)
     assert chosen[1] == "low" and _story(chosen) == 200_000  # the folded tellings, not every story body again
-    assert rungs == [{"books_rung": True}]  # the one walk prepared the Low frame with the Map at its parts
+    # The fold's walk in Max, then the Low frame's own walk with that fold and the Map at its parts: its facts are Low's.
+    assert rungs == [{}, {"select": "low", "books_rung": True}] and asked[0] == asked[1]
     facts = chosen[0]["low"][1]
     assert facts["first_contact_preference"] == "maps" and facts["max_room"]["cause"] == "first_contact"
     assert chosen[0]["low"][2] == folded_data and chosen[0]["low"][2].startswith(PROGRAM_HISTORY_HEAD)
@@ -665,7 +666,8 @@ def test_the_maps_rung_is_taken_only_below_every_refused_size_and_for_an_integra
     assert chosen[1] == ("low" if taken or case == "known-window-low" else "max") and asked
     assert (chosen[0][chosen[1]][1]["first_contact_preference"] == "maps") is taken
     assert _story(chosen) == 200_000  # the same folded tellings either way
-    assert rungs[0] == {"books_rung": case != "delegated" and case != "known-window-low"}
+    # The Low frame is walked, as Low, only where the rung is in reach (an integrating Max with a proven parts send).
+    assert rungs == [{}] + [{"select": "low", "books_rung": True}] * (case in ("taken", "parts-send-refused"))
 
 
 def test_a_fold_below_the_material_margin_does_not_replace_the_ordinary_view():
@@ -766,7 +768,8 @@ def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False, registry=Fals
     tellings and a Body-Map-at-its-parts retry followed and was answered (``before maps``): no fold gets under it, the
     Map's step does, so the start is Low, temporarily, for the window, the Map at its parts, the same tellings (``told``:
     that Max at its tellings). ``map_form`` takes that step away from the capture (``"no-parts"``: no parts form;
-    ``"no-reader"``: no store to retain its full text in): then the start stays Max with my tellings folded. Fixture
+    ``"no-reader"``: no store to retain its full text in and no reader of its own source): then the start stays Max
+    with my tellings folded. Fixture
     input only: each room's page carries the telling a hint may fold it to."""
     from ouroboros import context, dialogue_store
     from ouroboros import context_fit as cf
@@ -819,7 +822,7 @@ def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False, registry=Fals
             return core
         # This world's source tree is one legacy file; the rung needs chaptered books: a Map with its parts form,
         # as ``reference_books.body_map`` renders it, and the capture's own store as the reader for its full text.
-        core = booked(core, tmp_path / "chaptered", body="Its mechanism and why. " * 4)
+        core = booked(core, tmp_path / "chaptered", body="Its mechanism and why. " * 4, readable=map_form != "no-reader")
         assert core.body_map_parts and core.section_root
         return replace(core, **{None: {}, "no-parts": {"body_map_parts": ""}, "no-reader": {"section_root": ""}}[map_form])
 
@@ -909,6 +912,19 @@ def test_a_recorded_refusal_lowers_a_first_send_only_where_the_map_can_step(seam
     shown = "\n\n".join(block["text"] for block in json.loads(plan.projection(mode).system_content_json))
     assert ("## Body map (parts and addresses)" in shown) is (map_form is None)
     assert ("## Body map\n" in shown) is (map_form is not None)
+    if map_form is None:  # the lowered frame is Low in its own facts and names the refusal, never a window that did not fit
+        from ouroboros import memory_floor
+
+        floor = plan.projection("low").memory_facts["floor"]
+        assert floor["mode"] == "low" and floor["mode_switch"] == {"from": "max", "to": "low"}
+        why = ("Low, temporarily, for the window; my human's mode is Max. An earlier, larger request was refused on "
+               "this connection and the refusal stated no window")
+        assert why in shown and "did not fit the window" not in shown and "Max cuts" not in shown
+        # A later selection in that view (the mind's own fold or restore) still says why it is Low, the Map as it stood.
+        again = memory_floor.select_view(plan, "low", []).projection("low")
+        text = "\n\n".join(block["text"] for block in json.loads(again.system_content_json))
+        assert why in text and "## Body map (parts and addresses)" in text and "did not fit the window" not in text
+        assert again.memory_facts["first_contact_preference"] == "maps" and again.memory_facts["floor"]["mode"] == "low"
 
 
 @pytest.mark.parametrize("early_key,late_key", [("a", None), ("b", "a"), ("a", "b")],

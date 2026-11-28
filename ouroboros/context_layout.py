@@ -379,6 +379,9 @@ def _packet_book_index(book: ReferenceBook, *, inline: str = "") -> str:
     return "\n".join(rows)
 
 
+BODY_MAP_SOURCE = "read_file(root='system_repo', path={path!r})"  # the pointers' own notation (``section_floor._reader``)
+
+
 def body_map_section(body_map: str, parts: str = "", *, steppable: bool) -> str:
     """The resident Body Map as the governance block carries it (BIBLE P1).
 
@@ -386,14 +389,17 @@ def body_map_section(body_map: str, parts: str = "", *, steppable: bool) -> str:
     lowered, and the owner's own Low or Nano, carry the same bytes as a host section whose operative view is the
     Map's parts and addresses, which only a physical window takes (``memory_floor.BOOK_MAPS``): never a mode's
     target, a start's desired room or a requested saving. Without ``parts`` (a legacy single-file revision)
-    there is no shorter form.
+    there is no shorter form. A Map that names its reader carries its own source too (the Architecture
+    entrypoint, from which it is rendered): where an actor cannot read a retained text back, the parts point there.
     """
+    from ouroboros.reference_books import BODY_MAP_READER, BOOK_ENTRYPOINTS
     from ouroboros.section_floor import HostSection, report_text  # section_floor reads TIER0_ALWAYS_FULL from here
 
     if not body_map.strip():
         return ""
     if steppable and parts.strip():
-        return HostSection("body_map", body_map, parts)
+        return HostSection("body_map", body_map, parts, BODY_MAP_SOURCE.format(
+            path=BOOK_ENTRYPOINTS["architecture"]) if BODY_MAP_READER in body_map else "")
     return report_text(body_map, "body_map")
 
 

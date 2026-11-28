@@ -219,6 +219,13 @@ def test_a_presence_ceiling_that_grants_file_reading_follows_the_maps_addresses_
     assert (back.status == "ok") is (ceiling in ("no-ceiling", "retained-reader")), back.text[:200]
     assert (core.section_root == str(env.drive_root)) is (back.status == "ok")
     assert back.status == "ok" or (not core.section_root and PRESENCE_RESOURCE_BLOCKED in back.text) or not readable
+    # Where the window takes the Map to its parts, the pointer is this actor's own: the retained text where it reads
+    # one back, else the Map's source in the system repository (which its ceiling opens), else none at all.
+    from ouroboros.context_fit import _governance_blocks
+
+    [section] = [part for part in _governance_blocks(env, core, mode="low")[0] if getattr(part, "section_id", "") == "body_map"]
+    source = "read_file(root='system_repo', path='docs/ARCHITECTURE.md')"
+    assert section.reader == (source if readable else "")  # ``test_section_floor`` walks the step with each reader
     promise = 'read_file(root="system_repo"'
     for form in (core.body_map, core.body_map_parts):
         assert (promise in form) is readable and (reference_books.BODY_MAP_NO_READER in form) is not readable, form

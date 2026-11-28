@@ -938,8 +938,8 @@ def test_a_just_chosen_body_pays_last_and_only_what_a_providers_refusal_left(mon
 
 def _books_core(tmp_path, form="parts"):
     """A Max core whose Body Map Max holds whole (``_reference_book_fixtures.booked``: the real renderer's Map and its
-    parts form) beside a reader for its full text; ``form`` takes the step away: no parts form, or no store to retain
-    the full text in."""
+    parts form) beside a reader for its full text; ``form`` takes the step away: no parts form, or an actor with no
+    reader at all (no store to retain the full text in, and no ``read_file`` for the Map's own source)."""
     from ouroboros import context_fit as cf, memory_view as mv
     from tests import _memory_view_synthetic as syn
     from tests._reference_book_fixtures import booked
@@ -947,7 +947,7 @@ def _books_core(tmp_path, form="parts"):
     snapshot = syn.snapshot(story=syn.pages(2, 200), room_facts=syn.room())
     core = booked(cf.ContextCore("Core", "", "", "", "", "", '"Assignment"', memory_view_json=mv.snapshot_json(snapshot),
                                  section_root=str(tmp_path / "sections"), section_task_id="books01"),
-                  tmp_path, body="Whole map material. " * 40)
+                  tmp_path, body="Whole map material. " * 40, readable=form != "no-reader")
     return replace(core, **{"parts": {}, "no-parts": {"body_map_parts": ""}, "no-reader": {"section_root": ""}}[form])
 
 
