@@ -160,11 +160,11 @@ def task_gist_line(task, room_id):
     return f"[{gist_address(gist, (room_id,))}; task {task['task']}] — summary: «{gist['summary']}»"
 
 
-def task_gists_before_work_lines(room, gone):
-    """F1 counts host facts; a work's telling stays here until its work line takes it."""
+def task_gists_before_work_lines(room, gone, listed=None):
+    """F1 counts host facts; a work's telling stays here until its work line takes it. ``listed``: the room's works."""
     if gone.get("F7a"):
         return []
-    waiting = {key for key, _rows in works(room) if not any("work:" + key + suffix in gone.get("F2", ())
+    waiting = {key for key, _rows in (works(room) if listed is None else listed) if not any("work:" + key + suffix in gone.get("F2", ())
                                                           for suffix in (":progress", ":final"))}
     return [t for t in room.get("lane2", ()) if t.get("gist") and t.get("task") in waiting
             and t["first"] in gone.get("F1", ())]
@@ -204,18 +204,33 @@ def work_line(rows):
             f"«{last['gist']['summary']}»; {len(rows)} replies, {sum(r['chars'] for r in rows)} chars")
 
 
-def folded_work_rows(room, gone):
-    """Reply addresses replaced by a work line, and those lines at their work's last reply."""
+def snapshot_works(snapshot):
+    """``works`` of a snapshot's room, listed once per snapshot (a non-field attribute, as the floor's other prices)."""
+    if "_room_works" not in snapshot.__dict__:
+        snapshot.__dict__["_room_works"] = works(snapshot.room or {})
+    return snapshot.__dict__["_room_works"]
+
+
+def taken_works(listed, gone):
+    """``(key, rows, taken, final)`` of each listed work ``gone`` folds: every reply under its final line, else its
+    intermediate unprotected replies under its progress line; a work with nothing taken folds nothing."""
     selected = set(gone.get("F2", ()))
-    hidden, lines = set(), {}
-    for key, rows in works(room):
-        if "work:" + key + ":final" in selected:
+    for key, rows in listed:
+        final = "work:" + key + ":final" in selected
+        if final:
             taken = rows
         elif "work:" + key + ":progress" in selected:
             taken = [r for r in rows[:-1] if not r.get("protected_reply")]
         else:
             continue
         if taken:
-            hidden.update(row["address"] for row in taken)
-            lines[rows[-1]["address"]] = work_line(taken)
+            yield key, rows, taken, final
+
+
+def folded_work_rows(room, gone, listed=None):
+    """Reply addresses replaced by a work line, and those lines at their work's last reply. ``listed``: the room's works."""
+    hidden, lines = set(), {}
+    for _key, rows, taken, _final in taken_works(works(room) if listed is None else listed, gone):
+        hidden.update(row["address"] for row in taken)
+        lines[rows[-1]["address"]] = work_line(taken)
     return hidden, lines

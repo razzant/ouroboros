@@ -1258,18 +1258,21 @@ def _notes_line(notes: List[Dict[str, Any]]) -> str:
             f"ids: {', '.join(note['id'] for note in notes)} (memory_read(node_id=…))")
 
 
-def _room_note_lines(notes: List[Dict[str, Any]], gone: Mapping[str, Any], part=_rendered) -> List[str]:
+def _room_note_lines(notes: List[Dict[str, Any]], gone: Mapping[str, Any], part=_rendered, put=None) -> List[str]:
+    """This room's unsealed notes; ``put``: each run goes through it instead (``_room_runs``), keyed by what it reads."""
+    lines: List[str] = []
+    put = put or (lambda _key, make, *how: lines.extend(part(make(), *how)))
     addressed = set(gone.get('F8', ()))
-    aggregate = [note for note in notes if note['id'] in addressed] if gone.get('F8a') else []
-    lines = []
-    for note in notes:
+    members = [n for n, note in enumerate(notes) if note['id'] in addressed] if gone.get('F8a') else []
+    aggregate = [notes[n] for n in members]
+    for n, note in enumerate(notes):
         if aggregate and note is aggregate[0]:
-            lines += part([_notes_line(aggregate)], "notes", aggregate, "count")
+            put(("note list", tuple(members)), lambda: [_notes_line(aggregate)], "notes", aggregate, "count")
         if note['id'] not in addressed:
-            lines += part(_note_lines([note]), "note", [note])
+            put(("note", n, "whole"), lambda: _note_lines([note]), "note", [note])
         elif not aggregate:
-            lines += part([_note_pointer(note)], "note", [note],
-                          "lead" if "lead_rule" in note else "opening")
+            put(("note", n, "label"), lambda: [_note_pointer(note)], "note", [note],
+                "lead" if "lead_rule" in note else "opening")
     return lines
 
 
@@ -1284,90 +1287,132 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]], part=_ren
     root's sealed rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes, and last
     the standing facts that change with every row (so the room's earlier bytes stay a reusable prefix). The heading
     names the chat id its rows read in, which a ``row:`` address need not carry (``memory_view_work.row_reader``)."""
-    from ouroboros.owner_words import _FRAMES, _HEADINGS
-    from ouroboros.memory_view_work import folded_work_rows, task_line, works, task_gist_line, task_gists_before_work_lines, row_reader
+    lines: List[str] = []
+    _room_runs(room, gone, lambda _key, make, *how: lines.extend(part(make(), *how)), lambda: len(lines))
+    return "\n".join(lines)
 
+
+def room_block_chars(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> int:
+    """``json_chars(_room_text(snapshot.room, gone))`` from its runs (``_room_runs``): each run's escaped characters and
+    lines are taken once per key on this snapshot, and lines join by a newline, two escaped characters (the escape is
+    per character). A new level so prices only the runs whose form it changed; delivery still draws the room whole."""
+    from ouroboros.memory_view_work import snapshot_works
+
+    runs, total = snapshot.__dict__.setdefault("_room_runs", {}), [0, 0]
+
+    def put(key, make, *_how):
+        if key not in runs:
+            counted("view_pieces", key=(id(snapshot), ("room run", key)))
+            drawn = make()
+            runs[key] = sum(map(json_chars, drawn)), len(drawn)
+        total[0], total[1] = total[0] + runs[key][0], total[1] + runs[key][1]
+    _room_runs(snapshot.room, gone, put, lambda: total[1], snapshot_works(snapshot))
+    return total[0] + 2 * (total[1] - 1)
+
+
+def _room_runs(room: Mapping[str, Any], gone: Mapping[str, Any], put: Callable[..., None], drawn: Callable[[], int],
+               works: Optional[List[Any]] = None) -> None:
+    """The room block's runs of lines, in order, each through ``put(key, make, kind, sources, form)``: ``make()`` draws
+    the run and ``key`` names it (its source by position in the captured room) with every fact of ``gone`` ``make``
+    reads, so equal keys draw equal lines on one snapshot. ``drawn()``: the lines so far. ``works``: the room's works."""
+    from ouroboros.owner_words import _FRAMES, _HEADINGS
+    from ouroboros.memory_view_work import (task_line, task_gist_line, task_gists_before_work_lines, row_reader,
+                                            taken_works, work_line, works as works_of)
+
+    works = works_of(room) if works is None else works
     retold, mine, people, facts = (set(gone.get(step, ())) for step in ("F4", "F2", "F7", "F1"))
+    owners = set(gone.get("F7", ()))
     people |= set(gone.get("F7p", ()))
     bare = {ident[5:] for ident in mine | people if ident.startswith("bare:")}
     mine |= {ident[5:] for ident in mine if ident.startswith("bare:")}
     people |= {ident[5:] for ident in people if ident.startswith("bare:")}
-    lines = part([f"{_room_heading(room)} — head {room['head']}"])
+    put(("heading",), lambda: [f"{_room_heading(room)} — head {room['head']}"])
     for moved, heading in ((False, "### Retold before the update (helper retelling, not lived)"),
                            (True, "### Transferred memory (author and transfer named per record)")):
         if items := [item for item in room["legacy"] if item.get("transfer", False) is moved]:
-            lines += part(["", heading])
-            for item in items:
-                lines += part([_retold(item, item["id"] in retold)], "room_record", [item],
-                              "address" if item["id"] in retold else "whole")
+            put(("legacy", moved), lambda: ["", heading])
+            for n, item in enumerate(items):
+                short = item["id"] in retold
+                put(("legacy", moved, n, short), lambda: [_retold(item, short)], "room_record", [item],
+                    "address" if short else "whole")
     if room["under_parts"]:
-        lines += part(["", "### Pages under my parts" if all(i["part"] for i in room["under_parts"])
-                      else "### Pages of this room"])
-        for item in room["under_parts"]:
+        put(("under",), lambda: ["", "### Pages under my parts" if all(i["part"] for i in room["under_parts"])
+                                 else "### Pages of this room"])
+        for n, item in enumerate(room["under_parts"]):
             short = item["id"] in retold or item.get("standing", False)
-            lines += part([_retold(item, short)], "room_record", [item], "address" if short else "whole")
+            put(("under", n, short), lambda: [_retold(item, short)], "room_record", [item], "address" if short else "whole")
     if room.get("told"):
-        lines += part(["", "### Records of this room my accounts tell"])
-        for item in room["told"]:
-            lines += part([_told_here_line(item)], "told_records", [item], "count")
+        put(("told",), lambda: ["", "### Records of this room my accounts tell"])
+        for n, item in enumerate(room["told"]):
+            put(("told", n), lambda: [_told_here_line(item)], "told_records", [item], "count")
     if room["origins"]:
-        lines += part(["", "### Words that started this work (retention-proof)"])
-        for item in room["origins"]:
-            lines += part([f"[{item['ts'] or 'time not recorded'}; owner; {item['ref']}] " + _indented(item["text"]).lstrip(),
-                           *item.get("host_lines", ())], "origin", [item])  # the host's lines stand apart from the words
+        put(("origins",), lambda: ["", "### Words that started this work (retention-proof)"])
+        for n, item in enumerate(room["origins"]):
+            put(("origins", n), lambda: [f"[{item['ts'] or 'time not recorded'}; owner; {item['ref']}] "
+                                         + _indented(item["text"]).lstrip(), *item.get("host_lines", ())],
+                "origin", [item])  # the host's lines stand apart from the words
     if room.get("origin_gaps"):
-        lines += part([f"[Host fact: {gap}]" for gap in room["origin_gaps"]])
+        put(("origin gaps",), lambda: [f"[Host fact: {gap}]" for gap in room["origin_gaps"]])
     if room.get("project_words"):  # a project root: its human's rows that left the open conversation, whole and dated
-        lines += part(["", _HEADINGS["root"], _FRAMES["root"]])
+        put(("project words",), lambda: ["", _HEADINGS["root"], _FRAMES["root"]])
         for index, item in enumerate(room["project_words"]):  # same blank-line join; a gap has no address
             short = item.get("address") in people
-            lines += part(([""] if index else []) + [item["short"] if short else item["line"]],
-                          "project_words", [item], "address" if short else "whole")
+            put(("project words", index, short), lambda: ([""] if index else []) + [item["short"] if short else item["line"]],
+                "project_words", [item], "address" if short else "whole")
     if room["notes"]:
-        lines += part(["", "### My notes not yet sealed"]) + _room_note_lines(room["notes"], gone, part=part)
+        put(("notes",), lambda: ["", "### My notes not yet sealed"])
+        _room_note_lines(room["notes"], gone, put=put)
     if room["lane1"]:
-        work_rows, work_lines = folded_work_rows(room, gone)
+        folds = {rows[-1]["address"]: (key, final, taken) for key, rows, taken, final in taken_works(works, gone)}
+        work_rows = {row["address"] for _key, _final, taken in folds.values() for row in taken}
         addressed = mine | people | work_rows
-        aggregate = [item for item in room['lane1'] if item['address'] in addressed
-                     and not item.get('immune')] if gone.get('F7a') else []
+        members = [n for n, item in enumerate(room['lane1']) if item['address'] in addressed
+                   and not item.get('immune')] if gone.get('F7a') else []
+        aggregate = [room['lane1'][n] for n in members]
         grouped = {item['address'] for item in aggregate}
         omitted = grouped | work_rows
-        description = "people and my replies" if work_lines and not aggregate else "verbatim: people and my replies"
-        lines += part(["", f"### Open conversation since {room['since']} ({description})"])
-        lines += part([_FRAMES["root"]]) if room.get("project_words") is not None else []  # the root's frame over the open rows
-        if work_lines and not aggregate:
-            lines += part(["Completed work replies may stand as their gist. " + row_reader(room['room_id'])])
-        for item in room['lane1']:
+        description = "people and my replies" if folds and not aggregate else "verbatim: people and my replies"
+        put(("open", description), lambda: ["", f"### Open conversation since {room['since']} ({description})"])
+        if room.get("project_words") is not None:  # the root's frame over the open rows
+            put(("frame",), lambda: [_FRAMES["root"]])
+        if folds and not aggregate:
+            put(("gists",), lambda: ["Completed work replies may stand as their gist. " + row_reader(room['room_id'])])
+        for n, item in enumerate(room['lane1']):
             if aggregate and item is aggregate[0]:
-                lines += part([_rows_line(room, aggregate)], "room_rows", aggregate, "count")
-            if item['address'] in work_lines and not aggregate:
-                lines += part([work_lines[item['address']]], "work", [item], "gist")
+                put(("rows", tuple(members)), lambda: [_rows_line(room, aggregate)], "room_rows", aggregate, "count")
+            if item['address'] in folds and not aggregate:
+                key, final, taken = folds[item['address']]
+                put(("work", key, final), lambda: [work_line(taken)], "work", [item], "gist")
             if item['address'] not in omitted:
-                render = _row_pointer if item['address'] in bare or item['address'] in gone.get('F7', ()) else _row_opening
+                pointer = item['address'] in bare or item['address'] in owners
                 # Outside work rows (omitted above), ``addressed`` is exactly mine | people: no per-row union.
                 short = not item.get('immune') and item['address'] in addressed
-                lines += part([render(item, 'my reply' if item['address'] in mine else 'words') if short else item['line']],
-                              "room_row", [item], ("address" if render is _row_pointer else "opening") if short else "whole")
+                what = 'my reply' if item['address'] in mine else 'words'
+                put(("row", n, short and pointer, short and what),
+                    lambda: [(_row_pointer if pointer else _row_opening)(item, what) if short else item['line']],
+                    "room_row", [item], ("address" if pointer else "opening") if short else "whole")
     if room["lane2"]:
-        early = [item for item in room["lane2"] if item["first"] in facts]
-        gists = task_gists_before_work_lines(room, gone)  # a telling another room shows names that room's reader
-        folded = {key for key, _rows in works(room) if any("work:" + key + suffix in mine for suffix in (":progress", ":final"))}
-        lines += part(["", "### Task facts of this conversation (host; one line per task; a row:… address reads with "
-                      f"memory_read(room_id='{room['room_id']}', rows=true, from=<address>, to=<address>))"])
-        lines += part([_facts_line(room, early)], "task_facts", early, "count") if early else []
-        for t in gists:
-            lines += part([task_gist_line(t, room['room_id'])], "task_gist", [t], "gist")
-        for item in room["lane2"]:
+        early_at = [n for n, item in enumerate(room["lane2"]) if item["first"] in facts]
+        early = [room["lane2"][n] for n in early_at]
+        gists = task_gists_before_work_lines(room, gone, works)  # a telling another room shows names that room's reader
+        folded = {key for key, _rows in works if any("work:" + key + suffix in mine for suffix in (":progress", ":final"))}
+        put(("tasks",), lambda: ["", "### Task facts of this conversation (host; one line per task; a row:… address reads "
+                                 f"with memory_read(room_id='{room['room_id']}', rows=true, from=<address>, to=<address>))"])
+        if early:
+            put(("early", tuple(early_at)), lambda: [_facts_line(room, early)], "task_facts", early, "count")
+        for t in gists:  # a captured task row, alive with the snapshot that keeps the prices
+            put(("gist", id(t)), lambda: [task_gist_line(t, room['room_id'])], "task_gist", [t], "gist")
+        for n, item in enumerate(room["lane2"]):
             if item["first"] not in facts:
                 short = not gone.get("F7a") and item.get("task") in folded
-                lines += part([task_line(item, folded=short)], "task_fact", [item], "without_gist" if short else "whole")
-    if len(lines) == 1:
-        lines += part(["", "Nothing open, retold or noted in this room."])
-    lines += part(["", "### This room now", _facts_text(room["facts"])], "room_facts", [room["facts"]])
-    for item in room.get("sealed_by") or ():
-        lines += part([f"- sealed with the page {item['id']} of {item['label']}: memory_read(node_id='{item['id']}')"],
-                      "sealed_by", [item], "address")
-    return "\n".join(lines)
+                put(("task", n, short), lambda: [task_line(item, folded=short)], "task_fact", [item],
+                    "without_gist" if short else "whole")
+    if drawn() == 1:
+        put(("nothing",), lambda: ["", "Nothing open, retold or noted in this room."])
+    put(("now",), lambda: ["", "### This room now", _facts_text(room["facts"])], "room_facts", [room["facts"]])
+    for n, item in enumerate(room.get("sealed_by") or ()):
+        put(("sealed", n), lambda: [f"- sealed with the page {item['id']} of {item['label']}: memory_read(node_id='{item['id']}')"],
+            "sealed_by", [item], "address")
 
 
 def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "", observe=None, part=_rendered) -> str:
@@ -1385,7 +1430,15 @@ def room_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, f
     sizes = snapshot.__dict__.setdefault("_room_sizes", {})
     key = tuple((step, ids) for step, ids in level.addressed if step in (*_ROOM_STEPS, 'F6w', 'F6g', 'F6a'))
     if key not in sizes:
-        chars = [count for count in _room_parts(snapshot, dict(level.addressed), snapshot.piece) if count]
+        gone, blocks = dict(level.addressed), snapshot.__dict__.setdefault("_room_blocks", {})
+
+        def price(piece, make):  # this room's block from its runs (``room_block_chars``), every other piece whole
+            if piece[0] != "room":
+                return snapshot.piece(piece, make)
+            if piece not in blocks:
+                blocks[piece] = room_block_chars(snapshot, gone)
+            return blocks[piece]
+        chars = [count for count in _room_parts(snapshot, gone, price) if count]
         sizes[key] = sum(chars) + 4 * max(0, len(chars) - 1), bool(chars)
     total, present = sizes[key]
     if floor_note and snapshot.active:

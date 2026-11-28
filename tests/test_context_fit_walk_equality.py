@@ -1,4 +1,5 @@
-"""One fit prices each floor level once (call-fit K14, step one), and that changes nothing the mind reads.
+"""One fit prices each floor level once (call-fit K14, step one), a level from what changed since the previous one
+(step two), and neither changes anything the mind reads.
 
 ``memory_floor.render_view_for_mode``'s ``prices`` is one fit's memo (``context_fit._view_projections`` creates it) of
 what a level's receipt prices: its floor note, its size and the size of its owner-word level. Each comparison here runs
@@ -8,6 +9,11 @@ mode, every projection the plan carries with its receipts, its window and cap fa
 first-send hint keeps beside it (``first_contact_normal``, outside the plan's own equality), the messages of every mode
 and ``core_sha256``, or the same refusal with the same parts. The walk itself is the one before this change: every
 frame the fit steps through is walked, so what a walk does beside its price (a source's publication) is done as before.
+
+Step two prices a level's room from its runs of lines (``memory_view.room_block_chars``). Its tests run every fit
+under an oracle that recomputes each priced number from scratch on a fresh copy of the snapshot (no reused number:
+the room drawn whole) and must agree, and compare the shipped fit with the same fit whose incremental path the test
+disables (``whole``).
 """
 from __future__ import annotations
 
@@ -21,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import context_fit as cf, memory_floor as mf
+from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv
 from tests import _memory_scale_fixture as scale
 from tests import _memory_view_synthetic as syn
 from tests.test_first_contact_seams import _hinted_start, seam  # noqa: F401 (the fixture the hinted start reads)
@@ -61,6 +67,33 @@ def counting(counts):
         patch.setattr(mf, "render_view_for_mode", rendered)
         patch.setattr(mf, "floor_note", noted)
         patch.setattr(mf, "level_with", weighed)
+        yield
+
+
+@contextlib.contextmanager
+def whole():
+    """The fit without step two's incremental path: a level's room is drawn whole to price it."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(mv, "room_block_chars", lambda snapshot, gone: mv.json_chars(mv._room_text(snapshot.room, gone)))
+        yield
+
+
+@contextlib.contextmanager
+def oracle(checked):
+    """Every number the floor prices, recomputed from scratch on a fresh copy of its snapshot (``replace``: none of the
+    snapshot's stored prices) and asserted equal: a level's room against its whole drawn text, floor note included.
+    ``checked[name]`` counts the distinct values compared."""
+    room_chars, seen = mv.room_chars, set()
+
+    def room(snapshot, level=mv.FULL_VIEW, *, floor_note=""):
+        got = room_chars(snapshot, level, floor_note=floor_note)
+        if (id(snapshot), level, floor_note) not in seen:
+            seen.add((id(snapshot), level, floor_note))
+            assert got == mv.json_chars(mv.render_room(replace(snapshot), level, floor_note=floor_note)), level
+            checked["room"] += 1
+        return got
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(mv, "room_chars", room)
         yield
 
 
@@ -148,11 +181,17 @@ ROUTES = [pytest.param((facts.conversation_window_tokens, facts.basis, facts.wor
 def test_the_fit_reads_alike_with_and_without_the_memo(installs, shape, route, mode):
     env, core = installs(shape)
     window, basis, working, base = route
-    now, then, shipped, before = both(fit_on(env, core, window=window, mode=mode, basis=basis, working=working,
-                                             base=base))
+    fit = fit_on(env, core, window=window, mode=mode, basis=basis, working=working, base=base)
+    now, then, shipped, before = both(fit)
     assert now == then
     assert {m: shipped[m] for m in MODES} == {m: before[m] for m in MODES}  # every frame walked, as before
     assert shipped["notes"] <= before["notes"] and shipped["owners"] <= before["owners"]
+    checked = collections.Counter()
+    with oracle(checked):  # every number the walk prices equals its from-scratch value
+        assert outcome(fit) == now
+    with whole():  # the same fit without step two's incremental path
+        assert outcome(fit) == now
+    assert checked["room"] > 0
 
 
 def _snapshot(rows=158, pages=113, marks=40):
@@ -298,3 +337,94 @@ def test_a_first_send_hint_and_the_view_it_keeps_read_alike_with_and_without_the
     core = start.plan.core  # the capture the hinted start fitted
     now, then, shipped, before = both(lambda: start.fit(core=core))
     assert now == then and now[0] == "plan" and now[2] is not None and before["notes"] > 0
+
+
+def _changing_room(seed):
+    """A room whose every run can change form between levels: works of my replies (final and progress folds, a
+    protected reply), people's and my rows, immune rows, a project root's sealed owner rows, retold, transferred and
+    under-part records (one standing), told records, origins and their gaps, notes, task lines with and without a
+    telling, sealed pages; sizes and counts vary with ``seed``."""
+    import random
+
+    rng = random.Random(seed)
+    rows, n = [], 0
+    for w in range(rng.randint(3, 9)):
+        for k in range(rng.randint(1, 4)):
+            row = syn.said(n, "ouroboros", syn.prose(rng.randint(80, 900), "mine"), task_id=f"t{w:03d}",
+                           work_id=f"t{w:03d}", gist={"summary": f"Work {w} settled. " + syn.prose(rng.randint(40, 300)),
+                                                      "ts": "2026-09-01T00:00:00+00:00", "room_id": "1",
+                                                      "address": f"row:1@gist-{w}"})
+            row["protected_reply"] = k == 1 and w % 3 == 0
+            rows.append(row)
+            n += 1
+        person = syn.said(n, "human", syn.prose(rng.randint(30, 400), "owner"), owner_side=True, carried=False,
+                          immune=rng.random() < 0.2)
+        rows.append(person)
+        n += 1
+        if rng.random() < 0.5:
+            rows.append(syn.said(n, "human", syn.prose(rng.randint(30, 300), "owner"), owner_side=False))
+            n += 1
+    room = syn.room("1", legacy=rng.randint(0, 3), legacy_chars=400, under=rng.randint(0, 3), origins=rng.randint(0, 2),
+                    lane1=rows, lane2=rng.randint(2, 9), notes=rng.randint(0, 5))
+    for i, task in enumerate(room["lane2"]):
+        if i % 2 == 0:
+            task.update(task=f"t{i:03d}", gist={"summary": f"Task {i} told. " + syn.prose(120), "ts": task["ts"],
+                                               "room_id": "1" if i % 4 else "7", "address": task["first"]})
+            task["line"] += f" — summary: «Task {i} told.»"
+    if room["legacy"]:
+        room["legacy"][-1].update(transfer=True, of="written by another install; transferred")
+    if room["under_parts"]:
+        room["under_parts"][0]["standing"] = True
+    for note in room["notes"]:
+        note["text"] = syn.prose(rng.randint(60, 900))
+        if rng.random() < 0.5:
+            note["lead_rule"] = "first sentence"
+    room.update(told=[{"count": 2, "span": {"start": "2026-08-01T00:00:00+00:00", "end": "2026-08-02T00:00:00+00:00"},
+                       "accounts": ["acct-1"], "room_id": "1"}] if seed % 2 else [],
+                origin_gaps=["a Reply whose target cannot be read may belong here"] if seed % 3 == 0 else [],
+                project_words=[{"address": f"row:1@sealed-{i}", "line": "[2026-08-0%d; owner] " % (i + 1) + syn.prose(200, "owner"),
+                                "short": f"[2026-08-0{i + 1}; owner; row:1@sealed-{i}] (read by address)"}
+                               for i in range(seed % 3)],
+                sealed_by=[{"id": "page-x", "label": "Room 9"}] if seed % 2 == 0 else [])
+    return syn.snapshot(room_facts=room, story=syn.pages(4, 300))
+
+
+def _random_levels(snapshot, rng, count=80):
+    """Levels a walk could price (each step's listed forms, added and removed a few at a time) and levels no walk
+    builds (any id under any room step, ``bare:`` forms on people's rows, my rows under F7): a room's runs must price
+    every level as its whole text does."""
+    table, room = mf._elements(snapshot), snapshot.room
+    listed = [(step, ident) for step, ident, *_ in table.listed if step in mv._ROOM_STEPS or step == "F2"]
+    addresses = [row["address"] for row in room["lane1"]] + [row["address"] for row in room.get("project_words") or ()]
+    loose = ([("F2", a) for a in addresses] + [("F2", "bare:" + a) for a in addresses] + [("F7", a) for a in addresses]
+             + [("F7p", "bare:" + a) for a in addresses] + [("F1", t["first"]) for t in room["lane2"]]
+             + [("F4", r["id"]) for r in room["legacy"] + room["under_parts"]] + [("F8", n["id"]) for n in room["notes"]]
+             + [("F7a", "1"), ("F8a", "1")])
+    taken, levels = set(), []
+    for n in range(count):
+        pool = listed if n < count // 2 else listed + loose
+        for pair in rng.sample(pool, min(len(pool), rng.randint(1, 3))):
+            taken.symmetric_difference_update({pair})
+        levels.append(table.level(taken) if n < count // 2 else
+                      mv.FloorLevel(tuple((step, tuple(sorted(i for s, i in taken if s == step)))
+                                          for step in mf.LADDER if any(s == step for s, _ in taken))))
+    return levels
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_a_room_priced_by_its_runs_equals_its_whole_text_as_rows_enter_leave_and_regroup(seed):
+    """Over a random sequence of levels on one snapshot (each adds and removes forms, so rows enter and leave works,
+    aggregates and address forms and regroup), a level's room priced from its runs equals the whole drawn text at
+    every level; and a level priced again later, after others, reads the same."""
+    import random
+
+    snapshot = _changing_room(seed)
+    levels = _random_levels(snapshot, random.Random(seed))
+    assert {"F1", "F2", "F7", "F7a"} <= {step for level in levels for step, _ids in level.addressed}
+    for level in levels + levels[::-3]:
+        gone = dict(level.addressed)
+        assert mv.room_block_chars(snapshot, gone) == mv.json_chars(mv._room_text(snapshot.room, gone)), level
+        assert mv.room_chars(snapshot, level) == mv.json_chars(mv.render_room(replace(snapshot), level))
+    empty = syn.snapshot(room_facts=syn.room("1"))  # only its heading drawn: the "Nothing open" line joins, priced too
+    assert "Nothing open" in mv._room_text(empty.room, {})
+    assert mv.room_block_chars(empty, {}) == mv.json_chars(mv._room_text(empty.room, {}))
