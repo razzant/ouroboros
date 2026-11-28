@@ -1,20 +1,21 @@
-"""A start does not walk a Low frame that provably cannot hold, and one fit prices each floor level once (call-fit
-K14, step one): neither changes anything the mind reads.
+"""One fit prices each floor level once (call-fit K14, step one), and that changes nothing the mind reads.
 
-``memory_floor.frame_can_hold`` prices a start's Low frame at a bound no host form and memory level the frame's own walk
-can choose falls below (every section that may step at its shortest form, memory at the room's level-free pieces);
-``memory_floor.render_view_for_mode``'s ``prices`` is one fit's memo of what a level's receipt prices. Each comparison
-here runs the same fit (``context_fit.build_context_fit_plan`` over one captured core) twice: as shipped, and with
-both disabled (every Low walked, every level priced anew: the fit before this change), and asserts the outcome is the
-same: the chosen mode, every projection the plan carries with its receipts, its window and cap facts, the messages of
-every mode and ``core_sha256``, or the same refusal with the same parts.
+``memory_floor.render_view_for_mode``'s ``prices`` is one fit's memo (``context_fit._view_projections`` creates it) of
+what a level's receipt prices: its floor note, its size and the size of its owner-word level. Each comparison here runs
+the same fit (``context_fit.build_context_fit_plan`` over one captured core) twice: as shipped, and with the memo kept
+from the floor (every level priced anew: the fit before this change), and asserts the outcome is the same: the chosen
+mode, every projection the plan carries with its receipts, its window and cap facts, the ordinary projections a
+first-send hint keeps beside it (``first_contact_normal``, outside the plan's own equality), the messages of every mode
+and ``core_sha256``, or the same refusal with the same parts. The walk itself is the one before this change: every
+frame the fit steps through is walked, so what a walk does beside its price (a source's publication) is done as before.
 """
 from __future__ import annotations
 
 import collections
 import contextlib
 import json
-import random
+import errno
+from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -23,18 +24,18 @@ import pytest
 from ouroboros import context_fit as cf, memory_floor as mf
 from tests import _memory_scale_fixture as scale
 from tests import _memory_view_synthetic as syn
+from tests.test_first_contact_seams import _hinted_start, seam  # noqa: F401 (the fixture the hinted start reads)
 
 MODES = ("max", "low", "nano")
 CALL_BASE = ("list_available_tools", "enable_tools")
+SHIPPED_RESERVE = cf.main_output_reserve_tokens  # the hinted start prices the send cap its refusal recorded
 
 
 @contextlib.contextmanager
 def cold():
-    """The fit before this change: every Low frame walked (``frame_can_hold`` always True) and every level priced anew
-    (no ``prices`` memo reaches the floor)."""
+    """The fit before this change: every level priced anew (no ``prices`` memo reaches the floor)."""
     real = mf.render_view_for_mode
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(mf, "frame_can_hold", lambda *_a, **_kw: True)
         patch.setattr(mf, "render_view_for_mode", lambda *a, prices=None, **kw: real(*a, **kw))
         yield
 
@@ -64,14 +65,15 @@ def counting(counts):
 
 
 def outcome(fit):
-    """What the mind and the host read of one fit: the whole plan and every mode's messages, or the refusal."""
+    """What the mind and the host read of one fit: the whole plan, the ordinary projections a first-send hint keeps
+    beside it (compared apart: the plan's equality leaves them out) and every mode's messages, or the refusal."""
     try:
         plan = fit()
     except cf.MinimumViewUnfit as unfit:
         return ("refused", str(unfit), unfit.parts, unfit.memory_measured, unfit.deficit_tokens, unfit.window_tokens,
                 unfit.response_reserve_tokens, unfit.estimated_input_tokens)
-    return ("plan", plan, {mode: json.dumps(plan.messages_for(mode), ensure_ascii=False, sort_keys=True)
-                           for mode in MODES})
+    return ("plan", plan, plan.first_contact_normal,
+            {mode: json.dumps(plan.messages_for(mode), ensure_ascii=False, sort_keys=True) for mode in MODES})
 
 
 def resolver(window, basis="provider", working=10_000):
@@ -85,7 +87,7 @@ def fit_on(env, core, *, window, mode, basis="provider", working=10_000, base=CA
 
 
 def both(fit):
-    """``(shipped, cold, renders shipped, renders cold)`` of one fit."""
+    """``(shipped, cold, counts shipped, counts cold)`` of one fit."""
     shipped, before = collections.Counter(), collections.Counter()
     with counting(shipped):
         now = outcome(fit)
@@ -131,7 +133,7 @@ def installs(tmp_path_factory):
 
 
 # The routes the repair's guards use: each shipped call model at its declared window, a hard 85k text route and a wide
-# text route; and two windows where the rich install's Low is walked and abandoned (150k) or cannot hold at all (120k).
+# text route; and two windows where the rich install's Low is walked and abandoned (150k), or every mode refused (120k).
 ROUTES = [pytest.param((facts.conversation_window_tokens, facts.basis, facts.working_reserve_tokens, CALL_BASE),
                        id=f"{skill}:{model}") for skill, model, facts in scale.call_routes()] + [
     pytest.param((85_000, "provider", None, None), id="text:85k"),
@@ -143,13 +145,14 @@ ROUTES = [pytest.param((facts.conversation_window_tokens, facts.basis, facts.wor
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("route", ROUTES)
 @pytest.mark.parametrize("shape", ["fresh", "mature", "rich"])
-def test_the_fit_reads_alike_with_and_without_the_skip_and_the_memo(installs, shape, route, mode):
+def test_the_fit_reads_alike_with_and_without_the_memo(installs, shape, route, mode):
     env, core = installs(shape)
     window, basis, working, base = route
     now, then, shipped, before = both(fit_on(env, core, window=window, mode=mode, basis=basis, working=working,
                                              base=base))
     assert now == then
-    assert shipped["low"] <= before["low"] and shipped["notes"] <= before["notes"]
+    assert {m: shipped[m] for m in MODES} == {m: before[m] for m in MODES}  # every frame walked, as before
+    assert shipped["notes"] <= before["notes"] and shipped["owners"] <= before["owners"]
 
 
 def _snapshot(rows=158, pages=113, marks=40):
@@ -159,8 +162,7 @@ def _snapshot(rows=158, pages=113, marks=40):
 
 def _core(root, *, connections, snap=None):
     """A synthetic core whose Low and Max frames carry a connections text of ``connections`` characters and Nano a short
-    one (the Nano form keeps servers' guides behind their readers): a long one lets a window hold Nano while no form of
-    Low fits. Its drive is ``root`` (``.env``: what the fit is given)."""
+    one (the Nano form keeps servers' guides behind their readers). Its drive is ``root`` (``_env``)."""
     root.mkdir(parents=True, exist_ok=True)
     return replace(scale.core(root, snap or _snapshot()), connections=(
         scale.text("Connections with every server's guide", connections), scale.text("Connections by name", 1_200)))
@@ -170,96 +172,97 @@ def _env(core):
     return SimpleNamespace(drive_root=core.section_root)
 
 
-def _line(predicate, low, high):
-    """The least window in ``[low, high]`` where ``predicate(window)`` holds, for a predicate false below it."""
-    assert not predicate(low) and predicate(high)
-    while high - low > 1:
-        middle = (low + high) // 2
-        low, high = (low, middle) if predicate(middle) else (middle, high)
-    return high
-
-
-def test_a_low_no_form_can_fit_is_not_walked_and_a_low_its_walk_might_fit_is(tmp_path):
-    """On a window that holds Nano while Low's provable minimum cannot fit, the shipped fit renders no Low memory (the
-    cold fit walks Low and leaves it) and reads alike; one token wider the bound no longer proves it, the walk runs as
-    before and still reads alike. Both sides of today's own line (the window where Low's walk first holds) read alike
-    too, with the walk run, because the bound never claims what only the walk can decide: at that line the walk keeps
-    Low only by turning this room's uncovered owner rows into addresses under physical pressure (F7), below the level
-    its shortest walk stops at, so a bound pricing memory at that shortest level would have sent this start to Nano
-    (on this core: 170,020 against a window of 170,019 that Low holds)."""
-    core = _core(tmp_path, connections=240_000)
-
-    def lows(window):
-        counts = collections.Counter()
-        with counting(counts):
-            outcome(fit_on(_env(core), core, window=window, mode="max"))
-        return counts["low"]
-
-    bound = _line(lambda window: lows(window) > 0, 60_000, 400_000)  # the least window the bound lets Low be walked
-    for window, skipped in ((bound - 1, True), (bound, False)):
-        now, then, shipped, before = both(fit_on(_env(core), core, window=window, mode="max"))
-        assert now == then and now[0] == "plan" and now[1].initial_mode == "nano", window
-        assert before["low"] > 0 and (shipped["low"] == 0) is skipped, (window, shipped, before)
-
-    def holds_low(window):
-        with cold():
-            plan = outcome(fit_on(_env(core), core, window=window, mode="max"))
-        return plan[0] == "plan" and plan[1].initial_mode in ("low", "max")
-
-    line = _line(holds_low, bound, 600_000)  # today's own line: the least window where the walk keeps Low
-    for window, mode in ((line - 1, "nano"), (line, "low")):
-        now, then, shipped, before = both(fit_on(_env(core), core, window=window, mode="max"))
-        assert now == then and now[1].initial_mode == mode, window
-        assert shipped["low"] == before["low"] > 0, (window, shipped, before)
-    assert "F7" in now[1].projection("low").memory_facts["floor"]["steps"]
-
-
-def test_generated_shapes_read_alike_with_and_without_the_skip_and_the_memo(tmp_path, monkeypatch):
-    """A counterexample hunt: rooms and story of many sizes, long and short connections texts, windows from a refused
-    start to a whole one, every owner mode, densities and reserves; the shipped fit and the cold one read alike on
-    every shape, and the skip fires on some and stays quiet on others (so both directions are exercised)."""
-    rng, fired, walked = random.Random(14), 0, 0
-    for case in range(36):
-        rows, pages = rng.choice((12, 60, 158, 320)), rng.choice((4, 40, 113, 240))
-        core = _core(tmp_path / f"shape-{case}", connections=rng.choice((2_000, 40_000, 240_000)),
-                     snap=_snapshot(rows, pages, rng.choice((0, 12, 158))))
-        density = rng.choice((1.0, 1.0, 0.93, 1.13))
-        monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, _d=density, **_kw: _d)
-        window, mode = rng.randrange(50_000, 330_000, 997), rng.choice(MODES)
-        working = rng.choice((None, 10_000))
-        now, then, shipped, before = both(fit_on(_env(core), core, window=window, mode=mode, working=working))
-        assert now == then, (case, rows, pages, window, mode, density, working)
-        fired += shipped["low"] < before["low"]
-        walked += shipped["low"] == before["low"] > 0
-    assert fired and walked, (fired, walked)
-
-
-def test_one_fit_prices_a_level_once_and_its_prices_never_reach_another_fit(tmp_path):
+def test_one_fit_prices_a_level_once_and_drops_its_prices_with_the_fit(tmp_path):
     """The memo prices a level's floor note and the owner-word level its start-room line weighs once per fit (fewer of
-    each priced, the same plan), and a second fit of a changed snapshot in the same process reads exactly as a cold fit
-    of that snapshot: nothing priced for the first snapshot answers for the second."""
-    first = _core(tmp_path / "first", connections=2_000, snap=_snapshot(marks=12))
-    now, then, shipped, before = both(fit_on(_env(first), first, window=150_000, mode="max"))
+    each than the fit without it, the same plan), and two identical fits of the same capture price the same number of
+    each: a second fit finds none of the first one's prices."""
+    core = _core(tmp_path, connections=2_000, snap=_snapshot(marks=12))
+    fit = fit_on(_env(core), core, window=150_000, mode="max")
+    now, then, shipped, before = both(fit)
     assert now == then and 0 < shipped["notes"] < before["notes"] and 0 < shipped["owners"] < before["owners"], (
         shipped, before)
-    # The same rooms and story, so every level the walks meet names the same elements, beside more marks: each level's
-    # price differs, and a price kept from the first fit would answer wrongly here.
-    changed = _core(tmp_path / "second", connections=2_000, snap=_snapshot(marks=400))
-    again = outcome(fit_on(_env(changed), changed, window=150_000, mode="max"))
-    with cold():
-        fresh = outcome(fit_on(_env(changed), changed, window=150_000, mode="max"))
-    assert again == fresh and again != now
+    again = collections.Counter()
+    with counting(again):
+        assert outcome(fit) == now
+    assert (again["notes"], again["owners"]) == (shipped["notes"], shipped["owners"])
 
 
-def test_the_level_free_room_pieces_hold_at_every_level_of_the_walk(tmp_path):
-    """The memory term of the bound: the room pieces drawn without the level (marks, late reviews, a helper's words of
-    my human) price the same at the whole view and at the walk's shortest level, and every room text holds them."""
+def test_a_list_of_tool_names_prices_as_its_tuple(tmp_path):
+    """``render_view_for_mode`` takes any iterable of tool names: with a memo it reads a list as it reads the same
+    names without one, so the receipt (its memory reader line among them) is the same."""
+    snap = _snapshot(rows=60, pages=40, marks=12)
     from ouroboros import memory_view as mv
 
-    snap = replace(_snapshot(), owner_words=scale.text("A helper's words of my human", 900))
-    shortest = mf.fit_memory_view(snap, {"margin": 0, "physical": 0, "budget": None})
-    free = mf.level_free_chars(snap)
-    assert free > 0
-    for level in (mv.FULL_VIEW, shortest):
-        assert mv.room_chars(snap, level) >= free
-        assert mv.room_chars(snap, level, floor_note="x" * 400) >= free
+    args = dict(mode="nano", owner_mode="nano", window_tokens=120_000, known_window=True, output_reserve=16_384,
+                ratio=1.0, non_memory_tokens=500)
+    for level in (mv.FULL_VIEW, None):
+        plain = mf.render_view_for_mode(snap, level=level, tool_names=("enable_tools",), **args)
+        listed = mf.render_view_for_mode(snap, level=level, tool_names=["enable_tools"], prices={}, **args)
+        assert (listed.level, listed.note, listed.facts) == (plain.level, plain.note, plain.facts)
+
+
+def test_a_transient_publication_failure_reads_alike_with_and_without_the_memo(tmp_path):
+    """A source whose first publication fails once (a transient write error): today's walk meets it in the Low frame it
+    then leaves, Nano publishes that source again and the start fits at 82,260 (and keeps its pointer at 120,000). The
+    fit with the memo reads exactly as the fit without it, each over its own empty store: a shortcut that skipped the Low
+    walk would move that failure into Nano, keep the section whole and refuse this start (review K14REV1, Astra 1)."""
+    from ouroboros import artifacts
+
+    core = _core(tmp_path / "input", connections=240_000)
+    retain, write = mf.retain_section, artifacts.write_bytes_atomic
+    stores = iter(range(100))
+
+    def faulted(fit):
+        store, failed = tmp_path / f"store-{next(stores)}", []
+        store.mkdir()
+
+        def failing(target, data, **kw):
+            if not failed and "host-runtime-" in Path(target).name:
+                failed.append(target)
+                raise OSError(errno.EAGAIN, "synthetic transient publication failure")
+            return write(target, data, **kw)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(mf, "retain_section", lambda part, **kw: retain(part, root=str(store), task_id=kw["task_id"]))
+            patch.setattr(artifacts, "write_bytes_atomic", failing)
+            result = fit()
+        assert len(failed) == 1
+        return result
+
+    for window in (82_260, 120_000):
+        fit = fit_on(_env(core), core, window=window, mode="low")
+        now = faulted(lambda: outcome(fit))
+        with cold():
+            then = faulted(lambda: outcome(fit))
+        assert now == then and now[0] == "plan" and now[1].initial_mode == "nano", window
+        receipts = now[1].projection("nano").memory_facts.get("host_sections_addressed", ())
+        assert "runtime" in {row["section_id"] for row in receipts}, window
+
+
+def test_a_repeated_section_id_reads_alike_with_and_without_the_memo(tmp_path):
+    """Two captured sections under one id (the first long with a shorter form, the second one character, no reader to
+    publish): today's walk keeps both whole and holds Low at 26,462. The fit with the memo reads as the fit without it
+    there and one token narrower, where Nano follows; a bound that priced the first row's shorter form against the
+    second row's whole text would send this start to Nano (review K14REV1, Astra 2)."""
+    from ouroboros.section_floor import HostSection, capture_sections
+
+    parts = capture_sections((HostSection("runtime", "r" * 24_000, "q" * 16_000), HostSection("runtime", "r")),
+                             prefix="dynamic")
+    core = cf.ContextCore(base_prompt="Identity", bible_md="Principles", architecture_md="", development_md="",
+                          docs_need_development=False, semi_stable_text="", dynamic_text="\n\n".join(parts),
+                          dynamic_sections=tuple(parts), section_root="", section_task_id="k14-review",
+                          memory_view_json="", user_content_json=json.dumps("hi"),
+                          connections=("C" * 8_000, "C" * 40))
+    for window, mode in ((26_461, "nano"), (26_462, "low")):
+        now, then, _shipped, _before = both(fit_on(SimpleNamespace(drive_root=tmp_path), core, window=window, mode="low"))
+        assert now == then and now[0] == "plan" and now[1].initial_mode == mode, window
+
+
+def test_a_first_send_hint_and_the_view_it_keeps_read_alike_with_and_without_the_memo(seam, tmp_path, monkeypatch):  # noqa: F811
+    """A fresh chat whose connection refused a comparable request: its start chooses a smaller view and keeps the
+    ordinary projections beside it (``first_contact_normal``, which a route change restores). The folded fit goes
+    through the memo too; with and without it both the hinted plan and the kept ordinary view read alike."""
+    monkeypatch.setattr(cf, "main_output_reserve_tokens", SHIPPED_RESERVE)
+    start = _hinted_start(seam, tmp_path, monkeypatch)
+    core = start.plan.core  # the capture the hinted start fitted
+    now, then, shipped, before = both(lambda: start.fit(core=core))
+    assert now == then and now[0] == "plan" and now[2] is not None and before["notes"] > 0

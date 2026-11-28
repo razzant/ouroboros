@@ -38,6 +38,7 @@ from ouroboros.reference_books import ReferenceBook
 from ouroboros import context_budget
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
+from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.context_timing import adopt, another_pass, apart, counted, timed, timed_section
 
 log = logging.getLogger(__name__)
@@ -798,14 +799,13 @@ def _wire_measure(core, governance, sections, form, user, current, *, provider, 
     """Price a walk by deltas; a mode decision with a required handbook compares the complete rendered requests.
 
     A walk prices each selected program line with the room beside the one data envelope it reserves; a complete
-    request draws that room as the system part and program data a send carries, once per fit (``ViewFit.model_parts``).
-    The third result is the fit's memo of what its walks price per level (``memory_floor.render_view_for_mode``)."""
+    request draws that room as the system part and program data a send carries, once per fit (``ViewFit.model_parts``)."""
     from functools import cache
     from ouroboros import memory_floor as floor
     from ouroboros.memory_view import json_chars
 
     full = {m: {part.section_id: part.full_text for part in parts} for m, parts in sections.items()}
-    shapes, escaped, prices = {}, cache(json_chars), {}
+    shapes, escaped = {}, cache(json_chars)
     head = floor.program_history_head(snapshot)  # the envelope alone: its lines are already the room's
 
     def rows_for(mode, system, data):
@@ -835,7 +835,7 @@ def _wire_measure(core, governance, sections, form, user, current, *, provider, 
         return overhead + estimate_context_prompt_tokens(rows_for(mode, system, data), list(sent.schemas),
                                                          provider=provider, reasoning_effort=effort)
 
-    return measure, complete_price, prices
+    return measure, complete_price
 
 
 def _max_start_room(snapshot, texts, books, *, fixed, ratio, schemas, forms, window, reserve, work, allowances,
@@ -993,7 +993,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     whole_memory = (story_chars(snapshot), room_chars(snapshot)) if snapshot and held_heads else (0, 0)
     story_before, room_before = (story_chars(snapshot, held), room_chars(snapshot, held)) if snapshot else (0, 0)
 
-    measure, complete_price, prices = _wire_measure(core, governance, sections, form, user_content_json, current_messages,
+    measure, complete_price = _wire_measure(core, governance, sections, form, user_content_json, current_messages,
         provider=provider, effort=reasoning_effort, sized=sized, overhead=envelope_overhead_tokens, tool_frames=tool_frames,
         required=(whole_core, whole_governance) if whole_core.development_required else None, snapshot=snapshot)
 
@@ -1041,6 +1041,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             report_nano_miss=held_heads, prices=prices)
 
     stated: Dict[str, Optional[int]] = {}  # each walked mode's window in the start's frame (``frame`` fills it)
+    prices: Dict[Any, Any] = {}  # this fit's memo of what its walks price per level, dropped with the fit
 
     def books_save(level, window, boundary):
         # Only the frame changes. A new memory/host concession may not disguise a book switch that costs tokens.
@@ -1119,11 +1120,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
         return sent, fixed, reserve, window, boundary, allowances
 
-    def framed(selected):  # ``(mode, its frame)``; a start's Low no host form and memory level fit goes to Nano unwalked
-        skip = selected == "low" and kept is None and not (held_heads or cold_resume) and known_window and not floor.frame_can_hold(
-            snapshot, sections["low"], lambda forms: measure("low", tools_for("low"), forms), limits("low"), ratio, core)
-        return ("nano", timed("fit.frame_nano", frame, "nano")) if skip else (selected, timed(f"fit.frame_{selected}", frame, selected))
-    mode, (sent, fixed, reserve, window, boundary, allowances) = framed(mode)
+    sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     def work():
         target = context_budget.context_mode_limits(mode, preferred, output_reserve)[0]
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
@@ -1143,7 +1140,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                               and not telling_fits(mode, sent, section_views(sections[mode], receipts),
                                                    window, boundary, reserve, start_room=False))
     if (room_fact and floor.max_room_lost(room_fact)) or running_max_needs_maps:
-        mode, (sent, fixed, reserve, window, boundary, allowances) = framed("low")
+        mode = "low"
+        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
 
     running_shown = None
     def render(forms=None, *, level=None, telling_floor=False):
@@ -1178,7 +1176,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         running_shown = render(telling_floor=True)
         if misses_running_goal(running_shown):
             if books_save(running_shown.level, window, boundary):
-                mode, (sent, fixed, reserve, window, boundary, allowances) = framed("low")
+                mode = "low"
+                sent, fixed, reserve, window, boundary, allowances = timed("fit.frame_low", frame, mode)
                 # Walk Low from the held level, not from the discarded Max trial's tellings.
                 running_shown = render(telling_floor=True)
             if misses_running_goal(running_shown):
@@ -1198,7 +1197,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         if (running or mode == "low") and kept is not None and admitted:
             prior_view = (running_shown or render()) if shown is floor.NO_VIEW else shown
             last = (sent, fixed, reserve, window, boundary, allowances, receipts, prior_view, wire_room(prior_view), mode)
-        (mode, (sent, fixed, reserve, window, boundary, allowances)), running_shown = framed("low" if mode == "max" and not running else "nano"), None
+        mode, running_shown = ("low" if mode == "max" and not running else "nano"), None
+        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     if held_heads and mode == "nano" and overflows(shown):
         emergency_level = shown.level
         if floor._held_note_steps(sections[mode], receipts, form="reader",

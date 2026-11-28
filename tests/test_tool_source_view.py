@@ -3,7 +3,7 @@
 import json
 
 from ouroboros.artifacts import read_actor_source_bytes
-from ouroboros.tool_result_delivery import project_tool_result_batch
+from ouroboros.context_fit import project_tool_result_batch
 
 
 def _fit(messages, tools):
