@@ -13,7 +13,8 @@ intake on 27.11.2026:
 
 * the queued diagnostics, oldest first: an overrun's warning line and ``host_duty_stall`` row, then its
   ``host_duty_stall_end`` (``journal_duty_stall_end``), each episode once and in order;
-* each due root's cost figure (``LiveRootCosts.read``), published while its carrier still stands;
+* each due root's cost figure (``LiveRootCosts.read``), published while its carrier still stands and no
+  mark made since its take supersedes it;
 * the compatibility budget write (``supervisor.state.update_budget_from_usage``: the ledger read before
   STATE_LOCK, its ``(compaction_epoch, seq)`` order under it); a refused or raising write leaves the
   mark owed and its next attempt no sooner than ``BUDGET_PROJECTION_RETRY_SEC``;

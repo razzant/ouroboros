@@ -123,7 +123,8 @@ def test_the_loop_serves_owner_input_and_stop_while_the_budget_state_replace_sta
 def test_the_loop_serves_owner_input_and_stop_while_a_root_figure_identity_stat_stands(monkeypatch, tmp_path):
     """The root figure's ledger read stands in the usage store's identity stat (145.6 s on 27.11): the loop
     goes on, the root marked meanwhile is read again by the next pass, and the figure the root's heartbeat
-    carries is the latest read, for the carrier that still runs it."""
+    carries is the latest read, for the carrier that still runs it: the stood read, which those marks
+    superseded, publishes nothing (the figure stays unknown until the read for the latest mark lands)."""
     from ouroboros import usage_accounting
     from supervisor import workers as workers_mod
 
@@ -157,7 +158,7 @@ def test_the_loop_serves_owner_input_and_stop_while_a_root_figure_identity_stat_
     finally:
         release.set()
         _pass_ended()
-    assert LIVE_ROOT_COSTS.fields(ctx.DRIVE_ROOT, "root", task)["accounted_upper_bound_usd_with_children"] == 1.0
+    assert LIVE_ROOT_COSTS.fields(ctx.DRIVE_ROOT, "root", task) == {}, "a read the later marks superseded"
     server_maintenance.dispatch_display_projections(ctx)
     _pass_ended()
     assert reads == [(1, display_projections.DUTY_NAME), (4, display_projections.DUTY_NAME)]

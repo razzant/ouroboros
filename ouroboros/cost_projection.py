@@ -430,9 +430,10 @@ class LiveRootCosts:
       reads (``DueRoot``), and the roots that left RUNNING forgotten. Nothing marked, nothing taken;
     * ``read(roots, drive_root)``, off the loop (``display_projections``, the one host duty that
       reads them): each taken root's projection, published while the root's carrier is still the one
-      it was read for (a carrier that changed meanwhile has the root read again for it). A mark made
-      during the read leaves the root due for the next pass; ``restore(roots)`` puts back the roots
-      of a pass that could not start.
+      it was read for (a carrier that changed meanwhile has the root read again for it) and no mark came
+      since its take: a mark made during the read supersedes it, so the last accepted figure (or none)
+      stays until the next pass reads for that mark (a heartbeat's first look is no mark);
+      ``restore(roots)`` puts back the roots of a pass that could not start.
 
     Delegated-run custody is read with the usage in the same projection, so a run that started or
     settled with no model call of the subtree since reaches the figure with the subtree's next usage
@@ -450,6 +451,7 @@ class LiveRootCosts:
         self._figures: Dict[tuple, Dict[str, Any]] = {}
         self._carriers: Dict[tuple, str] = {}  # key -> the RUNNING task id whose heartbeat carries it
         self._due: Dict[tuple, float] = {}  # key -> monotonic time from which the next read may run
+        self._marked: set = set()  # keys marked since their last take: a read taken before such a mark is stale
 
     @staticmethod
     def _key(drive_root: Any, root_task_id: Any) -> tuple:
@@ -460,6 +462,7 @@ class LiveRootCosts:
         if key[1]:
             with self._lock:
                 self._due[key] = 0.0  # a change is read by the next pass, whatever retry was pending
+                self._marked.add(key)
 
     def fields(self, drive_root: Any, task_id: str, task: Mapping[str, Any],
                event: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
@@ -487,6 +490,7 @@ class LiveRootCosts:
             due = [key for key, at in self._due.items() if key[0] == root and at <= now]
             for key in due:
                 del self._due[key]
+                self._marked.discard(key)
             if due:  # a pass with work also forgets the roots that left RUNNING
                 for key in [key for key, carrier in self._carriers.items()
                             if key[0] == root and carrier not in running]:
@@ -512,6 +516,8 @@ class LiveRootCosts:
                 if carrier != due.carrier:
                     if carrier is not None:  # another task carries the root now: it is read again for that one
                         self._due.setdefault(due.key, 0.0)
+                    continue
+                if due.key in self._marked:  # superseded: that mark left the root due for the next pass
                     continue
                 if not (failed and due.key in self._figures):
                     self._figures[due.key] = projection
