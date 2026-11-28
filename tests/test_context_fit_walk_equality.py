@@ -820,3 +820,25 @@ def test_the_resident_facts_row_reads_the_room_price_the_fit_kept(tmp_path, monk
     unpriced = facts._resident_text(replace(snapshot), level)
     assert "this room's block" in priced and draws == []
     assert priced.split("this room's block")[1] == unpriced.split("this room's block")[1]
+
+
+def test_a_pickled_or_copied_snapshot_prices_a_new_level_as_a_fresh_one():
+    """A snapshot a walk priced, pickled or copied (shallow and deep), carries its declared fields and none of the
+    stored prices (some keyed by its rows' identities, which mean other rows after a round trip): it equals the
+    original, prices a new level as a fresh copy does, and ``dataclasses.replace`` keeps behaving as before."""
+    import copy
+    import pickle
+
+    snap = _changing_room(5)
+    levels = _random_levels(snap, __import__("random").Random(5), count=40)
+    for level in levels[:20]:
+        mv.room_chars(snap, level), ff.form_counts(snap, level), ff.holding_room(snap, level)
+    stored = {name for name in vars(snap) if name.startswith("_")}
+    assert {"_room_runs", "_form_numbers", "_pieces"} <= stored
+    for moved in (pickle.loads(pickle.dumps(snap)), copy.copy(snap), copy.deepcopy(snap), replace(snap)):
+        assert moved == snap and not {name for name in vars(moved) if name.startswith("_")}, type(moved)
+        for level in levels[20:]:
+            fresh = replace(snap)
+            assert mv.room_chars(moved, level) == mv.room_chars(fresh, level)
+            assert _ordered(ff.holding_room(moved, level)) == _ordered(_scratch_holding(snap, level))
+            assert _ordered(ff.form_counts(moved, level)) == _ordered(_scratch_counts(snap, level)[0])

@@ -275,6 +275,11 @@ class MemoryViewSnapshot:
     def active(self) -> bool:
         return self.store_status.get("state") == "active"
 
+    def __getstate__(self) -> Dict[str, Any]:
+        """Its declared fields only: a pickled or copied snapshot starts without the prices a walk stored on this object
+        (some keyed by its rows' identities), as ``dataclasses.replace`` and ``snapshot_json`` already do."""
+        return {field.name: getattr(self, field.name) for field in dataclasses.fields(self)}
+
     def piece(self, key: Any, make: Callable[[], str], count: Optional[Callable[[], int]] = None) -> int:
         """The characters one local form of this view adds to a request's JSON, made once for this snapshot by building
         its text (``view_pieces``), or by ``count`` where that form has its own exact price (this room's block,
