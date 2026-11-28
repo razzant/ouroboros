@@ -372,6 +372,8 @@ def _kept(snapshot, key, make):
 
 def _quotes_gone(snapshot, entry, gone):
     """Which of a story entry's quote addresses ``gone``'s F7 holds: all a page's forms read of the level."""
+    if not entry.get("quotes") or not gone.get("F7"):
+        return ()
     keys = _kept(snapshot, ("quote keys", id(entry)), lambda: tuple(
         f"quote:{entry['id']}:{n}" for n, _quote in enumerate(entry.get("quotes") or ())))
     return tuple(key for key in keys if key in gone.get("F7", ()))
