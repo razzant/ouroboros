@@ -90,7 +90,9 @@ def test_noninline_design_keeps_map_and_direct_source(governance_repo, surface, 
                                  touched_paths=[touched], usable_window_tokens=0)
 
     assert "Interaction meaning" in context.navigation
-    assert str(path) in context.navigation
+    # A seat that reads gets the exact file; a packet's seat opens no path and is named the document in the repository.
+    assert (f"Source: {path}." if delivery != "packet" else "Source: docs/DESIGN.md.") in context.navigation
+    assert (str(path) in context.navigation) is (delivery != "packet")
     assert "Original interaction rule." not in context.navigation + context.selected_inline
     assert "availability is not evidence of reading or application" in context.navigation.lower()
     assert "docs/DESIGN.md" not in context.inline_whole_documents
@@ -283,7 +285,7 @@ def test_final_packet_preserves_design_delivery_and_omission_facts(governance_re
         goal_section="Check signals", scope_section="Change", files_section="No DESIGN body attached",
         diff_text="diff --git a/web/ui.js b/web/ui.js\n", changed_files="web/ui.js")
     assert ("Interaction meaning" in prompt) == (layer == "body")
-    assert (str(path) in prompt) == (layer == "body")
+    assert ("Source: docs/DESIGN.md." in prompt) == (layer == "body") and str(path) not in prompt
     assert "Original interaction rule." not in prompt
     if layer == "body":
         assert "Interaction meaning" not in prompt[:stable_end]
@@ -296,7 +298,8 @@ def test_missing_design_is_named_without_claiming_content(governance_repo, deliv
     path.unlink()
     context = governance_context(governance_repo, surface="triad", delivery=delivery,
                                  touched_paths=["web/ui.js"], usable_window_tokens=1_000_000)
-    assert str(path) in context.navigation and "source unavailable" in context.navigation
+    assert (f"Source: {path}." if delivery != "packet" else "Source: docs/DESIGN.md.") in context.navigation
+    assert "source unavailable" in context.navigation and (str(path) in context.navigation) is (delivery != "packet")
     assert "No DESIGN content or navigation delivered" in context.navigation
     assert "docs/DESIGN.md" not in context.inline_whole_documents
     row = next(row for row in context.manifest if row["path"] == "docs/DESIGN.md")
