@@ -442,8 +442,10 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
 # delta is shown as a fact. Each text has three states in a revision: absent (a fact), there but unreadable
 # (``UnmeasuredText``: unknown, never absent and never smaller) and measured. The lane renders a base's Map with
 # that revision's own code (``revision_body_map_sizes``), so growth of the renderer's own text is growth; a
-# revision without a renderer has no earlier Map. The balance shown on a book edit renders every side with the
-# running code: that edit changes sources, and a change to the renderer is code the lane measures.
+# revision without a renderer has no earlier Map (``map_renderer_at``, the lane's and the balance's one answer). The
+# balance shown on a book edit renders the sides that have a renderer with the running code: that edit changes
+# sources, and a change to the renderer is code the lane measures. A side it cannot measure is said so, never
+# priced: "no Map rendered" there, or "unavailable" with the reason and no per-file component.
 
 BOOK_GROWTH_RULE = (
     "BIBLE.md, the prompts (prompts/*.md as one text) and the rendered Body Map (the Architecture entry, each "
@@ -493,14 +495,16 @@ class UnmeasuredText(OSError):
 class BookBalance:
     book_id: str
     size: int                              # composed UTF-8 bytes in the working tree
-    vs_head: int | None                    # net change against HEAD; None when HEAD has no such book
-    vs_upstream: int | None                # contribution delta against the official target's merge-base
+    vs_head: int | None                    # net change against HEAD; None when HEAD has no such book or is unknown
+    vs_upstream: int | None                # contribution delta against the official target's merge-base, None likewise
     upstream: str                          # local official development ref, "" when unavailable
     changed: tuple[tuple[str, int], ...]   # sources whose bytes differ from HEAD, with their delta
     merge_base: str = ""                   # exact measured commit, never the feature's tracking tip
     ruled: bool = True                     # False: a book or standalone document, whose size is a fact under no rule
     over_read: tuple[tuple[str, int, int], ...] = ()  # a book's chapters past one default read: (path, lines, chars)
     unmeasured: str = ""                   # why the text, there, could not be measured; its sizes are then unknown
+    head_unknown: str = ""                 # why HEAD's side has no size though the text may be there (never "absent")
+    base_unknown: str = ""                 # the same for the merge-base's side
 
     @property
     def owed(self) -> int:
@@ -755,6 +759,25 @@ print(json.dumps(None if sizes is None else sum(sizes.values())))
 '''
 
 
+NO_MAP_RENDERED = "no Map rendered"
+_RENDERER_PATH = "ouroboros/reference_books.py"
+
+
+def map_renderer_at(root: Path, ref: str) -> bool:
+    """Whether revision ``ref`` renders a Body Map at all: its ``reference_books`` defines ``body_map``. A revision
+    that does not had no Map, so no size of one is compared with it. ``UnmeasuredText`` where its tree or that
+    module cannot be read. Two offline Git reads, no interpreter."""
+    listing = _git_bytes(Path(root), "ls-tree", "-z", "--full-tree", ref, "--", _RENDERER_PATH)
+    if listing is None:
+        raise UnmeasuredText(f"{ref}: its tree cannot be listed")
+    if not listing:
+        return False
+    source = _git_bytes(Path(root), "show", f"{ref}:{_RENDERER_PATH}")
+    if source is None:
+        raise UnmeasuredText(f"{ref}:{_RENDERER_PATH} is listed but its object cannot be read here")
+    return any(line.startswith(b"def body_map(") for line in source.splitlines())
+
+
 def revision_body_map_sizes(root: Path, ref: str, text_id: str = BODY_MAP_TEXT) -> dict[str, int] | None:
     """The Body Map revision ``ref`` renders with its OWN code from its own books: what that revision sent.
 
@@ -766,10 +789,7 @@ def revision_body_map_sizes(root: Path, ref: str, text_id: str = BODY_MAP_TEXT) 
     import subprocess
     import sys
 
-    listing = _git_bytes(Path(root), "ls-tree", "-z", "--full-tree", ref, "--", "ouroboros/reference_books.py")
-    if listing is None:
-        raise UnmeasuredText(f"{ref}: its tree cannot be listed")
-    if not listing:
+    if not map_renderer_at(root, ref):
         return None
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", _REVISION_MAP, str(root), ref], cwd=str(root),
@@ -824,16 +844,23 @@ def book_balances(root: Path, paths: Iterable[str] | None = None, *, staged: boo
     ``staged``, in the index a commit would hold; never raises. Ruled texts (``BIBLE.md``, the prompts, and the
     Body Map whenever a book source is touched) carry what they owe; a book and a standalone document carry their
     size as a fact, a book also its chapters past one read. A text absent here is left out (the caller names it); a
-    text there but unreadable is a balance whose ``unmeasured`` says why. Each revision is read once."""
+    text there but unreadable is a balance whose ``unmeasured`` says why. An earlier side has three states, as in
+    the size lane: measured (a delta), absent (``None``, and each of its files a whole addition) or unknown
+    (``head_unknown`` / ``base_unknown``: unreadable there, or a revision that rendered no Map), which gives no
+    delta and no per-file component. Each revision is read once."""
     measures = _texts_of(None if paths is None else list(paths))
     if not measures:
         return []
     upstream, base = contribution_base(root)
-    now_at, head_at = _Revision(root, staged=staged), _Revision(root, "HEAD")
+    # A checkout with no commit yet has no HEAD side: every text is absent there (a fact), not unreadable.
+    born = bool(base) or _git_bytes(root, "rev-parse", "--verify", "--quiet", "HEAD") is not None
+    now_at, head_at = _Revision(root, staged=staged), _Revision(root, "HEAD") if born else None
     base_at = _Revision(root, base) if base else None
 
     def measured(sizes_at, text_id: str, revision: _Revision | None) -> tuple[dict[str, int] | None, str]:
         try:
+            if revision is not None and revision.ref and text_id == BODY_MAP_TEXT and not map_renderer_at(root, revision.ref):
+                return None, NO_MAP_RENDERED
             return (sizes_at(root, text_id, revision=revision) if revision is not None else None), ""
         except (OSError, ValueError, KeyError) as exc:
             return None, str(exc) or type(exc).__name__
@@ -852,30 +879,34 @@ def book_balances(root: Path, paths: Iterable[str] | None = None, *, staged: boo
             if why:
                 balances.append(BookBalance(text_id, 0, None, None, upstream, (), base, ruled, (), why))
             continue
-        head, at_base = measured(sizes_at, text_id, head_at)[0], measured(sizes_at, text_id, base_at)[0]
-        changed = tuple((path, now.get(path, 0) - (head or {}).get(path, 0))
-                        for path in dict.fromkeys([*now, *(head or {})])
-                        if now.get(path, 0) != (head or {}).get(path, 0))
+        (head, head_why), (at_base, base_why) = measured(sizes_at, text_id, head_at), measured(sizes_at, text_id, base_at)
+        changed = () if head_why else tuple((path, now.get(path, 0) - (head or {}).get(path, 0))
+                                            for path in dict.fromkeys([*now, *(head or {})])
+                                            if now.get(path, 0) != (head or {}).get(path, 0))
         balances.append(BookBalance(
             text_id, total(now),
             total(now) - total(head) if head is not None else None,
             total(now) - total(at_base) if at_base is not None else None,
-            upstream, changed if text_id != BODY_MAP_TEXT else (), base, ruled, over))
+            upstream, changed if text_id != BODY_MAP_TEXT else (), base, ruled, over, "", head_why, base_why))
     return balances
 
 
-def _signed(value: int | None) -> str:
-    return "n/a" if value is None else f"{value:+,} B"
+def _side(value: int | None, unknown: str, where: str) -> str:
+    """One earlier side of a balance: its delta, ``n/a`` where the text is absent there, or why it is unknown."""
+    if unknown:
+        return f"{unknown} at {where}" if unknown == NO_MAP_RENDERED else f"unavailable at {where} ({unknown})"
+    return ("n/a" if value is None else f"{value:+,} B") + f" vs {where}"
 
 
 def render_book_balance(balance: BookBalance) -> str:
     """One line: worktree size, HEAD delta, contribution delta and its actual cached base."""
     if balance.unmeasured:
         return f"{text_name(balance.book_id)} balance unavailable: {balance.unmeasured}"
-    line = f"{text_name(balance.book_id)} {balance.size:,} B: {_signed(balance.vs_head)} vs HEAD"
+    line = f"{text_name(balance.book_id)} {balance.size:,} B: {_side(balance.vs_head, balance.head_unknown, 'HEAD')}"
     if balance.upstream:
-        line += f", {_signed(balance.vs_upstream)} vs {balance.upstream} (merge-base {balance.merge_base or 'unavailable'})"
-    if balance.vs_upstream is None:
+        line += ", " + _side(balance.vs_upstream, balance.base_unknown,
+                             f"{balance.upstream} (merge-base {balance.merge_base or 'unavailable'})")
+    if balance.vs_upstream is None and balance.base_unknown != NO_MAP_RENDERED:
         line += "; contribution unknown"
     if balance.changed:
         line += " (" + ", ".join(f"{Path(path).stem} {delta:+,}" for path, delta in balance.changed) + ")"

@@ -729,3 +729,80 @@ def test_review_started_batch_is_not_retried_and_closes_input(tmp_path, monkeypa
     else:
         assert review._blob_texts(tmp_path, ["HEAD:tests/test_a.py"]) == {"HEAD:tests/test_a.py": None}
     assert len(sources) == 1 and sources[0].closed
+
+
+def test_an_earlier_side_is_a_delta_absent_or_unknown_and_an_unknown_side_prices_nothing(tmp_path):
+    """Three states of an earlier side, never a fiction (the size lane's): measured gives a delta; absent there
+    (proven) gives ``n/a`` and each file as a whole addition; there but unreadable gives "unavailable" with its
+    reason, no delta and no per-file component, for a ruled text and a standalone document alike."""
+    repo = _mapped_repo(tmp_path)
+    prompt, design = "prompts/SYSTEM.md", "docs/DESIGN.md"
+    assert design in STANDALONE_DOCS
+    for path, text in {prompt: "An unchanged prompt.\n", design: "The same instruction stays.\n"}.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8", newline="\n")
+    # Absent at HEAD, a fact: n/a, and the file is a whole addition.
+    new = book_balance_note(repo, [prompt, design])
+    assert "Prompts 21 B: n/a vs HEAD" in new and "(SYSTEM +21)" in new and "(DESIGN +28)" in new
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "a prompt and a standalone document")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    measured = book_balance_note(repo, [prompt, design])
+    assert "Prompts 21 B: +0 B vs HEAD, +0 B vs " in measured and "docs/DESIGN.md 28 B: +0 B vs HEAD" in measured
+    assert "nothing owed" in measured and "unavailable" not in measured
+    # There but unreadable: the unchanged HEAD blob of each is moved aside, the working files stay readable.
+    held = []
+    for path in (prompt, design):
+        oid = _git(repo, "rev-parse", f"HEAD:{path}")
+        blob = repo / ".git" / "objects" / oid[:2] / oid[2:]
+        blob.rename(tmp_path / oid)
+        held.append((tmp_path / oid, blob))
+    try:
+        unknown = book_balance_note(repo, [prompt, design])
+        by_id = _by_id(book_balances(repo, [prompt, design]))
+    finally:
+        for aside, blob in held:
+            aside.rename(blob)
+    for text_id, name, size in (("prompts", "Prompts", 21), (design, design, 28)):
+        balance = by_id[text_id]
+        assert (balance.size, balance.vs_head, balance.vs_upstream, balance.changed) == (size, None, None, ())
+        assert "cannot be read here" in balance.head_unknown and balance.base_unknown
+        assert f"{name} {size:,} B: unavailable at HEAD (" in unknown
+    assert "+0 B" not in unknown and "SYSTEM +" not in unknown and "DESIGN +" not in unknown and "n/a" not in unknown
+    assert "nothing owed" not in unknown and "contribution unknown" in unknown
+    assert book_balance_note(repo, [prompt, design]) == measured  # restored
+
+
+def test_a_base_that_rendered_no_map_is_said_so_never_priced_with_todays_renderer(tmp_path):
+    """The Map's balance against a revision renders that revision's books with the running code, a comparison of
+    sources. A revision whose own code had no Map renderer sent no Map: the balance says so there, with no delta,
+    as the size lane measures it (``map_renderer_at``: one answer for both); once the base renders one, the same
+    edit is a measured delta again."""
+    from ouroboros import reference_books as books
+
+    repo = _mapped_repo(tmp_path)
+    renderer = repo / "ouroboros" / "reference_books.py"
+    renderer.write_text("# the book contract, before the Map\n", encoding="utf-8", newline="\n")
+    _git(repo, "commit", "-qam", "a base whose code renders no Map")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", base)
+    renderer.write_text("# the book contract\ndef body_map(): ...\n", encoding="utf-8", newline="\n")
+    _git(repo, "commit", "-qam", "the contribution that renders the Map")
+    assert (books.map_renderer_at(repo, base), books.map_renderer_at(repo, "HEAD")) == (False, True)
+    assert books.revision_body_map_sizes(repo, base) is None  # the lane: no earlier Map, nothing compared
+    (repo / CHAPTER).write_text(BODY.replace(*OPENING), encoding="utf-8", newline="\n")
+    grown = len(OPENING[1]) - len(OPENING[0])
+    rendered = _by_id(book_balances(repo, [CHAPTER]))[BODY_MAP_TEXT]
+    assert (rendered.vs_head, rendered.vs_upstream, rendered.base_unknown) == (grown, None, books.NO_MAP_RENDERED)
+    line = render_book_balance(rendered)
+    assert line == (f"Body Map {rendered.size:,} B: +{grown} B vs HEAD, no Map rendered at "
+                    f"refs/remotes/canonical/ouroboros (merge-base {base})")
+    assert rendered.owed == grown  # what is known to have grown: this edit against HEAD
+    # The book itself has both sides at that base: its delta is measured there as before.
+    assert _by_id(book_balances(repo, [CHAPTER]))["architecture"].vs_upstream == grown
+    # The same edit against a base that renders a Map: a measured delta.
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    again = _by_id(book_balances(repo, [CHAPTER]))[BODY_MAP_TEXT]
+    assert (again.vs_head, again.vs_upstream, again.base_unknown) == (grown, grown, "")
+    with pytest.raises(UnmeasuredText, match="cannot be listed"):
+        books.map_renderer_at(repo, "0" * 40)

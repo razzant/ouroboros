@@ -23,7 +23,9 @@ def _git(root: pathlib.Path, *args: str) -> str:
 
 def _book_repo(root: pathlib.Path, *, official: bool = True) -> pathlib.Path:
     for path, text in {BOOK_ENTRYPOINTS["architecture"]: ENTRY, CHAPTER: BODY,
-                       "ouroboros/reference_books.py": "# the book contract\n", "ouroboros/loop.py": "x = 1\n",
+                       # every revision of this body renders a Body Map (``reference_books.map_renderer_at``)
+                       "ouroboros/reference_books.py": "# the book contract\ndef body_map(): ...\n",
+                       "ouroboros/loop.py": "x = 1\n",
                        "notes.md": "notes\n"}.items():
         (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text(text, encoding="utf-8", newline="\n")

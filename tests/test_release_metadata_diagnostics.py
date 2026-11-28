@@ -150,7 +150,7 @@ def _diagnose(ctx, source, **kwargs):
 def test_diagnostic_has_no_effects_even_with_pending_managed_review(candidate, monkeypatch, source, outcome):
     ctx = candidate
     # Exercise the real book helper too, including remote and merge-base reads.
-    _write(ctx.repo_dir, {"ouroboros/reference_books.py": "# book contract\n"})
+    _write(ctx.repo_dir, {"ouroboros/reference_books.py": "# book contract\ndef body_map(): ...\n"})
     _git(ctx.repo_dir, "remote", "add", "canonical", "https://github.com/razzant/ouroboros.git")
     _git(ctx.repo_dir, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
     if outcome == "blocked":
@@ -214,7 +214,7 @@ def test_free_tool_json_reports_cumulative_books_with_an_explicit_byte_source(ca
     repo = ctx.repo_dir
     chapter = "docs/architecture/01-one.md"
     body = "# One\n\nAn authored introduction.\n"
-    _write(repo, {"ouroboros/reference_books.py": "# book contract\n", chapter: body,
+    _write(repo, {"ouroboros/reference_books.py": "# book contract\ndef body_map(): ...\n", chapter: body,
                   "docs/ARCHITECTURE.md": "# Architecture\n\nThe map.\n\n## Chapters\n\n"
                                           "- [One](architecture/01-one.md)\n"})
     _git(repo, "add", ".")
@@ -262,7 +262,7 @@ def test_free_tool_json_reports_cumulative_books_with_an_explicit_byte_source(ca
 def test_free_diagnostic_without_paths_measures_bible_and_the_prompts(candidate, source):
     """Omitted paths mean every book and ruled text, so a grown prompt is never 'nothing owed'."""
     repo = candidate.repo_dir
-    _write(repo, {"ouroboros/reference_books.py": "# book contract\n", "BIBLE.md": "# BIBLE\n",
+    _write(repo, {"ouroboros/reference_books.py": "# book contract\ndef body_map(): ...\n", "BIBLE.md": "# BIBLE\n",
                   "prompts/SYSTEM.md": "system\n"})
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "texts")
@@ -278,7 +278,7 @@ def test_free_diagnostic_without_paths_measures_bible_and_the_prompts(candidate,
 def test_free_book_diagnostic_distinguishes_foreign_and_unknown_baseline(candidate, source):
     # A foreign project can have the same docs paths without the body contract.
     assert _diagnose(candidate, source)["book_balance"]["note"] == ""
-    _write(candidate.repo_dir, {"ouroboros/reference_books.py": "# book contract\n"})
+    _write(candidate.repo_dir, {"ouroboros/reference_books.py": "# book contract\ndef body_map(): ...\n"})
     _git(candidate.repo_dir, "add", ".")
     _git(candidate.repo_dir, "commit", "-qm", "body contract")
     result = _diagnose(candidate, source)
