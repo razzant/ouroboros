@@ -16,8 +16,8 @@
   "version": "0.1.22"
  },
  "grok_realtime": {
-  "content_hash": "e6769475b9f7f9e88dd77b40be6e60ef33cdc09ee0fabf1a66b7f5d5146651db",
-  "version": "0.1.16"
+  "content_hash": "3f5d4a37371d89c8f829f329bd54e7460d1c9888b06138b82688f820549b6a0e",
+  "version": "0.1.17"
  },
  "live_conversation": {
   "content_hash": "d4a5c90537b98f482cdb29c0431a88df4f066e9ccf66f62244ad592e8ab7519c",

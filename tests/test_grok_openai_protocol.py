@@ -148,6 +148,7 @@ def test_options_preserve_host_text_and_add_language_hints(providers, engine, la
             assert text.index("The owner opened this call") < text.index("Feature then owner rules.")
             if engine == "grok":
                 assert "languages" not in session and "language" not in session
+                assert "transcription" not in session["audio"]["input"]  # several: no hint (28.11.2026)
                 assert session["voice"] == "eve"
                 assert ("Speech recognition should expect: ru-RU, en-US." in text) is bool(languages)
                 if languages:

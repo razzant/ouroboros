@@ -329,3 +329,125 @@ def test_an_old_cancelled_receipt_cannot_release_the_next_unanswered_vad_turn(pr
                 await asyncio.gather(reader, return_exceptions=True)
             await native.close()
     asyncio.run(scenario())
+
+
+# Recorded on 28.11.2026 (probes/languages, grok-voice-3.0): the hint is echoed under audio.input.transcription as sent,
+# a null hint comes back as an empty transcription, top-level dialect keys are added, and a refusal names no client id.
+REFUSED = {"type": "error", "event_id": "931bc84b-2994-4fec-b4dc-6bef2f921914", "error": {
+    "type": "invalid_request_error", "code": "invalid_request_error",
+    "message": "session.update keys not applied: session.language_hint: must be a string"}}
+
+
+def hint_wire(answer=None, echoed_hint="as sent"):
+    from tests.test_grok_openai_protocol import Wire
+
+    class Recorded(Wire):
+        def put(self, event):
+            if event.get("type") == "session.updated":
+                event = __import__("copy").deepcopy(event)
+                transcription = event["session"].get("audio", {}).get("input", {}).get("transcription")
+                if transcription is not None:
+                    hint = transcription.get("language_hint") if echoed_hint == "as sent" else echoed_hint
+                    event["session"]["audio"]["input"]["transcription"] = {"language_hint": hint} if hint else {}
+                    event["session"]["input_audio_transcription"] = {"model": "grok-stt"}
+                    if hint:
+                        event["session"]["language_hint"] = hint
+            super().put(event)
+
+        async def send(self, raw):
+            import json
+            event = json.loads(raw)
+            transcription = event.get("session", {}).get("audio", {}).get("input", {}).get("transcription")
+            if answer is not None and transcription is not None and set(event["session"]) == {"audio"}:
+                self.sent.append(event)
+                self.put(answer)
+                return
+            await super().send(raw)
+    return Recorded("grok")
+
+
+async def grok_opened(providers, wire, languages=()):
+    from ouroboros.contracts.live_conversation import LiveOptions
+    adapter, wire = make(providers, "grok", LiveOptions(languages=languages), wire=wire)
+    await adapter.open()
+    assert (await adapter.receive())[0].kind == "ready"
+    return adapter
+
+
+@pytest.mark.parametrize("languages,setup,hint,taken", [
+    (("ru-RU",), None, "ru-RU", ("ru-RU",)),
+    (("ru-RU", "en-US"), "ru-RU", None, ()),  # several: the hint is cleared and the engine detects each utterance
+    ((), "de-DE", None, ()),
+])
+def test_grok_languages_change_in_place_judged_by_the_echo_check(providers, languages, setup, hint, taken):
+    async def run():
+        wire = hint_wire()
+        adapter = await grok_opened(providers, wire, (setup,) if setup else ())
+        try:
+            first = wire.sent[0]["session"]["audio"]["input"]
+            assert first.get("transcription") == ({"language_hint": setup} if setup else None)
+            instructions = adapter.instructions
+            update = asyncio.create_task(adapter.update_languages(languages))
+            await asyncio.sleep(0.01)
+            change = wire.sent[-1]
+            assert change == {"type": "session.update",
+                              "session": {"audio": {"input": {"transcription": {"language_hint": hint}}}}}
+            assert not adapter.renewal_ready and not update.done()
+            await adapter.send(ContextUpdate(({"role": "user", "content": "Room words."},)))
+            assert wire.sent[-1] is change, "nothing crosses the update before its echo"
+            await adapter.receive()  # the echo
+            assert await update == taken
+            await drain(adapter, wire)
+            assert [event["type"] for event in wire.sent[-2:]] == ["conversation.item.create", "response.create"]
+            assert adapter.instructions == instructions
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("answer", ["refused", "other hint echoed", "hint dropped"])
+def test_grok_refused_or_disagreeing_language_update_keeps_the_call_and_claims_nothing(providers, answer):
+    async def run():
+        wire = hint_wire(REFUSED if answer == "refused" else None,
+                         echoed_hint={"other hint echoed": "en-US", "hint dropped": None}.get(answer, "as sent"))
+        adapter = await grok_opened(providers, wire)
+        try:
+            update = asyncio.create_task(adapter.update_languages(("ru-RU",)))
+            await asyncio.sleep(0.01)
+            events = await adapter.receive()
+            assert not any(event.kind == "closed" for event in events) and not wire.closed
+            assert await update is None
+            assert adapter.renewal_ready and adapter.session_update is None
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+def test_grok_error_while_no_language_update_is_in_flight_stays_fatal(providers):
+    from ouroboros.contracts.realtime import RealtimeSetupError
+
+    async def run():
+        wire = hint_wire()
+        adapter = await grok_opened(providers, wire)
+        try:
+            wire.put(REFUSED)
+            with pytest.raises(RealtimeSetupError):
+                await adapter.receive()
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+def test_grok_echo_check_reads_a_requested_null_leaf_as_absent_and_nothing_else(providers):
+    check = providers["grok"].module.check_session_echo
+    cleared = {"audio": {"input": {"transcription": {"language_hint": None}}}}
+    check(cleared, {"audio": {"input": {"transcription": {}}}})
+    check(cleared, {"audio": {"input": {"transcription": {"language_hint": None}}}})
+    hinted = {"audio": {"input": {"transcription": {"language_hint": "ru-RU"}}}}
+    check(hinted, {"audio": {"input": {"transcription": {"language_hint": "ru-RU"}, "transport": "json"}}})
+    from ouroboros.contracts.realtime import RealtimeSetupError
+    for echoed in ({}, {"language_hint": "en-US"}, {"language_hint": None}):
+        with pytest.raises(RealtimeSetupError):
+            check(hinted, {"audio": {"input": {"transcription": echoed}}})
+    with pytest.raises(RealtimeSetupError):
+        check(cleared, {"audio": {"input": {"transcription": {"language_hint": "ru-RU"}}}})

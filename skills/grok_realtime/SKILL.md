@@ -1,7 +1,7 @@
 ---
 name: grok_realtime
 description: xAI Grok Voice provider for Live Conversation.
-version: 0.1.16
+version: 0.1.17
 type: extension
 runtime: python3
 entry: plugin.py
@@ -23,8 +23,14 @@ o200k stands in for Grok's own count, which the wire does not report; a smaller
 effect of text shape is not excluded. The 231,828 o200k-token accepted input is separate evidence,
 not a fit target. This package never selects or cuts memory. Host facts keep their roles;
 `Respond` opens the greeting only after setup acknowledgements. Call instructions
-follow host system text; language tags add a recognition sentence, not a session
-field. Silent tool outputs do not request another response.
+follow host system text; language tags add a recognition sentence, and one recorded
+tag is also the session's `audio.input.transcription.language_hint` (with several
+there is no hint and the engine detects each utterance). A call that records new
+languages changes the hint in place (`update_languages`): its own session.update,
+alone on the wire until echoed and judged by the adapter's echo check (a requested
+null hint echoes as cleared); a refusal or a disagreeing echo leaves the session as it
+was and reports nothing applied (probes 2026-11-28). Silent tool outputs do not request
+another response.
 Selected history containing tool calls is carried as ordered, quoted JSON in
 instructions, preserving arguments and results without reissuing those calls.
 

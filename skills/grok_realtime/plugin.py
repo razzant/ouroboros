@@ -5,6 +5,8 @@ Read 2026-10-21; R6 observed outer response.done.usage is retained verbatim.
 Probe 2026-11-27: session.updated echoes a requested null turn_detection as an undocumented
 client_controlled block with tuning fields, and adds turn_detection under audio.input and voice under audio.output.
 A requested voice comes back with the same id in both places (adapter open() proof, 27.11.2026).
+Probe 2026-11-28: audio.input.transcription.language_hint is taken in setup and mid-session and echoed as sent; a
+requested null hint echoes as an empty transcription (cleared); a refused session.update is an error naming no client id.
 """
 from __future__ import annotations
 import base64
@@ -84,6 +86,11 @@ def nested_turn_detection_echoed(requested, echoed):
         requested, nested['turn_detection'])
 
 
+def present(value):
+    """28.11.2026 probe: a requested null leaf (a cleared language_hint) is echoed as absent."""
+    return {k: v for k, v in value.items() if v is not None} if isinstance(value, dict) else value
+
+
 def audio_echoed(requested, echoed, turn_detection, voice):
     # Requested fields (format type and rate) stay exact; of the fields xAI adds, a non-JSON
     # transport, a nested turn_detection or an output voice that contradicts the request still refuses.
@@ -95,11 +102,17 @@ def audio_echoed(requested, echoed, turn_detection, voice):
             if actual != fields:
                 return False
             continue
-        if (any(k not in actual or actual[k] != v for k, v in fields.items())
+        if (any(k not in actual or present(actual[k]) != present(v) for k, v in fields.items())
                 or actual.get('transport', 'json') != fields.get('transport', 'json')
                 or (voice is not ABSENT and direction == 'output' and actual.get('voice', voice) != voice)):
             return False
     return turn_detection is ABSENT or nested_turn_detection_echoed(turn_detection, echoed)
+
+
+def language_hint(languages):
+    """One recorded language is the recognition hint; with several the engine detects each utterance (28.11.2026: it
+    transcribed Russian, English and a mixed utterance whole with no hint, as with one)."""
+    return languages[0] if len(languages) == 1 else None
 
 
 def check_session_echo(requested, actual):
@@ -194,6 +207,8 @@ class GrokSession(JsonSession):
                   'turn_detection': None,
                   'audio': {'input': {'format': {'type': 'audio/pcm', 'rate': 24000}},
                             'output': {'format': {'type': 'audio/pcm', 'rate': 24000}}}}
+        if language_hint(options.languages):
+            config['audio']['input']['transcription'] = {'language_hint': language_hint(options.languages)}
         if options.thinking:
             config['reasoning'] = {'effort': options.thinking}
         if options.voice:
@@ -214,6 +229,8 @@ class GrokSession(JsonSession):
         self.truncations = {}
         self.context_queue, self.outstanding = [], {}
         self.session_update = None
+        # A recognition-language change: requested (update, tags it applies, future), then in flight (tags, future).
+        self.language_request = self.language_update = None
         self.context_lock = asyncio.Lock()
         self.response_requested = self.want_response = self.speech_active = self.vad_response_pending = False
         self.waiting_tools = set()
@@ -230,7 +247,7 @@ class GrokSession(JsonSession):
         return self.ready and not (self.speech_active or self.vad_response_pending
             or self.active_response or self.response_requested or self.want_response or self.context_queue
             or self.outstanding or self.session_update is not None or self.waiting_tools or self.truncations
-            or self.input_transcripts or self.output_transcripts)
+            or self.input_transcripts or self.output_transcripts or self.language_request is not None)
 
     @property
     def input_pending(self):
@@ -312,8 +329,36 @@ class GrokSession(JsonSession):
         await self.advance_context()
         return events
 
+    async def update_languages(self, languages):
+        """Change the recognition hint in place: the tags it takes from now on (() = it detects each utterance), or None
+        when xAI refused the update or echoed something else. Instructions, tools and history are untouched."""
+        if not self.ready:
+            return None
+        tags = tuple(languages)
+        hint = language_hint(tags)
+        request = ({'audio': {'input': {'transcription': {'language_hint': hint}}}}, tags if hint else (),
+                   asyncio.get_running_loop().create_future())
+        self.language_request = request
+        await self.advance_context()
+        try:
+            return await request[2]
+        finally:
+            if self.language_request is request:
+                self.language_request = None
+
+    def settle_language(self, taken):
+        _, done = self.language_update
+        self.language_update = self.session_update = None
+        if not done.done():
+            done.set_result(taken)
+
     def is_benign_error(self, event):
         error = event.get('error')
+        if (event.get('type') == 'error' and isinstance(error, dict) and self.language_update is not None
+                and str(error.get('message', '')).startswith('session.update')):
+            # 28.11.2026: xAI names no client id; the gate makes ours the one session.update in flight. Nothing applied.
+            self.settle_language(None)
+            return True
         if (event.get('type') != 'error' or not isinstance(error, dict) or not self.pending_cancel
                 or error.get('code') != 'response_cancel_not_active'
                 or error.get('event_id') is not None  # Our xAI cancel has no client event id.
@@ -328,6 +373,12 @@ class GrokSession(JsonSession):
             if (not self.ready or self.active_response or self.response_requested or self.vad_response_pending
                     or self.outstanding or self.session_update is not None):
                 return
+            if self.language_request is not None:
+                update, applied, done = self.language_request
+                self.language_request = None
+                if not done.done():  # its own session.update, alone until echoed, judged by check_session_echo
+                    self.session_update, self.language_update = update, (applied, done)
+                    await self.write({'type': 'session.update', 'session': update})
             while self.context_queue and not self.outstanding and self.session_update is None:
                 command = self.context_queue.pop(0)
                 update = {}
@@ -377,7 +428,13 @@ class GrokSession(JsonSession):
         kind, item = event.get('type'), event.get('item_id', '')
         if kind == 'response.function_call_arguments.done':
             return self.tool_call(event)
-        if kind == 'session.updated' and self.session_update is not None:
+        if kind == 'session.updated' and self.language_update is not None:
+            try:
+                check_session_echo(self.session_update, event.get('session', {}))
+                self.settle_language(self.language_update[0])
+            except RealtimeSetupError:
+                self.settle_language(None)  # the echo disagrees: nothing is claimed as applied
+        elif kind == 'session.updated' and self.session_update is not None:
             actual = event.get('session', {})
             check_session_echo(self.session_update, actual)
             self.session_update = None
