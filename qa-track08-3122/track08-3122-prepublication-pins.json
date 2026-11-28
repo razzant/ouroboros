@@ -1,0 +1,22 @@
+{
+  "core_head": "a02300e5de3583c1d56ab40e30aab776a5a77016",
+  "core_tree": "f86ad013ae9a85253648d009152edb4b021e3dba",
+  "files": {
+    "track08-3122-prepublication-driver.py.in": {
+      "bytes": 16515,
+      "sha256": "c12372bbbeddc874a65fa407207e63a803dcedd6117e60efd67405ae3069e69b"
+    },
+    "track08-3122-prepublication-pair.json": {
+      "bytes": 14195,
+      "sha256": "189d3dff8c386bb9f1cc100609f244c4910eb5769008dd1b617270a31dfa84be"
+    },
+    "track08-3122-prepublication-witness.zip": {
+      "bytes": 23487,
+      "sha256": "d6c953fd42cd57c85a276e04bc7c09d20277eaaefcc1fd5bb80f1d4a91c05c6a"
+    }
+  },
+  "hub_head": "c42c25082128474a27acdf251d3793da6551ee68",
+  "hub_tree": "941012431d7393d2c97dda18aa3653bc691b7d37",
+  "qualification": "ordinary settled rotation on a fresh Settings-write fixture only",
+  "witness_manifest_sha256": "afab9a283e4262b20948604d28ea5dde1c0d35f98a284e7afc5a80b07910aeb6"
+}
