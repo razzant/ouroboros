@@ -1,0 +1,76 @@
+name: Nano native 80k · one Web Main message (QA only)
+on:
+  push:
+    branches: [qa/nano-native-80k-user]
+permissions:
+  contents: read
+concurrency:
+  group: nano-native-80k-user
+  cancel-in-progress: false
+jobs:
+  probe:
+    if: github.event.created && github.ref == 'refs/heads/qa/nano-native-80k-user' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Start bounded clock before checkout
+        run: |
+          echo "QA_CUTOFF=$(($(date +%s) + 780))" >> "$GITHUB_ENV"
+          echo "QA_DIR=$RUNNER_TEMP/nano-native-80k-user" >> "$GITHUB_ENV"
+          mkdir -m 700 "$RUNNER_TEMP/nano-native-80k-user"
+          printf '%s\n' '{"status":"partial","phase":"checkout","send":"not_clicked"}' > "$RUNNER_TEMP/nano-native-80k-user/facts.json"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - name: Verify candidate and prepare the public dependencies
+        shell: bash
+        run: |
+          printf '%s\n' '{"status":"partial","phase":"verify_candidate","send":"not_clicked"}' > "$QA_DIR/facts.json"
+          test "$(git rev-parse HEAD^)" = 87ada69af39035da4539a227fb430aa26554032e
+          test "$(git rev-parse 'HEAD^^')" = 9de8f3bd6f30b8cef445bf2294c55899eeb29aaa
+          test "$(git rev-parse 'HEAD^^{tree}')" = a8dc536e570865b864fecfbd28afccd2b6e4fbdd
+          test "$(git diff --name-status HEAD^ HEAD)" = "$(printf 'A\t.github/workflows/nano-native-80k-user.yml\nA\tscripts/qa_nano_native_80k_user.py')"
+          test "$(uname -m)" = x86_64
+          test "$(nproc)" -le 4
+          test -x /usr/bin/google-chrome
+          /usr/bin/google-chrome --version
+          remaining=$((QA_CUTOFF - $(date +%s)))
+          test "$remaining" -gt 0
+          printf '%s\n' '{"status":"partial","phase":"download_and_verify","send":"not_clicked"}' > "$QA_DIR/facts.json"
+          timeout --signal=TERM --kill-after=3 "$remaining" bash -euo pipefail -c '
+            model=Qwen3.5-0.8B-Q4_K_M.gguf
+            wheel=llama_cpp_python-0.3.38-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+            curl -fLsS --proto "=https" --proto-redir "=https" -o "$QA_DIR/$model" "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/$model"
+            curl -fLsS --proto "=https" --proto-redir "=https" -o "$QA_DIR/$wheel" "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.38/$wheel"
+            test "$(stat -c %s "$QA_DIR/$model")" = 532517120
+            test "$(stat -c %s "$QA_DIR/$wheel")" = 33067224
+            cd "$QA_DIR"
+            printf "%s  %s\n" bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517 "$model" 9a27213ff2b65614f3a25d87cf1721829588ed475650e84ded16a8dedb033426 "$wheel" | sha256sum -c
+            printf "%s\n" "{\"status\":\"partial\",\"phase\":\"install_dependencies\",\"send\":\"not_clicked\"}" > "$QA_DIR/facts.json"
+            python3 -m venv "$QA_DIR/venv"
+            "$QA_DIR/venv/bin/pip" install --disable-pip-version-check -r "$GITHUB_WORKSPACE/requirements-runtime.lock" "$QA_DIR/$wheel[server]"
+          '
+      - name: Run the single UI probe on loopback
+        shell: bash
+        run: |
+          remaining=$((QA_CUTOFF - $(date +%s) - 5))
+          test "$remaining" -gt 0
+          printf '%s\n' '{"status":"partial","phase":"enter_loopback_only_unit","send":"not_clicked"}' > "$QA_DIR/facts.json"
+          # The transient cgroup retains the browser's sandbox and bounds the whole probe, including the GGUF service.
+          # Never fall back to an unrestricted launch if the runner does not enforce these properties.
+          sudo systemd-run --quiet --wait --collect --service-type=exec \
+            --property="User=$(id -un)" --property=MemoryMax=8G \
+            --property=PrivateNetwork=yes \
+            --property=KillMode=control-group --property=TimeoutStopSec=5s \
+            --property="RuntimeMaxSec=${remaining}s" --working-directory="$GITHUB_WORKSPACE" \
+            /usr/bin/env -i PATH="$QA_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+            "$QA_DIR/venv/bin/python" "$GITHUB_WORKSPACE/scripts/qa_nano_native_80k_user.py" "$QA_DIR" "$QA_CUTOFF"
+      - name: Upload only the closed, synthetic facts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nano-native-80k-user-facts
+          path: ${{ runner.temp }}/nano-native-80k-user/facts.json
+          retention-days: 5
+          if-no-files-found: warn
