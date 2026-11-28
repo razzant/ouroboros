@@ -178,6 +178,8 @@ class UnixSocketForwarder:
 def live_channel_pair(tmp_path: pathlib.Path, monkeypatch, *, b_lets_a_start: bool = True, a_lets_b_start: bool = False):
     """Two installations (A opener, B receiver) with real ASGI letters doors over Unix sockets
     and two controllable 4-mode forwarders (no SSH)."""
+    if not peer_channel.is_door_supported():
+        pytest.skip("POSIX Unix-domain channel tests only")
     short_dir = pathlib.Path(tempfile.mkdtemp(prefix="obc-", dir="/tmp"))
     root_a, root_b = short_dir / "a" / "data", short_dir / "b" / "data"
     for r in (root_a, root_b):
