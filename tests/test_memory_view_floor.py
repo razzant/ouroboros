@@ -423,8 +423,7 @@ def test_a_selection_keeps_the_reader_path_of_the_request_that_follows_it(monkey
     from ouroboros import context_fit as cf
 
     snap = syn.snapshot(story=syn.pages(3, 3_000), room_facts=syn.room("1", lane1=[syn.spoken(1, "human", 900)]))
-    core = cf.ContextCore("Required core", "Constitution", "b" * 4_000, "", "Identity", "f" * 1_000, '"Assignment"',
-                          False, memory_view_json=mv.snapshot_json(snap))
+    core = cf.ContextCore("Required core", "Constitution", "b" * 4_000, "", "Identity", "f" * 1_000, '"Assignment"', memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     schemas = [{"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}}
                for name in ("compact_context", "enable_tools", "list_available_tools", "read_file")]

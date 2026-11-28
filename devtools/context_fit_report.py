@@ -128,9 +128,9 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
     add('BIBLE', core.bible_md)
     for part in governance[0][2:]:
         add(part.section_id, addressed.get(part.section_id, part.full_text),
-            'operative' if part.section_id in addressed else 'orientation' if book_mode == 'low' else 'whole')
-    if governance[1]:  # the whole handbook (its subject's in Max, or the task's own requirement in any mode), else Max's map
-        add('DEVELOPMENT', governance[1], 'whole' if core.docs_need_development or core.development_required else 'orientation')
+            'operative' if part.section_id in addressed else 'whole')
+    if governance[1]:  # the whole handbook: this task's own requirement, in any mode
+        add('DEVELOPMENT', governance[1], 'whole')
     for parts, fallback, label in ((core.semi_stable_sections, core.semi_stable_text, 'stable'),
                                    (core.dynamic_head_sections, core.dynamic_head_text, 'knowledge'),
                                    (core.dynamic_sections, core.dynamic_text, 'host')):

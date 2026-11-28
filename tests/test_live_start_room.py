@@ -150,7 +150,10 @@ def test_native_resume_prices_nano_schemas_and_keeps_loaded_and_feature_tools(ho
     ('fixture', '', 285_000, 'low', True), ('fixture', 'fixture-resume', 4_000, 'max', False),
     ('grok', '', 87_000, 'low', False),
 ])
-def test_running_voice_wall_prices_whole_books_before_going_below_tellings(host_world, route, resume, excess, mode, deeper):
+def test_running_voice_wall_lowers_the_body_map_before_going_below_tellings(host_world, route, resume, excess, mode, deeper):
+    """A running call over its window takes the lowered frame (the Body Map at its parts) before any of my memory goes
+    below a telling. The stimulus is a Body Map the size the repository's whole Architecture book had (about 464K
+    characters) with its real parts form: before 26.11.2026 Max carried that whole book and Low its chapter maps."""
     from time import perf_counter
 
     from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv
@@ -163,7 +166,10 @@ def test_running_voice_wall_prices_whole_books_before_going_below_tellings(host_
     owner = said(1, 'human', 'Keep the route and all my words exactly.', owner_side=True, immune=True)
     story = [{**page, **({'lead_rule': True} if i < 32 else {})} for i, page in enumerate(pages(64, 12_000))]
     memory = snapshot(story=story, room_facts=room(lane1=[owner]))
-    core = replace(host.plan.core, memory_view_json=mv.snapshot_json(memory))
+    real = host.plan.core
+    assert real.body_map_parts and real.section_root and real.section_task_id  # the Map can step to its parts here
+    core = replace(real, memory_view_json=mv.snapshot_json(memory),
+                   body_map=real.body_map + '\n\n' + 'chapter opening words ' * 21_000)
     whole = host.plan.projection('max')
     books = {m: cf._governance_blocks(None, core, mode=m) for m in ('max', 'low')}
     view, _ = cf._view_projections(core, books, host.plan.user_content_json, preferred='max', tool_schemas=host.schemas,

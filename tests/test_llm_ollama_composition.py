@@ -143,7 +143,7 @@ def test_cold_resume_and_admitted_forced_send_keep_the_scoped_ollama_load(instal
 
     install_http(handle)
     task = {"model": model, "use_local_model": False, "model_role": "main"}
-    core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"Finish"', False)
+    core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"Finish"')
 
     def plan(resolver=cf.resolve_context_fit_route):
         return cf.build_context_fit_plan(None, core, task, preferred_mode="max", tool_schemas=[],

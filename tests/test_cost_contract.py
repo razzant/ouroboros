@@ -507,7 +507,8 @@ def _build_work(measured: Dict[Any, Any], tag: str) -> Dict[int, Dict[str, int]]
     for k, view in views.items():
         assert view["mode_switch"] == {"from": "max", "to": "low"}, (
             f"{tag} k={k}: the build laws are about the live branch Max -> Low; this turn ran {view['mode']} "
-            f"(window {view['window_tokens']}, switch {view['mode_switch']})")
+            f"(window {view['window_tokens']}, switch {view['mode_switch']}; steps {view['steps']}, "
+            f"blocks {view['blocks']}, max room {view['max_room']})")
     return {k: view["work"] for k, view in views.items()}
 
 

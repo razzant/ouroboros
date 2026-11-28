@@ -155,20 +155,17 @@ def section_inventory(plan, mode, facts):
 
 
 def _governance_blocks(env: Any, core: Any, *, mode: str, reference_docs: Callable) -> Tuple[Any, ...]:
-    # D-ARCH (owner, 2026-08-08): the reference-doc form follows the RENDERED
-    # mode directly — ARCHITECTURE is full in max for every task class and the
-    # nav map in low; DEVELOPMENT inclusion is the caller's mode-independent
-    # decision carried on the core (the former per-task force_low_docs lever is
-    # gone: workspace binding no longer shapes the docs).
+    # One resident Body Map in every mode and focus (owner, 25.11.2026); no mode or binding preloads a manual
+    # behind it. ``mode`` only says whether the Map may step down to its parts here: never in the owner's Max, in a
+    # lowered frame for the physical window alone. The whole handbook rides only as a task's own requirement.
+    del env  # the capture holds every source this block renders
     static_parts = [report_text(core.base_prompt, "system"), report_text("## BIBLE.md\n\n" + core.bible_md, "bible")]
     sections, development = reference_docs(
-        env,
-        context_mode="low" if core.compact_reference_docs else mode,
-        include_development=core.docs_need_development or core.development_required,
+        context_mode=mode,
+        body_map=core.body_map,
+        body_map_parts=core.body_map_parts,
         required_book=core.development_required,
-        architecture_text=core.architecture_md,
         development_text=core.development_md,
-        books=core.reference_books,
     )
     static_parts.extend(sections)
     static_parts.extend(core.reference_book_errors)
@@ -195,18 +192,17 @@ def with_program_history(rows, data):
 def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room: str = "", mode: str = "",
                    addressed: Optional[Mapping[str, str]] = None, story_whole: bool = True,
                    trace: Any = None) -> List[Dict[str, Any]]:
-    # All stable items precede C; D is its own block only for the full handbook: Max without it carries the
-    # handbook's chapter map at the head of B, spending no breakpoint; a compact mode's D is a direct requirement
-    # (A' keeps its map). The mode picks the connections map's form in B. Never create an empty cache boundary.
+    # All stable items precede C; D exists only for a task's directly required handbook, in any mode, so every
+    # other task spends no breakpoint on it. The mode picks the connections map's form in B. Never create an empty
+    # cache boundary.
     # B declares what of it other works share (``SHARED_HEAD_KEY``): its head, and its story when that is whole.
     addressed = addressed or {}
     common, *handbook = render_governance(governance, addressed)
     semi = render_sections(core.semi_stable_sections, core.semi_stable_text, addressed)
     dynamic = render_sections(core.dynamic_sections, core.dynamic_text, addressed)
-    own_block = core.docs_need_development or core.development_required
     connections = core.connections[mode == "nano"]
-    shared = "\n\n".join(part for part in (*(() if own_block else handbook), semi, connections) if part)
-    stable = (common, *(handbook if own_block else ()), "\n\n".join(part for part in (shared, story) if part))
+    shared = "\n\n".join(part for part in (semi, connections) if part)
+    stable = (common, *handbook, "\n\n".join(part for part in (shared, story) if part))
     head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, addressed)
     blocks = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}} for text in stable if text.strip()]
     if shared.strip() and story.strip():

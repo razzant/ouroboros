@@ -44,9 +44,9 @@ def core(*, extra=(), memory=False):
     from tests import _memory_view_synthetic as syn
 
     snapshot = syn.snapshot(story=syn.pages(2, 8_000))
-    return cf.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", architecture_md="MAP", development_md="DEV",
+    return cf.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", body_map="MAP", development_md="DEV",
         semi_stable_text="IDENTITY", dynamic_text="MANDATORY CURRENT INDEX", user_content_json=json.dumps("ASSIGNMENT"),
-        docs_need_development=False, supplementary_messages_json=json.dumps(extra, ensure_ascii=False),
+        supplementary_messages_json=json.dumps(extra, ensure_ascii=False),
         memory_view_json=snapshot_json(snapshot) if memory else "")
 
 

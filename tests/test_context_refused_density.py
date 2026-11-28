@@ -53,11 +53,11 @@ def _measurement(route="route-a", density=1.0):
                            window_reading_tokens=None, reply_allowance_tokens=REPLY, capacity_deficit_tokens=0)
 
 
-def _real_plan(*, preferred="low", window=LIMIT, book_chars=0, body=False):
+def _real_plan(*, preferred="low", window=LIMIT, book_chars=0):
     """The integration plan with a real captured core; ``book_chars`` makes this task directly require a handbook,
-    ``body`` makes the body its subject, whose Max view holds that handbook with no addition."""
+    which every mode's view carries as the same addition (no body binding preloads it)."""
     plan = _plan(preferred=preferred, window=window)
-    core = context_fit.ContextCore("", "", "", "x" * book_chars, "", "", plan.user_content_json, body,
+    core = context_fit.ContextCore("", "", "", "x" * book_chars, "", "", plan.user_content_json,
                                    development_required=bool(book_chars))
     return replace(plan, core=core)
 
@@ -207,8 +207,12 @@ def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_pa
     client = SimpleNamespace(vision_query=lambda *_a, **_kw: ("caption " * 7500, {}))
     room = syn.room(notes=1)
     room["notes"][0]["text"] = "Held note. " + "n" * 8000
-    core = context_fit.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"', False,
+    core = context_fit.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"',
         memory_view_json=memory_view.snapshot_json(syn.snapshot(room_facts=room, story=[], conversations=[])))
+    if mode == "max":  # the books rung gives only a Body Map's step to its parts: a real Map, its parts and a reader
+        from tests._reference_book_fixtures import booked
+
+        core = booked(replace(core, section_root=str(tmp_path / "sections"), section_task_id="recovery"), tmp_path)
     plan = context_fit.build_context_fit_plan(None, core, {"id": "recovery", "_is_direct_chat": True},
         preferred_mode=mode, tool_schemas=[], route_resolver=lambda *_a, **_kw: (
             {"provider": "fixture", "model": "fixture"},
@@ -411,8 +415,8 @@ def round_call(tmp_path, monkeypatch):
                         ("_server_web_allowed_by_task", lambda *_a: False)):
         monkeypatch.setattr(loop, name, value)
     monkeypatch.setattr(loop_messages, "append_context_facts", lambda *_a, **_kw: False)
-    return lambda window, book_chars=0, body=False, **kw: _round(tmp_path, _real_plan(
-        preferred=kw.get("mode", "low"), window=window, book_chars=book_chars, body=body), **kw)
+    return lambda window, book_chars=0, **kw: _round(tmp_path, _real_plan(
+        preferred=kw.get("mode", "low"), window=window, book_chars=book_chars), **kw)
 
 
 @pytest.mark.parametrize("exact", [False, True], ids=["known_window_prediction", "exact_local_count"])
@@ -481,8 +485,9 @@ def test_a_size_terminal_names_the_final_candidate_it_refused(round_call, monkey
     ("size", "prediction"),  # the fallback's own admission: its book, window and reserve, never the restored primary's
     ("prediction", "size"),  # the provider's later refusal replaces the primary's prediction, its book arithmetic too
     ("prediction", "bad_request"),  # the primary's prediction named apart, without book arithmetic outside a size end
-    # A Max primary on a body task holds the book with no addition: the walk restores its 0, the refusing Low
-    # fallback's own book stays named, with its admission's arithmetic or, refused by the provider, without any.
+    # A Max primary carries the required handbook as the same addition as Low (no body binding holds it any more): the
+    # walk restores the primary's own addition, the refusing Low fallback's own book stays named, with its admission's
+    # arithmetic or, refused by the provider, without any.
     ("max_transient", "prediction"), ("max_size", "prediction"), ("max_transient", "size"),
     ("max_size", "bad_request"),  # outside a size end no handbook line, whoever carries the requirement
 ])
@@ -502,9 +507,9 @@ def test_a_failed_walk_names_each_size_refusal_with_its_own_route(round_call, mo
 
     held, primary = primary.startswith("max_"), primary.removeprefix("max_")
     mode = "max" if held else "low"  # both routes carry the task's required handbook
-    ctx = round_call(200_000, book_chars=8_000, body=held, words=4_000, mode=mode)
+    ctx = round_call(200_000, book_chars=8_000, words=4_000, mode=mode)
     primary_plan = ctx.context_fit_plan
-    fallback_plan = replace(_real_plan(preferred=mode, window=500_000, book_chars=8_000, body=held),
+    fallback_plan = replace(_real_plan(preferred=mode, window=500_000, book_chars=8_000),
                             model="anthropic/fallback", route_fp="route-b", provider="anthropic")
     # Sizes chosen so a minimum over every model would name the primary's: only the refusing model's key may answer.
     sizes = {primary_plan.model: (210_000, 200_000), fallback_plan.model: (510_000, 500_000)}
@@ -557,7 +562,8 @@ def test_a_failed_walk_names_each_size_refusal_with_its_own_route(round_call, mo
         task_id="t", round_idx=ctx.round_idx, event_queue=None, accumulated_usage=usage, task_type="task",
         emit_progress=lambda *_a, **_kw: None, context_fit_plan=primary_plan, active_context_mode="low")
     assert walked[0] is None and usage["_context_route_fp"] == primary_plan.route_fp  # the walk restored the primary
-    assert (usage["_context_required_book_tokens"] == 0) is held  # whose Max view holds the book with no addition
+    # The primary's own addition, the same in Max and Low: whole only by this task's contract, never by binding.
+    assert usage["_context_required_book_tokens"] == primary_plan.core.required_book_tokens() > 0
     assert usage["_last_llm_failure"]["model"] == fallback_plan.model  # the last attempt's row, as other readers know it
     assert usage["_acting_route_failure"]["failure_code"] == kinds[primary]  # the acting route's own failure, kept
     assert bool(passes) is (primary != "uncomparable_size")  # that one round's recovery returned before its passes
@@ -681,7 +687,8 @@ _OWN_BOOK = "\nThis task directly requires the whole development handbook (~2,00
     # The provider refused what the host sent and admitted with its book: its own size of it, no decomposition.
     (_attempt(3, sent=5_000), True, _stated(70_000, limit=60_000), "request input 70,000 tokens (provider stated) on "
      "m; assumed window 999,999 total", _OWN_BOOK),
-    # Its own Max view held the book with no addition: the round's later measure of the same route lends no size.
+    # An attempt recorded with no addition (a Max view that once held the book by body binding, an old record): the
+    # round's later measure of the same route lends no size.
     (_attempt(3, sent=5_000, book=0), True, _stated(70_000, limit=60_000), "request input 70,000 tokens (provider "
      "stated) on m; assumed window 999,999 total", _UNKNOWN_BOOK),
     # An earlier round's prediction: its admission's book and window are not this round's.

@@ -149,8 +149,12 @@ def test_exact_fit_reaches_ordinary_round_dispatch(lane, monkeypatch):
     assert (anchor.input_tokens, anchor.estimate_tokens, floor) == (10_050, admitted[-1], 10_050)
 
 
-@pytest.mark.parametrize("needs_arch,ordinary_first", [(False, False), (True, False), (True, True)])
-def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, monkeypatch, needs_arch, ordinary_first):
+@pytest.mark.parametrize("past_map,ordinary_first", [(False, False), (False, True), (True, False)])
+def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, monkeypatch, past_map, ordinary_first):
+    """An exact local count refuses the unread Low start with a required handbook: each step (an ordinary pass, then
+    the Body Map at its parts) goes to the exact local admission before another is asked. Past the Map nothing is left:
+    the refusal stands after that one exact check. (The base's second step, ARCHITECTURE's map after the handbook's
+    own, merged into the one Map's step: ``past_map`` replaces ``needs_arch``.)"""
     import re
     from ouroboros import context_fit as fit, loop_model_call, loop_round_limits
     from ouroboros.context_measurement import _physical_context_for_fit
@@ -163,9 +167,13 @@ def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, mon
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **kw: books.RESERVE)
     monkeypatch.setattr(fit, "_route_calibration_ratio", lambda *a, **kw: 1.0)
     monkeypatch.setattr("ouroboros.capability_evidence.resolve_main_token_density", lambda *a, **kw: (1.0, "fresh_route_usage"))
-    core = books.booked(books._core(tmp_path, required=True, memory=False), tmp_path,
-                        headings=600, body="Its practice. " * 10)
-    window = 109_177
+    core = books._booked(books._core(tmp_path, required=True, memory=False), tmp_path,
+                         headings=600, book_body="Its practice. " * 10)
+    beyond = books.map_saving(core) + 4_000 if past_map else 0  # more than the Map at its parts can give
+    # The exact count of this start's first request is 43,231 beside a 65,536 reply; the Map's step to its parts saves
+    # about 4,650 of that count but only about 3,970 by the estimate. This window is over by about 4,300: more than the
+    # estimate credits the step, less than the exact count it saves (the base's 109,177 sized two detailed maps).
+    window = 104_450
     plan = books._plan(tmp_path, core, "low", window, source="local_health")
     ctx = facts_ctx(tmp_path)
     ctx.active_model, ctx.active_context_mode = plan.model, "low"
@@ -181,7 +189,7 @@ def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, mon
         payload = _physical_candidate(dict(messages=candidate.messages, tools=candidate.tool_schemas,
                                            model=plan.model, max_tokens=books.RESERVE))
         text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        count = len(re.findall(r"[a-zA-Z]+|[0-9]|[^a-zA-Z0-9\s]", text)) + (4_000 if needs_arch else 0)
+        count = len(re.findall(r"[a-zA-Z]+|[0-9]|[^a-zA-Z0-9\s]", text)) + beyond
         native = dict(supported=True, input_is_exact=True, native_input_sha256=input_fingerprint(payload),
                       input_tokens=count, context_window=window)
         with ua.bind_physical_attempt_context(_physical_context_for_fit(measured, plan)):
@@ -220,13 +228,12 @@ def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, mon
     monkeypatch.setattr(loop_model_call, "_apply_refusal_pass", apply_pass)
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     answer, cost, mode = loop_model_call._recover_context_overflow(ctx, refusal, 0.0)
-    assert answer and mode == "low" and cost == 0
-    expected = ([[]] if ordinary_first else []) + [["development_map"]]
-    if needs_arch:
-        expected += [["development_map", "architecture_map"]]
-    assert sends == expected  # a distinct exact refusal precedes each further map step
+    assert bool(answer) is not past_map and mode == "low" and cost == 0
+    expected = ([[]] if ordinary_first else []) + [["body_map"]]
+    assert sends == expected  # a distinct exact refusal precedes each further step; past the Map none is left
     assert books._rows(ctx.context_fit_plan) == expected[-1]
-    if not needs_arch:
-        assert "Mechanism 599 — lines" in ctx.messages[0]["content"][0]["text"]
+    view = ctx.messages[0]["content"][0]["text"]
+    assert books.PARTS in view and "Mechanism 599: its facts." not in view and len(books._book_blocks(ctx.context_fit_plan, "low")) == 1
+    if not past_map:
         after = loop_round_limits._measure_trial_candidate(ctx, ctx.messages)
         assert measured.measurement.estimated_input_tokens - after.measurement.estimated_input_tokens < target - slack

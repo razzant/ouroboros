@@ -266,7 +266,7 @@ def test_a_cold_continuation_fits_its_start_in_the_effort_it_resumes_on(tmp_path
     snap = syn.snapshot(room_facts=syn.room("1"), story=syn.pages(1, 300),
                         conversations=[syn.conversation(i, words=10, word_chars=1_000) for i in range(10)])
     book = "# Architecture\n\n" + "Whole source book. " * 2_000
-    core = cf.ContextCore("Core", "BIBLE", book, "", "Identity", "Facts", '"Assignment"', False,
+    core = cf.ContextCore("Core", "BIBLE", book, "", "Identity", "Facts", '"Assignment"',
                           memory_view_json=mv.snapshot_json(snap))
     task = {"id": "t-wait", "type": "task", "chat_id": 1, "_attempt": 1, "text": "continue", "reasoning_effort": "high"}
 
@@ -457,7 +457,7 @@ def test_saved_model_first_fit_and_real_send(tmp_path, monkeypatch, decision):
     snapshot = syn.snapshot(room_facts=syn.room('1'), story=syn.pages(1, 300),
         conversations=[syn.conversation(i, words=10, word_chars=1000) for i in range(10)])
     core = cf.ContextCore('Core', 'BIBLE', '# Architecture\n' + 'Whole source book. '*2000,
-        '', 'Identity', 'Facts', '"Assignment"', False, memory_view_json=mv.snapshot_json(snapshot))
+        '', 'Identity', 'Facts', '"Assignment"', memory_view_json=mv.snapshot_json(snapshot))
     from datetime import datetime, timezone
 
     task = {'id': 'model-witness', 'type': 'task', 'chat_id': 1, '_attempt': 1, 'text': 'continue',

@@ -37,7 +37,7 @@ class PhysicalAttemptContext:
     window_observation_fp: str = ""  # Main account scope, separate from capability/density route_fp
     required_book_tokens: int = 0  # a directly required handbook inside this candidate (density applied), its note too
     preferred_mode: str = ""  # the owner's mode this task's plan holds at send (Settings may differ by now)
-    # Why ``rendered_mode`` is lower ("" for agreement or an unknown cause): the start's Max room lost its whole books
+    # Why ``rendered_mode`` is lower ("" for agreement or an unknown cause): the start's Max room was lost
     # to ``memory``, to what the ``request`` itself carries, or to the ``route``'s window; ``window`` the start's window
     # took it otherwise; ``after_start`` a lower mode the task took after its start (``context_measurement.mode_cause``).
     mode_cause: str = ""
@@ -129,13 +129,14 @@ def with_dispatch_stamp(request: Any, stamp: Tuple[int, str]) -> Any:
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made
 
 
-def shown_mode(rendered_mode: str, *, compact: bool = False) -> Tuple[str, str]:
-    """``(mode, books)``: the mode a send is named in and its books' form, the one fact every surface reads. A start
-    the window took from my human's Max renders the ``low`` frame and is named Low: it runs in Low, temporarily, for
-    the window, while the owner's choice stays Max beside it (``preferred_at_send``, owner 21.11.2026). Low and Nano
-    show chapter maps; Max shows the whole books unless its actor reads them as maps by design (a delegated child,
-    ``compact``)."""
-    return rendered_mode, "whole" if rendered_mode == "max" and not compact else "maps"
+def shown_mode(rendered_mode: str) -> Tuple[str, str]:
+    """``(mode, books)``: the mode a send is named in and what stands for the books in it, the one fact every surface
+    reads. A start the window took from my human's Max renders the ``low`` frame and is named Low: it runs in Low,
+    temporarily, for the window, while the owner's choice stays Max beside it (``preferred_at_send``, owner
+    21.11.2026). Every mode and focus carries the resident Body Map (owner 25.11.2026), so ``books`` is ``body_map``
+    on every new send; whether the window took the Map to its parts is the view's own receipt
+    (``host_sections_addressed``). Rows written before that say ``whole`` or ``maps`` and stay readable."""
+    return rendered_mode, "body_map"
 
 
 class ContextAttemptObservation(TypedDict, total=False):
@@ -150,7 +151,7 @@ class ContextAttemptObservation(TypedDict, total=False):
     round_id: str
     preferred_at_send: Literal["", "max", "low", "nano"]  # the task plan's owner mode when it sent
     applied: Literal["max", "low", "nano"]  # the mode the send is named in (``shown_mode``): Low for Low under Max
-    books: Literal["whole", "maps"]  # the books' form in this send
+    books: Literal["body_map", "whole", "maps"]  # what stood for the books in this send (``shown_mode``)
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
     cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why applied is lower than preferred_at_send; "" also when unknown
     target_missed: bool  # this send exceeded the owner's mode target (``context_target_miss``)
@@ -179,9 +180,7 @@ def attempt_fact(capture: Any, round_id: str = "") -> Optional[ContextAttemptFac
         if (not isinstance(context, PhysicalAttemptContext) or getattr(capture, "state", "") not in OBSERVED | {"released"}
                 or (round_id and context.round_id != round_id)):
             return None
-        from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES  # a delegated child or nanny reads compact books
-
-        applied, books = shown_mode(context.rendered_mode, compact=context.view_kind in DELEGATED_FOCUS_ROLES)
+        applied, books = shown_mode(context.rendered_mode)
         # Task-local Low exists only under my human's Max: a row written before the owner's mode was kept says so too
         preferred = context.preferred_mode or ("max" if context.profile == "task_local_low" else "")
         return {"attempt_id": str(capture.attempt_id), "ledger_state": str(capture.state), "round_id": context.round_id,

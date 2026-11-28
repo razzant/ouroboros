@@ -163,6 +163,33 @@ def test_the_real_architecture_book_navigation_exposes_all_h4_groups():
     assert end <= len(lines)
 
 
+def test_a_packet_index_says_the_reference_atlas_is_not_there_in_one_line():
+    """A seat without tools gets one line where the entrypoint's Reference Atlas stood (the resident Body Map
+    carries the Atlas for a mind that can open its documents); the entrypoint's other text stays verbatim and
+    the reader with tools keeps the Atlas rows."""
+    from ouroboros.reference_books import load_reference_book
+
+    files = {
+        "docs/ARCHITECTURE.md": (b"# Body\n\nThe map; the Reference Atlas below lists the rest.\n\n## Chapters\n\n"
+                                 b"- [Core](architecture/01-core.md)\n- [The web](architecture/02-web.md)\n\n"
+                                 b"## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) \xe2\x80\x94 how the screens look.\n\n"
+                                 b"## See also\n\nA closing word.\n"),
+        "docs/architecture/01-core.md": b"# Core\n\nWhat the core gives me.\n\n### Loop\n\nA.\n",
+        "docs/architecture/02-web.md": b"# Web\n\nWhat the web gives me.\n\n## Pages\n\nC.\n",
+    }
+    book = load_reference_book(Path("unused"), "architecture", lambda path: files[path])
+    packet = cl.book_navigation(book, instructions=False)
+    assert packet.startswith("# Body\n\nThe map; the Reference Atlas below lists the rest.\n\n## Chapters\n\n"
+                             f"{cl.PACKET_ATLAS}\n## See also\n\nA closing word.\n")
+    assert "DESIGN.md" not in packet and packet.count(cl.PACKET_ATLAS) == 1
+    with_tools = cl.book_navigation(book)
+    assert "how the screens look." in with_tools and cl.PACKET_ATLAS not in with_tools
+    del files["docs/ARCHITECTURE.md"]  # a book without an Atlas gains no such line
+    files["docs/ARCHITECTURE.md"] = b"# Body\n\nThe map.\n\n## Chapters\n\n- [Core](architecture/01-core.md)\n- [The web](architecture/02-web.md)\n"
+    plain = load_reference_book(Path("unused"), "architecture", lambda path: files[path])
+    assert cl.PACKET_ATLAS not in cl.book_navigation(plain, instructions=False)
+
+
 def test_a_legacy_revision_navigates_as_the_single_source_it_is():
     from ouroboros.reference_books import load_reference_book
 
@@ -177,38 +204,32 @@ def test_nav_map_no_heading_fallback_names_all_supported_depths():
     assert "(no `##`/`###`/`####` headings; read `x.md` directly)" in m
 
 
-def test_reference_doc_sections_preserve_max_and_orient_both_books_in_low():
-    """Max retains its full bodies; Low names both complete retrievable books."""
-    arch = "## Arch A\n\nARCHBODY\n"
+def test_reference_doc_sections_carry_one_body_map_and_the_handbook_only_when_required():
+    """Every mode carries the one resident Body Map (whole in Max; a host section whose operative view is its parts
+    in Low and Nano) and no manual behind it; the whole handbook rides only as a task's own requirement, in any mode.
+    Where no Map could be rendered, both books stay named as addresses, never silently."""
+    from ouroboros.section_floor import HostSection
+
+    body_map = "## Body map\n\nMAPBODY\n"
+    parts = "## Body map (parts and addresses)\n\n- Core: `docs/architecture/core.md`"
     dev = "## Dev A\n\nDEVBODY\n"
-
-    def _render(mode, include_dev):
-        parts, development = cl.reference_doc_sections(
-            None,
-            context_mode=mode,
-            include_development=include_dev,
-            architecture_text=arch,
-            development_text=dev,
-        )
-        return "\n\n".join([*parts, development])
-
-    max_no_dev = _render("max", False)
-    assert "ARCHBODY" in max_no_dev  # ARCH full in max even without dev context
-    assert "DEVBODY" not in max_no_dev
-    assert "docs/DEVELOPMENT.md" in max_no_dev  # pointer, never silent
-
-    max_dev = _render("max", True)
-    assert "ARCHBODY" in max_dev and "DEVBODY" in max_dev
-
-    low_dev = _render("low", True)
-    assert "ARCHBODY" not in low_dev  # nav map in low
-    assert "navigation map" in low_dev
-    assert "DEVBODY" not in low_dev
-    assert "## DEVELOPMENT.md (navigation map)" in low_dev
-
-    low_no_dev = _render("low", False)
-    assert "DEVBODY" not in low_no_dev
-    assert "docs/DEVELOPMENT.md" in low_no_dev
+    for mode in ("max", "low", "nano"):
+        sections, development = cl.reference_doc_sections(context_mode=mode, body_map=body_map,
+                                                          body_map_parts=parts, development_text=dev)
+        [section] = sections
+        assert section == body_map and development == "" and "DEVBODY" not in "\n\n".join(sections), mode
+        if mode == "max":  # nothing shorter to take in the owner's Max
+            assert not isinstance(section, HostSection) or section.operative_view is None
+        else:
+            assert isinstance(section, HostSection) and section.section_id == "body_map"
+            assert section.operative_view == parts
+        _sections, required = cl.reference_doc_sections(context_mode=mode, body_map=body_map, body_map_parts=parts,
+                                                         development_text=dev, required_book=True)
+        assert "DEVBODY" in required and required == cl.whole_development_book(dev), mode
+    [plain], _ = cl.reference_doc_sections(context_mode="low", body_map=body_map)  # a Map with no shorter form
+    assert plain == body_map and (not isinstance(plain, HostSection) or plain.operative_view is None)
+    [pointer], _ = cl.reference_doc_sections(context_mode="max", body_map="")
+    assert "docs/ARCHITECTURE.md" in pointer and "docs/DEVELOPMENT.md" in pointer
 
 
 def test_a_packet_index_states_its_notation_once_and_keeps_an_annotated_chapter_list():

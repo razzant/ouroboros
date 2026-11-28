@@ -34,7 +34,7 @@ import json
 import logging
 import math
 import pathlib
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from ouroboros.tool_capabilities import PAGEABLE_TOOL_RESULTS, requested_call_view
 
@@ -108,20 +108,47 @@ def typed_result_facts(row: Mapping[str, Any]) -> Dict[str, Any]:
     return facts
 
 
+class DeliveryNote(NamedTuple):
+    """The host's note for one call: ``retained`` keeps the call's clean producer text beside it (a mark the mind
+    tied to an action), ``contact`` rides alone (the own-body read line: the file read is its own exact source)."""
+    retained: str = ""
+    contact: str = ""
+
+
+def delivery_notes(ctx: Any, results: Sequence[Mapping[str, Any]]) -> list:
+    """The host's note for each call of a batch (``DeliveryNote``, empty where it has none): what trails the mind's
+    view of the result and never enters the producer's text. A mark the mind tied to an action, met for the first
+    time in the task (``mark_anchors``); and for a read of a source file of Ouroboros's own body, one line naming
+    its owning manual (``body_candidate.read_contact``, BIBLE P1), decided by where the read physically resolved
+    (its ``read_view``), so a foreign project's file of the same name gets none. That line keeps no state: it
+    follows every such read again."""
+    from ouroboros.body_candidate import read_contact
+    from ouroboros.mark_anchors import anchored_note
+
+    notes = []
+    for row in results:
+        view = (getattr(row.get("tool_result"), "meta", None) or {}).get("read_view") or {}
+        notes.append(DeliveryNote(anchored_note(ctx, row["fn_name"], row.get("tool_args") or {}), read_contact(
+            ctx, view["target"]) if ctx is not None and row["fn_name"] == "read_file" and view.get("target") else ""))
+    return notes
+
+
 def prepare_producer_sources(results: Sequence[Mapping[str, Any]], drive_root: Any, task_id: str,
-                             notes: Sequence[str] = ()) -> list:
+                             notes: Sequence[Any] = ()) -> list:
     """Retain clean producer text before measuring its model-visible locator.
 
-    A row the host notes only at delivery (``notes``, aligned with ``results``) keeps the
-    note as ``delivery_note`` and its own result as that clean text.
+    A row the host notes only at delivery (``notes``, aligned with ``results``: a ``DeliveryNote`` or a plain
+    retained note) keeps the note as ``delivery_note``; a retained note also keeps the row's own result as that
+    clean text. An own-body read line alone persists no second copy of what was read.
     """
     rows = [dict(row) for row in results]
     for index, row in enumerate(rows):
         producer_text = getattr(row.get("tool_result"), "producer_text", None)
         note = notes[index] if index < len(notes) else ""
-        if note:
-            row["delivery_note"] = note
-        if producer_text is not None or note:
+        retained, contact = (note, "") if isinstance(note, str) else note
+        if shown := "\n\n".join(part for part in (retained, contact) if part):
+            row["delivery_note"] = shown
+        if producer_text is not None or retained:
             clean = row["result"] if producer_text is None else producer_text
             row["producer_source_ref"] = (persist_result_source(drive_root, task_id,
                 str(row["tool_call_id"]) + ".producer", clean) if drive_root is not None else {})

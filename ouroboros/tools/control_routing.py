@@ -679,7 +679,7 @@ def _start_task(
         # default (a folder-less task in a folder-ful project stays possible).
         "workspace": workspace_sentinel,
         "context_requires_self_body_docs": context_requires_self_body_docs,
-        # Absent is not false: only an explicit answer overrides the subject-of-work rule (BIBLE P1).
+        # Only an explicit answer is recorded; true requires the whole handbook in any mode, nothing else preloads it.
         **({"context_requires_development": bool(context_requires_development)}
            if isinstance(context_requires_development, bool) else {}),
         **({"review_answer": True} if review_answer is True else {}),  # task_contract.review_answer

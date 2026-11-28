@@ -843,7 +843,8 @@ def _targets_body(ctx: Any, root: str) -> bool:
 
 def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefused | str | None:
     """Bind the candidate BEFORE an ordinary body write, a PR-integration verb or an acting
-    body child resolves a target; the bind that prepared or resumed it returns the neighbour note.
+    body child resolves a target; the bind that prepared or resumed it returns the neighbour note and the body's
+    closed roads (``closed_roads_contact``).
 
     Process tools are deliberately absent: no command text is classified. The
     mind prepares explicitly before process-first work. A refusal that the
@@ -870,13 +871,17 @@ def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefuse
         return None
     try:
         if not _serving_worktree(serving_repo_dir_for(ctx)):
-            return None  # no Git body (wheel/image install): the legacy in-place contract, disclosed in the map
+            # No Git body (wheel/image install): the legacy in-place contract, disclosed in the map; its first write
+            # is this work's entry into a body change all the same.
+            return entry_contact(ctx) or None
         bound = prepare(ctx)
     except CandidateRefused as exc:
         return exc
     except Exception as exc:
         return CandidateRefused("CANDIDATE_UNAVAILABLE", f"the candidate could not be prepared: {type(exc).__name__}: {exc}")
-    return None if bound.get("state") == "bound" else neighbour_note(ctx) or None
+    # A fresh bind returns the neighbour note and, on the work's first entry, the body's closed roads: the write that
+    # caused it already ran.
+    return None if bound.get("state") == "bound" else "\n\n".join(filter(None, (neighbour_note(ctx), entry_contact(ctx)))) or None
 
 
 def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dict[str, str]]:
@@ -1341,3 +1346,119 @@ def discard_scratch(row: Dict[str, Any]) -> None:
     if path.name and _wt._deletable(env_root, _wt._resolve_root()) and env_root.exists() and not _retained_scratch(
             row, classify=row.get("kind") != KIND):
         _wt._force_rmtree(env_root)
+
+
+# --------------------------------------------------------------------------- #
+# Contacts: the host names the manuals' addresses where the body is touched (BIBLE P1)
+# --------------------------------------------------------------------------- #
+CLOSED_ROADS = "10.2 Closed roads"
+ENTERED = "body_change_entered"  # task metadata: this work already received the closed roads
+
+
+def own_body_root(ctx: Any, target: Any) -> Optional[pathlib.Path]:
+    """The root of Ouroboros's own body that physically holds ``target``, else ``None``.
+
+    Decided by where the path resolved to, never by its name: this task's bound candidate, a copy the host
+    recorded as made from the body (``workspace_copy`` with ``source_is_system_repo`` true), the serving checkout
+    or the system repository, and the task's own folder when ``review_body_fact`` recognizes it as the body (one
+    probe per folder, kept on the context). A foreign project with the same file names is none of these.
+    """
+    from ouroboros.tools.tool_resolution import active_repo_dir_for, system_repo_dir_for
+    from ouroboros.workspace_copies import copy_binding
+
+    physical = pathlib.Path(target).resolve(strict=False)
+    copy = copy_binding(ctx)
+    roots = [descriptor(ctx).get("path") if is_bound(ctx) else None,
+             copy.get("execution_root") if copy.get("source_is_system_repo") is True else None,
+             serving_repo_dir_for(ctx), system_repo_dir_for(ctx)]
+    for root in (pathlib.Path(str(root)).resolve(strict=False) for root in roots if root):
+        if physical == root or root in physical.parents:
+            return root
+    try:
+        active = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
+    except (OSError, ValueError):
+        return None
+    if physical != active and active not in physical.parents:
+        return None
+    probed = getattr(ctx, "_own_body_folders", None)
+    if not isinstance(probed, dict):
+        probed = {}
+        try:
+            setattr(ctx, "_own_body_folders", probed)
+        except Exception:  # a context that keeps no attributes probes again
+            pass
+    if str(active) not in probed:
+        from ouroboros.review_body_fact import BODY_TRUE, body_fact
+
+        try:
+            probed[str(active)] = body_fact(active, system_repo=system_repo_dir_for(ctx), data_dir=getattr(
+                ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)).body == BODY_TRUE
+        except Exception:
+            log.debug("own-body probe unavailable; the folder stays unrecognized", exc_info=True)
+            probed[str(active)] = False
+    return active if probed[str(active)] else None
+
+
+def read_contact(ctx: Any, target: Any) -> str:
+    """One short line for a read of a source file of Ouroboros's own body: the first manual
+    ``ouroboros/domains.toml`` ``[references]`` declares for it (its owner), how many more it declares, and §10 of the
+    Body Map, whose rendered entry carries that chapter's title and path in every frame. ``""`` for any other read:
+    documentation (Markdown that is not a ruled text such as a prompt), tests, a path the manifest declares no
+    owner for, or an unreadable manifest. A fact the host has, never a judgment of what the mind should read, and
+    never part of the file's text (the caller delivers it as a host note beside the result). It keeps no state:
+    each read of the same file is followed by the same line, and the manifest is parsed per read."""
+    from ouroboros.code_shape_facts import is_test_source
+    from ouroboros.reference_books import ruled_text_of
+    from ouroboros.tools.governance_context import BODY_INVARIANTS_CHAPTER
+
+    try:
+        root = own_body_root(ctx, target)
+        if root is None:
+            return ""
+        relative = pathlib.Path(target).resolve(strict=False).relative_to(root).as_posix()
+        if is_test_source(relative) or (relative.lower().endswith(".md") and not ruled_text_of(relative)):
+            return ""  # documentation and tests, by their source role
+        from ouroboros.code_intelligence_architecture import load_domain_manifest
+
+        manuals = load_domain_manifest(root).manuals_for(relative)
+    except Exception:
+        log.debug("own-body read contact unavailable", exc_info=True)
+        return ""
+    if not manuals:
+        return ""
+    more = f" (+{len(manuals) - 1} in domains.toml [references])" if len(manuals) > 1 else ""
+    beside = "" if manuals[0] == BODY_INVARIANTS_CHAPTER else "; invariants and closed roads: Body Map §10"
+    return f"[Own body: owning manual `{manuals[0]}`{more}{beside}]"
+
+
+def entry_contact(ctx: Any) -> str:
+    """The closed roads (``closed_roads_contact``) on this work's first entry into a change of its own body, ``""``
+    on every later one. One decision for every entry: a candidate prepared fresh, a first explicit resume (by this
+    work or another that takes it over), Cyber Pro's in-place choice, the first automatic bind and the first write
+    of an install with no Git body. The work's task metadata records the delivery, so a repeated resume of the
+    candidate it already holds, a second in-place choice or a later write carries none."""
+    metadata = _metadata(ctx)
+    if metadata.get(ENTERED):
+        return ""
+    roads = closed_roads_contact(ctx)
+    if roads:
+        metadata[ENTERED] = True
+    return roads
+
+
+def closed_roads_contact(ctx: Any) -> str:
+    """What ``entry_contact`` adds on a work's first entry into a change of Ouroboros's own body: the Closed roads
+    section of the serving body's key invariants chapter, whole, and that chapter's address. Stated as what the
+    body holds; where it rides the result of a first write it cannot tell the mind what to do before that write.
+    ``""`` when the chapter or the section cannot be read."""
+    from ouroboros.reference_books import load_reference_book, read_book_section
+    from ouroboros.tools.governance_context import BODY_INVARIANTS_CHAPTER
+
+    try:
+        book = load_reference_book(serving_repo_dir_for(ctx), "architecture")
+        roads = read_book_section(book, CLOSED_ROADS).text.strip()
+    except (OSError, ValueError, KeyError):
+        log.debug("closed roads contact unavailable", exc_info=True)
+        return ""
+    return (f"[Own body — roads already closed, from `{BODY_INVARIANTS_CHAPTER}`, which also holds the invariants "
+            f"every part keeps; the manuals that own each file are named where it is read]\n{roads}")

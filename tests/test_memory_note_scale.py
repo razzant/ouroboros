@@ -30,7 +30,10 @@ def test_note_pressure_measurement(tmp_path, monkeypatch, extra_chars, note_line
     assert bool(result['ladder'].get('F8a')) is aggregate, diagnostic
     assert result['ladder']['F7a'] == 1 and result['ladder']['F5a'] == 1
     # Nano's standing set sends the fixture's read_file too (tool_policy.NANO_RESIDENT_SCHEMA_NAMES): one more F7 step.
-    assert result['ladder']['F7'] == {0: 19, 32000: 34, 48000: 42, 52000: 43, 53000: 43, 54000: 43}[extra_chars]
+    # The resident Body Map's parts form (2,380 characters, ~595 tokens, as the repository's books render it) stands in
+    # Nano where this fixture's single-file book had a navigation map of a few tokens: at no extra words it costs one
+    # more owner row here (19 with that stand-in; an installation's real chapter lists were 2,855 bytes before).
+    assert result['ladder']['F7'] == {0: 20, 32000: 34, 48000: 42, 52000: 43, 53000: 43, 54000: 43}[extra_chars]
     with monkeypatch.context() as earlier:
         earlier.setattr(mf, 'LADDER', tuple(s for s in mf.LADDER if s not in ('F8', 'F8a')))
         before = measure_core(core, tools, root=tmp_path, window=92000, reserve=10000)

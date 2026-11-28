@@ -172,16 +172,34 @@ _PREFLIGHT_CASES = [
         "M  docs/ARCHITECTURE.md\nM  README.md",
         None,
     ),
-    (
-        "new_module_without_architecture_blocked",
-        "add new module",
-        "A  ouroboros/new_module.py\nM  tests/test_new_module.py",
-        ("PREFLIGHT_BLOCKED", "ARCHITECTURE.md"),
-    ),
-    (
-        "new_module_with_architecture_passes",
+    (   # a new module is a row of the map by its manifest entry and its docstring lead, both read from the subject
+        "new_module_without_its_manifest_row_blocked",
         "add new module",
         "A  ouroboros/new_module.py\nM  tests/test_new_module.py\nM  docs/ARCHITECTURE.md",
+        ("PREFLIGHT_BLOCKED", "no `[modules]` row", "ouroboros/new_module.py"),
+    ),
+    (
+        "new_module_without_a_docstring_blocked",
+        "add new module",
+        "A  ouroboros/new_module.py\nM  ouroboros/domains.toml",
+        ("PREFLIGHT_BLOCKED", "no module docstring", "ouroboros/new_module.py"),
+    ),
+    (
+        "new_module_with_an_unparsable_manifest_blocked",
+        "add new module",
+        "A  ouroboros/new_module.py\nM  ouroboros/domains.toml",
+        ("PREFLIGHT_BLOCKED", "does not parse"),
+    ),
+    (   # no manual edit is demanded: whether the owning manual says enough is the reviewer's judgment (BIBLE P3)
+        "new_module_with_its_row_and_docstring_passes_without_a_staged_manual",
+        "add new module",
+        "A  ouroboros/new_module.py\nM  ouroboros/domains.toml\nM  tests/test_new_module.py",
+        None,
+    ),
+    (
+        "new_package_init_needs_no_docstring",
+        "add new package",
+        "A  ouroboros/pack/__init__.py\nM  ouroboros/domains.toml",
         None,
     ),
     (
@@ -193,6 +211,20 @@ _PREFLIGHT_CASES = [
 ]
 
 
+_ROW = '[domains]\nD01 = "Core"\n\n[modules]\n"ouroboros/new_module.py" = "D01"\n"ouroboros/pack/__init__.py" = "D01"\n'
+_DOCUMENTED = '"""What this module is for."""\nX = 1\n'
+_SUBJECT_FILES = {  # what the subject's index holds for the new-module cases, beside the release files
+    "new_module_without_its_manifest_row_blocked": {
+        "ouroboros/domains.toml": '[domains]\nD01 = "Core"\n\n[modules]\n', "ouroboros/new_module.py": _DOCUMENTED},
+    "new_module_without_a_docstring_blocked": {"ouroboros/domains.toml": _ROW, "ouroboros/new_module.py": "X = 1\n"},
+    "new_module_with_an_unparsable_manifest_blocked": {
+        "ouroboros/domains.toml": "[modules\n", "ouroboros/new_module.py": _DOCUMENTED},
+    "new_module_with_its_row_and_docstring_passes_without_a_staged_manual": {
+        "ouroboros/domains.toml": _ROW, "ouroboros/new_module.py": _DOCUMENTED},
+    "new_package_init_needs_no_docstring": {"ouroboros/domains.toml": _ROW, "ouroboros/pack/__init__.py": ""},
+}
+
+
 def test_preflight_check(subtests, monkeypatch, tmp_path):
     case_paths = case_folders(tmp_path)
     for case_id, message, staged_files, expected in _PREFLIGHT_CASES:
@@ -200,7 +232,8 @@ def test_preflight_check(subtests, monkeypatch, tmp_path):
         with subtests.test(case_id=case_id, message=message, staged_files=staged_files, expected=expected), monkeypatch.context() as monkeypatch:
             review = _get_review_module()
             values = {"VERSION": "3.24.0", "README.md":
-                      "[![Version 3.24.0](https://img.shields.io/badge/version-3.24.0-green.svg)]\n| 3.24.0 | release |"}
+                      "[![Version 3.24.0](https://img.shields.io/badge/version-3.24.0-green.svg)]\n| 3.24.0 | release |",
+                      **_SUBJECT_FILES.get(case_id, {})}
             monkeypatch.setattr(review, "_git_show_staged", lambda repo, path: values.get(path))
             from ouroboros import commit_admission
 

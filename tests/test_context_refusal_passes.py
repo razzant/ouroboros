@@ -8,6 +8,8 @@ earlier steps left of that target: the gradual order the owner asked for, never 
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from types import SimpleNamespace
 import pytest
 
@@ -258,11 +260,18 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
                 text = json.dumps(body["messages"], ensure_ascii=False)
                 if self.limit is None:
                     # E refuses the uncut view, but can hold its ordinary telling plus a real required book.
-                    self.limit = {"enough": raw - 1_000, "maps": raw - 120_000, "none": 100_000}[scenario]
+                    # M refuses its first two sends (the whole view, then memory's pass) and holds anything smaller
+                    # than the second: the books rung, the Body Map at its parts, is the first request it accepts.
+                    self.limit = {"enough": raw - 1_000, "maps": 0, "none": 100_000}[scenario]
+                elif scenario == "maps" and len(self.wire) == 1:
+                    self.limit = raw  # memory's pass is refused at its own size; a smaller request is held
                 rooms = tuple(i for i in range(16) if room_needle(FIRST_ROOM + i) in text)
                 self.wire.append(dict(raw=raw, status=400 if raw >= self.limit else 200,
-                    books="sweep_cancel_intents" in text, bible="owed on body changes" in text,
+                    # The resident Body Map whole (its own heading), or at its parts and addresses.
+                    books="## Body map\\n" in text, parts="## Body map (parts and addresses)" in text,
+                    tools=sorted(tool["function"]["name"] for tool in body["tools"]), bible="owed on body changes" in text,
                     development="Hermetic preflight isolation" in text, story=len(rooms), rooms=rooms,
+                    leads=text.count("settled its mock work"),  # every room's telling lead (``told_page``)
                     cap=body.get("max_tokens"), owner="fixture 3896" in text,
                     facts=re.findall(r"\[CONTEXT_FACTS\][^|]+\| mode ([^|]+)", text)))
                 if raw >= self.limit:
@@ -282,7 +291,9 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
         # Fixture input, not a patched fit: the whole page has a genuine shorter telling beside its address.
         with monkeypatch.context() as shapes:
             shapes.setattr(_turn_shapes, "_page", told_page)
-            lay_rooms(drive, 16, 143_000 if scenario == "enough" else 100_000)
+            # E's story is large enough that the hint's fold leaves the required handbook room under E's limit
+            # (whole books once gave that slack; the resident Body Map does not).
+            lay_rooms(drive, 16, 290_000 if scenario == "enough" else 100_000)
         memory = Memory(drive_root=drive, repo_dir=repo)
         env = SimpleNamespace(repo_dir=repo, drive_root=drive, repo_path=lambda p: repo / p, drive_path=lambda p: drive / p)
         if scenario == "enough":
@@ -302,7 +313,7 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
             monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", key)
             return settings
 
-        def send(room, key, *, required=False, dispatch_key=None):
+        def send(room, key, *, required=False, dispatch_key=None, answered=scenario != "none"):
             settings = keyed(key)
             # M/N use a short A2 to exercise the just-under-refusal trap. In E only memory may pay the difference.
             short = scenario != "enough" and room in {7102, 7105, 7106}
@@ -326,43 +337,56 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
             if dispatch_key:  # the key rotates between this fit and the first real POST
                 keyed(dispatch_key)
             text, usage, _ = _run(SimpleNamespace(plan=plan, task=task, drive=drive, tools=registry))
-            assert (ANSWER in str(text)) is (scenario != "none"), (server.wire, usage.get("_last_llm_error"))
+            assert (ANSWER in str(text)) is answered, (server.wire, usage.get("_last_llm_error"))
+            # Recovery steps memory and the Body Map, never a tool: every request of this chat carries the same tools.
+            assert len({tuple(row["tools"]) for row in server.wire[start:]}) == 1, server.wire[start:]
             sends[room] = registry._ctx.context_fit_plan
-            return plan, server.wire[start:], dispatch_target(task["model"], settings)
+            return plan, server.wire[start:], dispatch_target(task["model"], settings), str(text)
 
         sends = {}
 
-        first, a1, target_a = send(7101, "synthetic-a-3896")
-        refused, before_maps, _any = cw.first_contact_limits(target_a, a1[0]["cap"])
+        first, a1, target_a, _ = send(7101, "synthetic-a-3896")
+        refused, before_maps, _any = cw.first_contact_limits(target_a, a1[0]["cap"])  # (Max wire, before maps, any form)
         assert refused == a1[0]["raw"], (a1, ce._read(drive).get("main_first_contact"))
         assert before_maps == (a1[1]["raw"] if scenario != "enough" else 0), (a1, ce._read(drive).get("main_first_contact"))
-        second, a2, _ = send(7102, "synthetic-a-3896")
+        second, a2, _, _ = send(7102, "synthetic-a-3896")
         if scenario == "enough":  # the handbook a chat requires is no memory's debt: the same tellings fold
-            required, with_handbook, _ = send(7106, "synthetic-a-3896", required=True)
+            required, with_handbook, _, _ = send(7106, "synthetic-a-3896", required=True)
             assert required.core.development_required and with_handbook[0]["development"], with_handbook
-            assert not a2[0]["development"] and required.core.required_book_tokens("max") > 0
+            assert not a2[0]["development"] and required.core.required_book_tokens() > 0
             assert [row["status"] for row in with_handbook] == [200], with_handbook
             assert with_handbook[0]["books"] and with_handbook[0]["story"] == a2[0]["story"], (a2, with_handbook)
             assert with_handbook[0]["rooms"] == a2[0]["rooms"], (a2, with_handbook)
             print({"required A2": with_handbook})
-        other, b1, _ = send(7103, "synthetic-b-3896")
-        if scenario == "maps":
-            required, with_handbook, _ = send(7104, "synthetic-a-3896", required=True)
-            assert required.initial_mode == "low" and required.core.development_required
-            assert len(with_handbook) == 1 and with_handbook[0]["development"] and not with_handbook[0]["books"]
+        other, b1, _, _ = send(7103, "synthetic-b-3896")
+        if scenario == "maps":  # the followed maps refusal trades no frame for a required handbook either
+            required, with_handbook, _, said = send(7104, "synthetic-a-3896", required=True, answered=False)
+            assert required.start == ("max", "first_contact") and required.core.development_required
+            assert all(row["development"] for row in with_handbook), with_handbook  # whole on every request
+            assert with_handbook[0]["books"] and with_handbook[0]["story"] == a2[0]["story"], (a2, with_handbook)
+            # M holds less than the tellings plus the handbook: memory never pays it (owner 1.11); the books rung
+            # steps only the Map, and the terminal names the owner's choices instead of dropping the requirement.
+            assert with_handbook[-1]["parts"] and all(row["status"] == 400 for row in with_handbook), with_handbook
+            assert "a new task without this requirement" in said, said
         # A's fact shaped the fit; B resolved at dispatch: B's first POST is the ordinary view, one plan, no extra call.
-        hinted, rotated, _ = send(7105, "synthetic-a-3896", dispatch_key="synthetic-b-3896")
+        hinted, rotated, _, _ = send(7105, "synthetic-a-3896", dispatch_key="synthetic-b-3896")
         assert hinted.first_contact_normal is not None, scenario
         assert rotated[0]["books"] and rotated[0]["story"] == a1[0]["story"], (a1, rotated)
         # Its own facts only: the unsent hinted preparation's row is gone, the ordinary view's row is B1's.
         assert len(rotated[0]["facts"]) == 1 and rotated[0]["facts"] == b1[0]["facts"], (b1, rotated)
-        assert scenario == "enough" or rotated[0]["facts"] != a2[0]["facts"], (a2, rotated)  # A2 sent chapter maps
+        assert rotated[0]["story"] > a2[0]["story"], (a2, rotated)  # not A2's folded view
         assert sends[7105].first_contact_normal is None
         assert not sends[7105].projection(sends[7105].initial_mode).memory_facts.get("first_contact_preference")
-        if scenario == "none":  # a refused hinted maps send is no Max bound, and the next start keeps its tellings
-            _third, a3, _ = send(7106, "synthetic-a-3896")
-            assert a3[0]["story"] == a2[0]["story"] and not a3[0]["books"], (a2, a3)
-            assert a3[0]["raw"] <= a2[0]["raw"] + 2_000, (a2, a3)
+        if scenario == "none":  # a refused Body-Map-parts send is no Max bound, and the next start keeps its tellings
+            _third, a3, _, _ = send(7106, "synthetic-a-3896")
+            assert a3[0]["story"] == a2[0]["story"] and a3[0]["books"] and not a3[0]["parts"], (a2, a3)
+            assert a3[0]["leads"] == a2[0]["leads"] == 16, (a2, a3)
+            # Max with A2's story: A2's size plus the Map's step back to whole (as A1's own sends measured it) plus
+            # what four more chats add to memory (the same Low form at the same level on both chats: their last sends).
+            step = max(a["raw"] - b["raw"] for a in a1 for b in a1 if a["books"] and b["parts"] and a["story"] == b["story"])
+            grown = a3[-1]["raw"] - a2[-1]["raw"]
+            assert a3[-1]["parts"] and a2[-1]["parts"] and a3[-1]["leads"] == a2[-1]["leads"], (a2, a3)
+            assert step > 0 and a2[0]["raw"] < a3[0]["raw"] <= a2[0]["raw"] + step + grown + 500, (a1, a2, a3, step, grown)
         keyed("synthetic-a-3896")
     print({"limit": server.limit, "A1": a1, "A2": a2, "B1": b1})
     if scenario == "none":
@@ -370,13 +394,22 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
         assert a2[0]["raw"] >= min(row["raw"] for row in a1) - 2_000, (a1, a2)
     else:
         assert [row["status"] for row in a1] == ([400, 400, 200] if scenario == "maps" else [400, 200]), a1
+        # M: the books rung's Body Map at its parts is what A1's round finally sent; memory's pass was refused.
+        # That first numberless pass of the running view takes every telling (a1[1]["leads"] == 0) while the Map is
+        # still whole: base behaviour, razzant/ouroboros#4321, pinned neither away nor as desired here.
+        assert scenario != "maps" or (a1[2]["parts"] and not a1[1]["parts"] and a1[2]["story"] == a1[1]["story"]), a1
+        # M: one accepted send. My human's Max at its tellings still stood above the refused Max a parts send
+        # followed, so A2 starts Low, temporarily, for the window: the Map at its parts, every telling, A1's tools.
         assert [row["status"] for row in a2] == [200], (a1, a2)
-    if scenario == "maps":  # the actual alternate A2 Max is just under F1, not past its margin
-        alternate = cf.bounded_prompt_tokens_for_payload({"messages": second.messages_for("max"),
-            "tools": json.loads(second.start_tool_schemas_json)}, 0)
-        assert before_maps - cf.reclaim_low_water_margin(None, before_maps) < alternate < before_maps
+    lowered = scenario != "enough"  # E's fold gets under its refusal (no parts send followed): Max, the Map whole
+    if lowered:  # every room at its telling, smaller than every size this wire refused
+        assert a2[0]["story"] == 0 and a2[0]["leads"] == 16 and a2[0]["raw"] < _any, (a1, a2, _any)
+        assert a2[0]["parts"] and not a2[0]["books"] and a2[0]["tools"] == a1[0]["tools"], (a1, a2)
+    else:
+        assert a2[0]["books"] and not a2[0]["parts"], a2
     assert b1[0]["status"] == 400 and b1[0]["books"] and b1[0]["story"] == a1[0]["story"], (a1, b1)
-    assert a2[0]["books"] is (scenario == "enough") and a2[0]["story"] < a1[0]["story"]
+    assert a2[0]["story"] < a1[0]["story"]
+    assert second.start == (("low", "first_contact_maps") if lowered else ("max", "first_contact")), second.start
     assert all(row["bible"] and row["owner"] and row["cap"] == a1[0]["cap"] for row in a1 + a2 + b1)
     assert all(plan.window_record.usable is None and plan.preferred_mode == "max" for plan in (first, second, other))
     assert second.projection(second.initial_mode).memory_facts["first_contact_preference"]
@@ -608,7 +641,7 @@ def test_a_numberless_first_refusal_drops_the_slack_and_a_further_one_the_rest(t
     from tests import _memory_view_synthetic as syn
 
     words = [syn.conversation(i, words=40, word_chars=2_000) for i in range(30)]
-    core = cf.ContextCore("Core", "", "", "", "", "", '"Continue."', False,
+    core = cf.ContextCore("Core", "", "", "", "", "", '"Continue."',
                           memory_view_json=mv.snapshot_json(syn.snapshot(room_facts=syn.room("1"), conversations=words)))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     evidence = SimpleNamespace(route_fp="probe", status="confirmed", stale=False, window_tokens=1_000_000, source="fixture")
@@ -833,14 +866,22 @@ def test_books_pay_remaining_room_before_any_unseen_body(monkeypatch):
     assert calls == [("books",), ("unseen_bodies", 50_000)]  # then only what the books left
 
 
-@pytest.mark.parametrize("useful", [False, True], ids=["larger-maps", "useful-maps"])
+@pytest.mark.parametrize("useful", [False, True], ids=["map-saves-nothing", "map-steps-to-parts"])
 def test_a_measured_second_pass_cannot_hide_an_unhelpful_book_switch(tmp_path, monkeypatch, useful):
+    """The books rung gives only the Body Map's step to its parts and addresses in the Low frame: where that saves
+    nothing (a Map with no shorter form) the measured rung changes nothing and stays Max, so the pass goes on to unseen
+    bodies; where it saves (a large Map, its short parts form and a reader for its full text) the start is Low with the
+    Map at its parts at the same memory level, and nothing else is spent."""
+    import json
+
     from ouroboros import context_fit as cf, loop, memory_view as mv
     from tests import _memory_view_synthetic as syn
     from tests._context_fit_fixtures import _refusal_ctx
 
-    core = cf.ContextCore("Core", "", "# Runtime\n\n" + "Whole book material. " * (4_000 if useful else 1),
-                          "", "", "", '"Assignment"', False, memory_view_json=mv.snapshot_json(syn.snapshot()))
+    body_map = "## Body map\n\n" + "Whole map material. " * (4_000 if useful else 1)
+    core = cf.ContextCore("Core", "", body_map, "", "", "", '"Assignment"', memory_view_json=mv.snapshot_json(syn.snapshot()),
+                          **({"body_map_parts": "## Body map (parts and addresses)\n\n- Core: `docs/core.md`",
+                              "section_root": str(tmp_path / "sections"), "section_task_id": "books"} if useful else {}))
     evidence = SimpleNamespace(route_fp="books", status="confirmed", stale=False, window_tokens=200_000)
     plan = cf.build_context_fit_plan(None, core, {"type": "task"}, preferred_mode="max",
         route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"}, evidence))
@@ -864,6 +905,11 @@ def test_a_measured_second_pass_cannot_hide_an_unhelpful_book_switch(tmp_path, m
     assert lmc._apply_refusal_pass(ctx, lmc.REFUSAL_PASSES[1], measure(ctx), 2_000, 1_000)
     if useful:
         assert ctx.active_context_mode == "low" and ctx.messages[0] != shown and not unseen
+        low, held = ctx.context_fit_plan.projection("low").memory_facts, plan.projection("max").memory_facts
+        assert [row["section_id"] for row in low["host_sections_addressed"]] == ["body_map"]
+        sent = json.dumps(ctx.messages[0], ensure_ascii=False)
+        assert "## Body map (parts and addresses)" in sent and "Whole map material." not in sent
+        assert (low["floor"]["steps"], low["floor"]["runs"]) == (held["floor"]["steps"], held["floor"]["runs"])
     else:
         assert unseen == [("unseen_bodies", "max", 2_000)]
         assert ctx.context_fit_plan is plan and ctx.messages[0] == shown
@@ -890,36 +936,61 @@ def test_a_just_chosen_body_pays_last_and_only_what_a_providers_refusal_left(mon
         assert changed is bool(paid or chosen)
 
 
-@pytest.mark.parametrize("ceiling,mode", [(0, "low"), (200_000, "low"), (50_000, "nano")])
-def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_path, monkeypatch, ceiling, mode):
-    from ouroboros import capability_evidence as ce, context_fit as cf, memory_view as mv
-    from ouroboros.context_window import record_observation
+def _books_core(tmp_path, form="parts"):
+    """A Max core whose Body Map Max holds whole (``_reference_book_fixtures.booked``: the real renderer's Map and its
+    parts form) beside a reader for its full text; ``form`` takes the step away: no parts form, or no store to retain
+    the full text in."""
+    from ouroboros import context_fit as cf, memory_view as mv
     from tests import _memory_view_synthetic as syn
+    from tests._reference_book_fixtures import booked
+
+    snapshot = syn.snapshot(story=syn.pages(2, 200), room_facts=syn.room())
+    core = booked(cf.ContextCore("Core", "", "", "", "", "", '"Assignment"', memory_view_json=mv.snapshot_json(snapshot),
+                                 section_root=str(tmp_path / "sections"), section_task_id="books01"),
+                  tmp_path, body="Whole map material. " * 40)
+    return replace(core, **{"parts": {}, "no-parts": {"body_map_parts": ""}, "no-reader": {"section_root": ""}}[form])
+
+
+def _books_ctx(tmp_path, monkeypatch, core, *, mode="max", window=1_000_000):
+    from ouroboros import capability_evidence as ce, context_fit as cf
     import ouroboros.loop as loop
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
-    snapshot = syn.snapshot(story=syn.pages(2, 200), room_facts=syn.room())
-    core = cf.ContextCore("Core", "", "Whole books. " * 8_000, "", "", "", '"Assignment"', False,
-                          memory_view_json=mv.snapshot_json(snapshot))
-    plan = cf.build_context_fit_plan(None, core, {"type": "task"}, preferred_mode="max",
+    plan = cf.build_context_fit_plan(None, core, {"type": "task"}, preferred_mode=mode,
         route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
-            ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "books-route")))
-    assert plan.initial_mode == "max"
-    ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode="max", messages=plan.messages_for("max"),
+            ce.CapabilityEvidence(window, "confirmed" if window else "unprobeable", "metadata", "books-route")))
+    assert plan.initial_mode == mode
+    ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, messages=plan.messages_for(mode),
         tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[], accumulated_usage={}, task_id="books01",
         event_queue=None, drive_logs=tmp_path / "logs", round_idx=2)
+
     def measure(ctx, **_kwargs):
         return cf.measure_main_fit(ctx.context_fit_plan, ctx.messages, [],
             profile=lmc._main_context_profile(ctx.context_fit_plan, ctx.active_context_mode),
             rendered_mode=ctx.active_context_mode, round_id="books")
+
+    events = []
     monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _queue, _task, _logs, event, *_a, **_kw: events.append(event))
     monkeypatch.setattr(lmc, "invalidate_task_cache_splits", lambda *_a: None)
+    return ctx, measure, events
+
+
+@pytest.mark.parametrize("ceiling,mode", [(0, "low"), (200_000, "low"), (50_000, "nano")])
+def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_path, monkeypatch, ceiling, mode):
+    """The books rung from Max: the Body Map steps to its parts (a real Map, its parts form and a reader for its full
+    text), in the frame the refused window selects."""
+    from ouroboros.context_window import record_observation
+
+    ctx, measure, events = _books_ctx(tmp_path, monkeypatch, _books_core(tmp_path))
+    plan = ctx.context_fit_plan
     if ceiling:
         record_observation(tmp_path, plan.route_fp, refused=ceiling)
     lmc._reproject_actual_overflow_low(ctx)
     assert ctx.active_context_mode == ctx.tools._ctx.active_context_mode == mode
+    assert lmc.map_at_parts(ctx.context_fit_plan.projection(mode))
+    assert [event["checkpoint_kind"] for event in events] == ["context_fit_low_retry"]
     from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR  # the next send names this rebuild (C2 S4)
     assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
     assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
@@ -929,3 +1000,40 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
     fit = measure(ctx).measurement
     assert fit.capacity_total_tokens - fit.response_reserve_tokens == (ceiling - fit.response_reserve_tokens if ceiling else 1_000_000 - 8_192)
     assert ctx.context_fit_plan.window_record.source.startswith("refusal" if ceiling else "metadata")
+
+
+@pytest.mark.parametrize("form", ["parts", "no-parts", "no-reader"])
+def test_a_books_rung_that_cannot_step_the_map_changes_and_counts_nothing(tmp_path, monkeypatch, form):
+    """astra (PR3 review): with no parts form or no reader for the Map's full text the rung has nothing to give: the
+    mode, the plan and the transcript stay, no ``context_fit_low_retry`` checkpoint tells the owner the Map was
+    shortened, and the step is no contribution; with both, the same refusal steps the Map and counts its saving."""
+    ctx, measure, events = _books_ctx(tmp_path, monkeypatch, _books_core(tmp_path, form))
+    plan, shown = ctx.context_fit_plan, json.dumps(ctx.messages)
+    shed = lmc._apply_refusal_step(ctx, "books", measure(ctx), None, 0)
+    if form == "parts":
+        assert ctx.active_context_mode == "low" and lmc.map_at_parts(ctx.context_fit_plan.projection("low"))
+        assert shed and shed > 0 and [event["checkpoint_kind"] for event in events] == ["context_fit_low_retry"]
+    else:
+        assert shed is None and events == []
+        assert ctx.active_context_mode == "max" and ctx.context_fit_plan is plan and json.dumps(ctx.messages) == shown
+
+
+@pytest.mark.parametrize("form", ["parts", "no-reader"])
+def test_an_already_low_frame_on_a_route_with_no_window_steps_the_map_at_a_numberless_refusal(tmp_path, monkeypatch, form):
+    """astra 1 (PR3 review): an owner-Low plan on a route that states no window meets a refusal that names no size; the
+    books rung works in that frame too: the Map steps to its parts, the mode stays Low, the saving counts and the
+    owner is told. With no reader for the Map's full text nothing steps, nothing is claimed."""
+    ctx, measure, events = _books_ctx(tmp_path, monkeypatch, _books_core(tmp_path, form), mode="low", window=0)
+    plan = ctx.context_fit_plan
+    assert plan.window_record is None or plan.window_record.usable is None  # no window known on this route
+    assert not lmc.map_at_parts(plan.projection("low"))  # an unknown window shortens nothing at the start
+    before = plan.projection("low").memory_facts["floor"].get("steps")
+    shed = lmc._apply_refusal_step(ctx, "books", measure(ctx), None, 0)
+    assert ctx.active_context_mode == "low"
+    if form == "parts":
+        rebound = ctx.context_fit_plan.projection("low")
+        assert lmc.map_at_parts(rebound) and shed and shed > 0
+        assert rebound.memory_facts["floor"].get("steps") == before  # only the Map stepped
+        assert [event["checkpoint_kind"] for event in events] == ["context_fit_low_retry"]
+    else:
+        assert shed is None and events == [] and ctx.context_fit_plan is plan

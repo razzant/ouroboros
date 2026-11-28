@@ -204,9 +204,8 @@ def test_real_sends_leave_the_fact_on_their_ledger_rows(main_call):
     prompt = ctx.messages[0]["content"]
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     witness = ("prompts/SYSTEM.md", digest, len(prompt), digest)  # (path, file digest, length, text digest)
-    core = ContextCore(base_prompt=prompt, bible_md="", architecture_md="", development_md="", semi_stable_text="",
-                       dynamic_text="", user_content_json=json.dumps("go"), docs_need_development=False,
-                       base_prompt_source=witness)
+    core = ContextCore(base_prompt=prompt, bible_md="", body_map="", development_md="", semi_stable_text="",
+                       dynamic_text="", user_content_json=json.dumps("go"), base_prompt_source=witness)
     ctx.context_fit_plan = replace(ctx.context_fit_plan, core=core)
 
     def send(round_idx):

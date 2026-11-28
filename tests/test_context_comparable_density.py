@@ -184,7 +184,7 @@ def test_task_anchor_outranks_even_comparable_foreign_measurements(monkeypatch):
 
 def test_memory_coarsening_uses_the_density_that_measured_the_saving(monkeypatch):
     plan = _plan()  # a real captured core without a required handbook: it adds nothing to the window
-    plan = replace(plan, core=context_fit.ContextCore("", "", "", "", "", "", plan.user_content_json, False))
+    plan = replace(plan, core=context_fit.ContextCore("", "", "", "", "", "", plan.user_content_json))
     fit = context_fit.measure_main_fit(plan, plan.messages_for("low"), [], profile="owner_low",
         rendered_mode="low", round_id="r2", anchor=InputAnchor(150_000, 100_000, 1))
     seen = []

@@ -182,11 +182,11 @@ def test_the_size_terminal_names_the_kinds_and_the_largest_unit_once(tmp_path):
     assert f", my replies ({unit.unit_id}) ~{unit.context_size_tokens:,}" in text and "largest single" not in text
     core = [{"role": "system", "content": "Complete required core. " * 6000}, *head[1:], _owner(OWNER_LATER)]
     text = terminal(core)
-    assert "(largest parts: core and books ~" in text and "largest single" not in text and text.count("core and books") == 1
+    assert "(largest parts: core and body map ~" in text and "largest single" not in text and text.count("core and body map") == 1
 
 
 # The size terminal's frame as f4cd41056 wrote it: a same-task working checkpoint carries it across an Update or a rollback.
-BASE_REFUSAL_FRAME = [["unit:2:2:47f4248f4c33a6e7", 890], ["core and books", 16], ["assignment", 16]]
+BASE_REFUSAL_FRAME = [["unit:2:2:47f4248f4c33a6e7", 890], ["core and body map", 16], ["assignment", 16]]
 
 
 def _base_refusal_frame_facts(usage, round_idx):
@@ -208,7 +208,7 @@ def test_the_size_terminal_frame_reads_across_an_update_and_a_rollback(tmp_path)
     from ouroboros.context_view_facts import refusal_frame_facts
 
     assert refusal_frame_facts({"_context_refusal_frame": BASE_REFUSAL_FRAME}, 3) == (
-        "largest parts: unit:2:2:47f4248f4c33a6e7 ~890, core and books ~16, assignment ~16 by raw estimate of the current view")
+        "largest parts: unit:2:2:47f4248f4c33a6e7 ~890, core and body map ~16, assignment ~16 by raw estimate of the current view")
     head = [{"role": "system", "content": "S"}, {"role": "user", "content": "go"}, *(_review_row(n) for n in range(4))]
     long_reply = {"role": "assistant", "content": "My long analysis. " * 1500}
     unit = next(u for u in cc.context_units([*head, long_reply], scope="dialogue") if u.start == len(head))
@@ -274,7 +274,7 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
     schemas = [{"type": "function", "function": {"name": f"tool_{i}", "description": "Read a fixture path.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}
         for i in range(60)]
-    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"', False)
+    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"')
     plan = cf.build_context_fit_plan(None, core, {"id": "renewal"}, preferred_mode="max",
         tool_schemas=schemas, reasoning_effort=effort, route_resolver=lambda *_a, **_kw: (
             {"provider": provider, "model": provider + "::fixture"},

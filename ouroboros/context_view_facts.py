@@ -63,7 +63,7 @@ def block_label(message, index, block, plan):
         return "this room, my other conversations and runtime facts"
     if text.startswith("## DEVELOPMENT.md"):
         return "development book"
-    return "core and books" if index == 0 else "runtime facts"
+    return "core and body map" if index == 0 else "runtime facts"
 
 
 def _producer_kind(messages, index, first_user):
@@ -178,7 +178,7 @@ def memory_facts(plan, mode, messages=()):
         if room.get("cause") == "held":
             line += "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room.get("cuts") else "")
         elif room.get("cause") in ("crowded", "route"):  # any other value is a measure without a settled cause
-            cause = floor.lowered_cause(room)  # Nano where protected words left the maps frame no room
+            cause = floor.lowered_cause(room)  # Nano where protected words left the Low frame no room
             start = str((getattr(plan, "start", None) or ("",))[0])
             built = start if start in ("low", "nano") else mode  # the captured build's mode, not a later route's
             ran = "Nano, temporarily, for the window" if built == "nano" else floor.TEMPORARY_LOW
@@ -186,7 +186,7 @@ def memory_facts(plan, mode, messages=()):
                 ", a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here"
                 if cause == "route" else "")
     if preference := receipt.get("first_contact_preference"):
-        form = "chapter maps" if preference == "maps" else "a smaller memory view"
+        form = "the body map at its parts and addresses" if preference == "maps" else "a smaller memory view"
         line += f"; first send chose {form} after a refusal on its planned connection; that refusal stated no window"
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
     line += (resident_fact(plan, snapshot, receipt) + (f"; shown only by address: {shown}" if shown else "")
@@ -282,11 +282,13 @@ _SHORT_BASIS = {"request": " with no memory", "route": " with no memory and no t
 
 def mode_words(plan, mode):
     """The facts row's mode: a Low the window took from my human's Max named so beside that choice, with its recorded
-    cause (``context_measurement.mode_cause``) and, where this capture's Max room lost its books to that same cause
+    cause (``context_measurement.mode_cause``) and, where this capture's Max room did not hold for that same cause
     (a cold restore's capture may have lowered for another), its shortfall on that cause's basis
     (``memory_floor.lowered_need``); Max says Max is not measured where the row's own window text knows no window
     (``row_window``), whatever its start, a rebind or restore onto an unknown window too, and a window learned later
-    (a rebind, a refusal) is a measured Max. First-send maps are a preference, not temporary Low due to the window."""
+    (a rebind, a refusal) is a measured Max. A first send that a refusal recorded on its connection lowered (the Body
+    Map at its parts, every telling kept) is the same Low, temporarily, for the window; its cause is that refusal, which
+    stated no window."""
     preferred = str(getattr(plan, "preferred_mode", "") or "")
     if mode == "low" and preferred == "max":
         from ouroboros.context_fit import FIRST_CONTACT_START
@@ -297,7 +299,7 @@ def mode_words(plan, mode):
         room = room if isinstance(room, dict) else {}
         saved_maps = getattr(plan, "start", None) == ("low", FIRST_CONTACT_START["maps"])
         if facts.get("first_contact_preference") == "maps" or (saved_maps and room.get("cause") not in ("crowded", "route")):
-            return "low (first-send chapter maps; my human's mode: max)"
+            return f"{floor.TEMPORARY_LOW.lower()} (my human's mode: max); cause {FIRST_SEND_REFUSED}"
         cause = mode_cause(plan, mode)
         same = cause in floor.LOWERED_CAUSES and room.get("cause") in ("crowded", "route") and floor.lowered_cause(room) == cause
         short = floor.lowered_need(room)[1] - room["window"] if same else 0
@@ -308,36 +310,43 @@ def mode_words(plan, mode):
     return mode
 
 
+#: Why a first send was lowered by what its connection refused before (``context_fit._prefer_first_contact``).
+FIRST_SEND_REFUSED = "a larger request was refused on this connection before, and the refusal stated no window"
 _LOW_START_WHY = {
-    "memory": "the whole books did not fit beside my memory even in its shortest tellings",
+    "memory": "my memory did not fit the window beside the work's room even in its shortest tellings",
     "request": "even with no memory, what the request itself carries tips this start over the window on {model}",
-    "route": ("on {model} the window cannot hold the whole books beside the rest of this start and the work's room "
-              "even with no memory; folding my memory cannot change that"),
+    "route": ("on {model} the window cannot hold my core, the body map and the rest of this start beside the work's "
+              "room even with no memory; folding my memory cannot change that"),
 }
 
 
 def low_start_line(plan, mode, task_id):
-    """The owner's Main line for a fresh start of an integrating focus that the window took from whole books in my
-    human's Max (to Low, temporarily, or to Nano where protected words leave the maps frame no room), named in the mode
+    """The owner's Main line for a fresh start of an integrating focus that the window took from my human's Max
+    (to Low, temporarily, or to Nano where protected words leave the Low frame no room), named in the mode
     it got, by its Max room's cause (``memory_floor.lowered_cause``: memory, what the request itself carries, or the
     route). Its Max room exists only on the owner's Max with a known window. No numbers: the task's own facts keep
     them. "" for every other start: a held start, a delegated child or nanny, the owner's Low or Nano, an unknown
     window."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room")
-    if receipt.get("role") in DELEGATED_FOCUS_ROLES or not isinstance(room, dict) or room.get("cause") not in ("crowded", "route"):
+    if receipt.get("role") in DELEGATED_FOCUS_ROLES:
         return ""
-    ran = "Nano" if mode == "nano" else "Low"  # protected words the maps frame could not hold beside its reply reserve
+    if mode == "low" and receipt.get("first_contact_preference") == "maps":  # lowered by a recorded refusal: no Max room
+        return (f"Task {task_id} runs in Low for now, not in your Max: {FIRST_SEND_REFUSED}; my memory keeps every "
+                "telling and the body map stands at its parts and addresses. Your setting stays Max.")
+    if not isinstance(room, dict) or room.get("cause") not in ("crowded", "route"):
+        return ""
+    ran = "Nano" if mode == "nano" else "Low"  # protected words the Low frame could not hold beside its reply reserve
     why = _LOW_START_WHY[floor.lowered_cause(room)].format(model=str(getattr(plan, "model", "") or "") or "this route")
     return (f"Task {task_id} runs in {ran} for now{floor.REQUIRED_BOOK_WHOLE if room.get('book_required') else ''}, not "
-            f"in your Max: {why}{'; even the chapter maps did not fit' if ran == 'Nano' else ''}. Your setting stays Max.")
+            f"in your Max: {why}{'; Low did not fit either' if ran == 'Nano' else ''}. Your setting stays Max.")
 
 
 def low_start_episode(root, plan, mode, task_id, send):
     """One Main line per open period of each cause (owner A, 07.11.2026, replacing 1B of 29.10; a period per cause by
     the coordinator's option C, 22.11.2026). ``state/low_start_episode.json`` maps each open period's key to
     ``{since, task, levels, room}``: ``memory`` for the installation, ``request:<model>`` and ``route:<model>`` for the
-    plan's model. A fresh start that the window took from whole books (``low_start_line``) sends its line and opens its
+    plan's model. A fresh start that the window took from my human's Max (``low_start_line``) sends its line and opens its
     key's period only when that key has none open; while it is open nothing more is sent for that key, and keys are
     independent, so a route start never silences the memory line. A start that holds Max (it runs in Max, its room
     held, no delegated role) silently closes every open period opened in its room (``room_id``) beside its work room
@@ -355,7 +364,8 @@ def low_start_episode(root, plan, mode, task_id, send):
     levels = int(room.get("levels") or 1)  # the start's work room in eighths of its window
     place = room.get("room_id")
     line = low_start_line(plan, mode, task_id)
-    cause = floor.lowered_cause(room) if line else ""
+    refused = receipt.get("first_contact_preference") == "maps"  # a period of its own, by model, like the route's
+    cause = "refusal" if line and refused else floor.lowered_cause(room) if line else ""
     key = cause if cause == "memory" else f"{cause}:{str(getattr(plan, 'model', '') or '')}"
 
     def periods(bits):  # None leaves the file as it is

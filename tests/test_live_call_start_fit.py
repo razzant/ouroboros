@@ -64,8 +64,8 @@ def _plan(root, monkeypatch, nano_base):
     tools.append(_schema("query_code", 200))
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=[{**syn.spoken(1, "human", 100), "owner_side": True,
                                                              "immune": True}]))
-    core = fit.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", architecture_md="# Architecture",
-        development_md="# Development", docs_need_development=False, semi_stable_text="IDENTITY " + "x" * 300_000,
+    core = fit.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", body_map="# Architecture",
+        development_md="# Development", semi_stable_text="IDENTITY " + "x" * 300_000,
         dynamic_text="", user_content_json=json.dumps("Open the call."),
         memory_view_json=memory_view.snapshot_json(snapshot), section_root=str(root))
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)

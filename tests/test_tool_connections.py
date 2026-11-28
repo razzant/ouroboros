@@ -605,9 +605,8 @@ def test_status_reports_the_pin_instructions_and_catalog_potential():
 
 
 def test_the_mode_view_picks_the_form_inside_the_cached_block():
-    core = ContextCore(base_prompt="P", bible_md="B", architecture_md="", development_md="", semi_stable_text="S",
-                       dynamic_text="C", user_content_json="{}", docs_need_development=False,
-                       connections=("FULL MAP", "NAMES MAP"))
+    core = ContextCore(base_prompt="P", bible_md="B", body_map="", development_md="", semi_stable_text="S",
+                       dynamic_text="C", user_content_json="{}", connections=("FULL MAP", "NAMES MAP"))
     for mode, form in (("max", "FULL MAP"), ("low", "FULL MAP"), ("nano", "NAMES MAP")):
         blocks = _system_blocks(core, ("governance",), "story", "room", mode=mode)
         stable = [block["text"] for block in blocks if "cache_control" in block]

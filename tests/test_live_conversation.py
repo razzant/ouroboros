@@ -565,37 +565,35 @@ def test_only_the_owners_own_call_speech_can_be_cited(host_world, monkeypatch, k
 
 
 
-# The window is the one number here that follows the books. A Max start is lowered by the window when its whole books,
-# the tools, the reply reserve and the first send's eighth of the window do not fit it; the story never decides that
-# (``memory_floor.max_room_lost`` prices it at its shortest telling, a written beginning for these pages), so no page
-# length can hold the premise. In estimator tokens the premise holds for windows from 348k (below it a Low start folds
-# old pages) to 378k (above it Max fits once ARCHITECTURE, DEVELOPMENT and SYSTEM are each about a sixth lighter than at
-# 459d03b); 365k sits near the middle. A base that starts in Max: the books got lighter, lower the window. Old pages
-# folded at the base: the tools or the core grew, raise it. The 80 pages stay as they are: they pay the frame below.
-@pytest.mark.parametrize('host_world', [('max', 365_000, 'estimator')], indirect=True)
+# Before the resident Body Map (26.11.2026) the premise was a Max start the window lowered to Low beside whole books
+# (365k), whose Low frame carried both detailed chapter maps. A lowered Low now stands the Map at its parts from the
+# start, so the Map has nothing left to spare there; the successor premise is a start that holds Max with the Map and
+# every page whole (1M), whose first call request the voice window refuses: the floor rung of that unsent start is
+# where the Map is spared (or not) while the old pages pay. The 80 pages stay as they are: they pay the frame below.
+@pytest.mark.parametrize('host_world', [('max', 1_000_000, 'estimator')], indirect=True)
 def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_untouched(host_world, monkeypatch):
-    """The original case of the book maps through the real ``session_candidate``, one world and one stub session: a story
-    of long old pages a Max start lowered to Low by the window has not folded, and a voice window that refuses the first
-    request. Before the call opens, the physical frame (reply reserve and the first send's own room kept) is paid by the
-    old pages' written beginnings and both detailed maps stay whole; the same preparation without the ``unsent_start``
-    that ``session_candidate`` hands its floor rung yields the maps first. An opened session whose request fits asks no
-    start room and is not touched."""
-    from ouroboros import context_fit as fit, context_layout, memory_view
+    """The original case of the book maps (#3649) through the real ``session_candidate``, one world and one stub
+    session: a story of long old pages a Max start holds whole beside the whole Body Map, and a voice window that
+    refuses the first request. Before the call opens, the physical frame (reply reserve and the first send's own room
+    kept) is paid by the old pages' written beginnings and the Body Map stays whole; the same preparation without the
+    ``unsent_start`` that ``session_candidate`` hands its floor rung yields the Map first. An opened session whose
+    request fits asks no start room and is not touched."""
+    from ouroboros import context_fit as fit, memory_view
     from ouroboros.contracts.live_conversation import LiveOptions
     from ouroboros.realtime_setup import measure_session_wire, session_candidate
-    from ouroboros.reference_books import load_reference_book
     from tests import _memory_view_synthetic as syn
 
     host, factory = host_world.host, host_world.provider['session']
     host.model = replace(host.model, facts=replace(host.model.facts, basis='estimator'))
     story = [dict(page, lead_rule=1, text=f'Old project {n} ended with its decision. Detail {n}: ' + syn.prose(6_000))
              for n, page in enumerate(syn.pages(80, 0))]
-    core = replace(host.plan.core, memory_view_json=memory_view.snapshot_json(syn.snapshot(story=story)))
+    real = host.plan.core
+    assert real.body_map_parts and real.section_root and real.section_task_id  # the Map can step to its parts here
+    core = replace(real, memory_view_json=memory_view.snapshot_json(syn.snapshot(story=story)))
     base = fit.build_context_fit_plan(host_world.env, core, host_world.task, preferred_mode='max', tool_schemas=host.schemas,
                                       nano_base=host.plan.start_nano_base, route_resolver=host.turn.resolve_route)
     options = LiveOptions(instructions='Call feature instructions. ' * 20, languages=('en-US',))
-    maps = [context_layout.book_navigation(load_reference_book(host_world.env.repo_dir, book))
-            for book in ('architecture', 'development')]
+    maps = [core.body_map]  # the whole Body Map as the repository's own books render it
 
     def text_of(messages):
         content = messages[0]['content']
@@ -618,10 +616,10 @@ def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_u
             session, _, evidence = session_candidate(host, factory, options)
         return text_of(session.wire['messages']), evidence
 
-    assert base.initial_mode == 'low' and base.preferred_mode == 'max'  # no owner target: only a window folds this view
-    base_text = text_of(base.messages_for('low'))
+    assert base.initial_mode == 'max' and base.preferred_mode == 'max'  # no owner target: only a window folds this view
+    base_text = text_of(base.messages_for('max'))
     assert all(whole_map in base_text for whole_map in maps) and pages_of(base_text) == (80, 0)
-    host.messages[:] = copy.deepcopy(base.messages_for('low'))
+    host.messages[:] = copy.deepcopy(base.messages_for('max'))
     whole = measure_session_wire(host, base, host.messages, host.schemas, factory, options)[2]['fit']['measurement'][
         'estimated_input_tokens']
     reserve = host.model.facts.working_reserve_tokens
@@ -629,7 +627,7 @@ def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_u
 
     text, evidence = prepare(refused)
     assert [row['rung'] for row in evidence['recovery']] == ['floor']  # the wire refused; the floor rung walked
-    assert all(whole_map in text for whole_map in maps)  # every heading and line range of both books, as authored
+    assert all(whole_map in text for whole_map in maps)  # the whole Body Map, as rendered from the books
     assert pages_of(text)[1]  # at least one old page stepped to its written beginning
     room, measurement = evidence['work_room'], evidence['fit']['measurement']
     assert room['first_send'] and 0 < room['requested_tokens'] <= room['remaining_tokens'] and room['deficit_tokens'] == 0
@@ -637,7 +635,9 @@ def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_u
 
     bare, evidence = prepare(refused, unsent_start=False)  # the same preparation, only that argument removed
     assert [row['rung'] for row in evidence['recovery']] == ['floor']
-    assert not all(whole_map in bare for whole_map in maps)  # without it the maps are the first host forms to yield
+    # Without it too (carbon B1, PR3 review): below Max the Map answers to the window in every frame, a sent view's
+    # reprojection included, so it stays whole while this window holds my tellings beside it.
+    assert all(whole_map in bare for whole_map in maps) and pages_of(bare)[1]
 
     for window, opened in ((whole + reserve, True), (None, False)):  # an open session whose request fits; an unknown window
         text, evidence = prepare(window, opened=opened)

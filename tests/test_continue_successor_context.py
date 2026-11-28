@@ -6,8 +6,9 @@ the successor's startup authority materialization
 predecessor's compact brief (status and cause, owner words, omitted fields with sizes) is in that first request beside the exact reader of
 the complete record, so the work order points to it instead of ordering it read;
 the request names no actor (a nonce proves the action, not who pressed it); the
-predecessor's stored self-body handbook choice survives admission, its restored
-contract-only copy, replay and a second Continue after pre-start shutdown; the system-checkout
+predecessor's stored self-body choice (the installed DESIGN slice beside the resident Body Map)
+and its own handbook requirement survive admission, its restored contract-only copy, replay and
+a second Continue after pre-start shutdown; the system-checkout
 SHA is labelled with its own surface capture time, never as the task's start; a named
 predecessor that reads back empty at start refuses it instead of an empty brief.
 """
@@ -115,9 +116,23 @@ def _first_request(env, memory, task):
     return task, messages
 
 
-@pytest.mark.parametrize("flag", [True, False, None])
+DESIGN_BIBLE = "DESIGN-BIBLE-SENTINEL: one accent per surface."
+
+
+def _body_view(system_text, *, flag, required, handbooks):
+    """What the request carries of my body: the resident Map always; the installed body's DESIGN slice for work the
+    task declares mine from a foreign folder; the whole handbook only as the contract's own requirement."""
+    from ouroboros.context_layout import INSTALLED_DESIGN
+
+    assert "## Body map" in system_text and "- Review: `docs/development/01-review.md`" in system_text
+    assert (INSTALLED_DESIGN in system_text, DESIGN_BIBLE in system_text) == (flag is True, flag is True)
+    assert handbooks == int(required), "only the contract's own requirement sends the whole handbook"
+
+
+@pytest.mark.parametrize("flag,required", [(True, False), (False, False), (None, False), (True, True)],
+                         ids=["self-body", "not-self-body", "absent", "self-body-requires-handbook"])
 def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_dated_checkout(
-        tmp_path, monkeypatch, flag):
+        tmp_path, monkeypatch, flag, required):
     from ouroboros.agent import Env
     from ouroboros.memory import Memory
     from ouroboros.server_restart import _shutdown_task_cleanup_args
@@ -134,10 +149,13 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
     for sub in ("state", "memory/knowledge", "logs"):
         (tmp_path / sub).mkdir(parents=True, exist_ok=True)
     (tmp_path / "memory" / "identity.md").write_text("I am Ouroboros.", encoding="utf-8")
+    (books.repo_dir / "docs" / "DESIGN.md").write_text(
+        f"# DESIGN\n\n## Design bible\n\n{DESIGN_BIBLE}\n\n## Components\n\nComponent detail.\n", encoding="utf-8")
     env = Env(repo_dir=books.repo_dir, drive_root=tmp_path, budget_drive_root=tmp_path)
     memory = Memory(tmp_path, repo_dir=books.repo_dir)
-    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: only the flag restores the handbook
-    contract = {"context": "PREDECESSOR-CONTRACT-SENTINEL", **({FIELD: flag} if flag is not None else {})}
+    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: only the flag brings the installed DESIGN
+    contract = {"context": "PREDECESSOR-CONTRACT-SENTINEL", **({FIELD: flag} if flag is not None else {}),
+                **({"context_requires_development": True} if required else {})}
     _interrupted(tmp_path, workspace_root=str(workspace), workspace_mode="external",
                  task_contract=contract, mutation_evidence=_mutation_evidence())
     before = load_task_result(tmp_path, "pred-1")
@@ -157,6 +175,7 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
     else:
         assert row[FIELD] is flag
     assert row["task_contract"][FIELD] is bool(flag)
+    assert row["task_contract"].get("context_requires_development", False) is required  # the requirement moves too
     assert load_task_result(tmp_path, successor)["metadata"]["task_contract"][FIELD] is bool(flag)
     expected_binding = {"workspace_root": str(workspace), "workspace_mode": "external",
                         "deadline_at": before["deadline_at"]}
@@ -184,7 +203,7 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
         assert absent not in text
 
     # The fresh first request in Max, and the restored queue row (the snapshot keeps
-    # task_contract, not the top-level flag), make the same handbook decision.
+    # task_contract, not the top-level flag), carry the same view of my body.
     restored = copy.deepcopy(row)
     restored.pop(FIELD, None)
     handbooks = []
@@ -205,7 +224,8 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
         assert json.dumps(before["mutation_evidence"]) not in rendered
         users = json.dumps([m for m in messages if m.get("role") == "user"], ensure_ascii=False)
         assert json.dumps(text, ensure_ascii=False)[1:-1] in users, "the work order is the first user turn"
-    assert handbooks == [int(flag is True)] * 2, "only an explicit true restores the handbook in an external folder"
+        _body_view(system_text, flag=flag, required=required, handbooks=handbooks[-1])
+    assert len(handbooks) == 2
 
     # A recovered admission (queue row kept, result row lost) keeps the same contract.
     assert delete_document(tmp_path, successor)
@@ -248,7 +268,9 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
         task, messages = _first_request(env, memory, candidate)
         handbooks = [block for block in messages[0]["content"]
                      if block["text"].startswith("## DEVELOPMENT.md\n")]
-        assert len(handbooks) == int(flag is True), "second Continue must carry the stored handbook choice"
+        # Second Continue carries the stored choices: the flag's DESIGN slice and the requirement's handbook.
+        _body_view("\n".join(block["text"] for block in messages[0]["content"]), flag=flag, required=required,
+                   handbooks=len(handbooks))
         assert "task_contract" not in task["predecessor_authority"]
         assert task["predecessor_authority"]["omitted_fields"]["task_contract"] > 0
         assert load_task_result(tmp_path, successor)["metadata"]["task_contract"] == stopped["metadata"]["task_contract"]
@@ -269,8 +291,8 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
     assert all(load_task_result(tmp_path, second_id).get(key) == value
                for key, value in expected_binding.items()), "second-hop replay retains the same binding"
     _, messages = _first_request(env, memory, workers.PENDING[0])
-    assert sum(block["text"].startswith("## DEVELOPMENT.md\n")
-               for block in messages[0]["content"]) == int(flag is True)
+    _body_view("\n".join(block["text"] for block in messages[0]["content"]), flag=flag, required=required,
+               handbooks=sum(block["text"].startswith("## DEVELOPMENT.md\n") for block in messages[0]["content"]))
 
 
 @pytest.mark.parametrize("canonical,metadata,expected", [

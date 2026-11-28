@@ -34,10 +34,9 @@ def main_plan(manager, monkeypatch, tmp_path):
 
     def build(mode="max", text="source", *, use_local=True, resolver=None):
         core = context_fit.ContextCore(
-            base_prompt="p", bible_md="b", architecture_md="a", development_md="d",
+            base_prompt="p", bible_md="b", body_map="a", development_md="d",
             semi_stable_text="s", dynamic_text="y", user_content_json=json.dumps(text),
-            docs_need_development=False,
-        )
+            )
         return context_fit.build_context_fit_plan(
             SimpleNamespace(drive_root=tmp_path), core,
             {"id": "local-fit", "model": "local-fixture", "use_local_model": use_local},

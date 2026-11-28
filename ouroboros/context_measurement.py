@@ -188,9 +188,9 @@ def estimate_context_prompt_tokens(
 def required_book_addition(plan: Any, mode: str) -> int:
     """What this task's directly required handbook adds to ``mode``'s view of ``plan``, its start note included
     (estimator tokens; 0 without a captured core). The window charges it; no target, memory or transcript narrowing
-    is sized by it. A first request that cannot go out with it yields only maps for it (``ContextCore.required_book_tokens``)."""
+    is sized by it. A first request that cannot go out with it yields only maps for it (``memory_floor.yield_for_book``)."""
     core = getattr(plan, "core", None)
-    return 0 if core is None else core.required_book_tokens(mode) + int(
+    return 0 if core is None else core.required_book_tokens() + int(
         (plan.projection(mode).memory_facts or {}).get(BOOK_NOTE_KEY) or 0)
 
 
@@ -438,8 +438,8 @@ def _no_memory_tokens(plan: Any, rendered_mode: str) -> Optional[int]:
 def mode_cause(plan: Any, rendered_mode: str) -> str:
     """Why a candidate renders below the plan's owner mode, from the plan's own facts: ``""`` when it does not; the
     start's own mode carries the start's cause (``ContextFitPlan.start``, ``memory_floor.start_cause``: ``memory``,
-    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces. A first-send preference
-    or an unmeasured Max is not a physical reason. Any other lower mode, or a start lowered by no mode switch,
+    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces. A first-send fold
+    or an unmeasured Max is not a physical reason; a first send its connection's recorded refusal lowered is ``window``. Any other lower mode, or a start lowered by no mode switch,
     is ``after_start`` (taken by the task after its start). A restored task whose start
     was not carried (``context_fit.UNKNOWN_START``) names no cause: ``""`` beside a lower mode is unknown."""
     from ouroboros.memory_floor import start_cause
@@ -453,7 +453,7 @@ def mode_cause(plan: Any, rendered_mode: str) -> str:
         started = str(getattr(plan, "initial_mode", "") or "")
         cause = start_cause(plan.projection(started).memory_facts) if started else ""
     if rendered_mode == started and cause in FIRST_CONTACT_START.values():
-        return ""
+        return "window" if cause == FIRST_CONTACT_START["maps"] else ""  # lowered by a recorded refusal: Max did not fit
     cause = "" if cause == "unmeasured" else cause
     return cause if rendered_mode == started and cause else "after_start"
 

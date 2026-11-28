@@ -1,4 +1,4 @@
-"""Book projections share captured sources without narrowing Main Max."""
+"""The resident Body Map shares captured sources in every mode; no mode preloads a chapter body."""
 
 import json
 from types import SimpleNamespace
@@ -48,7 +48,7 @@ def _text(plan, mode):
     return "\n".join(p["text"] for p in plan.projection(mode).system_message()["content"])
 
 
-def test_main_max_and_nano_use_the_same_captured_book_bytes(tmp_path):
+def test_main_max_and_nano_use_the_same_captured_body_map_bytes(tmp_path):
     env, core, task = _capture(tmp_path)
     plan = _plan(env, core, task, "nano")
     assert plan.initial_mode == "nano"
@@ -58,12 +58,12 @@ def test_main_max_and_nano_use_the_same_captured_book_bytes(tmp_path):
         assert "My complete identity." in text
         assert "My whole earlier biography." in text
         assert "The complete constitution." in text
-        assert text.count("How I keep work alive.") == 1
-    assert "Full mechanism and WHY." in full and "Full engineering discipline." in full
+        # One Map, the same captured bytes in every mode: each chapter's path and opening, never a chapter body.
+        assert text.count(core.body_map) == 1 and text.count("How I keep work alive.") == 1
+        assert "docs/architecture/runtime.md" in text and "docs/development/change.md" in text
+        assert "Full mechanism and WHY." not in text and "Full engineering discipline." not in text
     assert "Parent's unselected current working note." in full
     assert "Unselected raw parent conversation." in full
-    assert "Full mechanism and WHY." not in nano and "Full engineering discipline." not in nano
-    assert "docs/architecture/runtime.md" in nano and "docs/development/change.md" in nano
     assert str(env.repo_dir) not in plan.projection("max").system_message()["content"][0]["text"]
     # Reading a newer file cannot mutate an already captured source or cached prefix.
     before = json.dumps(plan.messages_for("max"), sort_keys=True)
@@ -72,12 +72,14 @@ def test_main_max_and_nano_use_the_same_captured_book_bytes(tmp_path):
     assert _text(plan, "nano") == nano
 
 
-def test_child_keeps_biography_and_book_orientation_in_max(tmp_path):
+def test_child_keeps_biography_and_the_body_map_in_max(tmp_path):
     env, core, task = _capture(tmp_path, {"delegation_role": "subagent"})
     text = _text(_plan(env, core, task, "max"), "max")
     assert "My whole earlier biography." in text and "My complete identity." in text
-    assert "How I keep work alive." in text and "How changes remain coherent." in text
-    assert "Full mechanism and WHY." not in text
+    # The same resident Body Map as Main: chapter openings and both books' chapter addresses, no chapter body.
+    assert core.body_map in text and "How I keep work alive." in text
+    assert "- Change: `docs/development/change.md`" in text
+    assert "Full mechanism and WHY." not in text and "Full engineering discipline." not in text
     assert "Parent's unselected current working note." not in text
     assert "Unselected raw parent conversation." not in text
     # The child role line is carried verbatim: it no longer names tools or claims the
@@ -113,15 +115,19 @@ def test_a_later_capture_reuses_book_parses_and_restored_mtime_edit_is_fresh(tmp
     assert parses == []
     source = env.repo_path("docs/architecture/runtime.md")
     stamp = source.stat()
-    source.write_bytes(source.read_bytes().replace(b"Full mechanism", b"Next mechanism"))
+    # Same size, restored mtime: an edit of the chapter's opening (which the Map carries) and of its body (read on demand).
+    source.write_bytes(source.read_bytes().replace(b"Full mechanism", b"Next mechanism").replace(b"keep work", b"hold work"))
     os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     after = context._capture_context_core(env, memory, task, None, None)
     assert parses == ["docs/architecture/runtime.md"]
-    assert after.architecture_md != first.architecture_md and "Next mechanism" in after.architecture_md
+    assert after.body_map != first.body_map and "How I hold work alive." in after.body_map
+    assert "Next mechanism" not in after.body_map  # the body stays behind the Map's address
+    chapter = next(book for book in after.reference_books if book.book_id == "architecture").chapters[0]
+    assert "Next mechanism" in chapter.text
     books._book_source.cache_clear()
     fresh = context._capture_context_core(env, memory, task, None, None)
-    assert (fresh.architecture_md, fresh.development_md, fresh.memory_view_json) == (
-        after.architecture_md, after.development_md, after.memory_view_json)
+    assert (fresh.body_map, fresh.development_md, fresh.memory_view_json) == (
+        after.body_map, after.development_md, after.memory_view_json)
     source.unlink()
     assert context._capture_context_core(env, memory, task, None, None).reference_book_errors
 
@@ -166,3 +172,59 @@ def test_authored_common_understanding_is_resident_with_every_note_summary(tmp_p
     assert "Details belong to their source" in sections
     assert "Detailed source." not in sections  # the body still belongs to its own note
     assert "scope='global'" in sections
+
+
+@pytest.mark.parametrize("ceiling", ["no-ceiling", "system-docs", "no-reader", "workspace-reader"])
+def test_a_presence_ceiling_that_grants_file_reading_follows_the_maps_addresses_and_nothing_more(tmp_path, ceiling):
+    """The Map names its reader only for an actor that can follow it, and every address it names is followable by
+    one that carries it and was granted file reading (owner's decision, 27 Nov 2026): a Presence turn whose positive
+    ceiling grants ``read_file``, whatever its resource grants, reads the shipped manuals the Map names (both
+    books' entrypoints and chapters, the Reference Atlas's documents) through the real capture and registry, and
+    still reads nothing else its grants do not admit. A ceiling with no ``read_file`` reads none of them and gets
+    ``BODY_MAP_NO_READER`` in the whole Map and in its parts form."""
+    from ouroboros import reference_books
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+    from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED
+    from tests import test_presence_authority as pa
+
+    targets = {"no-ceiling": None, "no-reader": (),
+               "workspace-reader": (pa.PresenceToolTarget("builtin", "read_file"),
+                                    pa.PresenceResourceTarget("active_workspace", ("read",), "shared")),
+               "system-docs": (pa.PresenceToolTarget("builtin", "read_file"),
+                               pa.PresenceResourceTarget("system_repo", ("read",), "docs"))}[ceiling]
+    contract = {} if targets is None else {"capability_ceiling": pa.presence_ceiling_payload(
+        pa.build_presence_capability_ceiling(skill_name="moderator", skill_content_hash="c" * 64,
+                                             state_fingerprint="d" * 64, resolution=pa._resolution(*targets)))}
+    env, _plain, task = _capture(tmp_path, {"task_contract": contract} if contract else None)
+    entry = env.repo_dir / "docs" / "ARCHITECTURE.md"
+    entry.write_text(entry.read_text() + "\n## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) — how the screens look.\n"
+                     "- `README.md` and `CONTRIBUTING.md` — the first look.\n")
+    for path in ("docs/DESIGN.md", "README.md", "docs/unlisted.md", "ouroboros/loop.py"):
+        (env.repo_dir / path).parent.mkdir(parents=True, exist_ok=True)
+        (env.repo_dir / path).write_text("text\n")  # CONTRIBUTING.md is named and absent: no address
+    ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_contract=contract)
+    registry = ToolRegistry(repo_dir=env.repo_dir, drive_root=env.drive_root)
+    registry.set_context(ctx)
+    core = context._capture_context_core(env, Memory(drive_root=env.drive_root, repo_dir=env.repo_dir), task, None, ctx,
+                                         registry)
+    readable = ceiling != "no-reader"
+    promise = 'read_file(root="system_repo"'
+    for form in (core.body_map, core.body_map_parts):
+        assert (promise in form) is readable and (reference_books.BODY_MAP_NO_READER in form) is not readable, form
+    assert (promise in _text(_plan(env, core, task, "max"), "max")) is readable
+
+    def read(path):
+        return registry.execute_result("read_file", {"root": "system_repo", "path": path})
+
+    manuals = ("docs/ARCHITECTURE.md", "docs/architecture/runtime.md", "docs/DEVELOPMENT.md",
+               "docs/development/change.md", "docs/DESIGN.md", "README.md")
+    assert sorted(reference_books.body_map_addresses(env.repo_dir)) == sorted(manuals)
+    for path in manuals:
+        assert (read(path).status == "ok") is readable, (path, read(path).text[:200])
+    # Nothing the Map does not name opens by this: only a grant that already admitted it (or no ceiling) reads it.
+    for path, admitted in (("docs/unlisted.md", ("no-ceiling", "system-docs")), ("ouroboros/loop.py", ("no-ceiling",)),
+                           ("BIBLE.md", ("no-ceiling",))):
+        got = read(path)
+        assert (got.status == "ok") is (ceiling in admitted), (path, got.text[:200])
+        if ceiling in ("system-docs", "workspace-reader") and ceiling not in admitted:
+            assert PRESENCE_RESOURCE_BLOCKED in got.text, (path, got.text[:200])

@@ -189,7 +189,7 @@ def test_pending_effort_rebind_reaches_result_ingress(main_loop, monkeypatch, kn
 
     f, resolved = main_loop, []
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
-    core = ContextCore("Core", "Bible", "Architecture", "", "Identity", "Facts", json.dumps("go"), False)
+    core = ContextCore("Core", "Bible", "Architecture", "", "Identity", "Facts", json.dumps("go"))
     model = "openai::fixture-model"
     original = build_context_fit_plan(None, core, {"model": model}, preferred_mode="max", reasoning_effort="none",
         route_resolver=lambda *_a, **_kw: ({"model": model, "provider": "openai"},

@@ -12,6 +12,9 @@ PROTECTED = {'system': 34800, 'bible': 51900, 'identity': 46000,
              'shared_understanding': 38000, 'scratchpad': 14400, 'memory_marks': 7700}
 HOST = {'knowledge_index': 20000, 'runtime': 15200, 'subagents': 10400,
         'review_continuity': 7200, 'installed_skills': 3200, 'review_ledger': 3200}
+# The resident Body Map and its parts-and-addresses form as ``reference_books.body_map`` renders them from the
+# repository's books (26.11.2026); before it, the start carried the whole Architecture book (400,000 characters).
+BODY_MAP, BODY_MAP_PARTS = 14300, 2380
 
 
 _SENTENCES = (
@@ -80,8 +83,8 @@ def core(root, snap=None):
         if name in {'runtime', 'subagents', 'installed_skills'} else HostSection(name, text(name, size))
         for name, size in HOST.items() if name != 'knowledge_index')
     return cf.ContextCore(base_prompt=text('SYSTEM', PROTECTED['system']), bible_md=text('BIBLE', PROTECTED['bible']),
-        architecture_md='# Architecture\n\n' + 'book ' * 80000, development_md='', docs_need_development=False,
-        semi_stable_text='\n\n'.join(stable), dynamic_head_text='\n\n'.join(head), dynamic_text='\n\n'.join(dynamic),
+        body_map=text('## Body map', BODY_MAP), body_map_parts=text('## Body map (parts and addresses)', BODY_MAP_PARTS),
+        development_md='', semi_stable_text='\n\n'.join(stable), dynamic_head_text='\n\n'.join(head), dynamic_text='\n\n'.join(dynamic),
         semi_stable_sections=stable, dynamic_head_sections=head, dynamic_sections=dynamic,
         memory_view_json=mv.snapshot_json(snap), user_content_json=json.dumps('Continue in this room.'),
         section_root=str(root), section_task_id='scale-fit')

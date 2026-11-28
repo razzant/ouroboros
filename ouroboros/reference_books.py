@@ -285,6 +285,125 @@ def overview_book(
     return BookView("\n\n".join(rows), tuple(refs), False)
 
 
+BODY_MAP_ATLAS = "Reference Atlas"
+BODY_MAP_READER = 'Each `Source:` path and Atlas address reads with `read_file(root="system_repo", path=...)`.'
+#: What stands in the reader's place for an actor whose capability ceiling cannot follow the addresses (BIBLE P1: a
+#: disclosure names a source its reader can resolve, or says that it cannot).
+BODY_MAP_NO_READER = ("This task's capability ceiling holds no reader for these addresses: they say where each "
+                      "manual lives, for a focus whose ceiling grants `read_file`.")
+
+
+def _atlas_rows(entrypoint: MarkdownSource) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """The Reference Atlas items as ``(text, linked paths)``: each Markdown link replaced by the repository path
+    it resolves to, and those paths apart.
+
+    A link in the entrypoint is relative to ``docs/``; a reader tool takes a repository path, so the resident
+    Map carries that. Spans come from the parsed source: no pattern guesses where a link starts or ends.
+    """
+    section = next((h for h in entrypoint.headings if h.level == 2 and h.title == BODY_MAP_ATLAS), None)
+    if section is None:
+        return ()
+    base = posixpath.dirname(entrypoint.source_path)
+    rows = []
+    for item in entrypoint.list_items:
+        if not section.span.end_byte <= item.start_byte < section.section.end_byte:
+            continue
+        at, parts, paths = item.start_byte, [], []
+        for link in entrypoint.links:
+            if item.start_byte <= link.span.start_byte and link.span.end_byte <= item.end_byte:
+                target = urlsplit(link.destination)
+                if target.scheme or target.netloc:
+                    continue  # an outside address stays as written
+                paths.append(posixpath.normpath(posixpath.join(base, unquote(target.path))))
+                parts += [entrypoint.raw[at:link.span.start_byte].decode("utf-8"), f"`{paths[-1]}`"]
+                at = link.span.end_byte
+        rows.append(("".join([*parts, entrypoint.raw[at:item.end_byte].decode("utf-8")]).strip(), tuple(paths)))
+    return tuple(rows)
+
+
+def body_map_addresses(root: Path) -> frozenset[str]:
+    """Every repository path the resident Body Map gives as an address, read from the body at ``root``: both
+    entrypoints, their chapters, and the Reference Atlas's documents (a linked row's link targets; an unlinked
+    row's backticked paths on its address side that are files there). These are the shipped manuals a focus
+    carrying the Map is told it can read (``presence_authority.presence_ceiling_allows_binding``); an entrypoint
+    that cannot be read or parsed contributes nothing."""
+    root, found = Path(root), set()
+    for book_id, entry_path in BOOK_ENTRYPOINTS.items():
+        try:
+            entry = parse_markdown_source((root / entry_path).read_bytes(), entry_path)
+            members = _member_paths(entry, book_id) or ()
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        found.update((entry_path, *members))
+        for text, paths in _atlas_rows(entry):
+            named = paths or tuple(span.strip("`") for span in text.split(" — ", 1)[0].split() if span[:1] == "`" == span[-1:])
+            found.update(path for path in named if (root / path).is_file())
+    return frozenset(found)
+
+
+def _under_folders(entries: Iterable[tuple[str, str]]) -> list[str]:
+    """``(path, label)`` rows with each folder, and an extension all its files share, named once above them: every
+    address stays exact as that line with the row's name in place of ``<name>``, and a row keeps its label."""
+    groups: list[tuple[str, list[tuple[str, str]]]] = []
+    for path, label in entries:
+        folder, _, name = path.rpartition("/")
+        if not groups or groups[-1][0] != folder:
+            groups.append((folder, []))
+        groups[-1][1].append((name, label))
+    rows = []
+    for folder, files in groups:
+        shared = {posixpath.splitext(name)[1] for name, _label in files}
+        suffix = shared.pop() if len(shared) == 1 else ""
+        rows.append(f"`{folder + '/' if folder else ''}<name>{suffix}`:")
+        rows += [f"{name[:len(name) - len(suffix)]}: {label}" if label else name[:len(name) - len(suffix)]
+                 for name, label in files]
+    return rows
+
+
+def body_map(architecture: ReferenceBook, development: ReferenceBook | None = None, *,
+             readable: bool = True) -> tuple[BookView, str]:
+    """The resident Body Map and its parts-and-addresses form (BIBLE P1), both rendered from the book sources.
+
+    The Map is the Architecture entrypoint's authored introduction, each chapter's title, physical path and
+    authored opening, the Reference Atlas and the Development chapters by title and path. It carries no line
+    number, count or release version, so an edit inside a chapter's body or a release leaves its bytes alone;
+    the file on disk keeps its version header (``release_sync``). The second value is what stands when a
+    physical window cannot hold the Map: every chapter of both books by title and every Atlas address, each
+    folder and shared extension named once above its files (``_under_folders``), nothing else. A linked Atlas address is taken from its
+    parsed link; a row with no link keeps its address side as written. It is ``""`` for a legacy single-file
+    revision, whose only view is its source navigation. ``readable`` false (a Presence turn whose ceiling cannot
+    read the system repository) replaces each form's reader line by ``BODY_MAP_NO_READER``.
+    """
+    if architecture.legacy:  # one physical file: its navigation is its only view; the other book stays one address away
+        view = overview_book(architecture)
+        return replace(view, text=f"{view.text}\n\nEngineering handbook, read on demand: `{BOOK_ENTRYPOINTS['development']}`."), ""
+    entry = architecture.entrypoint
+    chapters = [chapter for book in (architecture, development) if book is not None and not book.legacy
+                for chapter in book.chapters]
+    handbook = [] if development is None or development.legacy else [
+        f"- {chapter.headings[0].title}: `{chapter.source_path}`" for chapter in development.chapters]
+    atlas = _atlas_rows(entry)
+    rows = ["## Body map", entry.text_at(_preamble(entry)).strip(), BODY_MAP_READER if readable else BODY_MAP_NO_READER]
+    refs = [_ref(architecture, entry, _preamble(entry))]
+    for chapter in architecture.chapters:
+        opening = _preamble(chapter)
+        rows.append(f"### {chapter.headings[0].title}\nSource: `{chapter.source_path}`\n{chapter.text_at(opening).strip()}")
+        refs.extend((_ref(architecture, chapter, chapter.headings[0].span), _ref(architecture, chapter, opening)))
+    if atlas:
+        rows.append(f"### {BODY_MAP_ATLAS}\n" + "\n".join(text for text, _paths in atlas))
+    if handbook:
+        rows.append("### Development handbook chapters\n" + "\n".join(handbook))
+    parts = ["## Body map (parts and addresses)",
+             "\n".join(_under_folders((chapter.source_path, chapter.headings[0].title) for chapter in chapters))]
+    if atlas:
+        linked = _under_folders((path, "") for _text, paths in atlas for path in paths)
+        unlinked = [text.split(" — ", 1)[0] for text, paths in atlas if not paths]  # its address side, as written
+        parts.append("\n".join([f"{BODY_MAP_ATLAS}:", *linked, *unlinked]))
+    parts.append('Each reads with `read_file(root="system_repo", path=...)`, its name in place of `<name>`.'
+                 if readable else BODY_MAP_NO_READER)
+    return BookView("\n\n".join(rows), tuple(refs), False), "\n\n".join(parts)
+
+
 def read_book_range(
     book: ReferenceBook, chapter_path: str, start_line: int = 1,
     max_lines: int | None = None,
@@ -310,23 +429,45 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
                            span.end_line - span.start_line + 1)
 
 
-# --------------------------------------------------------------------------- book balance
+# --------------------------------------------------------------------------- text balance
 # A measurement, never a gate (BIBLE P3 c5). The size lane needs an explicit
-# contribution base; ordinary manual/tag CI cannot certify per-change book growth.
+# contribution base; ordinary manual/tag CI cannot certify per-change growth.
+#
+# The size rule (owner decision 2A, 2026-11-25) follows what a mind carries. What every mind carries in every
+# request ends no larger than at its contribution base: BIBLE.md, the prompts as one text (owner decision 3A,
+# 2026-10-28: words moved between prompt files cost nothing, a new prompt file is growth) and the rendered Body
+# Map. A book chapter is read on demand, so its limit is physical: one default ``read_file``; a chapter that
+# outgrows it is split by subject with its reasons kept. The large standalone documents have no size rule: their
+# delta is shown as a fact. Each text has three states in a revision: absent (a fact), there but unreadable
+# (``UnmeasuredText``: unknown, never absent and never smaller) and measured. The lane renders a base's Map with
+# that revision's own code (``revision_body_map_sizes``), so growth of the renderer's own text is growth; a
+# revision without a renderer has no earlier Map. The balance shown on a book edit renders every side with the
+# running code: that edit changes sources, and a change to the renderer is code the lane measures.
 
 BOOK_GROWTH_RULE = (
-    "Each touched book, BIBLE.md and the prompts (prompts/*.md as one text) must end no larger "
-    "than at its contribution base; added text is paid in the same text by a statement that leaves, "
-    "never by a lost fact (DEVELOPMENT \"Paying down a size cap\"). Manual/tag "
-    "CI without that base does not verify this rule. The owner's book-growth label can approve "
-    "an exception; local commits are not blocked."
+    "BIBLE.md, the prompts (prompts/*.md as one text) and the rendered Body Map (the Architecture entry, each "
+    "chapter's opening, the Reference Atlas and the Development chapters by title and path) ride every request, "
+    "so each must end no larger than at its contribution base; added text is paid in the same text by a statement "
+    "that leaves, never by a lost fact (DEVELOPMENT \"Paying down a size cap\"). Manual/tag CI without that base "
+    "does not verify this rule. The owner's book-growth label can approve an exception; local commits are not blocked."
+)
+# One default ``read_file``: its line window (the tool's ``max_lines`` default) and its result limit in characters
+# (``tool_capabilities.TOOL_RESULT_LIMITS``), both pinned to their owners by ``tests/test_reference_book_readers.py``.
+CHAPTER_READ_LINES, CHAPTER_READ_CHARS = 2000, 80_000
+CHAPTER_BAND_RULE = (
+    f"A book chapter is read on demand in one default read_file ({CHAPTER_READ_LINES:,} lines, {CHAPTER_READ_CHARS:,} "
+    "characters); a chapter that outgrows it is split by subject with its reasons kept, never trimmed to fit."
 )
 
-# The constitution and the prompts follow the books' growth rule (owner decision 3A, 2026-10-28):
-# every mind and check loads them. The prompt files are one text, so words moved between them
-# cost nothing and a new prompt file is growth.
 RULED_TEXTS = {"constitution": "BIBLE.md", "prompts": "prompts"}
-_TEXT_NAMES = {"constitution": "BIBLE.md", "prompts": "Prompts"}
+BODY_MAP_TEXT = "body_map"
+# Large documents read on demand outside the two books: their size delta is a fact in the balance, under no rule.
+STANDALONE_DOCS = ("docs/DESIGN.md", "docs/PERSISTENCE.md", "docs/CLIENT_CONTRACT.md", "docs/CREATING_SKILLS.md",
+                   "docs/CHECKLISTS.md")
+_TEXT_NAMES = {"constitution": "BIBLE.md", "prompts": "Prompts", BODY_MAP_TEXT: "Body Map"}
+# Everything a balance reads in a Git revision: one listing and one blob batch cover it.
+_MEASURED_PATHS = (*BOOK_ENTRYPOINTS.values(), *(f"docs/{book_id}" for book_id in BOOK_ENTRYPOINTS),
+                   RULED_TEXTS["constitution"], RULED_TEXTS["prompts"], *STANDALONE_DOCS)
 
 
 def ruled_text_of(path: str) -> str:
@@ -339,8 +480,12 @@ def ruled_text_of(path: str) -> str:
 
 
 def text_name(text_id: str) -> str:
-    """How a book or ruled text is named in a balance line."""
-    return _TEXT_NAMES.get(text_id) or f"{text_id.title()} book"
+    """How a book, a ruled text or a standalone document is named in a balance line."""
+    return _TEXT_NAMES.get(text_id) or (text_id if text_id in STANDALONE_DOCS else f"{text_id.title()} book")
+
+
+class UnmeasuredText(OSError):
+    """A text that is there but cannot be read or rendered: its size is unknown, never absent and never smaller."""
 
 
 @dataclass(frozen=True)
@@ -352,12 +497,15 @@ class BookBalance:
     upstream: str                          # local official development ref, "" when unavailable
     changed: tuple[tuple[str, int], ...]   # sources whose bytes differ from HEAD, with their delta
     merge_base: str = ""                   # exact measured commit, never the feature's tracking tip
+    ruled: bool = True                     # False: a book or standalone document, whose size is a fact under no rule
+    over_read: tuple[tuple[str, int, int], ...] = ()  # a book's chapters past one default read: (path, lines, chars)
+    unmeasured: str = ""                   # why the text, there, could not be measured; its sizes are then unknown
 
     @property
     def owed(self) -> int:
-        """Known growth for warning consumers: contribution when measured, else HEAD only."""
+        """Known growth of a ruled text for warning consumers: contribution when measured, else HEAD only."""
         delta = self.vs_upstream if self.vs_upstream is not None else self.vs_head
-        return max(0, delta or 0)
+        return max(0, delta or 0) if self.ruled else 0
 
 
 _OFFLINE_GIT = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
@@ -421,58 +569,111 @@ def contribution_base(root: Path) -> tuple[str, str]:
     return upstream, base
 
 
-def _index_sizes(root: Path, where: str) -> dict[str, int] | None:
-    """Blob bytes of the staged files under ``where``: what a commit of the index would hold."""
-    listing = _git_bytes(root, "ls-files", "-s", "-z", "--", where)
-    if listing is None:
-        return None
-    staged = {}  # path -> blob
-    for row in listing.decode("utf-8", "replace").split("\0"):
-        meta, _, path = row.partition("\t")
-        if path and len(fields := meta.split()) == 3:
-            if fields[2] != "0":  # an unmerged path has no single staged form: the collection is unmeasured
-                return None
-            staged[path] = fields[1]
-    batch = "".join(f"{blob}\n" for blob in staged.values()).encode()
-    checked = _git_bytes(root, "cat-file", "--batch-check", stdin=batch)
-    sizes = [line.split() for line in (checked or b"").decode("ascii", "replace").splitlines()]
-    if checked is None or len(sizes) != len(staged) or any(len(row) != 3 for row in sizes):
-        return None
-    return {path: int(row[2]) for path, row in zip(staged, sizes)}
+class _Revision:
+    """The measured sources of one revision: the working tree, the index (``staged``) or ``ref``.
+
+    A Git revision is listed once and every measured blob is read in one ``git cat-file --batch`` the first time any
+    is needed, so one operation reads each (revision, path) once. ``FileNotFoundError``: absent there, a fact;
+    ``UnmeasuredText``: there but unreadable (an unlisted tree, an object the store lacks, a denied file).
+    """
+
+    def __init__(self, root: Path, ref: str = "", staged: bool = False) -> None:
+        self.root, self.ref, self.git = Path(root), ref, bool(ref or staged)
+        self.where = ref or ("the index" if staged else "the working tree")
+        self._blobs: dict[str, bytes | None] | None = None
+
+    def _held(self) -> dict[str, bytes | None]:
+        if self._blobs is None:
+            listing = (_git_bytes(self.root, "ls-tree", "-r", "-z", "--full-tree", self.ref, "--", *_MEASURED_PATHS)
+                       if self.ref else _git_bytes(self.root, "ls-files", "-s", "-z", "--", *_MEASURED_PATHS))
+            if listing is None:
+                raise UnmeasuredText(f"{self.where} cannot be listed")
+            oids = {}  # path -> blob
+            for row in listing.decode("utf-8", "replace").split("\0"):
+                meta, _, path = row.partition("\t")
+                fields = meta.split()
+                if not path or len(fields) != 3:
+                    continue
+                if not self.ref and fields[2] != "0":  # an unmerged path has no single staged form
+                    raise UnmeasuredText(f"{self.where} holds {path} unmerged")
+                if not self.ref or fields[1] == "blob":
+                    oids[path] = fields[2] if self.ref else fields[1]
+            out = _git_bytes(self.root, "cat-file", "--batch", stdin="".join(f"{o}\n" for o in oids.values()).encode()
+                             ) if oids else b""
+            blobs: dict[str, bytes | None] = {}
+            at = 0
+            for path, oid in oids.items():  # `<oid> blob <size>\n<bytes>\n`, or `<oid> missing\n`, in input order
+                end = (out or b"").find(b"\n", at)
+                header = out[at:end].split() if out and end >= 0 else []
+                if len(header) == 3 and header[0].decode("ascii", "replace") == oid and header[2].isdigit():
+                    blobs[path], at = out[end + 1:end + 1 + int(header[2])], end + 2 + int(header[2])
+                else:
+                    blobs[path], at = None, (end + 1 if end >= 0 else at)
+            self._blobs = blobs
+        return self._blobs
+
+    def holds(self, path: str) -> bool:
+        if self.git:
+            return path in self._held()
+        try:
+            (self.root / path).stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError as exc:
+            raise UnmeasuredText(f"{path}: {exc}") from exc
+        return True
+
+    def paths(self) -> list[str]:
+        """Every measured path a Git revision holds."""
+        return list(self._held())
+
+    def read(self, path: str) -> bytes:
+        if not self.git:
+            try:
+                return (self.root / path).read_bytes()
+            except (FileNotFoundError, NotADirectoryError):
+                raise
+            except OSError as exc:
+                raise UnmeasuredText(f"{path}: {exc}") from exc
+        held = self._held()
+        if path not in held:
+            raise FileNotFoundError(f"{self.where}:{path}")
+        blob = held[path]
+        if blob is None:
+            raise UnmeasuredText(f"{self.where}:{path} is listed but its object cannot be read here")
+        return blob
+
+    def size(self, path: str) -> int:
+        if not self.git:
+            try:
+                return (self.root / path).stat().st_size
+            except (FileNotFoundError, NotADirectoryError):
+                raise
+            except OSError as exc:
+                raise UnmeasuredText(f"{path}: {exc}") from exc
+        return len(self.read(path))
 
 
-def book_source_sizes(root: Path, book_id: str, ref: str = "", *, staged: bool = False) -> dict[str, int] | None:
+def _unmeasured(text_id: str, revision: _Revision, exc: Exception) -> UnmeasuredText:
+    return exc if isinstance(exc, UnmeasuredText) else UnmeasuredText(f"{text_name(text_id)} at {revision.where}: {exc}")
+
+
+def book_source_sizes(root: Path, book_id: str, ref: str = "", *, staged: bool = False,
+                      revision: _Revision | None = None) -> dict[str, int] | None:
     """UTF-8 bytes of each book source, entrypoint first, in the working tree, the index (``staged``) or at ``ref``.
 
-    Only the entrypoint is parsed; chapter bytes are sizes, so a measurement costs one
-    `git show` plus one `git ls-tree` per ref (the index: `git ls-files` and one `git cat-file`
-    batch). ``None`` when the book is unreadable there.
+    ``None`` where the book's entrypoint is absent; ``UnmeasuredText`` where the book is there but unreadable.
     """
-    root, entry = Path(root), BOOK_ENTRYPOINTS[book_id]
-    try:
-        if staged and not ref:
-            raw, blobs = _git_bytes(root, "show", f":{entry}"), _index_sizes(root, f"docs/{book_id}")
-            if raw is None or blobs is None:
-                return None
-            size_of = blobs.__getitem__
-        elif ref:
-            raw = _git_bytes(root, "show", f"{ref}:{entry}")
-            listing = _git_bytes(root, "ls-tree", "-r", "-l", "-z", "--full-tree", ref, "--", f"docs/{book_id}")
-            if raw is None or listing is None:
-                return None
-            blobs = {}
-            for row in listing.decode("utf-8").split("\0"):
-                meta, _, path = row.partition("\t")
-                if path and meta.split()[1] == "blob":
-                    blobs[path] = int(meta.split()[3])
-            size_of = blobs.__getitem__
-        else:
-            raw = (root / entry).read_bytes()
-            size_of = lambda path: (root / path).stat().st_size  # noqa: E731
-        members = _member_paths(parse_markdown_source(raw, entry), book_id) or ()
-        return {entry: len(raw), **{path: size_of(path) for path in members}}
-    except (OSError, ValueError, KeyError, IndexError, UnicodeDecodeError):
+    revision = revision or _Revision(root, ref, staged)
+    entry = BOOK_ENTRYPOINTS[book_id]
+    if not revision.holds(entry):
         return None
+    try:
+        raw = revision.read(entry)
+        members = _member_paths(parse_markdown_source(raw, entry), book_id) or ()
+        return {entry: len(raw), **{path: revision.size(path) for path in members}}
+    except (OSError, ValueError, KeyError, IndexError, UnicodeDecodeError) as exc:
+        raise _unmeasured(book_id, revision, exc) from exc
 
 
 def composed_size(sizes: dict[str, int]) -> int:
@@ -480,54 +681,177 @@ def composed_size(sizes: dict[str, int]) -> int:
     return sum(sizes.values()) + 2 * (len(sizes) - 1)
 
 
-def ruled_text_sizes(root: Path, text_id: str, ref: str = "", *, staged: bool = False) -> dict[str, int] | None:
+def ruled_text_sizes(root: Path, text_id: str, ref: str = "", *, staged: bool = False,
+                     revision: _Revision | None = None) -> dict[str, int] | None:
     """UTF-8 bytes of each file of a ruled text, in the working tree, the index (``staged``) or at ``ref``;
-    ``None`` when absent."""
-    root, where = Path(root), RULED_TEXTS[text_id]
+    ``None`` when absent, ``UnmeasuredText`` when there but unreadable."""
+    revision = revision or _Revision(root, ref, staged)
+    root, where = revision.root, RULED_TEXTS[text_id]
     try:
-        if staged and not ref:
-            sizes = {path: size for path, size in (_index_sizes(root, where) or {}).items()
-                     if ruled_text_of(path) == text_id}
-        elif ref:
-            listing = _git_bytes(root, "ls-tree", "-l", "-z", "--full-tree", ref, "--",
-                                 where if text_id == "constitution" else f"{where}/")
-            rows = [row.partition("\t") for row in (listing or b"").decode("utf-8", "replace").split("\0")]
-            sizes = {path: int(meta.split()[3]) for meta, _, path in rows
-                     if path and meta.split()[1] == "blob" and ruled_text_of(path) == text_id}
+        if revision.git:
+            sizes = {path: revision.size(path) for path in revision.paths() if ruled_text_of(path) == text_id}
         else:  # a Windows checkout may hold CRLF for these unpinned files: count the committed LF form
             files = [root / where] if text_id == "constitution" else sorted((root / where).glob("*.md"))
             sizes = {file.relative_to(root).as_posix(): len(file.read_bytes().replace(b"\r\n", b"\n"))
                      for file in files if file.is_file()}
-    except (OSError, ValueError, IndexError):  # a file gone mid-read: unmeasured, like an unreadable book
-        return None
+    except (OSError, ValueError, IndexError) as exc:  # a file denied or gone mid-read: unmeasured, never absent
+        raise _unmeasured(text_id, revision, exc) from exc
     return sizes or None
 
 
+def body_map_sizes(root: Path, text_id: str = BODY_MAP_TEXT, ref: str = "", *, staged: bool = False,
+                   revision: _Revision | None = None) -> dict[str, int] | None:
+    """UTF-8 bytes of the Body Map this code renders from the books in the working tree, the index or at ``ref``.
+
+    ``None`` where that revision holds no Architecture book (no Map, a fact); a Development book it does not hold
+    adds no handbook chapters (a fact as well). ``UnmeasuredText`` where either book is there but cannot be read:
+    an unreadable handbook is unknown, never a Map smaller by its chapter list."""
+    revision = revision or _Revision(root, ref, staged)
+    if not revision.holds(BOOK_ENTRYPOINTS["architecture"]):
+        return None
+    try:
+        architecture = load_reference_book(revision.root, "architecture", revision.read)
+        development = (load_reference_book(revision.root, "development", revision.read)
+                       if revision.holds(BOOK_ENTRYPOINTS["development"]) else None)
+        return {text_id: len(body_map(architecture, development)[0].text.encode("utf-8"))}
+    except (OSError, ValueError, KeyError) as exc:
+        raise _unmeasured(BODY_MAP_TEXT, revision, exc) from exc
+
+
+# Run by ``revision_body_map_sizes`` in a child interpreter: every ``ouroboros`` module comes from the revision's own
+# tree (the package itself is a bare namespace, so no ``__init__`` runs), and that revision's ``body_map_sizes``
+# renders its own books read through Git. It prints the size, or ``null`` where the revision has no renderer.
+_REVISION_MAP = r'''
+import importlib.abc, importlib.util, json, subprocess, sys
+root, ref = sys.argv[1], sys.argv[2]
+
+class Revision(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    def find_spec(self, name, path=None, target=None):
+        if name == "ouroboros":
+            return importlib.util.spec_from_loader(name, self, is_package=True)
+        if not name.startswith("ouroboros."):
+            return None
+        stem = name.replace(".", "/")
+        for file, package in ((stem + ".py", False), (stem + "/__init__.py", True)):
+            done = subprocess.run(["git", "show", f"{ref}:{file}"], cwd=root, capture_output=True, timeout=30)
+            if done.returncode == 0:
+                spec = importlib.util.spec_from_loader(name, self, origin=f"{ref}:{file}", is_package=package)
+                spec.loader_state = done.stdout
+                return spec
+        return None
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        if module.__spec__.loader_state is not None:
+            exec(compile(module.__spec__.loader_state, module.__spec__.origin, "exec"), module.__dict__)
+
+sys.meta_path.insert(0, Revision())
+books = importlib.import_module("ouroboros.reference_books")
+sizes = books.body_map_sizes(root, ref=ref) if hasattr(books, "body_map") else None
+print(json.dumps(None if sizes is None else sum(sizes.values())))
+'''
+
+
+def revision_body_map_sizes(root: Path, ref: str, text_id: str = BODY_MAP_TEXT) -> dict[str, int] | None:
+    """The Body Map revision ``ref`` renders with its OWN code from its own books: what that revision sent.
+
+    ``None`` where the revision has no renderer (no ``ouroboros/reference_books.py`` with ``body_map``): it had no
+    Map, so nothing is compared. ``UnmeasuredText`` where its tree cannot be listed or its renderer fails. One child
+    interpreter with a deadline and offline Git; only the size lane pays it."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    listing = _git_bytes(Path(root), "ls-tree", "-z", "--full-tree", ref, "--", "ouroboros/reference_books.py")
+    if listing is None:
+        raise UnmeasuredText(f"{ref}: its tree cannot be listed")
+    if not listing:
+        return None
+    try:
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", _REVISION_MAP, str(root), ref], cwd=str(root),
+                              capture_output=True, timeout=120, env={**os.environ, **_OFFLINE_GIT})
+        size = json.loads(done.stdout.decode("utf-8").strip().splitlines()[-1]) if done.returncode == 0 else ...
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
+        raise UnmeasuredText(f"{ref}: its Body Map renderer did not answer: {exc}") from exc
+    if size is ... or not (size is None or isinstance(size, int)):
+        why = (done.stderr.decode("utf-8", "replace").strip().splitlines() or ["no output"])[-1]
+        raise UnmeasuredText(f"{ref}: its Body Map renderer failed: {why}")
+    return None if size is None else {text_id: size}
+
+
+def chapters_over_one_read(root: Path, book_id: str, ref: str = "", *, staged: bool = False,
+                           revision: _Revision | None = None) -> tuple[tuple[str, int, int], ...]:
+    """``(path, lines, characters)`` of each chapter of ``book_id`` that one default ``read_file`` cannot hold.
+    Raises where the book cannot be read: an unmeasured chapter is unknown, never within the band."""
+    revision = revision or _Revision(root, ref, staged)
+    book = load_reference_book(revision.root, book_id, revision.read)
+    sized = ((chapter.source_path, len(chapter.text.splitlines()), len(chapter.text)) for chapter in book.chapters)
+    return tuple(row for row in sized if row[1] > CHAPTER_READ_LINES or row[2] > CHAPTER_READ_CHARS)
+
+
+def standalone_sizes(root: Path, path: str, ref: str = "", *, staged: bool = False,
+                     revision: _Revision | None = None) -> dict[str, int] | None:
+    """UTF-8 bytes of one standalone document there, ``None`` when absent, ``UnmeasuredText`` when unreadable."""
+    revision = revision or _Revision(root, ref, staged)
+    return {path: revision.size(path)} if revision.holds(path) else None
+
+
 def ruled_text_paths(root: Path) -> list[str]:
-    """The working-tree files of every ruled text, for a caller that measures everything."""
-    return [path for text_id in RULED_TEXTS for path in (ruled_text_sizes(root, text_id) or {})]
+    """The working-tree files of every ruled text, for a caller that measures everything (it names an unreadable one)."""
+    root = Path(root)
+    files = [root / RULED_TEXTS["constitution"], *sorted((root / RULED_TEXTS["prompts"]).glob("*.md"))]
+    return [file.relative_to(root).as_posix() for file in files if file.is_file()]
+
+
+def _texts_of(paths: list[str] | None) -> list[tuple[str, Callable[..., dict[str, int] | None], bool]]:
+    """``(text id, its measure, ruled)`` of every text ``paths`` touch, all of them when ``None``: the ruled texts,
+    the Body Map whenever a book source is touched, the books, the standalone documents."""
+    books = list(BOOK_ENTRYPOINTS) if paths is None else sorted(
+        {book_id for book_id, entry in BOOK_ENTRYPOINTS.items() for path in paths if book_entrypoint_for(path) == entry})
+    texts = list(RULED_TEXTS) if paths is None else sorted({ruled_text_of(path) for path in paths} - {""})
+    return ([(text_id, ruled_text_sizes, True) for text_id in texts]
+            + ([(BODY_MAP_TEXT, body_map_sizes, True)] if books else [])
+            + [(book_id, book_source_sizes, False) for book_id in books]
+            + [(path, standalone_sizes, False) for path in STANDALONE_DOCS if paths is None or path in paths])
 
 
 def book_balances(root: Path, paths: Iterable[str] | None = None, *, staged: bool = False) -> list[BookBalance]:
-    """The balance of every book or ruled text ``paths`` touch (all of them when ``None``), measured in the
-    working tree or, ``staged``, in the index a commit would hold; never raises."""
-    paths = None if paths is None else list(paths)
-    wanted = list(BOOK_ENTRYPOINTS) if paths is None else sorted(
-        {book_id for book_id, entry in BOOK_ENTRYPOINTS.items()
-         for path in paths if book_entrypoint_for(path) == entry})
-    texts = list(RULED_TEXTS) if paths is None else sorted({ruled_text_of(path) for path in paths} - {""})
-    if not wanted and not texts:
+    """The balance of every text ``paths`` touch (all of them when ``None``), measured in the working tree or,
+    ``staged``, in the index a commit would hold; never raises. Ruled texts (``BIBLE.md``, the prompts, and the
+    Body Map whenever a book source is touched) carry what they owe; a book and a standalone document carry their
+    size as a fact, a book also its chapters past one read. A text absent here is left out (the caller names it); a
+    text there but unreadable is a balance whose ``unmeasured`` says why. Each revision is read once."""
+    measures = _texts_of(None if paths is None else list(paths))
+    if not measures:
         return []
     upstream, base = contribution_base(root)
-    measures = [(book_id, book_source_sizes, composed_size) for book_id in wanted]
-    measures += [(text_id, ruled_text_sizes, lambda sizes: sum(sizes.values())) for text_id in texts]
+    now_at, head_at = _Revision(root, staged=staged), _Revision(root, "HEAD")
+    base_at = _Revision(root, base) if base else None
+
+    def measured(sizes_at, text_id: str, revision: _Revision | None) -> tuple[dict[str, int] | None, str]:
+        try:
+            return (sizes_at(root, text_id, revision=revision) if revision is not None else None), ""
+        except (OSError, ValueError, KeyError) as exc:
+            return None, str(exc) or type(exc).__name__
+
     balances: list[BookBalance] = []
-    for text_id, sizes_at, total in measures:
-        now = sizes_at(root, text_id, staged=staged)
+    for text_id, sizes_at, ruled in measures:
+        total = composed_size if text_id in BOOK_ENTRYPOINTS else (lambda sizes: sum(sizes.values()))
+        now, why = measured(sizes_at, text_id, now_at)
+        over: tuple[tuple[str, int, int], ...] = ()
+        if now is not None and text_id in BOOK_ENTRYPOINTS:
+            try:
+                over = chapters_over_one_read(root, text_id, revision=now_at)
+            except (OSError, ValueError, KeyError) as exc:  # sized but unreadable as a book: never within the band
+                now, why = None, str(_unmeasured(text_id, now_at, exc))
         if now is None:
+            if why:
+                balances.append(BookBalance(text_id, 0, None, None, upstream, (), base, ruled, (), why))
             continue
-        head = sizes_at(root, text_id, "HEAD")
-        at_base = sizes_at(root, text_id, base) if base else None
+        head, at_base = measured(sizes_at, text_id, head_at)[0], measured(sizes_at, text_id, base_at)[0]
         changed = tuple((path, now.get(path, 0) - (head or {}).get(path, 0))
                         for path in dict.fromkeys([*now, *(head or {})])
                         if now.get(path, 0) != (head or {}).get(path, 0))
@@ -535,7 +859,7 @@ def book_balances(root: Path, paths: Iterable[str] | None = None, *, staged: boo
             text_id, total(now),
             total(now) - total(head) if head is not None else None,
             total(now) - total(at_base) if at_base is not None else None,
-            upstream, changed, base))
+            upstream, changed if text_id != BODY_MAP_TEXT else (), base, ruled, over))
     return balances
 
 
@@ -545,6 +869,8 @@ def _signed(value: int | None) -> str:
 
 def render_book_balance(balance: BookBalance) -> str:
     """One line: worktree size, HEAD delta, contribution delta and its actual cached base."""
+    if balance.unmeasured:
+        return f"{text_name(balance.book_id)} balance unavailable: {balance.unmeasured}"
     line = f"{text_name(balance.book_id)} {balance.size:,} B: {_signed(balance.vs_head)} vs HEAD"
     if balance.upstream:
         line += f", {_signed(balance.vs_upstream)} vs {balance.upstream} (merge-base {balance.merge_base or 'unavailable'})"
@@ -552,29 +878,31 @@ def render_book_balance(balance: BookBalance) -> str:
         line += "; contribution unknown"
     if balance.changed:
         line += " (" + ", ".join(f"{Path(path).stem} {delta:+,}" for path, delta in balance.changed) + ")"
+    if not balance.ruled:
+        line += " [a fact: read on demand, under no size rule]"
+    if balance.over_read:
+        line += " [past one read: " + ", ".join(
+            f"{Path(path).name} {lines:,} lines/{chars:,} characters" for path, lines, chars in balance.over_read) + "]"
     return line
 
 
 def book_balance_note(root: Path, paths: Iterable[str], *, staged: bool = False) -> str:
-    """The footer for a write to Ouroboros's own body; ``""`` when no book or ruled text was written.
+    """The footer for a write to Ouroboros's own body; ``""`` when no book, ruled text or standalone document was written.
     ``staged`` measures the index (a staged commit's subject), otherwise the working tree.
 
     Callers decide that ``root`` is the body (the system repository or its bound candidate):
     a user's project with a ``docs/architecture`` folder never receives this note.
     """
-    touched = [path for path in paths if book_path_role(path) or ruled_text_of(path)]
+    touched = [path for path in paths if book_path_role(path) or ruled_text_of(path) or path in STANDALONE_DOCS]
     if not touched:
         return ""
     balances = book_balances(root, touched, staged=staged)
-    wanted = {book_entrypoint_for(path) for path in touched}
     available = {balance.book_id for balance in balances}
-    unavailable = [f"{text_name(book_id)} balance unavailable"
-                   for book_id, entry in BOOK_ENTRYPOINTS.items()
-                   if entry in wanted and book_id not in available]
-    unavailable += [f"{text_name(text_id)} balance unavailable"
-                    for text_id in sorted({ruled_text_of(path) for path in touched} - {""} - available)]
-    lines = [render_book_balance(balance) for balance in balances] + unavailable
-    if any(balance.owed for balance in balances):
-        return "ℹ️ Text growth:\n" + "\n".join(lines) + "\n" + BOOK_GROWTH_RULE
-    measured = not unavailable and all(balance.vs_upstream is not None for balance in balances)
+    absent = [f"{text_name(text_id)} is absent here" for text_id, _, _ in _texts_of(touched) if text_id not in available]
+    lines = [render_book_balance(balance) for balance in balances] + absent
+    rules = ([BOOK_GROWTH_RULE] if any(balance.owed for balance in balances) else []) + (
+        [CHAPTER_BAND_RULE] if any(balance.over_read for balance in balances) else [])
+    if rules:
+        return "ℹ️ Text growth:\n" + "\n".join([*lines, *rules])
+    measured = all(balance.vs_upstream is not None and not balance.unmeasured for balance in balances)
     return "ℹ️ Text growth: " + "; ".join(lines) + ("; nothing owed." if measured else ".")

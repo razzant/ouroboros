@@ -380,7 +380,7 @@ def navigation_material(layer: str, delivery: str) -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a layer's governance navigation
     as its renderer composes it for ``delivery``, over placeholders (the subject's documents, the sources a skill
     owes). The documents it names, their headings and the guides' own text are not here."""
-    from ouroboros.context_layout import PACKET_CHAPTER_DIR, PACKET_INDEX, design_navigation
+    from ouroboros.context_layout import PACKET_ATLAS, PACKET_CHAPTER_DIR, PACKET_INDEX, design_navigation
     from ouroboros.tools.review_helpers import GOVERNANCE_OMISSION
 
     words = NAVIGATION_WORDS.get(layer, {})
@@ -392,7 +392,8 @@ def navigation_material(layer: str, delivery: str) -> list:
                             for note in _DESIGN_REVIEW_MAP.values())
             pointers.append(_INVARIANTS_UNAVAILABLE)
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
-                *(pointers if layer == BODY_LAYER else ()), *([PACKET_INDEX, PACKET_CHAPTER_DIR.format(folder="⟨folder⟩")] if delivery == PACKET_DELIVERY else ())]
+                *(pointers if layer == BODY_LAYER else ()), *([PACKET_INDEX, PACKET_CHAPTER_DIR.format(folder="⟨folder⟩"), PACKET_ATLAS]
+                  if delivery == PACKET_DELIVERY else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
     (tail,) = words[delivery]
     return [heading, *(rules + subject_words + tail for rules in (with_rules, without_rules)),

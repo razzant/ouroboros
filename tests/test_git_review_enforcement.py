@@ -517,27 +517,40 @@ class TestReviewEnforcementModes:
             "a per-item always-block hardcode (58a52c4 class) would fail here"
         )
 
-    def test_new_module_triggers_architecture_preflight_through_run_unified_review(self, tmp_path, monkeypatch):
-        """Check 4 (architecture_doc) fires through the real _run_unified_review caller.
+    @staticmethod
+    def _index(monkeypatch, review, *rows, source='"""What the module is for."""\n', files=None):
+        """The subject's index for a new-module case: the manifest with one ``[modules]`` row per path in ``rows``,
+        ``source`` as every ``.py`` file, and ``files`` as given (a ``None`` value reads as absent)."""
+        from ouroboros import commit_admission
+
+        manifest = '[domains]\nD01 = "Core"\n\n[modules]\n' + "".join(f'"{row}" = "D01"\n' for row in rows)
+        index = {"ouroboros/domains.toml": manifest, **(files or {})}
+        show = lambda repo_dir, path: index[path] if path in index else source if path.endswith(".py") else None  # noqa: E731
+        monkeypatch.setattr(review, "_git_show_staged", show)
+        monkeypatch.setattr(commit_admission, "_head_text", show)  # HEAD's carriers equal the index's
+
+    def test_new_module_without_its_map_row_reaches_the_review_through_run_unified_review(self, tmp_path, monkeypatch):
+        """The new-module check fires through the real _run_unified_review caller.
 
         This proves the name-status conversion in _run_unified_review feeds
         _preflight_check correctly, so added files are detected.
         """
         review = _get_review_module()
         ctx = _make_ctx(tmp_path)
-        # Simulate: new ouroboros module added + tests staged, but ARCHITECTURE.md absent
+        # Simulate: new ouroboros module added + tests staged, its `[modules]` row absent from the manifest
         # name-status format: git emits "A\tpath" for added files
         self._mock_staged(
             monkeypatch, review,
             changed_files="ouroboros/new_module.py\ntests/test_new_module.py",
             name_status_files="A\touroboros/new_module.py\nA\ttests/test_new_module.py",
         )
+        self._index(monkeypatch, review)
         monkeypatch.setattr(review, "_handle_multi_model_review", lambda *a, **k: self._fake_result("[]", "[]"))
         result = review._run_unified_review(ctx, "add new module", repo_dir=ctx.repo_dir)
-        # The preflight finds ARCHITECTURE.md missing and returns it beside the review, never a refusal.
+        # The preflight finds the row missing and returns it beside the review, never a refusal.
         assert result is None
         said = " ".join(w for w in ctx._review_advisory if isinstance(w, str))
-        assert "PREFLIGHT_BLOCKED" in said and "ARCHITECTURE.md" in said
+        assert "PREFLIGHT_BLOCKED" in said and "no `[modules]` row" in said and "ouroboros/new_module.py" in said
 
     def test_rename_out_of_ouroboros_without_tests_passes(self):
         """Regression (#447): a rename/deletion of a .py file out of
@@ -552,9 +565,10 @@ class TestReviewEnforcementModes:
         )
         assert result is None
 
-    def test_rename_into_ouroboros_triggers_architecture_check(self):
-        """Renaming a .py file INTO ouroboros/ without ARCHITECTURE.md triggers check 4."""
+    def test_rename_into_ouroboros_owes_its_map_row(self, monkeypatch):
+        """Renaming a .py file INTO ouroboros/ without its `[modules]` row triggers the new-module check."""
         review = _get_review_module()
+        self._index(monkeypatch, review)
         # Destination becomes "A ouroboros/new_module.py" → triggers new-module check
         result = review._preflight_check(
             "move module into ouroboros",
@@ -563,27 +577,25 @@ class TestReviewEnforcementModes:
         )
         assert result is not None
         assert "PREFLIGHT_BLOCKED" in result
-        assert "ARCHITECTURE.md" in result
+        assert "no `[modules]` row" in result and "ouroboros/new_module.py" in result
 
-    def test_rename_into_ouroboros_with_architecture_passes(self, monkeypatch):
-        """Renaming a .py file into ouroboros/ + staging ARCHITECTURE.md passes check 4.
+    def test_rename_into_ouroboros_with_its_row_passes_and_a_staged_book_never_stands_in(self, monkeypatch):
+        """Renaming a .py file into ouroboros/ with its `[modules]` row and a docstring passes; a staged
+        ARCHITECTURE.md is neither demanded nor a substitute for the row (BIBLE P3: no mandatory touch).
 
         ARCHITECTURE.md is a version carrier: the version-neutral index lane reads
         the staged carrier to compare its span with HEAD, so the lexical case
         supplies an index and a HEAD of its own (an unreadable one is honest unavailable evidence).
         """
-        from ouroboros import commit_admission
-
         review = _get_review_module()
-        show = lambda repo_dir, path: "# Ouroboros v3.24.0\n" if path == "docs/ARCHITECTURE.md" else None  # noqa: E731
-        monkeypatch.setattr(review, "_git_show_staged", show)
-        monkeypatch.setattr(commit_admission, "_head_text", show)  # HEAD's carrier equals the index's
-        result = review._preflight_check(
-            "move module into ouroboros",
-            "D  docs/old_module.py\nA  ouroboros/new_module.py\nM  tests/test_new.py\nM  docs/ARCHITECTURE.md",
-            "/tmp",
-        )
-        assert result is None
+        staged = "D  docs/old_module.py\nA  ouroboros/new_module.py\nM  tests/test_new.py"
+        book = {"docs/ARCHITECTURE.md": "# Ouroboros v3.24.0\n"}
+        self._index(monkeypatch, review, "ouroboros/new_module.py", files=book)
+        assert review._preflight_check("move module into ouroboros", staged, "/tmp") is None
+        assert review._preflight_check("move module into ouroboros", staged + "\nM  docs/ARCHITECTURE.md", "/tmp") is None
+        self._index(monkeypatch, review, files=book)
+        blocked = review._preflight_check("move module into ouroboros", staged + "\nM  docs/ARCHITECTURE.md", "/tmp")
+        assert blocked and "no `[modules]` row" in blocked
 
     def test_rename_lines_parsed_correctly_by_preflight(self, tmp_path, monkeypatch):
         """Rename entries (R100\told\tnew) use the destination path for preflight checks."""
@@ -630,9 +642,10 @@ class TestReviewEnforcementModes:
         # No ouroboros .py → no check 3 block
         assert result is None
 
-    def test_copied_module_without_architecture_blocked(self):
-        """Copied .py file in ouroboros/ (status C) triggers architecture-doc preflight."""
+    def test_copied_module_without_its_map_row_blocked(self, monkeypatch):
+        """Copied .py file in ouroboros/ (status C) triggers the new-module preflight."""
         review = _get_review_module()
+        self._index(monkeypatch, review)
         # C status means a new file that was copied from somewhere else — still a new module
         result = review._preflight_check(
             "add copied module",
@@ -641,19 +654,15 @@ class TestReviewEnforcementModes:
         )
         assert result is not None
         assert "PREFLIGHT_BLOCKED" in result
-        assert "ARCHITECTURE.md" in result
+        assert "no `[modules]` row" in result and "ouroboros/new_copy.py" in result
 
-    def test_copied_module_with_architecture_passes(self, monkeypatch):
-        """Copied .py file in ouroboros/ + ARCHITECTURE.md staged → passes."""
-        from ouroboros import commit_admission
-
+    def test_copied_module_with_its_row_passes(self, monkeypatch):
+        """Copied .py file in ouroboros/ with its `[modules]` row and a docstring → passes."""
         review = _get_review_module()
-        show = lambda repo_dir, path: "# Ouroboros v3.24.0\n" if path == "docs/ARCHITECTURE.md" else None  # noqa: E731
-        monkeypatch.setattr(review, "_git_show_staged", show)  # the staged carrier the neutral lane compares
-        monkeypatch.setattr(commit_admission, "_head_text", show)  # ... with HEAD's equal one
+        self._index(monkeypatch, review, "ouroboros/new_copy.py")
         result = review._preflight_check(
             "add copied module",
-            "C  ouroboros/new_copy.py\nM  tests/test_new_copy.py\nM  docs/ARCHITECTURE.md",
+            "C  ouroboros/new_copy.py\nM  tests/test_new_copy.py",
             "/tmp",
         )
         assert result is None
@@ -681,24 +690,27 @@ class TestReviewEnforcementModes:
         )
         assert result is None
 
-    def test_deleted_architecture_does_not_satisfy_check4(self, monkeypatch):
-        """Deleting ARCHITECTURE.md does not count as 'architecture doc staged'.
-
-        HEAD's file carries no version span here, so the release lane has no carrier
-        move to report and check 4 stays the subject.
-        """
-        from ouroboros import commit_admission
-
+    def test_a_deleted_manifest_gives_the_new_module_no_row(self, monkeypatch):
+        """A manifest the same change deletes holds no row: the subject's index is read, never the name-status line."""
         review = _get_review_module()
-        monkeypatch.setattr(commit_admission, "_head_text", lambda repo_dir, path: "# Architecture\n")
+        self._index(monkeypatch, review, files={"ouroboros/domains.toml": None})
         result = review._preflight_check(
             "add new module",
-            "A  ouroboros/new_module.py\nM  tests/test_new.py\nD  docs/ARCHITECTURE.md",
+            "A  ouroboros/new_module.py\nM  tests/test_new.py\nD  ouroboros/domains.toml",
             "/tmp",
         )
         assert result is not None
         assert "PREFLIGHT_BLOCKED" in result
-        assert "ARCHITECTURE.md" in result
+        assert "no `[modules]` row" in result
+
+    def test_an_index_that_cannot_be_read_is_unavailable_evidence_for_the_new_module_check(self, tmp_path):
+        """A folder that is no repository answers nothing about the row: unavailable, never a pass or a defect."""
+        from ouroboros.commit_admission import preflight_evidence_unavailable
+
+        review = _get_review_module()
+        result = review._preflight_check("add new module", "A  ouroboros/new_module.py", tmp_path)
+        assert result is not None and "PREFLIGHT_UNAVAILABLE" in result and "ouroboros/domains.toml" in result
+        assert preflight_evidence_unavailable(result)
 
     def test_deleted_readme_does_not_satisfy_check1(self, tmp_path, monkeypatch):
         """Deleting README.md while VERSION is staged triggers check 1."""
@@ -717,22 +729,23 @@ class TestReviewEnforcementModes:
         assert "PREFLIGHT_UNAVAILABLE" in result
 
     def test_copied_module_triggers_via_run_unified_review(self, tmp_path, monkeypatch):
-        """Check 4 fires for C-status copy via _run_unified_review, but source NOT treated as deleted."""
+        """The new-module check fires for C-status copy via _run_unified_review, but source NOT treated as deleted."""
         review = _get_review_module()
         ctx = _make_ctx(tmp_path)
         # Copy from ouroboros/base.py to ouroboros/new_copy.py.
         # The source (ouroboros/base.py) is unchanged — only the destination is new.
-        # Architecture doc is absent → check 4 should fire.
+        # Its `[modules]` row is absent → the new-module check should fire.
         self._mock_staged(
             monkeypatch, review,
             changed_files="ouroboros/new_copy.py\ntests/test_new_copy.py",
             name_status_files="C100\touroboros/base.py\touroboros/new_copy.py\nA\ttests/test_new_copy.py",
         )
+        self._index(monkeypatch, review, "ouroboros/base.py")
         monkeypatch.setattr(review, "_handle_multi_model_review", lambda *a, **k: self._fake_result("[]", "[]"))
         result = review._run_unified_review(ctx, "add copied module", repo_dir=ctx.repo_dir)
         assert result is None
         said = " ".join(w for w in ctx._review_advisory if isinstance(w, str))
-        assert "PREFLIGHT_BLOCKED" in said and "ARCHITECTURE.md" in said
+        assert "PREFLIGHT_BLOCKED" in said and "no `[modules]` row" in said and "ouroboros/new_copy.py" in said
 
     # ``test_copy_source_not_treated_as_deletion`` was removed with the
     # tests-required preflight heuristic (#447): a false D entry for a copy

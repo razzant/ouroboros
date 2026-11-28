@@ -462,6 +462,12 @@ def presence_ceiling_allows_binding(ceiling: PresenceCapabilityCeiling, binding:
         prefix_parts = () if grant.path_prefix == "." else PurePosixPath(grant.path_prefix).parts
         if relative_parts[: len(prefix_parts)] == prefix_parts:
             return True
+    # The resident Body Map tells every focus where each shipped manual lives: a ceiling that grants file reading
+    # follows exactly those addresses in the body it runs from (the product's own public documents), nothing else.
+    if (str(binding.root), str(binding.operation), entry) == ("system_repo", "read", False) and logical_base is None:
+        from ouroboros.reference_books import body_map_addresses
+
+        return presence_ceiling_allows_tool(ceiling, "read_file") and relative.as_posix() in body_map_addresses(base)
     return False
 
 

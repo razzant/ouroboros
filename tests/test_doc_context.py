@@ -1,20 +1,18 @@
-"""Tests for the low/max reference-doc layout in the always-on agent context.
+"""Tests for the reference-doc layout in the always-on agent context.
 
-Doc matrix (D-ARCH unification, owner 2026-08-08):
-  ARCHITECTURE follows the OWNER MODE alone: full in max for EVERY task class
-       (self-body, project tasks with or without a folder, evolution, external
-       surfaces); navigation map in low. It is Ouroboros's capability/tools/
-       access map — never dropped per-task in max.
-  DEVELOPMENT follows the SUBJECT OF THE WORK (D-DEV 2026-08-08, 6A 2026-10-27,
-       BIBLE P1; `context_input_selection.development_resident`): an explicit
-       context_requires_development wins either way (absent is not false); a
-       subagent or an api/cli/scheduled surface gets its chapter map unless the
-       task asks for the handbook; self-body work keeps it; a bound tree that
-       body_fact proves foreign gets the map; an unbound task (a direct-chat
-       turn in a PROJECT ROOM included) or a tree whose body fact is unknown
-       keeps it — a path fact, never a guess from message text (P5). Project
-       MEMBERSHIP is deliberately NOT the signal.
-  README/CHECKLISTS: on-demand pointer in all modes.
+Doc matrix (owner 25.11.2026, BIBLE P1; supersedes D-ARCH and D-DEV of 2026-08-08):
+  Every mode (Max, Low, Nano) and every focus carries ONE resident Body Map,
+       rendered from the books' sources (`reference_books.body_map`): the
+       Architecture entry's introduction, each chapter's title, physical path
+       and authored opening, the Reference Atlas and the Development chapter
+       list. No chapter body is preloaded in any mode.
+  DEVELOPMENT is whole only as the task's own requirement
+       (`task_contract.context_requires_development is True`), in any mode, as
+       its own block. No binding, surface, task type or
+       `context_requires_self_body_docs` preloads it.
+  A single-file (legacy) Architecture revision has no Map form: its source
+       navigation rides instead. Where no book renders, the prompt names the
+       books, README and CHECKLISTS as on-demand reads.
 SYSTEM + BIBLE are tier-0 and always full.
 """
 
@@ -30,9 +28,46 @@ promotion_host = _promotion_host
 # Unique sentinel placed inside the ARCHITECTURE body so we can prove the full
 # body is inlined (max) vs replaced by a structure-only nav map (low).
 _ARCH_BODY_SENTINEL = "ARCH_BODY_SENTINEL_XYZ"
+_DEV_BODY_SENTINEL = "DEV_BODY_SENTINEL_XYZ"
+_BOOKS = {
+    "docs/ARCHITECTURE.md": (
+        "# Ouroboros v5.5.0 — Architecture\n\nThe map of my body.\n\n## Chapters\n\n"
+        "- [Section A](architecture/01-section-a.md)\n- [Section B](architecture/02-section-b.md)\n\n"
+        "## Reference Atlas\n\n- [DEVELOPMENT.md](DEVELOPMENT.md) — how a change is made.\n"
+        "- [CHECKLISTS.md](CHECKLISTS.md) — the questions my reviewers answer.\n"),
+    "docs/architecture/01-section-a.md": (
+        "# Section A\n\nWhat section A gives me.\n\n## Mechanism\n\n" + _ARCH_BODY_SENTINEL + " alpha\n"),
+    "docs/architecture/02-section-b.md": "# Section B\n\nWhat section B gives me.\n\n## Detail\n\nbeta\n",
+    "docs/DEVELOPMENT.md": "# DEVELOPMENT.md — Dev Guide\n\nHow I change.\n\n## Chapters\n\n- [Review](development/01-review.md)\n",
+    "docs/development/01-review.md": "# Review\n\nHow a change is reviewed.\n\n## Rules\n\n" + _DEV_BODY_SENTINEL + "\n",
+}
+_MAP_ROWS = (
+    "## Body map", "The map of my body.",
+    "### Section A\nSource: `docs/architecture/01-section-a.md`\nWhat section A gives me.",
+    "### Section B\nSource: `docs/architecture/02-section-b.md`\nWhat section B gives me.",
+    "### Reference Atlas\n- `docs/DEVELOPMENT.md` — how a change is made.",
+    "### Development handbook chapters\n- Review: `docs/development/01-review.md`",
+)
+HANDBOOK = "## DEVELOPMENT.md\n\n"
+REQUIRED = {"task_contract": {"context_requires_development": True}}
 
 
-def _make_env_and_memory(tmpdir: pathlib.Path):
+def _map_only(text):
+    """The resident Map, whole, with no chapter body, no handbook block, no line range and no version."""
+    for row in _MAP_ROWS:
+        assert row in text, row
+    assert _ARCH_BODY_SENTINEL not in text and _DEV_BODY_SENTINEL not in text and HANDBOOK not in text
+    assert "## ARCHITECTURE.md" not in text and "v5.5.0" not in text and " — lines " not in text
+
+
+def _required(text):
+    """The Map stays, and the task's own requirement adds the whole handbook as its block."""
+    for row in _MAP_ROWS:
+        assert row in text, row
+    assert _ARCH_BODY_SENTINEL not in text and text.count(HANDBOOK) == 1 and _DEV_BODY_SENTINEL in text
+
+
+def _make_env_and_memory(tmpdir: pathlib.Path, *, legacy: bool = False):
     from ouroboros.agent import Env
     from ouroboros.memory import Memory
 
@@ -46,14 +81,19 @@ def _make_env_and_memory(tmpdir: pathlib.Path):
     (repo_dir / "docs").mkdir(parents=True, exist_ok=True)
     (repo_dir / "prompts" / "SYSTEM.md").write_text("You are Ouroboros.", encoding="utf-8")
     (repo_dir / "BIBLE.md").write_text("# Principle 0: Agency", encoding="utf-8")
-    (repo_dir / "docs" / "ARCHITECTURE.md").write_text(
-        "# Ouroboros v5.5.0 — Architecture\n\n## Section A\n\n"
-        + _ARCH_BODY_SENTINEL
-        + " alpha\n\n### Section A child\n\n#### Section A detail\n\ndetail\n\n"
-        + "## Section B\n\nbeta\n",
-        encoding="utf-8",
-    )
-    (repo_dir / "docs" / "DEVELOPMENT.md").write_text("# DEVELOPMENT.md — Dev Guide", encoding="utf-8")
+    if legacy:  # a single-file revision: no Map form, its source navigation stands in
+        (repo_dir / "docs" / "ARCHITECTURE.md").write_text(
+            "# Ouroboros v5.5.0 — Architecture\n\n## Section A\n\n"
+            + _ARCH_BODY_SENTINEL
+            + " alpha\n\n### Section A child\n\n#### Section A detail\n\ndetail\n\n"
+            + "## Section B\n\nbeta\n",
+            encoding="utf-8",
+        )
+        (repo_dir / "docs" / "DEVELOPMENT.md").write_text("# DEVELOPMENT.md — Dev Guide", encoding="utf-8")
+    else:
+        for path, text in _BOOKS.items():
+            (repo_dir / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo_dir / path).write_text(text, encoding="utf-8", newline="\n")
     (repo_dir / "README.md").write_text('[![Version 5.5.0](https://img.shields.io/badge/version-5.5.0-green.svg)](VERSION)', encoding="utf-8")
     (repo_dir / "docs" / "CHECKLISTS.md").write_text("## Change Review Checklist\n| # | item |", encoding="utf-8")
     (drive_root / "state" / "state.json").write_text('{"spent_usd": 0}', encoding="utf-8")
@@ -75,10 +115,10 @@ def foreign_tree(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
-def _build_system_text(task_overrides=None, *, context_mode="max"):
+def _build_system_text(task_overrides=None, *, context_mode="max", legacy=False):
     from ouroboros.context import build_llm_messages
     tmpdir = pathlib.Path(tempfile.mkdtemp())
-    env, memory = _make_env_and_memory(tmpdir)
+    env, memory = _make_env_and_memory(tmpdir, legacy=legacy)
     task = {"id": "test-1", "type": "task", "text": "hello"}
     if task_overrides:
         task.update(task_overrides)
@@ -95,12 +135,11 @@ def _build_system_text(task_overrides=None, *, context_mode="max"):
     return " ".join(block.get("text", "") for block in content if isinstance(block, dict))
 
 
-def test_max_mode_inlines_architecture_and_development_in_full():
-    text = _build_system_text(context_mode="max")
-    assert "## ARCHITECTURE.md" in text
-    assert _ARCH_BODY_SENTINEL in text  # full body inlined
-    assert "navigation map" not in text
-    assert "## DEVELOPMENT.md" in text
+@pytest.mark.parametrize("mode", ["max", "low", "nano"])
+def test_every_mode_carries_the_body_map_and_no_chapter_body(mode):
+    _map_only(_build_system_text(context_mode=mode))
+    # The task's own requirement adds the whole handbook in the same mode, the Map unchanged beside it.
+    _required(_build_system_text(REQUIRED, context_mode=mode))
 
 
 def test_forked_task_captures_canonical_memory_and_exact_api_context():
@@ -376,39 +415,18 @@ def test_named_owner_source_resolves_beyond_automatic_recent_generations():
     assert task["origin_message_text"] == text
 
 
-def test_max_mode_external_workspace_keeps_arch_full_but_drops_development():
-    """D-ARCH: ARCHITECTURE is full-resident in max for EVERY class, including
-    the external-surface class; DEVELOPMENT (the self-engineering handbook)
-    is the on-demand pointer there — external work targets OTHER codebases."""
+@pytest.mark.parametrize("mode", ["max", "low"])
+def test_an_external_surface_and_a_self_body_flag_carry_the_map_and_no_handbook(mode):
+    """An external CLI task on another folder carries the same Body Map as any task; declaring the work
+    Ouroboros's own (``context_requires_self_body_docs``) preloads no manual either. Only the contract's own
+    requirement brings the whole handbook, on the same surface."""
     from ouroboros.contracts.task_contract import build_task_contract
 
-    external = _build_system_text(
-        {
-            "workspace_root": "/tmp/example-workspace",
-            "workspace_mode": "external",
-            "actor_id": "cli",
-            "metadata": {"source": "cli"},
-        },
-        context_mode="max",
-    )
-    assert "## ARCHITECTURE.md" in external
-    assert _ARCH_BODY_SENTINEL in external  # capability map stays resident
-    assert "## ARCHITECTURE.md (navigation map)" not in external
-    assert "## DEVELOPMENT.md\n\n" not in external  # the handbook is not inlined...
-    assert "## DEVELOPMENT.md (navigation map)" in external  # ...its chapter map is (6A, P1's visible pointer)
-
-    self_body = _build_system_text(
-        {
-            "workspace_root": "/tmp/example-workspace",
-            "workspace_mode": "external",
-            "actor_id": "cli",
-            "metadata": {"source": "cli"},
-            "context_requires_self_body_docs": True,
-        },
-        context_mode="max",
-    )
-    assert _ARCH_BODY_SENTINEL in self_body
-    assert "## DEVELOPMENT.md" in self_body  # explicit self-body keeps DEV full
+    surface = {"workspace_root": "/tmp/example-workspace", "workspace_mode": "external", "actor_id": "cli",
+               "metadata": {"source": "cli"}}
+    _map_only(_build_system_text(surface, context_mode=mode))
+    _map_only(_build_system_text({**surface, "context_requires_self_body_docs": True}, context_mode=mode))
+    _required(_build_system_text({**surface, "context_requires_self_body_docs": True, **REQUIRED}, context_mode=mode))
 
     contract = build_task_contract({
         "id": "task-docs",
@@ -424,21 +442,6 @@ def test_max_mode_external_workspace_keeps_arch_full_but_drops_development():
         "metadata": {"source": "api_task"},
     })
     assert contract_false["context_requires_self_body_docs"] is False
-
-
-def test_low_mode_external_workspace_gets_both_book_navigation_views():
-    external = _build_system_text(
-        {
-            "workspace_root": "/tmp/example-workspace",
-            "workspace_mode": "external",
-            "actor_id": "cli",
-            "metadata": {"source": "cli"},
-        },
-        context_mode="low",
-    )
-    assert "navigation map" in external
-    assert _ARCH_BODY_SENTINEL not in external
-    assert "## DEVELOPMENT.md (navigation map)" in external
 
 
 @pytest.mark.parametrize("mode", ["max", "low", "nano"])
@@ -464,10 +467,10 @@ def test_promoted_self_body_requirement_reaches_the_contract_and_context_without
     ))
     books_env, _memory = _make_env_and_memory(tmp_path / "books")
     env = Env(repo_dir=books_env.repo_dir, drive_root=host.root, budget_drive_root=host.root)
-    development_body = "# DEVELOPMENT.md — Dev Guide\n\n## Review\n\nRead every source before committing.\n"
-    (env.repo_dir / "docs" / "DEVELOPMENT.md").write_text(development_body, encoding="utf-8", newline="\n")
+    development_body = "# Review\n\nHow a change is reviewed.\n\n## Rules\n\nRead every source before committing.\n"
+    (env.repo_dir / "docs" / "development" / "01-review.md").write_text(development_body, encoding="utf-8", newline="\n")
     memory = Memory(host.root, repo_dir=env.repo_dir)
-    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: the flag alone decides the handbook
+    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: the flag selects DESIGN, never the handbook
     project = create_project(host.root, "code-copy", name="Code Copy")
     entry = next(tool for tool in get_tools() if tool.name == "start_task")
     field = "context_requires_self_body_docs"
@@ -489,9 +492,9 @@ def test_promoted_self_body_requirement_reaches_the_contract_and_context_without
         current_chat_id=1, task_metadata={}, pending_events=[], event_queue=SimpleNamespace(put_nowait=emit),
     )
     first = None
-    # A later task in the SAME project must not inherit the first task's choice.
-    for flag in (True, None, False):
-        kwargs = {} if flag is None else {field: flag}
+    # A later task in the SAME project must not inherit the first task's choice; the last one also requires the handbook.
+    for flag, required in ((True, False), (None, False), (False, False), (True, True)):
+        kwargs = ({} if flag is None else {field: flag}) | ({"context_requires_development": True} if required else {})
         result = entry.handler(tool_ctx, "Inspect this working copy", title="Working copy inspection",
                                project_id=project["id"],
                                workspace_root=str(workspace), **kwargs)
@@ -508,14 +511,15 @@ def test_promoted_self_body_requirement_reaches_the_contract_and_context_without
         messages, _cap = build_llm_messages(env=env, memory=memory, task=task)
         content = messages[0]["content"]
         first = first or content[0]
-        assert content[0] == first and "docs/DEVELOPMENT.md" in content[0]["text"]
+        # One governance block for every task: the Map names the handbook's chapters, the flag preloads none.
+        assert content[0] == first and "- Review: `docs/development/01-review.md`" in content[0]["text"]
+        assert "## Body map" in content[0]["text"] and "Read every source before committing." not in content[0]["text"]
         handbook = [block for block in content if block["text"].startswith("## DEVELOPMENT.md\n")]
-        assert len(handbook) == int(bool(flag) and mode == "max")
+        assert len(handbook) == int(required)
         if handbook:
+            assert task["task_contract"]["context_requires_development"] is True
             assert content[1] == handbook[0] and "cache_control" in handbook[0]
             assert development_body in handbook[0]["text"]
-        if mode != "max":
-            assert "## DEVELOPMENT.md (navigation map)" in content[0]["text"]
         child = {"id": "child-" + task["id"], "type": "task", "text": "Read the assignment", "chat_id": task["chat_id"],
                  "delegation_role": "subagent", "parent_task_id": task["id"], "root_task_id": task["id"],
                  "configured_subagent": {"id": "helper", "route": {"kind": "api_model"}}}
@@ -527,135 +531,85 @@ def test_promoted_self_body_requirement_reaches_the_contract_and_context_without
         assert child["task_contract"][field] is bool(flag)
         child_messages, _cap = build_llm_messages(env=env, memory=memory, task=child)
         child_content = child_messages[0]["content"]
-        assert "## DEVELOPMENT.md (navigation map)" in child_content[0]["text"]
+        assert "## Body map" in child_content[0]["text"] and "- Review: `docs/development/01-review.md`" in child_content[0]["text"]
+        assert "context_requires_development" not in child["task_contract"]  # no descendant inherits the requirement
         assert not any(block["text"].startswith("## DEVELOPMENT.md\n") for block in child_content)
-    assert len(events) == len(host.pending) == 3 and not host.attempts
+    assert len(events) == len(host.pending) == 4 and not host.attempts
 
 
-def test_max_mode_evolution_task_keeps_arch_and_development_full():
-    """D-ARCH (owner, 2026-08-08): evolution gets the FULL capability map in
-    max ('и эволюции тоже её класть нужно') — the v6.30.0 nav-map downgrade is
-    removed — and keeps the engineering handbook inline."""
-    text = _build_system_text({"type": "evolution"}, context_mode="max")
-    assert "## ARCHITECTURE.md" in text
-    assert _ARCH_BODY_SENTINEL in text
-    assert "navigation map" not in text
-    assert "## DEVELOPMENT.md" in text  # handbook still full
-
-    # Deep self-review keeps the full self-body docs (unchanged).
-    review_text = _build_system_text({"type": "deep_self_review"}, context_mode="max")
-    assert _ARCH_BODY_SENTINEL in review_text
-
-    # Low retains navigation to both books; Max's full bodies stay unchanged.
-    low_text = _build_system_text({"type": "evolution"}, context_mode="low")
-    assert "navigation map" in low_text
-    assert _ARCH_BODY_SENTINEL not in low_text
-    assert "## DEVELOPMENT.md" in low_text
+def test_evolution_and_deep_self_review_carry_the_body_map_without_a_handbook():
+    """Owner 25.11.2026 (BIBLE P1): self-body work reads its chapters on demand from the Map's addresses; the task
+    type preloads no manual in any mode (it used to keep both books whole in Max)."""
+    for kind in ("evolution", "deep_self_review"):
+        for mode in ("max", "low"):
+            _map_only(_build_system_text({"type": kind}, context_mode=mode))
+    _required(_build_system_text({"type": "evolution", **REQUIRED}, context_mode="max"))
 
 
-def test_development_keys_on_the_repo_binding_not_project_membership():
-    """D-DEV (owner 2026-08-08): the handbook loads iff the work targets
-    Ouroboros's own body, and the structural signal is the ACTIVE REPO BINDING —
-    NOT `project_id`. ARCHITECTURE is unaffected and follows the owner mode alone
-    (D-ARCH): full in max for every class, navigation map in low."""
-    # A project task with a BOUND workspace (this is what a promoted project task
-    # is since Q10=A auto-provisions a genesis tree) works on ANOTHER codebase.
-    foreign = str(foreign_tree(pathlib.Path(tempfile.mkdtemp()) / "proj-tree"))
-    folder_max = _build_system_text(
+def test_no_binding_or_room_preloads_the_handbook_only_the_contract_does(tmp_path):
+    """Neither the active repo binding nor project membership decides the handbook any more (it used to key on the
+    binding, D-DEV 2026-08-08): a proven-foreign folder, an unknown folder, a direct chat in a project room, an
+    opted-out room, evolution in a room and an explicit self-body flag all carry the same Map alone. The task's own
+    contract requirement brings it whole on the same binding; an explicit false keeps it out."""
+    foreign = str(foreign_tree(tmp_path / "proj-tree"))
+    cases = (
         {"project_id": "proj_sub", "workspace_root": foreign, "workspace_mode": "external"},
-        context_mode="max",
-    )
-    assert _ARCH_BODY_SENTINEL in folder_max  # ARCH full in max, always
-    assert "## DEVELOPMENT.md\n\n" not in folder_max
-    assert "## DEVELOPMENT.md (navigation map)" in folder_max  # its chapter map stands in (6A)
-    # A bound tree whose body fact is unknown (no git here) keeps the book: missing facts never narrow it (6A).
-    unknown_max = _build_system_text(
         {"project_id": "proj_sub", "workspace_root": "/tmp/proj-tree-unknown", "workspace_mode": "external"},
-        context_mode="max",
+        {"project_id": "proj_sub", "_is_direct_chat": True},
+        {"project_id": "proj_sub", "workspace": "none"},
+        {"project_id": "proj_sub", "type": "evolution"},
+        {"project_id": "proj_sub", "workspace_root": "/tmp/proj-tree", "workspace_mode": "external",
+         "context_requires_self_body_docs": True},
+        {"project_id": "proj_sub", "task_contract": {"context_requires_development": False}},
     )
-    assert "## DEVELOPMENT.md\n\n" in unknown_max
-
-    # A direct-chat turn in a PROJECT ROOM binds no workspace: still Ouroboros's
-    # own body, so it KEEPS the handbook. This is the case the project_id-keyed
-    # draft got wrong.
-    room_chat_max = _build_system_text(
-        {"project_id": "proj_sub", "_is_direct_chat": True}, context_mode="max"
-    )
-    assert _ARCH_BODY_SENTINEL in room_chat_max
-    assert "## DEVELOPMENT.md" in room_chat_max
-    room_chat_low = _build_system_text(
-        {"project_id": "proj_sub", "_is_direct_chat": True}, context_mode="low"
-    )
-    assert "navigation map" in room_chat_low
-    assert _ARCH_BODY_SENTINEL not in room_chat_low
-    assert "## DEVELOPMENT.md" in room_chat_low
-
-    # workspace="none" binds nothing -> the task is not external -> keeps it.
-    opt_out = _build_system_text(
-        {"project_id": "proj_sub", "workspace": "none"}, context_mode="max"
-    )
-    assert "## DEVELOPMENT.md" in opt_out
-
-    # Evolution / self-body keep it through the self-body branch even in a room.
-    evolution = _build_system_text(
-        {"project_id": "proj_sub", "type": "evolution"}, context_mode="max"
-    )
-    assert "## DEVELOPMENT.md" in evolution
-
-    # Explicit per-task overrides still win in BOTH directions.
-    explicit_dev = _build_system_text(
-        {
-            "project_id": "proj_sub", "workspace_root": "/tmp/proj-tree",
-            "workspace_mode": "external", "context_requires_development": True,
-        },
-        context_mode="max",
-    )
-    assert "## DEVELOPMENT.md" in explicit_dev
-    explicit_self_body = _build_system_text(
-        {
-            "project_id": "proj_sub", "workspace_root": "/tmp/proj-tree",
-            "workspace_mode": "external", "context_requires_self_body_docs": True,
-        },
-        context_mode="max",
-    )
-    assert "## DEVELOPMENT.md" in explicit_self_body
-    explicit_off = _build_system_text(
-        {"project_id": "proj_sub", "context_requires_development": False}, context_mode="max"
-    )
-    assert "## DEVELOPMENT.md\n\n" not in explicit_off and "## DEVELOPMENT.md (navigation map)" in explicit_off
+    for task in cases:
+        _map_only(_build_system_text(task, context_mode="max"))
+    _map_only(_build_system_text({"project_id": "proj_sub", "_is_direct_chat": True}, context_mode="low"))
+    _required(_build_system_text({"project_id": "proj_sub", "workspace_root": foreign, "workspace_mode": "external",
+                                  **REQUIRED}, context_mode="max"))
 
 
-def test_readme_and_checklists_are_on_demand_pointer_in_both_modes():
+def test_readme_and_checklists_are_never_inlined_and_the_atlas_names_the_checklists():
     for mode in ("max", "low"):
         text = _build_system_text(context_mode=mode)
-        assert "Reference docs available on demand" in text
-        # Named in the pointer (visible, never silently dropped) but not inlined.
-        assert "README.md" in text
-        assert "CHECKLISTS.md" in text
+        # The Map's Reference Atlas names the checklists (visible, never silently dropped); neither is inlined.
+        assert "`docs/CHECKLISTS.md` — the questions my reviewers answer." in text
+        assert "| # | item |" not in text and "img.shields.io" not in text
 
 
-def test_low_mode_architecture_is_navigation_map_not_full_body():
-    text = _build_system_text(context_mode="low")
-    assert "navigation map" in text
-    assert "Section A" in text and "Section B" in text  # headings present
-    assert "- Section A — lines 3-12" in text  # parent keeps its complete subtree
-    assert "  - Section A child — lines 7-12" in text
-    assert "    - Section A detail — lines 9-12" in text
-    assert _ARCH_BODY_SENTINEL not in text  # full body NOT inlined in low
+def test_without_a_renderable_book_the_on_demand_pointer_names_every_reference_doc(tmp_path):
+    from ouroboros.context import build_llm_messages
+
+    env, memory = _make_env_and_memory(tmp_path)
+    (env.repo_dir / "docs" / "ARCHITECTURE.md").unlink()
+    messages, _ = build_llm_messages(env=env, memory=memory, task={"id": "t", "type": "task", "text": "hello"})
+    text = messages[0]["content"][0]["text"]
+    assert "## Body map" not in text and "Reference book source unavailable: docs/ARCHITECTURE.md." in text
+    assert "Reference docs available on demand" in text
+    for name in ("docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md", "README.md", "docs/CHECKLISTS.md"):
+        assert f"`{name}`" in text
 
 
-def test_low_mode_development_navigation_for_task_and_direct_chat():
-    code_text = _build_system_text({"type": "task"}, context_mode="low")
-    assert "## DEVELOPMENT.md (navigation map)" in code_text
+@pytest.mark.parametrize("mode", ["max", "low"])
+def test_a_single_file_architecture_revision_rides_as_its_source_navigation(mode):
+    """A legacy single-file book has no Map form: its source navigation (headings with physical line ranges)
+    stands in every mode, never its body."""
+    text = _build_system_text(context_mode=mode, legacy=True)
+    assert "# Architecture (source navigation)\nFull source: `docs/ARCHITECTURE.md`" in text
+    # Every heading with its physical line range: a parent's range keeps its complete subtree.
+    assert "- Section A: `docs/ARCHITECTURE.md` lines 3-12" in text
+    assert "- Section A child: `docs/ARCHITECTURE.md` lines 7-12" in text
+    assert "- Section A detail: `docs/ARCHITECTURE.md` lines 9-12" in text
+    assert "- Section B: `docs/ARCHITECTURE.md` lines 13-15" in text
+    assert _ARCH_BODY_SENTINEL not in text  # full body NOT inlined
+    assert "## Body map" not in text and HANDBOOK not in text
 
-    chat_text = _build_system_text({"_is_direct_chat": True}, context_mode="low")
-    assert "## DEVELOPMENT.md (navigation map)" in chat_text
 
-    pure_chat_text = _build_system_text(
-        {"_is_direct_chat": True, "context_requires_development": False},
-        context_mode="low",
-    )
-    assert "## DEVELOPMENT.md (navigation map)" in pure_chat_text
+def test_low_mode_lists_the_handbook_chapters_for_task_and_direct_chat():
+    for task in ({"type": "task"}, {"_is_direct_chat": True},
+                 {"_is_direct_chat": True, "task_contract": {"context_requires_development": False}}):
+        _map_only(_build_system_text(task, context_mode="low"))
+    _required(_build_system_text({"_is_direct_chat": True, **REQUIRED}, context_mode="low"))
 
 
 # Predicted route pressure no longer changes the document projection. The

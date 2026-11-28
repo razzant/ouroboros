@@ -408,3 +408,127 @@ def pulse_line(
             text += f", {len(missed)} unreadable not counted: {named}" if missed else ""
         parts.append(("tests: " if test else "") + text)
     return f"Code shape: {'; '.join(parts)}." if parts else ""
+
+
+# --------------------------------------------------------------------------- the body's manuals beside a change
+MANIFEST_PATH = "ouroboros/domains.toml"
+
+
+def governed_text(path: str) -> bool:
+    """A document whose prose governs the body: a book source, ``BIBLE.md``, a prompt, any ``docs/`` Markdown."""
+    from ouroboros.reference_books import book_path_role, ruled_text_of
+
+    return bool(book_path_role(path) or ruled_text_of(path) or (path.startswith("docs/") and path.endswith(".md")))
+
+
+def _naming_invariants(invariants: str, path: str) -> list[str]:
+    """The numbers of the key invariants whose text literally names ``path``: its repository path or its path
+    below ``ouroboros/``, standing alone (``tools/review.py`` does not name ``review.py``). A mention, never a
+    judgment of which invariants apply."""
+    names = {path, path.removeprefix("ouroboros/")}
+    spelled = re.compile("|".join(rf"(?<![\w./-]){re.escape(name)}(?![\w/-])" for name in sorted(names)))
+    found = []
+    for line in invariants.splitlines():
+        number, dot, text = line.partition(". ")
+        if dot and number.isdigit() and spelled.search(text):
+            found.append(number)
+    return found
+
+
+def ownership_note(shown: Iterable[str], changed: Iterable[str], manifest: Optional[str], invariants: Optional[str],
+                   *, base_manifest: Optional[str] = None, removed: Iterable[str] = ()) -> str:
+    """For each shown file the manifest declares an owner for, code or governed prose alike: its owning manuals,
+    each marked by whether this change touches it, and the key invariants that name the file, which a file
+    without a declared owner keeps too. One row per file and every row, never one union or a cut list, so a
+    reader sees which file left which manual untouched. A ``removed`` file keeps the owner ``base_manifest``
+    assigned it. ``manifest`` and ``invariants`` are the subject's own texts (``None``: unread); an untouched
+    manual is a fact for the mind and the reviewer, never a gate (BIBLE P3), and a manifest that cannot be
+    read is one named line, never a failure of the caller."""
+    if not manifest:
+        return ""
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+
+    def owners(text: Optional[str]):
+        try:
+            return load_domain_manifest(pathlib.Path("."), text or ""), ""
+        except Exception as exc:  # informational: no manifest fault escapes into an edit's or a review's receipt
+            return None, f"Owning manuals unavailable: {exc}; no owner is named."
+
+    now, notice = owners(manifest)
+    before = owners(base_manifest)[0] if base_manifest else None
+    touched, gone, rows = set(changed), set(removed), []
+    for path in shown:
+        side = before if path in gone and before is not None else now
+        manuals = side.manuals_for(path) if side is not None else ()
+        named = _naming_invariants(invariants, path) if invariants else []
+        if not (manuals or named):
+            continue
+        rows.append(f"- {path}: " + (", ".join(
+            f"{manual} ({'in this change' if manual in touched else 'not in this change'})" for manual in manuals)
+            or "no owning manual declared") + (f"; key invariants that name it: {', '.join(named)}" if named else ""))
+    head = [notice] if notice else (["Owning manuals (`ouroboros/domains.toml` [references]), per file:"] if rows else [])
+    return "\n".join([*head, *rows])
+
+
+MODULE_DIRECTORY = "docs/architecture/01-module-directory.md"
+RUNTIME_PACKAGES = ("ouroboros/", "supervisor/")  # where a new ``.py`` file is a runtime module (the preflight's rule)
+
+
+def directory_note(added: Iterable[str], changed: Iterable[str]) -> str:
+    """For a change that adds a runtime module (a ``.py`` file under ``RUNTIME_PACKAGES``): whether the hand-kept
+    module directory is in the change. A literal fact about the diff for the mind and the reviewer, never a gate
+    (BIBLE P3) and nothing when no module is added."""
+    modules = sorted(path for path in added if path.startswith(RUNTIME_PACKAGES) and path.endswith(".py"))
+    if not modules:
+        return ""
+    state = "in this change" if MODULE_DIRECTORY in set(changed) else "not in this change"
+    return f"New runtime modules: {', '.join(modules)}; the hand-kept module directory `{MODULE_DIRECTORY}` is {state}."
+
+
+def removed_prose_note(documents: Iterable[str], at_base: Mapping[str, Optional[str]],
+                       current: Mapping[str, Optional[str]], *, locator: str, unread: Iterable[str] = (),
+                       limit: int = 12, width: int = 240) -> str:
+    """The prose this change removed from governed documents: each line a document holds fewer times than at the
+    base and no changed document gained, so a paragraph moved between them stays quiet and one deleted where a
+    twin survives elsewhere is still counted, in the document that lost it. Every removed line is counted; the
+    first ``limit`` are shown, each whole or with the number of characters cut, and the count not shown is stated
+    beside ``locator``, the command that lists all of them. Fenced blocks and blank lines are not prose; an absent
+    side (a new or deleted document) counts as empty, while a document in ``unread`` (a side it has that could not
+    be read) is compared on neither side and named as unknown, never counted as removed."""
+    unknown = list(dict.fromkeys(unread))
+    documents = [path for path in documents if path not in unknown]
+
+    def prose(text: Optional[str]) -> Iterator[str]:
+        fenced = False
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if line.startswith("```"):
+                fenced = not fenced
+            elif line and not fenced:
+                yield line
+
+    before = {path: collections.Counter(prose(at_base.get(path))) for path in documents}
+    after = {path: collections.Counter(prose(current.get(path))) for path in documents}
+    arrived = sum((after[path] - before[path] for path in documents), collections.Counter())  # a move's other end
+    removed = []
+    for path in documents:
+        left = before[path] - after[path]  # what this document itself holds fewer times
+        for line in prose(at_base.get(path)):
+            if left[line] > 0:
+                left[line] -= 1
+                if arrived[line] > 0:
+                    arrived[line] -= 1
+                else:
+                    removed.append((path, line))
+    lines = []
+    if removed:
+        shown = [f"- {path}: {line[:width]}" + (f" … (+{len(line) - width} characters)" if len(line) > width else "")
+                 for path, line in removed[:limit]]
+        rest = (f"{len(removed) - limit} more removed lines are not shown here; " if len(removed) > limit else "")
+        gone = "1 line of the base is gone" if len(removed) == 1 else f"{len(removed)} lines of the base are gone"
+        lines = [f"Removed governed prose: {gone} from the changed documents:", *shown,
+                 f"({rest}all of them: `{locator}`)"]
+    if unknown:
+        lines.append(f"Removed governed prose unknown (a side was not read here, nothing is counted as removed): "
+                     f"{', '.join(unknown)}; read them with `{locator}`")
+    return "\n".join(lines)

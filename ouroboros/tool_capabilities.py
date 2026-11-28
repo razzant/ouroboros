@@ -353,8 +353,8 @@ UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "memory_mark",
 })
 
-# Governance sources (the required-resident books stay whole in the system
-# prompt; a tool READ of one is an ordinary result under the measured frame).
+# Governance sources, read whole: a tool READ of one is an ordinary result under
+# the measured frame (BIBLE.md also rides the system prompt; the books, the Body Map).
 UNTRUNCATED_REPO_READ_PATHS: frozenset[str] = frozenset({
     "BIBLE.md",
     "README.md",

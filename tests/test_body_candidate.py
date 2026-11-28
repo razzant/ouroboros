@@ -6,6 +6,8 @@ their GC, the child-copy admission, the commit and review seams.
 """
 from __future__ import annotations
 
+import itertools
+import json
 import os
 import pathlib
 import shutil
@@ -15,7 +17,7 @@ import sys
 import pytest
 
 from ouroboros import body_candidate, subagent_worktrees
-from tests.body_candidate_support import candidate_commit, git, isolate, make_ctx, make_serving
+from tests.body_candidate_support import REPO, candidate_commit, git, isolate, make_ctx, make_serving
 
 
 @pytest.fixture
@@ -1228,3 +1230,235 @@ def test_the_metadata_search_reads_git_ceiling_directories_as_git_does(tmp_path,
     ]:
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", value)
         assert has_git_metadata(install) is found, value
+
+
+# --------------------------------------------------------------------------- #
+# Contacts: the host names the manuals' addresses where the body is touched (BIBLE P1)
+# --------------------------------------------------------------------------- #
+ROAD = "- **Not a second GEN**, because one owner holds it."
+MANUALS = {
+    "ouroboros/domains.toml": ('[domains]\nD01 = "Core"\nD02 = "Guards"\n\n[references]\n'
+                               'D01 = ["docs/architecture/01-core.md"]\n'
+                               'D02 = ["docs/architecture/10-key-invariants.md", "docs/architecture/01-core.md"]\n'
+                               '"web/" = ["docs/architecture/03-web.md", "docs/DESIGN.md", "docs/CLIENT.md"]\n'
+                               '"skills/" = ["docs/architecture/13-skills.md"]\n"prompts/" = ["docs/development/04-gov.md"]\n'
+                               '"build.sh" = ["docs/architecture/08-build.md"]\n\n'
+                               '[modules]\n"ouroboros/mod_a.py" = "D01"\n"ouroboros/mod_b.py" = "D02"\n'),
+    "docs/ARCHITECTURE.md": ("# Architecture\n\nThe map.\n\n## Chapters\n\n- [Core](architecture/01-core.md)\n"
+                             "- [Key Invariants](architecture/10-key-invariants.md)\n"),
+    "docs/architecture/01-core.md": "# 1. Core\n\nWhat the core gives me.\n",
+    "docs/architecture/10-key-invariants.md": ("# 10. Key Invariants\n\nThe rules every part keeps.\n\n"
+                                               f"### 10.2 Closed roads\n\nRoads already closed.\n\n{ROAD}\n"),
+    "build.sh": "#!/bin/sh\n", "web/app.js": "// app\n", "web/tests/app.test.js": "// test\n",
+    "skills/demo/SKILL.md": "# Demo skill\n", "skills/demo/run.py": "RUN = 1\n", "prompts/SYSTEM.md": "# I am\n",
+}
+LINE = "[Own body: owning manual `{}`{}; invariants and closed roads: Body Map §10]"
+_READS = itertools.count()
+
+
+def _with_manuals(repo):
+    for relative, text in MANUALS.items():
+        (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+        (repo / relative).write_bytes(text.encode("utf-8"))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "manuals")
+
+
+def _read_note(registry, ctx, path, **args):
+    """A read through the loop's own tool path (``_execute_single_tool`` then ``process_tool_results``): the typed
+    result, the host note trailing what the mind is shown, and the trace row."""
+    from ouroboros.loop_tool_execution import _execute_single_tool, process_tool_results
+
+    logs = pathlib.Path(ctx.drive_root) / "logs"
+    logs.mkdir(exist_ok=True)
+    call_id = f"read-{next(_READS)}"
+    row = _execute_single_tool(registry, {"id": call_id, "function": {
+        "name": "read_file", "arguments": json.dumps({"path": path, **args})}}, logs)
+    typed = row["tool_result"]
+    assert typed.status == "ok", typed.text
+    messages, trace = [], {"tool_calls": [], "reasoning_notes": []}
+    process_tool_results([row], messages, trace, lambda *_a: None, registry)
+    (shown,) = [message["content"] for message in messages if message.get("role") == "tool"]
+    assert shown == row["result"] or shown.startswith(row["result"] + "\n\n"), shown
+    return typed, shown[len(row["result"]):].removeprefix("\n\n"), trace["tool_calls"][0]
+
+
+def test_a_read_of_an_own_body_file_is_followed_by_its_manuals_outside_the_files_text(body, tmp_path):
+    """The owner's "ОБЯЗАТЕЛЬНО при работе над телом" needs the address at hand: a read of a body source file ends,
+    in what the mind is shown, with one short line naming its owning manual, how many more the manifest declares,
+    and §10 of the Body Map. The file's text, its typed result and the loop's producer row carry none of it, and no
+    second copy of the read is kept. Own-body identity is where the read resolved, not the file's name; the line
+    repeats on every read (no state)."""
+    serving, data = body
+    _with_manuals(serving)
+    ctx = make_ctx(serving, data, "root-reader")
+    registry = _registry(serving, data, ctx)
+    typed, note, traced = _read_note(registry, ctx, "ouroboros/mod_a.py", root="system_repo")
+    assert note == LINE.format("docs/architecture/01-core.md", "")
+    assert "Own body" not in typed.text and not typed.host_annotations and "GEN_OLD" in typed.text
+    assert "producer_source_ref" not in traced and not list(data.rglob("*.producer-*"))  # no copy of the file
+    assert _read_note(registry, ctx, "ouroboros/mod_a.py", root="system_repo")[1] == note  # the same line again
+    # The invariants chapter as the owner is not named twice; a build script and a web file are the body too
+    # (no filename allowlist); a web file names its first manual and counts the rest.
+    assert _read_note(registry, ctx, "ouroboros/mod_b.py", root="system_repo")[1] == (
+        "[Own body: owning manual `docs/architecture/10-key-invariants.md` (+1 in domains.toml [references])]")
+    assert _read_note(registry, ctx, "build.sh", root="system_repo")[1] == LINE.format("docs/architecture/08-build.md", "")
+    assert _read_note(registry, ctx, "web/app.js", root="system_repo")[1] == LINE.format(
+        "docs/architecture/03-web.md", " (+2 in domains.toml [references])")
+    # A skill's code and a governed prompt keep it; documentation and tests under the same rows stay quiet.
+    assert _read_note(registry, ctx, "skills/demo/run.py", root="system_repo")[1] == LINE.format(
+        "docs/architecture/13-skills.md", "")
+    assert _read_note(registry, ctx, "prompts/SYSTEM.md", root="system_repo")[1] == LINE.format(
+        "docs/development/04-gov.md", "")
+    for quiet in ("skills/demo/SKILL.md", "web/tests/app.test.js", "docs/architecture/01-core.md", "server.py"):
+        assert _read_note(registry, ctx, quiet, root="system_repo")[1] == "", quiet
+    assert not list(data.rglob("*.producer-*"))
+    # The same read through this task's bound candidate is still the body.
+    body_candidate.prepare(ctx)
+    assert _read_note(registry, ctx, "ouroboros/mod_a.py")[1] == LINE.format("docs/architecture/01-core.md", "")
+
+    # A foreign project with the same file names is not the body: nothing is named.
+    foreign = tmp_path / "foreign"
+    for relative in ("ouroboros/mod_a.py", "build.sh", "ouroboros/domains.toml"):
+        (foreign / relative).parent.mkdir(parents=True, exist_ok=True)
+        (foreign / relative).write_bytes((serving / relative).read_bytes())
+    git(foreign, "init", "-q", "-b", "main")
+    git(foreign, "add", "-A")
+    git(foreign, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "foreign")
+    guest = make_ctx(serving, data, "root-guest", workspace_root=str(foreign), workspace_mode="external")
+    guest_registry = _registry(serving, data, guest)
+    for path in ("ouroboros/mod_a.py", "build.sh"):
+        typed, note, _traced = _read_note(guest_registry, guest, path)
+        assert note == "" and (foreign / path).read_text(encoding="utf-8") in typed.text
+
+
+def test_a_copy_or_a_clone_of_the_body_is_read_as_the_body(body, tmp_path):
+    """The two roots of ``own_body_root`` past the bound candidate and the serving checkout: a copy the host
+    recorded as made from the body (``workspace_copy``) and a task's own folder that is a clone of it."""
+    serving, data = body
+    _with_manuals(serving)
+    expected = LINE.format("docs/architecture/01-core.md", "")
+    copy = tmp_path / "copy-of-body"
+    shutil.copytree(serving, copy, ignore=shutil.ignore_patterns(".git"))
+    git(copy, "init", "-q", "-b", "main")  # its own history: only the host's record makes it the body
+    git(copy, "add", "-A")
+    git(copy, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "copy")
+    for recorded, line in ((True, expected), (False, "")):
+        meta = {"root_task_id": "root-x", "delegation_role": "subagent",
+                "workspace_copy": {"execution_root": str(copy), "source_is_system_repo": recorded}}
+        child = make_ctx(serving, data, f"child-copy-{recorded}", workspace_root=str(copy),
+                         workspace_mode="external", task_metadata=meta)
+        assert _read_note(_registry(serving, data, child), child, "ouroboros/mod_a.py")[1] == line, recorded
+
+    clone = tmp_path / "clone-of-body"
+    git(tmp_path, "clone", "-q", str(serving), str(clone))
+    root = make_ctx(serving, data, "root-clone", workspace_root=str(clone), workspace_mode="external")
+    assert not body_candidate.is_bound(root)
+    assert _read_note(_registry(serving, data, root), root, "ouroboros/mod_a.py")[1] == expected
+
+
+def test_the_read_line_on_the_real_manifest_names_code_and_leaves_documentation_and_tests_alone(body):
+    """The shipped ``ouroboros/domains.toml``: a script, a web implementation file, a module and a governed prompt
+    keep the line with one manual address; a skill's SKILL.md, the pull-request template, a web test and a
+    vendored manifest page under the same rows stay quiet."""
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+
+    serving, data = body
+    _with_manuals(serving)
+    (serving / "ouroboros/domains.toml").write_bytes((REPO / "ouroboros/domains.toml").read_bytes())
+    real = load_domain_manifest(REPO)
+    code = ("scripts/check_domains.py", "web/modules/chat.js", "ouroboros/context.py", "prompts/SYSTEM.md")
+    quiet = ("skills/telegram/SKILL.md", ".github/PULL_REQUEST_TEMPLATE.md", "web/tests/host_lifecycle_rows.test.js",
+             "web/vendor/VENDOR-MANIFEST.md")
+    for relative in code + quiet:
+        (serving / relative).parent.mkdir(parents=True, exist_ok=True)
+        (serving / relative).write_text("x\n", encoding="utf-8")
+    ctx = make_ctx(serving, data, "root-real")
+    registry = _registry(serving, data, ctx)
+    for relative in code:
+        manuals = real.manuals_for(relative)
+        note = _read_note(registry, ctx, relative, root="system_repo")[1]
+        assert manuals and note.startswith(f"[Own body: owning manual `{manuals[0]}`") and note.count("`") == 2, note
+        assert ("(+" in note) is (len(manuals) > 1) and "Body Map §10" in note
+    for relative in quiet:
+        assert real.manuals_for(relative), relative  # a row covers it: the source role keeps it quiet
+        assert _read_note(registry, ctx, relative, root="system_repo")[1] == "", relative
+
+
+def test_entering_a_body_change_carries_the_closed_roads_once_and_only_for_the_own_body(body, monkeypatch, tmp_path):
+    """One decision, the work's first entry into a change of its own body, carries the Closed roads section whole
+    with the chapter's address: a candidate prepared fresh, a first explicit resume (by another work too), the
+    first automatic bind and Cyber Pro's in-place choice. A later write, a second receipt of a bound task, a
+    repeated resume of the candidate it holds, a second in-place choice and a subagent told where its parent put
+    it carry none (an acting child in an unrelated workspace once got Ouroboros's closed roads)."""
+    import re
+
+    serving, data = body
+    _with_manuals(serving)
+    explicit = make_ctx(serving, data, "root-explicit")
+    registry = _registry(serving, data, explicit)
+    receipt = registry.execute("prepare_self_change", {})
+    assert receipt.endswith(ROAD) and "### 10.2 Closed roads" in receipt
+    assert "`docs/architecture/10-key-invariants.md`" in receipt and "before editing" not in receipt.lower()
+    assert "Closed roads" not in registry.execute("prepare_self_change", {})  # already bound: said once
+    candidate = re.search(r"body candidate (\S+) is", receipt).group(1)
+    for _ in range(2):  # re-entering the candidate this work holds
+        again = registry.execute("prepare_self_change", {"resume": candidate})
+        assert f"body candidate {candidate} is resumed" in again and "Closed roads" not in again
+    assert "Closed roads" not in registry.execute("write_file", {"path": "ouroboros/mod_a.py", "content": "GEN = 'E'\n"})
+
+    _terminal(data, "root-explicit")  # another work takes the ended work's candidate over: its first entry
+    taker = make_ctx(serving, data, "root-taker")
+    registry = _registry(serving, data, taker)
+    taken = registry.execute("prepare_self_change", {"resume": candidate})
+    assert f"body candidate {candidate} is resumed" in taken and taken.endswith(ROAD)
+    assert "Closed roads" not in registry.execute("prepare_self_change", {"resume": candidate})
+
+    automatic = make_ctx(serving, data, "root-automatic")
+    registry = _registry(serving, data, automatic)
+    first = registry.execute("write_file", {"path": "ouroboros/mod_b.py", "content": "GEN = 'A'\n"})
+    assert ROAD in first and "Closed roads" not in registry.execute(
+        "write_file", {"path": "ouroboros/mod_b.py", "content": "GEN = 'B'\n"})
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    in_place = make_ctx(serving, data, "root-in-place")
+    registry = _registry(serving, data, in_place)
+    assert ROAD in registry.execute("prepare_self_change", {"in_place": True})
+    assert "Closed roads" not in registry.execute("prepare_self_change", {"in_place": True})
+
+    workspace = tmp_path / "their-project"
+    workspace.mkdir()
+    child = make_ctx(serving, data, "child-elsewhere", workspace_root=str(workspace), workspace_mode="external",
+                     task_metadata={"root_task_id": "root-x", "delegation_role": "subagent"},
+                     task_constraint={"mode": "acting_subagent", "surface": "workspace_in_place",
+                                      "write_root": str(workspace), "base_sha": ""})
+    from ouroboros.tools.control_runtime import _prepare_self_change
+
+    told = _prepare_self_change(child)  # the handler's own answer, as the Cyber Pro child test reads it
+    assert told.startswith("OK: no separate body candidate is prepared for a subagent") and str(workspace) in told
+    assert "Closed roads" not in told and ROAD not in told
+
+
+def test_the_first_write_of_an_install_without_a_git_body_carries_the_closed_roads_once(tmp_path, monkeypatch):
+    """A packaged (wheel or image) install writes its body in place; its first body write is the work's entry and
+    carries the roads, its later writes none, and each write lands as before."""
+    data = isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    install = tmp_path / "packaged-install"
+    for relative, text in {**MANUALS, "ouroboros/mod_a.py": "START = 1\n"}.items():
+        (install / relative).parent.mkdir(parents=True, exist_ok=True)
+        (install / relative).write_bytes(text.encode("utf-8"))
+    ctx = make_ctx(install, data, "root-packaged")
+    registry = _registry(install, data, ctx)
+    first = registry.execute_result("write_file", {"path": "ouroboros/mod_a.py", "content": "START = 2\n"})
+    assert first.status == "ok" and first.text.endswith(ROAD) and "### 10.2 Closed roads" in first.text
+    later = registry.execute_result("write_file", {"path": "ouroboros/mod_a.py", "content": "START = 3\n"})
+    assert later.status == "ok" and "Closed roads" not in later.text
+    assert (install / "ouroboros/mod_a.py").read_text(encoding="utf-8") == "START = 3\n"
+    assert body_candidate.list_candidates() == [] and not body_candidate.is_bound(ctx)
+
+
+def test_a_body_without_its_invariants_chapter_enters_a_change_without_a_roads_note(body):
+    serving, data = body  # the miniature body holds no book: the receipt is the plain one, never a failure
+    receipt = _registry(serving, data, make_ctx(serving, data, "root-bookless")).execute("prepare_self_change", {})
+    assert receipt.startswith("OK: body candidate") and "Closed roads" not in receipt

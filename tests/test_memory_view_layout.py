@@ -1,6 +1,7 @@
 """Where the memory view sits in a request, and what each block's bytes depend on.
 
-A built request holds common governance (A', marked), the optional handbook (D, marked),
+A built request holds common governance (A', marked: the core and the one resident Body Map), the handbook a task's
+own contract requires (D, marked; ``context_requires_development``, no binding or subject preloads it),
 identity with my story (B, marked), then knowledge, my rooms and the runtime
 facts (C, unmarked). B depends only on the chronicle, identity, WORLD, the deep review and the
 catalog: the same bytes for Main, a Project's root and a wake. Knowledge edits change only C;
@@ -26,9 +27,11 @@ import sys
 import pytest
 
 from tests._memory_view_context import blocks, section, world
-from tests.test_doc_context import foreign_tree  # a bound tree body_fact proves foreign (6A: unknown keeps the book)
+from tests.test_doc_context import foreign_tree  # a bound tree body_fact proves foreign
 
 MAIN = {"id": "tmain", "chat_id": 1}
+# The task's own direct requirement of the whole handbook: the only thing that adds D (owner 1.11.2026, 25.11.2026).
+REQUIRED = {"task_contract": {"context_requires_development": True}}
 WAKE = {"id": "wake", "chat_id": 1, "_is_direct_chat": True,
         "metadata": {"initiator": "consciousness", "usage_category": "consciousness"}}
 
@@ -90,12 +93,15 @@ def _messages(env, memory, task, **kwargs):
 
 def test_the_request_keeps_my_story_before_the_changing_tail_and_the_book_separate(tmp_path):
     env, memory, _rooms = world(tmp_path)
-    messages, _cap = _messages(env, memory, MAIN)
+    plain, _cap = _messages(env, memory, MAIN)  # Main carries no handbook by binding: A', B, C
+    assert [block["text"].startswith("## DEVELOPMENT.md\n") for block in plain[0]["content"]] == [False] * 3
+    messages, _cap = _messages(env, memory, {**MAIN, **REQUIRED})
     content = messages[0]["content"]
     assert messages[1]["role"] == "user"
     assert all("cache_control" in block for block in content[:-1]) and "cache_control" not in content[-1]
     a, d, b, c = (block["text"] for block in content)
     assert d.startswith("## DEVELOPMENT.md\n") and "## DEVELOPMENT.md\n" not in a
+    assert (a, b) == tuple(block["text"] for block in plain[0]["content"][:2])  # the handbook moves neither A' nor B
     assert "## My story" in b and "## My story" not in a + d + c
     for heading in ("## Shared understanding", "## Knowledge base", "## This room (Main [chat_id=1])", "## Other conversations"):
         assert heading in c and heading not in a + b, heading
@@ -422,7 +428,8 @@ def _framing_window(env, memory, ctx):
     its whole estimate plus half of ``_LONG``. Measured by two whole probes of that work (room against window)."""
     from ouroboros.utils import estimate_tokens
 
-    probes = [_start(env, memory, dict(MAIN), ctx=ctx, restart=True, window=window) for window in (400_000, 500_000)]
+    probes = [_start(env, memory, {**MAIN, **REQUIRED}, ctx=ctx, restart=True, window=window)
+              for window in (400_000, 500_000)]
     assert not any(probe["addressed"] for probe in probes), "the pressed fixture is framed at 400k: the fixture moved"
     slope = (probes[1]["room"] - probes[0]["room"]) / 100_000
     target = probes[0]["estimate"] + estimate_tokens(_LONG) / 2
@@ -635,7 +642,7 @@ def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, r
     env, memory, _rooms = world(tmp_path)
     _queue(env)
     monkeypatch.setenv("TOTAL_BUDGET", "100")
-    canonical, window, first_task = _ctx(env, "tmain"), 400_000, dict(MAIN)
+    canonical, window, first_task = _ctx(env, "tmain"), 400_000, {**MAIN, **REQUIRED}  # both works carry D
     if fact in ("frame_budget", "framed_another_day"):
         _press(memory)
         window = _framing_window(env, memory, canonical)
@@ -649,7 +656,7 @@ def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, r
         _servers()
     first = _start(env, memory, first_task, ctx=canonical, restart=True, window=window)
     assert first["D"] and first["wire"] and first["mode"] == "max", "the fixture no longer builds D, schemas and Max"
-    task = {"id": "another-task", "chat_id": 1, "text": "a different owner message, later"}
+    task = {"id": "another-task", "chat_id": 1, "text": "a different owner message, later", **REQUIRED}
     start = {"ctx": _ctx(env, "another-task"), "window": window}
     reached = _VARY[fact](env, monkeypatch, clocks=clocks, base=base, later=later, start=start, task=task)
     second = _start(env, memory, task, **start)
@@ -664,32 +671,43 @@ def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, r
 
 
 def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbook(tmp_path):
-    """A real workspace binding must not invalidate the common governance prefix."""
+    """A real workspace binding must not invalidate the common governance prefix. Only a task whose own contract
+    requires the handbook gets it, as its own block, whatever its binding, surface or role; no binding, unknown
+    subject or self-body declaration preloads it (BIBLE P1, owner 25.11.2026)."""
     env, memory, _rooms = world(tmp_path)
     project = foreign_tree(tmp_path / "project")
     tasks = {
-        "main": ({**MAIN, "_is_direct_chat": True}, True),
-        "wake": (WAKE, True),
-        "system-root": ({"id": "root", "workspace": "none"}, True),
+        "main": ({**MAIN, "_is_direct_chat": True}, False),
+        "wake": (WAKE, False),
+        "system-root": ({"id": "root", "workspace": "none"}, False),
+        "self-body": ({"id": "self", "context_requires_self_body_docs": True}, False),
         "workspace-root": ({"id": "bound", "workspace_root": str(project)}, False),
         **{source: ({"id": source, "metadata": {"source": source}}, False)
            for source in ("api_task", "cli", "scheduled_task")},
         "presence": ({"id": "presence", "type": "presence", "source": "presence", "_presence_turn": True,
                       "context_requires_development": False, "chat_id": 777}, False),
+        "main-required": ({**MAIN, "_is_direct_chat": True, **REQUIRED}, True),
+        "workspace-required": ({"id": "bound-required", "workspace_root": str(project), **REQUIRED}, True),
+        "api-required": ({"id": "api-required", "metadata": {"source": "api_task"}, **REQUIRED}, True),
     }
     contents = {name: _messages(env, memory, task)[0][0]["content"] for name, (task, _book) in tasks.items()}
     assert all(content[0] == contents["main"][0] for content in contents.values())
     for name, content in contents.items():
         book = tasks[name][1]
-        assert "docs/DEVELOPMENT.md" in content[0]["text"], name
         handbook = [block for block in content if block["text"].startswith("## DEVELOPMENT.md\n")]
         assert len(handbook) == int(book), name
         if book:
             assert content[1] == handbook[0] and "cache_control" in handbook[0], name
+    # The handbook stays addressed in the common block of every role, never silently (here a legacy single-file
+    # revision, whose Map is its source navigation).
+    for name, content in contents.items():
+        assert "docs/DEVELOPMENT.md" in content[0]["text"], name
 
 
-@pytest.mark.parametrize("mode,child", [("low", False), ("nano", False), ("max", True), ("nano", True)])
-def test_compact_modes_and_children_keep_both_book_maps_without_a_separate_handbook(tmp_path, monkeypatch, mode, child):
+@pytest.mark.parametrize("mode,child", [("max", False), ("low", False), ("nano", False), ("max", True), ("nano", True)])
+def test_every_mode_and_child_keeps_the_body_map_without_a_separate_handbook(tmp_path, monkeypatch, mode, child):
+    """One resident Body Map in the common block of every mode and of a child; the subject marker
+    ``context_requires_self_body_docs`` preloads no manual and moves no byte of it."""
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", mode)
     env, memory, _rooms = world(tmp_path)
     task = {**MAIN, **({"delegation_role": "subagent", "parent_task_id": "bound",
@@ -699,15 +717,17 @@ def test_compact_modes_and_children_keep_both_book_maps_without_a_separate_handb
         messages, _cap = _messages(env, memory, {**task, "context_requires_self_body_docs": flag})
         content = messages[0]["content"]
         prefixes.append(content[0])
-        assert "## ARCHITECTURE.md (navigation map)" in content[0]["text"]
-        assert "## DEVELOPMENT.md (navigation map)" in content[0]["text"]
+        assert "Full source: `docs/ARCHITECTURE.md`" in content[0]["text"]  # this legacy revision's Map
+        assert "## ARCHITECTURE.md" not in content[0]["text"]  # never the whole book
         assert not any(block["text"].startswith("## DEVELOPMENT.md\n") for block in content)
     assert prefixes[0] == prefixes[1]
 
 
 @pytest.mark.parametrize("book", [False, True])
 def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_floor(tmp_path, monkeypatch, book):
-    """D is reconstructed from the capture, never from a block index or changed files."""
+    """D, the handbook a task's own contract requires, is reconstructed from the capture in every mode, never from a
+    block index or changed files; without the requirement no mode carries it. The floor counts it in the start's
+    measure, while memory's own allowance never pays it."""
     from dataclasses import replace
     from types import SimpleNamespace
     from ouroboros import context, context_fit
@@ -718,7 +738,7 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
     chapter = env.repo_path("docs/development/rules.md")
     chapter.parent.mkdir()
     chapter.write_text("# Rules\n\nChange rules.\n\n## Detail\n\n" + "handbook body " * 2000, encoding="utf-8")
-    task = {"type": "task", "text": "hi", **MAIN, "workspace_root": "" if book else str(foreign_tree(tmp_path / "project"))}
+    task = {"type": "task", "text": "hi", **MAIN, **(REQUIRED if book else {})}
     core = context._capture_context_core(env, memory, task, None, None)
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     route = lambda *_a, **_kw: ({"model": "m", "provider": "p"}, SimpleNamespace(  # noqa: E731
@@ -728,16 +748,22 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
         return context._build_context_fit_plan(env, capture, task, preferred_mode="max", route_resolver=route)
 
     plan = build(core)
-    without = build(replace(core, docs_need_development=False))
+    assert core.development_required is book
+    without = build(replace(core, development_required=False))
     for mode in ("max", "low", "nano"):
         facts = plan.projection(mode).memory_facts["floor"]
         delta = without.projection(mode).memory_facts["floor"]["physical_allowance_tokens"] - facts["physical_allowance_tokens"]
-        assert (delta > 5000) if book else delta == 0  # every unsent book form shares the start's one memory view
+        assert delta == 0, mode  # memory's allowance never pays the required handbook: the window charges it
+    need = (plan.projection("max").memory_facts["max_room"]["floor_need"]
+            - without.projection("max").memory_facts["max_room"]["floor_need"])
+    assert (need > 5000) if book else need == 0  # the Max room's measure counts it beside the Body Map
     chapter.write_text("# Rules\n\nChanged after capture.\n", encoding="utf-8")
     rebuilt = plan.reproject_for_route(window_tokens=2_000_000, known_window=True, ratio=1.0,
                                       output_reserve=plan.output_reserve_tokens, tool_schemas=None)
     # Physical pressure first narrows host facts; D remains the complete captured handbook.
-    tight = plan.projection("max").estimated_tokens + plan.output_reserve_tokens - 1
+    # Physical pressure on the ordinary view: the required handbook is no memory's or host form's debt (the window
+    # charges it at admission), so the shortfall is set below the ordinary view itself.
+    tight = plan.projection("max").estimated_tokens - core.required_book_tokens() + plan.output_reserve_tokens - 1
     narrowed = plan.reproject_for_route(window_tokens=tight, known_window=True, ratio=1.0,
                                        output_reserve=plan.output_reserve_tokens, tool_schemas=None)
     for mode in ("max", "low", "nano"):
@@ -745,8 +771,8 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
         assert after["content"] == before["content"]  # a larger window keeps every shown view
         assert rebuilt.projection(mode).memory_facts == plan.projection(mode).memory_facts
         texts = [block["text"] for block in after["content"]]
-        assert sum(text.startswith("## DEVELOPMENT.md\n") for text in texts) == int(book and mode == "max")
-        if book and mode == "max":
+        assert sum(text.startswith("## DEVELOPMENT.md\n") for text in texts) == int(book)
+        if book:
             assert texts[1] == "## DEVELOPMENT.md\n\n" + core.development_md
         assert all("Changed after capture" not in text for text in texts)
     texts = [block["text"] for block in narrowed.messages_for("max")[0]["content"]]
@@ -762,7 +788,7 @@ def test_route_reprojection_keeps_the_captured_handbook_and_counts_it_in_the_flo
              - (tight - 1_000_000))
     # Separate section estimates round individually; the complete request rounds once.
     assert freed > 0 and abs(freed - sum(row["tokens_saved"] for row in receipts)) <= len(receipts) + 1
-    assert not {row["section_id"] for row in receipts} & {"architecture", "development"}
+    assert not {row["section_id"] for row in receipts} & {"architecture", "development", "body_map"}
 
 
 def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tmp_path, case_root):
@@ -778,9 +804,11 @@ def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tm
     # A new page of my story, each work with its own tool context: B's declared head ends where the story starts and
     # keeps its bytes with the schemas, A' and D; only the story moves, and its earlier bytes stay its prefix.
     _queue(env)
-    before = _start(env, memory, dict(MAIN), ctx=_ctx(env, "tmain"), restart=True)
+    before = _start(env, memory, {**MAIN, **REQUIRED}, ctx=_ctx(env, "tmain"), restart=True)
     page = _page(memory.drive_root, "1", 11, 12, text="My page about the next request.")
-    after = _start(env, memory, {"id": "another-task", "chat_id": 1, "text": "later"}, ctx=_ctx(env, "another-task"))
+    after = _start(env, memory, {"id": "another-task", "chat_id": 1, "text": "later", **REQUIRED},
+                   ctx=_ctx(env, "another-task"))
+    assert before["D"] and after["D"], "both works carry their required handbook as D"
     assert f"page {page}" in after["B"] and "My page about the next request." in after["B"]
     assert "My page about the next request." not in after["C"]
     for start in (before, after):
@@ -809,7 +837,7 @@ def test_anthropic_preserves_the_message_seal_and_gives_schemas_only_a_free_slot
 
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", mode)
     env, memory, _rooms = world(tmp_path)
-    messages, _cap = _messages(env, memory, {**MAIN, "workspace_root": str(foreign_tree(tmp_path / "project")) if not book else ""})
+    messages, _cap = _messages(env, memory, {**MAIN, **(REQUIRED if book else {})})
     seal_task_transcript(messages)
     if long:
         for i in range(6):
@@ -831,7 +859,7 @@ def test_anthropic_preserves_the_message_seal_and_gives_schemas_only_a_free_slot
         assert client._cache_breakpoint_tls.pending is None
     kept = LLMClient._payload_cache_breakpoints(payload)
     assert len(kept) == len(_deep_markers(payload)) == 4
-    has_book = book and mode == "max"
+    has_book = book  # the required handbook's own block, in every mode
     assert "cache_control" not in payload["tools"][-1]
     system = payload.get("system", payload["messages"][0].get("content"))
     assert ("cache_control" in system[-1]) == (not has_book)
@@ -923,7 +951,7 @@ def test_resident_memory_stays_one_block_where_the_allocator_does_not_act(tmp_pa
 
     child = {"delegation_role": "subagent", "parent_task_id": "bound", "root_task_id": "bound",
              "task_contract": {"input_sources": "declared"}, "configured_subagent": {"route": {"kind": "api_model"}}}
-    window, mode, task = {"handbook": (1_000_000, "max", {}), "child": (160_000, "low", child),
+    window, mode, task = {"handbook": (1_000_000, "max", REQUIRED), "child": (160_000, "low", child),
                           "unsealed": (160_000, "low", {"workspace_root": str(foreign_tree(tmp_path / "project"))})}[case]
     messages, _cap = _story_start(tmp_path, monkeypatch, window, mode, **task)
     if case == "unsealed":
@@ -1321,7 +1349,7 @@ def test_codex_keeps_identity_and_my_story_in_the_leading_system_group(tmp_path,
     from tests.test_memory_view_story import _page
 
     env, memory, _rooms = world(tmp_path)
-    task = {**MAIN, "workspace_root": "" if book else str(foreign_tree(tmp_path / "project"))}
+    task = {**MAIN, **(REQUIRED if book else {})}
     messages, _cap = _messages(env, memory, task)
     wire, target = _codex_wire(messages)
     stable, c = messages[0]["content"][:-1], messages[0]["content"][-1]["text"]
@@ -1358,8 +1386,9 @@ def test_direct_openai_and_openrouter_keep_all_stable_items_and_one_notice(tmp_p
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", True, raising=False)
     monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *_a, **_kw: {})
     env, memory, _rooms = world(tmp_path)
-    messages, _cap = _messages(env, memory, {**MAIN, "workspace_root": "" if book else str(foreign_tree(tmp_path / "project"))})
+    messages, _cap = _messages(env, memory, {**MAIN, **(REQUIRED if book else {})})
     stable, c = messages[0]["content"][:-1], messages[0]["content"][-1]["text"]
+    assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in stable) == book
     tools = [{"type": "function", "function": {"name": "probe", "parameters": {"type": "object", "properties": {}}}}]
     client = LLMClient(api_key="unused")
     for model, key in (("openai::gpt-6-sol", "OPENAI_API_KEY"), ("openai/gpt-6-sol", "OPENROUTER_API_KEY")):

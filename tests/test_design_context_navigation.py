@@ -296,7 +296,7 @@ BIG_BIBLE = BIBLE + "\n" + "A principle of the room and its objects, told for bo
 def _fitting(tmp_path, monkeypatch, *, section_root=None, required_words=0, others=True, authored=False):
     """Exercise the context assembly/first request with pinned route facts and no provider send."""
     from ouroboros import context_fit as fit, memory_view
-    from ouroboros.reference_books import compose_book, load_reference_book
+    from ouroboros.reference_books import body_map, compose_book, load_reference_book
     from ouroboros.section_floor import HostSection, capture_sections
     from tests import _memory_view_synthetic as syn
 
@@ -336,9 +336,12 @@ def _fitting(tmp_path, monkeypatch, *, section_root=None, required_words=0, othe
     snapshot = syn.snapshot(story=story, room_facts=syn.room("1", lane1=[syn.spoken(1, "ouroboros", 8_000), owner]),
         conversations=[] if authored else [syn.conversation(i, words=10, word_chars=600) for i in range(30)])
     head, dynamic = [index, design], [*services, world]
+    # The resident Map its books render, with its parts and addresses (a lowered frame stands it at those parts). The
+    # handbook rides only as the task's own requirement (``required_words``).
+    view, parts = body_map(*books)
     core = fit.ContextCore(
-        base_prompt="SYSTEM WHOLE", bible_md="BIBLE WHOLE", architecture_md=compose_book(books[0]),
-        development_md=compose_book(books[1]), docs_need_development=not required_words,
+        base_prompt="SYSTEM WHOLE", bible_md="BIBLE WHOLE", body_map=view.text,
+        body_map_parts=parts, development_md=compose_book(books[1]) if required_words else "",
         development_required=bool(required_words), reference_books=books, semi_stable_text="IDENTITY WHOLE",
         dynamic_text="\n\n".join(dynamic), dynamic_head_text="\n\n".join(head),
         user_content_json=json.dumps("WORDS THAT STARTED THE WORK"),
@@ -473,7 +476,7 @@ def test_nano_prices_design_after_the_cuts_the_map_needs_anyway(tmp_path, monkey
     assert mapped_cuts and bool(whole_cuts - mapped_cuts) is needs_map
     facts, text, chosen_cuts = start(design)
     assert chosen_cuts == (mapped_cuts if needs_map else whole_cuts)
-    design_steps = [r.get("start_room") for r in facts["host_sections_addressed"] if r["section_id"] == design.section_id]
+    design_steps = [r.get("start_room") for r in facts.get("host_sections_addressed", ()) if r["section_id"] == design.section_id]
     assert design_steps == (["nano"] if needs_map else [])
     assert (design.full_text in text) is not needs_map
     assert (map_text in text) is needs_map
@@ -553,15 +556,15 @@ def test_without_a_measured_window_only_a_refusal_past_tellings_takes_the_bible(
     assert design.full_text in fitted(0, "nano", known=False)[-1]
 
 
-def test_running_max_keeps_the_books_at_both_sides_of_the_design_boundary(tmp_path, monkeypatch, record_property):
-    """At a measured wall, compare both Max frames at the same room goal before useful book maps."""
+def test_running_max_keeps_the_body_map_at_both_sides_of_the_design_boundary(tmp_path, monkeypatch, record_property):
+    """At a measured wall, compare both Max frames at the same room goal before the Map steps to its parts."""
     import copy
     from dataclasses import replace
     from hashlib import sha256
 
     from ouroboros import context_budget, context_fit as fit, memory_floor as floor, memory_view as mv
     from ouroboros.artifacts import read_actor_source_bytes
-    from ouroboros.context_layout import book_navigation
+    from ouroboros.reference_books import compose_book
     from ouroboros.section_floor import predicted_section, relocated_text
     from tests._context_fit_fixtures import _rebind
     from tests._memory_view_synthetic import pages
@@ -571,8 +574,10 @@ def test_running_max_keeps_the_books_at_both_sides_of_the_design_boundary(tmp_pa
     story = tuple({**page, "lead_rule": 2, "text": f"{page['id']} MY_OWN_RECAP.\n\n{page['text']} SEALED_PAGE_TAIL"}
                   for page in pages(6, 12_000))
     memory = replace(memory, story=story, owner_words="Governing owner words: keep the lamp blue.")
+    # Only the authored pages or DESIGN can pay before the Map steps. Stimulus: a Map as large as the whole Architecture
+    # composition (whole books once weighed on Max so) whose parts and addresses its books render.
     core = replace(fitted.core, dynamic_head_sections=(design,), dynamic_sections=(),
-                   memory_view_json=mv.snapshot_json(memory))  # only the authored pages or DESIGN can pay before the books
+                   body_map=compose_book(fitted.core.reference_books[0]), memory_view_json=mv.snapshot_json(memory))
     initial, *_ = fitted(2_000_000, "max", core=core)
     sent = initial.messages_for("max") + [{"role": "assistant", "content": "Exact earlier reply."},
                                            {"role": "user", "content": "Exact latest words 🧪."}]
@@ -623,13 +628,13 @@ def test_running_max_keeps_the_books_at_both_sides_of_the_design_boundary(tmp_pa
             assert not addressed
         free = window - reserve - event["projected_prompt_tokens"]
         eighth = (window + divisor - 1) // divisor
-        whole_books = core.architecture_md in text and core.development_md in text
+        whole_books = core.body_map in text  # the Map whole; else it stands at its parts and addresses
         if not whole_books:
-            assert all(book_navigation(book) in text for book in core.reference_books)
+            assert core.body_map_parts in text
         recaps, tails = text.count("MY_OWN_RECAP."), text.count("SEALED_PAGE_TAIL")
         record_property(case, json.dumps(dict(window=window, reserve=reserve, free=free, required=0 if case == "wide" else eighth,
             input=event["projected_prompt_tokens"], original_input=bound - reserve, whole_threshold=whole, pointer_threshold=pointer,
-            preferred=rebound.preferred_mode, effective=mode, books="whole" if whole_books else "chapter_maps", design=whole_design,
+            preferred=rebound.preferred_mode, effective=mode, books="whole" if whole_books else "map_parts", design=whole_design,
             recaps=recaps, whole_page_tails=tails, owner_and_tail_exact=True,
             host_steps=[r["section_id"] for r in facts.get("host_sections_addressed", ())],
             request_sha256=sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest())))
@@ -667,28 +672,40 @@ def test_an_actor_without_a_reader_gets_the_whole_bible_or_its_name_unavailable(
 def test_a_required_handbook_start_takes_the_bible_map_before_it_refuses(tmp_path, monkeypatch):
     """A task that directly requires the whole handbook near its route's limit (RV1, Astra 1): where the handbook fits
     only beside the bible's map, the start takes the map and keeps the whole handbook; below that an integrating Low
-    start yields its handbook's own map, then ARCHITECTURE's (owner 23.11.2026, 1); a window that cannot hold it even
-    so is refused by name, as before, and with room the bible stays whole."""
+    start yields the Body Map at its parts (owner 23.11.2026, 1; one Map since 25.11.2026); a window that cannot hold it even
+    so is refused by name, as before, and with room the bible stays whole. A Map whose parts are no shorter than its
+    text never steps. (Stimulus: a Map as large as the whole Architecture composition, so its step saves.)"""
+    from dataclasses import replace
+
     from ouroboros import context_fit as fit, memory_floor as floor
+    from ouroboros.reference_books import compose_book
 
     design, fitted = _fitting(tmp_path, monkeypatch, required_words=30, others=False)
-
+    small = fitted.core
+    large = replace(small, body_map=compose_book(small.reference_books[0]))
     refusals = {}
 
-    def starts(window):
+    def starts(window, core=large):
         try:
-            return fitted(window, "low")
+            return fitted(window, "low", core=core)
         except fit.MinimumViewUnfit as unfit:
             refusals[window] = str(unfit)
             return None
 
+    def smallest(core):  # the smallest start: refused below, started at or above
+        low, high = 1_000, 2_000_000
+        while high - low > 1:
+            middle = (low + high) // 2
+            low, high = (low, middle) if starts(middle, core) else (middle, high)
+        return low, high
+
+    # The real Map of these books is shorter whole than at its parts beside a receipt: it never steps.
+    assert starts(smallest(small)[1], small)[2] == ["design_bible"]
+
     roomy = starts(2_000_000)
     assert roomy and not roomy[2] and len([b for b in roomy[1].system_message()["content"]
                                            if b["text"].startswith("## DEVELOPMENT.md\n")]) == 1
-    low, high = 1_000, 2_000_000  # the smallest start: refused below, started at or above
-    while high - low > 1:
-        middle = (low + high) // 2
-        low, high = (low, middle) if starts(middle) else (middle, high)
+    low, high = smallest(large)
     plan, view, rows, steps, text = starts(high)
     assert rows == ["design_bible", *floor.BOOK_MAPS] and design.operative_view in text and BIG_BIBLE.strip() not in text
     assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in view.system_message()["content"])

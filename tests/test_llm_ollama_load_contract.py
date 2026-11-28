@@ -39,7 +39,7 @@ def _runner(monkeypatch, tmp_path, install_http, server, **windows):
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "capability-evidence")
     install_http(server)
-    core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"Finish"', False)
+    core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"Finish"')
 
     def plan(role="main"):
         return cf.build_context_fit_plan(None, core, {"model": model, "use_local_model": False, "model_role": role},

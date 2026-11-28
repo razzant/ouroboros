@@ -30,6 +30,7 @@ HEADING = "## Held knowledge notes"
 QUEUE_FACT = {"note": "Queue observation unavailable; current capacity is unknown."}
 TASK = {"id": "held-note-turn", "chat_id": 1, "type": "task", "text": "Newest owner assignment."}
 RESERVE = 4096
+PARTS = "## Body map (parts and addresses)"  # the Body Map at its parts, as a frame the window lowered shows it
 
 
 @pytest.fixture
@@ -57,6 +58,16 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(context_fit, "main_output_reserve_tokens", lambda **_kw: RESERVE)
     return Env(repo_dir=repo, drive_root=data), memory
+
+
+def _heavy_map(world):
+    """A resident Body Map that weighs what the whole Architecture book weighed in Max before 26.11.2026 (the stimulus
+    moved from the book's bytes to the Map's): the runtime chapter's authored opening carries the old book text, so
+    Max's whole Map is heavy while its parts and addresses stay short, and a frame the window lowers from Max shows
+    the parts (``memory_floor.lowered_maps``). Call it before the capture."""
+    (world[0].repo_dir / "docs/architecture/runtime.md").write_bytes(
+        ("# Runtime\n\nRuntime orientation. " + "Book text. " * 20_000
+         + "\n\n## Full mechanism\n\nThe mechanism.\n").encode("utf-8"))
 
 
 def _write(world, topic, head, *, claims=("room:1",), scope="global", revision=None, **metadata):
@@ -741,14 +752,16 @@ def _ordered_world(world):
     return _core(world)
 
 
-def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a_head_without_a_summary_stays(world, monkeypatch):
+def test_window_takes_the_body_map_to_its_parts_then_the_index_outline_then_heads_one_at_a_time_and_a_head_without_a_summary_stays(world, monkeypatch):
+    _heavy_map(world)
     captured = _ordered_world(world)
-    # At 170k, summarizing two heads in the whole-book frame could keep Max. Map the books first.
+    # At 170k, summarizing two heads beside the whole Map could keep Max. The Map goes to its parts first.
     roomy, maps, band, outlined, one, two = (
         _plan(world, window, core=captured) for window in (200_000, 170_000, 90_000, 60_000, 44_000, 30_000))
     assert roomy.initial_mode == "max" and "Book text. Book text." in _blocks(roomy)[0]["text"]
     assert all(plan.initial_mode == "low" for plan in (maps, band, outlined, one, two))
-    assert "Book text. Book text." not in _blocks(maps)[0]["text"] and "Full mechanism" in _blocks(maps)[0]["text"]
+    assert "Book text. Book text." not in _blocks(maps)[0]["text"] and PARTS in _blocks(maps)[0]["text"]
+    assert maps.low_projection.memory_facts["floor"]["mode_switch"] == {"from": "max", "to": "low"}
     assert _index(roomy) == _index(maps) == "whole" and _cuts(roomy) == _cuts(maps) == []
     # The band. At 90k this start misses its own bound (the window less the reply reserve and the two eighths a root
     # keeps for work) while the physical window still holds the request with the whole index. Neither yields: only
@@ -809,10 +822,12 @@ def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a
 
 
 def test_a_smaller_window_never_shows_more_of_a_head_and_no_head_yields_beside_a_whole_index(world):
-    """Down one descending sweep of windows, from whole books through the map frame to the emergency floor: the set
-    of whole heads never grows, a whole-book frame shortens none, wherever a head has yielded the index stands as
-    its outline, and in the map frames the index never comes back once outlined. (A whole-book frame's own index step
-    is the target's and is not judged here; this frame sends no tool schemas, so Nano prices like the map frame.)"""
+    """Down one descending sweep of windows, from the whole Body Map in Max through the lowered frame (the Map at its
+    parts) to the emergency floor: the set of whole heads never grows, a Max frame shortens none, wherever a head has
+    yielded the index stands as its outline, and in the lowered frames the index never comes back once outlined. (Max's
+    own index step is the target's and is not judged here; this frame sends no tool schemas, so Nano prices like the
+    lowered frame.)"""
+    _heavy_map(world)
     captured = _ordered_world(world)
     whole, forms, outlined = {"a", "b", "c"}, [], False
     for window in range(196_000, 8_000, -4_000):
@@ -974,8 +989,9 @@ def test_admitted_rebind_compares_both_full_prices(world, deciding_cost):
 
 
 @pytest.mark.parametrize("preferred,connections,schemas,kept", [
-    # A Max work lowered to its maps, two small tool schemas: Nano admits no more input and its fixed part is no
-    # smaller, so the mode is not paid for a note four characters shorter (the full prices would choose Nano).
+    # A Max work lowered for the window (the Body Map at its parts), two small tool schemas: Nano admits no more
+    # input and its fixed part is no smaller, so the mode is not paid for a note four characters shorter (the full
+    # prices would choose Nano).
     ("max", ("", ""), 2, "low"),
     # Low carries a connections map Nano does not: Nano's fixed part is smaller (the full prices would keep Low).
     ("low", ("Low connections. " * 4, ""), 0, "nano"),
@@ -989,6 +1005,12 @@ def test_a_running_work_that_holds_no_head_takes_low_or_nano_by_the_two_frames_a
              for name in ("read_fixture", "memory_read")][:schemas]
     memory = synthetic.snapshot(mark_count=1)
     core = replace(_core(world), section_root="", memory_view_json=memory_view.snapshot_json(memory), connections=connections)
+    if preferred == "max":  # Max lowered for the window: the heavy Map at its parts beside its retained full text,
+        _heavy_map(world)   # the one section with a reader here; every other host section keeps its one form
+        core = replace(_core(world), memory_view_json=memory_view.snapshot_json(memory), connections=connections)
+        core = replace(core, **{name: tuple(replace(part, operative_view=None) if getattr(part, "operative_view", None)
+                                            else part for part in getattr(core, name))
+                                for name in ("semi_stable_sections", "dynamic_head_sections", "dynamic_sections")})
     assert not any(isinstance(part, held_notes.HeldNoteSection) for part in core.dynamic_sections)
     initial = _plan(world, 30_000, mode=preferred, core=core)
     assert initial.initial_mode == "low"
@@ -1114,19 +1136,19 @@ def test_only_a_physical_head_step_reasks_the_early_route_question(world, monkey
 @pytest.mark.parametrize("mismatch", [None, "late_row", "changed_schema", "changed_title", "changed_chapter", "outlined_index"],
                          ids=["matching_frame", "late_row", "changed_schema", "changed_title_same_price",
                               "changed_chapter_refit", "outlined_index_refit"])
-def test_a_cold_return_replays_the_book_map_it_sent_beside_whole_heads_and_memory(world, monkeypatch, mismatch):
-    """#3649 on an inert capture: a running work's request showed its required handbook's own map as its chapter list
-    (the final sender's step, ``memory_floor.step_book_map``) beside two whole held heads. The continuation carries that
-    map receipt, so the restored process's own fit replays the frame with
-    the list, and the restore's rebind (``owner_wait.rebind_restored_route``) keeps it: the heads stay whole and memory
-    keeps its forms; nothing of theirs pays for a map the answer never read. The same holds where the restore itself
-    adds a late row or adopts a changed schema, so the saved frame no longer matches and the held view is refit:
-    the yielded book map stays yielded, and ARCHITECTURE's map, shown whole, stays whole (#3649). Where chapter text or
-    title changed (whether at the same uncut price or with added headings), the short chapter list stays short, retains
-    the current full map behind a fresh reader, never reuses the old reader, and leaves the historical source untouched.
-    The restore prices its tools by M2's own reconciliation (``continuation_tools.reconcile_restored_tools``): where it
-    adopts the current catalog (here a list saved before the MCP gateway existed, ``_gateway_due``), the changed schema
-    and its own notice reach the restored request beside the DEVELOPMENT list's reader, ARCHITECTURE's map and both heads."""
+def test_a_cold_return_replays_the_body_map_parts_it_sent_beside_whole_heads_and_memory(world, monkeypatch, mismatch):
+    """#3649 on an inert capture: a running work's request showed the Body Map at its parts list for its required
+    handbook (the final sender's step, ``memory_floor.step_book_map``) beside two whole held heads. The continuation
+    carries that receipt, so the restored process's own fit replays the frame with the list, and the restore's rebind
+    (``owner_wait.rebind_restored_route``) keeps it: the heads stay whole and memory keeps its forms; nothing of theirs
+    pays for a Map the answer never read. The same holds where the restore itself adds a late row or adopts a changed
+    schema, so the saved frame no longer matches and the held view is refit: the yielded Map stays yielded (#3649).
+    Where the Map's text changed (a chapter title at the same uncut price, or added mechanisms), the short parts list
+    stays short, retains the current full Map behind a fresh reader, never reuses the old reader, and leaves the
+    historical source untouched. The restore prices its tools by M2's own reconciliation
+    (``continuation_tools.reconcile_restored_tools``): where it adopts the current catalog (here a list saved before the
+    MCP gateway existed, ``_gateway_due``), the changed schema and its own notice reach the restored request beside the
+    parts list's reader and both heads."""
     from ouroboros import owner_wait
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.tools.compact_context import record_context_view
@@ -1154,22 +1176,23 @@ def test_a_cold_return_replays_the_book_map_it_sent_beside_whole_heads_and_memor
     first = _plan(world, 65_000 if mismatch == "outlined_index" else window, mode="low", ctx=sent, core=core,
                   tool_schemas=saved)
     accepted = first
-    while mismatch != "outlined_index" and not any(row["section_id"] == "development_map" for row in map_rows(accepted)):
-        accepted = memory_floor.step_book_map(accepted, "low")  # its required handbook's yields, its own map included
+    while mismatch != "outlined_index" and not any(row["section_id"] == "body_map" for row in map_rows(accepted)):
+        accepted = memory_floor.step_book_map(accepted, "low")  # its required handbook's yields, the Body Map included
     assert _index(accepted) == ("outline" if mismatch == "outlined_index" else "whole")
-    assert not _cuts(accepted) and "Rule 599 — lines" not in _blocks(accepted)[0]["text"]
+    assert not _cuts(accepted) and "Mechanism 599: its facts" not in _blocks(accepted)[0]["text"]
     sent.context_fit_plan, sent.active_context_mode = accepted, "low"
     messages = accepted.messages_for("low")
     observe_send(sent, messages, round_idx=1, tools=saved)
     record_context_view(sent, messages, saved)
     state = json.loads(json.dumps(continuation_state(sent, messages, {}, {}, 1, saved, set())))
     originals = map_rows(accepted)
-    original = next(row for row in originals if row["section_id"] == "development_map")
+    original = next(row for row in originals if row["section_id"] == "body_map")
     reader = original["reader"]
     source = read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode()
     old_block = state["context_observations"]["_last_context_observation"]["messages"][0]["content"][0]["text"]
-    assert reader in old_block and "- Change:" in old_block and "Rule 599 — lines" in source
-    assert "Change (navigation map)" in source
+    assert reader in old_block and "`docs/development/<name>.md`:\nchange: Change" in old_block  # the parts: folder, name, title
+    assert "Mechanism 599: its facts" in source
+    assert source.startswith("## Body map\n") and PARTS in old_block
 
     restored = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
     captured = replace(core, held_note_resume=held_notes.restored_capture(state))
@@ -1210,23 +1233,24 @@ def test_a_cold_return_replays_the_book_map_it_sent_beside_whole_heads_and_memor
     assert (priced[0] != priced[1]) is (mismatch in {"late_row", "changed_schema", "outlined_index"})
     assert mode == "low" and _held(plan) == _held(accepted) and not _cuts(plan) and floor(plan) == floor(accepted)
     block = resumed[0]["content"][0]["text"]
-    assert ("Mechanism 599 — lines" in block) is (mismatch != "outlined_index")
+    assert "Mechanism 599: its facts" not in block and PARTS in block  # the yielded Map stays yielded
     assert _index(plan) == "whole"
     if mismatch in {"changed_title", "changed_chapter"}:
         assert [row["section_id"] for row in map_rows(plan)] == [row["section_id"] for row in originals]
-        updated = next(row for row in map_rows(plan) if row["section_id"] == "development_map")
+        updated = next(row for row in map_rows(plan) if row["section_id"] == "body_map")
         assert updated["reader"] != reader and updated["source_ref"] != original["source_ref"]
         assert reader not in block and updated["reader"] in block
-        assert "## Engineering (chapters)" in block and "Rework (navigation map)" not in block
+        assert "`docs/development/<name>.md`:\nchange: Rework" in block  # the current parts, still short
         current_map = read_actor_source_bytes(core.section_root, core.section_task_id, updated["source_ref"]).decode()
-        assert "Rework (navigation map)" in current_map and ("Rule 611 — lines" in current_map) is (mismatch == "changed_chapter")
+        assert current_map.startswith("## Body map\n") and "- Rework: `docs/development/change.md`" in current_map
+        assert ("Mechanism 611: its facts" in current_map) is (mismatch == "changed_chapter")
         tool_registry = ToolRegistry(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root)
         tool_registry._ctx.task_id = TASK["id"]
-        assert "Rework (navigation map)" in tool_registry.execute(
+        assert "- Rework: `docs/development/change.md`" in tool_registry.execute(
             "read_file", {"root": "artifact_store", "path": updated["source_ref"]["path"]})
         assert read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode() == source
     else:
-        assert map_rows(plan) == originals and reader in block and "## Engineering (chapters)" in block
+        assert map_rows(plan) == originals and reader in block and "`docs/development/<name>.md`:\nchange: Change" in block
     payload = "\n".join(part["text"] for part in resumed[0]["content"])  # the restored request's whole system row
     assert "A held note. " * 1_500 in payload and "Another held note. " * 1_500 in payload  # both heads, whole
     notices = [row["content"] for row in resumed if "The tool set changed since this task's last request" in str(
@@ -1240,9 +1264,11 @@ def test_required_handbook_joins_after_the_ordinary_map_frame_has_fit(world):
     head = "A held note. " * 5_000
     _write(world, "a", head, summary="First summary.")
     _write(world, "b", head, summary="Second summary.")
-    ordinary = _core(world)
-    ordinary = replace(ordinary, development_md=ordinary.development_md + "Full handbook appendix. " * 1_500)
-    required = replace(ordinary, development_required=True)
+    # The capture composes the handbook only for a task whose own contract requires it.
+    required = _core(world, {**TASK, "task_contract": {"context_requires_development": True}})
+    assert required.development_required and "Handbook. Handbook." in required.development_md
+    required = replace(required, development_md=required.development_md + "Full handbook appendix. " * 1_500)
+    ordinary = replace(required, development_required=False)
     fits = _plan(world, 65_000, mode="low", core=ordinary)
     also_fits = _plan(world, 65_000, mode="low", core=required)
     assert not _cuts(fits) and _held(also_fits) == _held(fits)
@@ -1257,7 +1283,7 @@ def test_required_handbook_joins_after_the_ordinary_map_frame_has_fit(world):
 
 
 def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_goes_below_a_telling(world, monkeypatch):
-    """The owner's Nova rooms of 18-19 Nov: his Max with the books at chapter maps, my shortest telling tens of
+    """The owner's Nova rooms of 18-19 Nov: his Max lowered (the Body Map at its parts), my shortest telling tens of
     thousands of tokens past the start bound, memory's shorter forms inside it. Memory walks down its ladder and all
     six heads stand whole beside the whole index. A head yields only where the window cannot hold the request with
     memory at its shortest forms either, after the index outline, in address order. The fact the mind gets about what
@@ -1269,14 +1295,15 @@ def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_g
         _write(world, topic, words * 400, summary=f"Authored summary of {topic}.",
                **({"type": "person"} if topic in ("sasha", "nina") else {}))
     _write(world, "library", "An unclaimed note.", claims=(), summary="A long index summary. " * 4_000)
+    _heavy_map(world)
     memory = synthetic.snapshot(role="integrator", story=synthetic.pages(3, 80_000))
     memory = replace(memory, spec=replace(memory.spec, work_room_levels=2))  # a root's start keeps two eighths for work
     captured = replace(_core(world), memory_view_json=memory_view.snapshot_json(memory))
     telling = memory_floor.tokens_of(memory_view.story_chars(memory, memory_floor.telling_level(memory)))
 
-    def facts(plan):  # the owner's Max, rendered at chapter maps
+    def facts(plan):  # the owner's Max in Low, temporarily, for the window: the Map at its parts
         assert plan.preferred_mode == "max" and plan.initial_mode == "low"
-        assert "Book text. Book text." not in _blocks(plan)[0]["text"]
+        assert "Book text. Book text." not in _blocks(plan)[0]["text"] and PARTS in _blocks(plan)[0]["text"]
         return plan.low_projection.memory_facts
 
     def whole(plan):
@@ -1309,8 +1336,8 @@ def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_g
     assert context_view_facts.memory_facts(plain, "low").endswith(
         f"; shown only by address: {memory_floor.addressed_text(facts(plain)['floor']['steps'])}; marks in view 0")
 
-    # A work already running in whole books: where my telling no longer fits beside them the books go to their maps,
-    # and that drop shortens nothing; memory then folds and the index outlines before the window takes a head.
+    # A work already running in Max with the whole Map: where my telling no longer fits beside it the Map goes to its
+    # parts, and that drop shortens nothing; memory then folds and the index outlines before the window takes a head.
     running = _plan(world, 400_000, core=captured)
     assert running.initial_mode == "max"
     messages = [*running.messages_for("max"), {"role": "user", "content": "Owner's words during work."}]

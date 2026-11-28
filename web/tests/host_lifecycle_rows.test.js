@@ -180,6 +180,33 @@ test('a start the window took from Max is Low for now beside the owner\'s Max, o
     assert.ok(!whole.fact || !whole.fact.text.includes('for now'));
 });
 
+test('a row written since the Body Map became resident names the window; an older row keeps the words of its time', () => {
+    // Owner 25.11.2026: no mode preloads a book, so a start the window takes from Max lost nothing to the books. The
+    // backend marks such a send `books: body_map`; `maps`, `whole` and unmarked rows are older and keep their sentences.
+    const now = { preferred_at_send: 'max', applied: 'low', books: 'body_map' };
+    const before = { preferred_at_send: 'max', applied: 'low', books: 'maps' };
+    const said = { memory: 'the history does not fit this model’s window even in its shortest tellings.',
+        request: 'even without the history, the request leaves the work no room in this model’s window.',
+        route: 'this model’s window cannot hold the start even without the history and the tools.' };
+    for (const [cause, words] of Object.entries(said)) {
+        assert.equal(causeOf({ ...now, cause }, 'max'), `Low for now, not Max: ${words}`, cause);
+        assert.match(causeOf({ ...before, cause }, 'max'), /whole books/, cause);
+        assert.equal(taskCheckpointLabel({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max',
+            effective_mode: 'low', books: 'body_map', cause }), `Context starts in a smaller mode. Low for now, not Max: ${words}`);
+    }
+    assert.equal(causeOf({ ...now, cause: 'window' }, 'max'), 'Max did not fit at the start.');
+    const shown = contextShown(observeContext(null, [{ chat_id: 1, activity_id: 'w', task_attempt: 1, context_attempt: {
+        attempt_id: 'a', ledger_state: 'dispatched', task_attempt: 1, ...now, cause: 'memory', observed_at: '2026-11-26T10:00:00Z' } }], 1), 'max');
+    assert.equal(shown.label, 'Context: Low now, Max chosen');
+    assert.ok(shown.fact.text.startsWith(`Low for now, not Max: ${said.memory}`), shown.fact.text);
+    // Size recovery: the Map at its parts, said as that; the retry being prepared names the Map it shortened.
+    const retry = (extra) => summarizeChatLiveEvent({ type: 'task_checkpoint', task_id: 't1',
+        checkpoint_kind: 'context_fit_low_retry', round: 4, effective_mode: 'low', ...extra }).headline;
+    assert.equal(retry({ books: 'body_map' }), 'Body map shown as its parts and addresses during context-size recovery');
+    assert.equal(retry({ books: 'maps' }), 'Books shown as chapter navigation during context-size recovery');
+    assert.equal(retry({ books: 'body_map', book_map: 'body_map' }), 'Preparing a smaller request: Body map shortened to its parts and addresses');
+});
+
 test('#931 typed checkpoints are task facts in the expanded card, never narration', () => {
     for (const kind of ['context_view', 'budget_scope_paused', 'brand_new_kind', '']) {
         const view = summarizeChatLiveEvent({ type: 'task_checkpoint', task_id: 't1', checkpoint_kind: kind, round: 30 });

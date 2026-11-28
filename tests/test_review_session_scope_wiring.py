@@ -877,6 +877,8 @@ def test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured(tmp_path)
     # Keep the ~23K allowance, not the previous tree's ceiling. The excerpt must actually have been selected.
     # Splitting chapter 6 into five files with openings and §10.2 (2026-11-26) measure 295,181 (285,414 before):
     # five chapter maps and the openings in the navigation, the closed roads in the inlined invariants.
+    # With the resident Body Map (2026-11-27) the same subject measures 299,375: the Reference Atlas back in the
+    # retrieving navigation, and the constitution, checklist and closed-road lines this change adds, inlined.
     assert without_diff < 320_000, without_diff
     assert any(row["path"] == "docs/DESIGN.md#Design bible" and row["disposition"] == "inline"
                for row in manifest["governance_manifest"])

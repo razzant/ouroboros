@@ -372,7 +372,7 @@ def test_the_budget_soft_landing_wraps_up_with_the_model_not_the_host_text(actin
                 credential_profile_id=pin or "account-a", account_fingerprint="fingerprint-a")
 
         monkeypatch.setattr(context, "_context_fit_route", route)
-        core = cf.ContextCore("Own SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"Please finish"', False)
+        core = cf.ContextCore("Own SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"Please finish"')
         slot.context_fit_plan = cf.build_context_fit_plan(None, core,
             {"model": other, "model_role": role, "task_metadata": slot.task_metadata}, preferred_mode="max",
             tool_schemas=[], reasoning_effort="none", route_resolver=route)
@@ -553,7 +553,7 @@ def test_cold_return_prices_and_sends_the_acting_role_until_ordinary_handover(ac
             account_fingerprint="fingerprint-a")
 
     monkeypatch.setattr(context, "_context_fit_route", route)
-    core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"finish"', False)
+    core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts", '"finish"')
     def plan(model, role):
         return cf.build_context_fit_plan(None, core, {"model": model, "model_role": role},
             preferred_mode="max", tool_schemas=[], reasoning_effort="high", route_resolver=route)
@@ -658,7 +658,7 @@ def test_same_route_forced_effort_fits_only_a_longer_request(tmp_path, monkeypat
 
     monkeypatch.setattr(context, "_context_fit_route", route)
     core = cf.ContextCore("SYSTEM", "BIBLE", "", "", "Identity", "Facts",
-                          '"' + "Task evidence. " * 3000 + '"', False)
+                          '"' + "Task evidence. " * 3000 + '"')
     plan = cf.build_context_fit_plan(None, core, {"model": model}, preferred_mode="max",
                                     tool_schemas=schemas, reasoning_effort=fitted, route_resolver=route)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
@@ -677,7 +677,17 @@ def test_same_route_forced_effort_fits_only_a_longer_request(tmp_path, monkeypat
         monkeypatch.setattr("ouroboros.loop._rebind_context_fit_plan", unavailable)
     rebound = forced._bind_forced_route(call)
     assert forced._forced_physical_context(call, call.messages) is not None
-    assert call.accumulated_usage["_context_capacity_deficit_tokens"] == (0 if fit_available else 4319)
+    # The deficit is what the unavailable fit's actual wire (its acting effort's request, unmodified) asks beyond the
+    # input this route admits: the recorded total refusal less its reply reserve. Derived, so a system text that moves
+    # moves it too; the obligation is a positive deficit there and none where the acting fit was available.
+    usage = call.accumulated_usage
+    if fit_available:
+        assert usage["_context_capacity_deficit_tokens"] == 0
+    else:
+        admitted = 100000 - 65536  # ``record_observation`` above: the refused total less the acting reply reserve
+        assert usage["_context_window"]["admitted"] == admitted
+        deficit = usage["_context_prompt_estimate"] - admitted
+        assert usage["_context_capacity_deficit_tokens"] == deficit > 0
     assert rebound is rebind
     assert owner.active_effort_override == fitted and owner.active_effort == acting
     assert owner.context_fit_plan.start == plan.start  # repricing never rewrites the task's historical start

@@ -725,7 +725,7 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
             break
     if any(normalize_bool(source.get("review_answer")) for source in (merged, task, metadata)):
         contract["review_answer"] = True  # task review Required reviews the whole final answer (``review_answer_required``)
-    # The task's own direct handbook answer, from its contract alone: a legacy top-level value keeps its Max meaning.
+    # The task's own direct handbook answer, from its contract alone: a legacy top-level value is not copied in and means nothing.
     if isinstance(merged.get("context_requires_development"), bool):
         contract["context_requires_development"] = merged["context_requires_development"]
     attachment_ref = merged.get("attachment_manifest_ref", task.get("attachment_manifest_ref"))

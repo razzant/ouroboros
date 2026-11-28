@@ -25,9 +25,11 @@ ARCHIVED = 40  # archived knowledge notes and old rescue snapshots the archive s
 RESCUE_AGE_SEC = 3 * 86_400.0  # an old restart's rescue snapshot: older than the health block's two hours
 CATALOGUE_WINDOW = 126_000  # tokens: tight for both root sizes, so a turn's start walks Max -> Low as a live install's does.
 WIDE_WINDOW = 1_000_000  # tokens: more than any view measured here fills, so a fit keeps Max (the stand's horizon)
-#                             Picked by hand: the books, the tool schemas and this fixture's history set the band, and growth
-#                             past it fails the Max -> Low precondition in test_cost_contract._build_work. Deriving it would
-#                             take a calibration boot per root size; re-pick the number when that precondition fails.
+#                             Picked by hand: the tool schemas, the start's host sections and this fixture's history set the
+#                             band, and growth past it fails the Max -> Low precondition in test_cost_contract._build_work.
+#                             Re-picked 26.11.2026 for the resident Body Map: 118,000 then ran Nano; Max's gate missed from
+#                             132,672 tokens (k=1) and Low held at 122,000 and 128,000, so the middle of that band. Deriving
+#                             it would take a calibration boot per root size; re-pick the number when that precondition fails.
 
 
 def _author(task_id: str) -> Dict[str, Any]:

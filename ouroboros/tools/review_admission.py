@@ -739,7 +739,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     from ouroboros.preflight_receipts import execution_section
 
     goal_text, execution = goal_with_author_questions(goal, author_questions), execution_section(preflight_execution)
-    pulse = review_subject_pulse(review_root, layer, frozen_subject.managed)
+    pulse = review_subject_pulse(review_root, layer, frozen_subject.managed, frozen_subject)
     goal_section = build_goal_section(goal_text, scope, commit_message, owner_words, execution, pulse)
     scope_section = build_scope_section(scope)
     rebuttal_section = build_rebuttal_section(review_rebuttal)

@@ -64,7 +64,8 @@ def test_the_pulse_counts_every_wave_since_the_contribution_base(tmp_path):
     # What the last wave alone shows hides the module wave 1 created.
     assert "custody.py" not in _git(repo, "diff", "--name-only", "HEAD")
 
-    fact, shape, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
+    fact, shape, directory, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
+    assert directory.startswith("New runtime modules: ouroboros/custody.py, ouroboros/fresh.py; ")  # both waves' modules
     assert fact.startswith(f"Diff pulse since canonical/ouroboros merge-base {base[:12]}: ")
     assert "files 3, lines +295/-0 (net +295)" in fact
     assert "new files: ouroboros/custody.py, ouroboros/fresh.py;" in fact
@@ -161,7 +162,7 @@ def test_staged_constitution_and_prompts_are_sized_from_the_index_and_a_conflict
     """The ruled texts (BIBLE.md and prompts/) follow the index like the books: an unstaged edit after staging
     neither hides nor inflates the staged balance; during an unresolved merge the prompts are unmeasured, never a
     false deletion, and they are measured again once the conflict is staged resolved."""
-    from ouroboros.reference_books import book_balance_note, ruled_text_sizes
+    from ouroboros.reference_books import UnmeasuredText, book_balance_note, ruled_text_sizes
 
     repo = _body(tmp_path / "body")
     (repo / "prompts").mkdir()
@@ -187,7 +188,8 @@ def test_staged_constitution_and_prompts_are_sized_from_the_index_and_a_conflict
     merged = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "merge", "theirs"], cwd=repo,
                             capture_output=True)
     assert merged.returncode == 1 and _git(repo, "ls-files", "-u", "--", "prompts/other.md")
-    assert ruled_text_sizes(repo, "prompts", staged=True) is None
+    with pytest.raises(UnmeasuredText, match="holds prompts/other.md unmerged"):  # there and unread: never "absent"
+        ruled_text_sizes(repo, "prompts", staged=True)
     assert "balance unavailable" in book_balance_note(repo, ["prompts/other.md"], staged=True)
     (repo / "prompts/other.md").write_text("resolved\n", encoding="utf-8", newline="\n")
     _git(repo, "add", "prompts/other.md")
@@ -377,7 +379,7 @@ def test_a_changed_python_source_adds_its_code_shape_and_an_unparsed_one_is_unkn
                                           '    monkeypatch.setattr("ouroboros.core.x", 2)\n'
                                           '    subprocess.run(["git", "init", "-q"], cwd=tmp_path)\n')
 
-    fact, shape, question = diff_pulse(repo).split("\n")
+    fact, shape, _directory, question = diff_pulse(repo).split("\n")  # a new leaf: the directory fact stands third
     assert shape == ("Code shape: module handles +1/-0, calls through them +3/-0, re-exported names +0/-1; "
                      "tests: patched product-module names +1/-0, git init call sites +1/-0.")
     assert "⚠" not in shape and question == DIFF_PULSE_QUESTION
@@ -428,7 +430,7 @@ def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns
     test_src, product_src = "def test_ok():\n    pass\n", "X = 1\n"
     _write(repo, "tests/test_sample.py", 1, test_src)
     _write(repo, "ouroboros/sample.py", 1, product_src)
-    known_fact, known_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+    known_fact, known_shape, *_ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
     assert "tests: items +1/-0," in known_fact and "unreadable" not in known_fact
     assert known_shape == (
         "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-0; "
@@ -446,7 +448,7 @@ def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns
 
     with monkeypatch.context() as scoped:
         scoped.setattr(ast, "parse", fail_parse)
-        unknown_fact, unknown_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+        unknown_fact, unknown_shape, *_ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
     assert "tests: items +0/-0 (1 unreadable)," in unknown_fact
     assert unknown_shape == (
         "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: "
@@ -565,3 +567,169 @@ def test_every_seat_of_a_body_wave_reads_the_pulse_and_a_core_brief_does_not(
                                                    governance_root=str(repo), surface="change", layer="body"))
     assert pulse in build_two_part_brief(frozen, seat, goal=GOAL, scope=SCOPE)["system"]
     assert fact not in build_two_part_brief(frozen, seat, layer="core", goal=GOAL, scope=SCOPE)["system"]
+
+
+# ---------------------------------------------------------------- the body's manuals beside a change (BIBLE P1)
+_OWNERS = ('[domains]\nD01 = "Core"\n\n[references]\nD01 = ["docs/architecture/01-core.md", "docs/DESIGN.md"]\n'
+           '"web/" = ["docs/architecture/03-web.md"]\n\n[modules]\n"ouroboros/core.py" = "D01"\n')
+_INVARIANTS = ("# 10. Key Invariants\n\nThe rules.\n\n1. **One owner.** `ouroboros/core.py` owns x.\n"
+               "2. **Another file.** `tools/core.py` is not that module.\n3. **Again.** `core.py` keeps y.\n")
+
+
+def _owned_body(root: Path, chapters: dict) -> Path:
+    repo = _body(root)
+    files = {"ouroboros/domains.toml": _OWNERS, "docs/architecture/10-key-invariants.md": _INVARIANTS,
+             "web/app.js": "// app\n", **chapters}
+    for path, text in files.items():
+        _write(repo, path, 1, text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "manuals")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    return repo
+
+
+def test_the_pulse_names_each_touched_files_owning_manuals_and_whether_the_change_touches_them(tmp_path):
+    """One row per file, never a union: the reader sees which file left which manual untouched, and which key
+    invariants name the file (a mention, not a judgment). A fact beside the change, never a gate."""
+    repo = _owned_body(tmp_path / "body", {"docs/architecture/01-core.md": "# 1. Core\n\nThe core.\n"})
+    _write(repo, "ouroboros/core.py", 12)
+    _write(repo, "web/app.js", 2, "// app\n")
+    _write(repo, "docs/architecture/01-core.md", 1, "# 1. Core\n\nThe core, restated.\n")
+    pulse = diff_pulse(repo)
+    assert ("- ouroboros/core.py: docs/architecture/01-core.md (in this change), docs/DESIGN.md (not in this change); "
+            "key invariants that name it: 1, 3") in pulse
+    assert "- web/app.js: docs/architecture/03-web.md (not in this change)" in pulse
+    owners = pulse.split("Owning manuals")[1].split("Removed governed prose")[0]
+    assert owners.count("\n- ") == 2 and "notes.md" not in owners and "01-core.md:" not in owners  # only declared owners' files
+    # Staged, the owners are the index's: a later unstaged manifest edit changes nothing the commit would hold.
+    _git(repo, "add", "ouroboros/core.py")
+    _write(repo, "ouroboros/domains.toml", 1, _OWNERS.replace("01-core.md", "09-other.md"))
+    staged = diff_pulse(repo, ["ouroboros/core.py"], staged=True)
+    assert "- ouroboros/core.py: docs/architecture/01-core.md (not in this change)" in staged and "09-other" not in staged
+    # A tree with no manifest (any other repository) says nothing about owners.
+    assert "Owning manuals" not in diff_pulse(_touched(_body(tmp_path / "plain")))
+
+
+def test_a_change_that_adds_a_runtime_module_says_whether_the_module_directory_is_in_it(tmp_path):
+    """The hand-kept module directory beside a new module: the pulse says whether the directory file is in the
+    change, as a literal fact about the diff (no veto), names every added module, and says nothing when the change
+    adds none: a new test, a new document or an edit of an existing module is no new runtime module."""
+    directory = "docs/architecture/01-module-directory.md"
+    repo = _owned_body(tmp_path / "body", {directory: "# 1.1 Module Directory\n\nRows.\n"})
+    line = "New runtime modules: {}; the hand-kept module directory `" + directory + "` is {}."
+    _write(repo, "ouroboros/core.py", 11)
+    _write(repo, "tests/test_new.py", 1)
+    _write(repo, "docs/new.md", 1, "notes\n")
+    assert "New runtime modules" not in diff_pulse(repo) and directory not in diff_pulse(repo)  # nothing added
+    _write(repo, "ouroboros/fresh.py", 1)
+    _write(repo, "supervisor/also.py", 1)
+    assert line.format("ouroboros/fresh.py, supervisor/also.py", "not in this change") in diff_pulse(repo)
+    _write(repo, directory, 1, "# 1.1 Module Directory\n\nRows.\n- fresh.py: a new row.\n")
+    assert line.format("ouroboros/fresh.py, supervisor/also.py", "in this change") in diff_pulse(repo)
+    # Staged, the fact is the index's: only what the commit would add, and the directory only if staged with it.
+    _git(repo, "add", "ouroboros/fresh.py")
+    staged = diff_pulse(repo, ["ouroboros/fresh.py"], staged=True)
+    assert line.format("ouroboros/fresh.py", "not in this change") in staged
+
+
+def _touched(repo: Path) -> Path:
+    _write(repo, "ouroboros/core.py", 11)
+    return repo
+
+
+def test_the_pulse_counts_every_removed_line_of_governed_prose_and_says_what_it_does_not_show(tmp_path):
+    """A paragraph moved between changed documents is quiet; one deleted is counted even where a twin survives
+    elsewhere; nothing is cut silently: a long line states the characters left out, a long list the lines left
+    out, and the locator names every changed governed document."""
+    long = "Why this holds: " + "reason " * 60
+    keep = [f"Kept rule {n}." for n in range(3)]
+    gone = [f"Dropped reason {n}." for n in range(13)]
+    fence = "```\nFenced example.\n\nFenced twin.\n```"  # not prose; the lines after its close are again
+    one = "# 1. Core\n\n" + "\n\n".join(["Moved paragraph.", "Twin line.", long, *keep, *gone[:6], fence, *gone[6:]]) + "\n"
+    two = "# 2. Other\n\nTwin line.\n"
+    repo = _owned_body(tmp_path / "body", {"docs/architecture/01-core.md": one, "docs/architecture/02-other.md": two})
+    _write(repo, "docs/architecture/01-core.md", 1, "# 1. Core\n\n" + "\n\n".join(keep) + "\n")
+    _write(repo, "docs/architecture/02-other.md", 1, two + "\nMoved paragraph.\n")
+    pulse = diff_pulse(repo, ["docs/architecture/01-core.md"])
+    assert "Removed governed prose: 15 lines of the base are gone from the changed documents:" in pulse
+    assert "Moved paragraph." not in pulse and "- docs/architecture/01-core.md: Twin line." in pulse
+    assert f"- docs/architecture/01-core.md: {long.strip()[:240]} … (+{len(long.strip()) - 240} characters)" in pulse
+    assert "(3 more removed lines are not shown here; all of them: `git diff " in pulse and "Fenced" not in pulse
+    assert "-- docs/architecture/01-core.md docs/architecture/02-other.md`)" in pulse
+    # A change that removes nothing, and an edit that touches no governed document, say nothing.
+    assert "Removed governed prose" not in diff_pulse(repo, ["ouroboros/core.py"])
+    _git(repo, "checkout", "-q", "--", "docs")
+    _write(repo, "docs/architecture/01-core.md", 1, one + "\nAdded reason.\n")
+    assert "Removed governed prose" not in diff_pulse(repo, ["docs/architecture/01-core.md"])
+
+
+def test_every_owned_file_has_its_row_a_governed_prompt_keeps_its_owner_and_a_removed_file_its_base_owner(tmp_path):
+    """No owned file is cut to a count: six owned modules give six rows. A prompt with a declared owner is a file
+    like any other here; a removed file keeps the owner the base assigned it, and an invariant that names a file
+    is stated whether or not the manifest declares an owner for it."""
+    owned = [f"ouroboros/m{n}.py" for n in range(6)]
+    manifest = _OWNERS.replace('"web/" =', '"prompts/" = ["docs/development/04-gov.md"]\n"web/" =') + "".join(
+        f'"{path}" = "D01"\n' for path in [*owned, "ouroboros/gone.py"])
+    invariants = _INVARIANTS + "4. **Notes.** `notes.md` holds the notes.\n"
+    repo = _owned_body(tmp_path / "body", {"ouroboros/domains.toml": manifest, "ouroboros/gone.py": "x = 1\n",
+                                           "docs/architecture/10-key-invariants.md": invariants,
+                                           "prompts/SYSTEM.md": "# System\n\nBe brief.\n"})
+    for path in owned:
+        _write(repo, path, 1)
+    _write(repo, "prompts/SYSTEM.md", 1, "# System\n\nBe brief and kind.\n")
+    _write(repo, "notes.md", 2, "notes\n")
+    _write(repo, "ouroboros/domains.toml", 1, manifest.replace('"ouroboros/gone.py" = "D01"\n', ""))
+    (repo / "ouroboros/gone.py").unlink()
+    owners = diff_pulse(repo).split("Owning manuals")[1].split("Removed governed prose")[0]
+    for path in [*owned, "ouroboros/gone.py"]:
+        assert f"- {path}: docs/architecture/01-core.md (not in this change), docs/DESIGN.md (not in this change)\n" in owners
+    assert "- prompts/SYSTEM.md: docs/development/04-gov.md (not in this change)" in owners
+    assert "- notes.md: no owning manual declared; key invariants that name it: 4" in owners
+    assert owners.count("\n- ") == 9 and "more files" not in owners and "ouroboros/domains.toml:" not in owners
+
+
+def test_a_governed_side_that_was_not_read_is_unknown_prose_and_a_deleted_document_is_removed(tmp_path, monkeypatch):
+    """Missing bytes are not deleted words: a present document whose side could not be read is named, with the
+    locator, and counted as neither kept nor removed; a document the change deletes is removed prose."""
+    from ouroboros import review
+
+    chapter = "docs/architecture/01-core.md"
+    repo = _owned_body(tmp_path / "body", {chapter: "# 1. Core\n\nOne rule.\n\nTwo rule.\n"})
+    _write(repo, chapter, 1, "# 1. Core\n\nOne rule.\n")
+    _git(repo, "add", "-A")
+    real = review._blob_texts
+    monkeypatch.setattr(review, "_blob_texts", lambda root, specs: {
+        spec: None if spec.startswith(":") else text for spec, text in real(root, specs).items()})
+    unread = diff_pulse(repo, [chapter], staged=True)
+    assert (f"Removed governed prose unknown (a side was not read here, nothing is counted as removed): {chapter}; "
+            f"read them with `git diff --cached ") in unread and "of the base are gone" not in unread
+    monkeypatch.setattr(review, "_blob_texts", real)
+    read = diff_pulse(repo, [chapter], staged=True)
+    assert f"1 line of the base is gone from the changed documents:\n- {chapter}: Two rule.\n" in read
+    assert "prose unknown" not in read
+    _git(repo, "rm", "-qf", chapter)
+    monkeypatch.setattr(review, "_blob_texts", lambda root, specs: {
+        spec: None if spec.startswith(":") else text for spec, text in real(root, specs).items()})
+    gone = diff_pulse(repo, [chapter], staged=True)
+    assert "3 lines of the base are gone" in gone and "prose unknown" not in gone  # an absent side is absent
+
+
+def test_a_manifest_of_the_wrong_shape_is_one_named_line_and_a_body_write_still_succeeds(tmp_path, monkeypatch):
+    """The pulse is information: valid TOML of the wrong shape is an invalid manifest (one ValueError for every
+    reader), named once in the receipt of a write that happened, never a tool error; a sound manifest names owners."""
+    import ouroboros.safety as safety
+
+    monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
+    broken = _registry(tmp_path / "broken", external=False)
+    for path, content in (("ouroboros/domains.toml", "modules = 1\n"), ("ouroboros/loop.py", "x = 2\n")):
+        said = str(broken.execute("write_file", {"path": path, "content": content}))
+        assert said.startswith("✅"), said[:300]
+        assert ("Owning manuals unavailable: ouroboros/domains.toml section [modules] must be a table; "
+                "no owner is named.") in said
+    sound = _registry(tmp_path / "sound", external=False)
+    assert str(sound.execute("write_file", {"path": "ouroboros/domains.toml", "content": (
+        '[domains]\nD01 = "Core"\n[references]\nD01 = ["docs/architecture/01-one.md"]\n'
+        '[modules]\n"ouroboros/loop.py" = "D01"\n')})).startswith("✅")
+    said = str(sound.execute("write_file", {"path": "ouroboros/loop.py", "content": "x = 2\n"}))
+    assert said.startswith("✅") and "unavailable" not in said
+    assert "- ouroboros/loop.py: docs/architecture/01-one.md (not in this change)" in said

@@ -480,6 +480,18 @@ def test_a_live_calls_record_holds_what_its_adopted_connection_told_beside_its_o
 
     monkeypatch.setitem(host_world.provider, 'session', lambda *args, **kw: Session(*args, **kw))
     host, factory = host_world.host, host_world.provider['session']
+    # A Body Map the size the repository's whole Architecture book had (about 464K characters) with its real parts form:
+    # the window that misses Max by 60K is then held by Low, which stands the Map at its parts (before 26.11.2026 Max
+    # carried that whole book and Low its chapter maps). With the real Map's ~3K-token saving that window sends Nano.
+    from ouroboros import context_fit as fit
+
+    real = host.plan.core
+    assert real.body_map_parts and real.section_root and real.section_task_id  # the Map can step to its parts here
+    core = replace(real, body_map=real.body_map + '\n\n' + 'chapter opening words ' * 21_000)
+    host.plan = host.ctx.context_fit_plan = fit.build_context_fit_plan(
+        host_world.env, core, host_world.task, preferred_mode='max', tool_schemas=host.schemas,
+        nano_base=host.plan.start_nano_base, route_resolver=host.turn.resolve_route)
+    host.messages[:] = host.plan.messages_for(host.plan.initial_mode)
     monkeypatch.setenv("GH_CONFIG_DIR", str(host_world.env.drive_root / "gh"))
     monkeypatch.setattr(github, "github_cli_configured", lambda: bool(os.environ.get("GITHUB_TOKEN")))
     monkeypatch.setenv("GITHUB_TOKEN", "synthetic-test-fixture")

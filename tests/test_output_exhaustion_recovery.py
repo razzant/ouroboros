@@ -210,7 +210,7 @@ def test_a_numbered_refusal_caps_the_route_on_either_send(tmp_path, monkeypatch,
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(ce, "probe", lambda _root, **k: ce.CapabilityEvidence(1_000_000, "confirmed", "metadata",
         ce.route_fingerprint(**{name: k[name] for name in ("provider", "model", "base_url", "options")})))
-    core = cf.ContextCore("Required memory and books: KEEP.", "", "", "", "", "", '"Assignment"', False)
+    core = cf.ContextCore("Required memory and books: KEEP.", "", "", "", "", "", '"Assignment"')
     plan = cf.build_context_fit_plan(None, core, {}, preferred_mode="max", route_resolver=cf.resolve_context_fit_route)
     kw["tools"]._ctx.context_fit_plan = plan
     assert resolve_window(plan, 65_536).usable == 934_464 and plan.window_witness_bound
@@ -236,7 +236,7 @@ def test_empty_replies_and_a_predicted_smaller_send_record_no_refusal(tmp_path, 
     monkeypatch.setattr(ce, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
     monkeypatch.setattr(ce, "probe", lambda _root, **k: ce.CapabilityEvidence(1_000_000, "confirmed", "metadata",
         ce.route_fingerprint(**{name: k[name] for name in ("provider", "model", "base_url", "options")})))
-    core = cf.ContextCore("Required memory and books: KEEP.", "", "", "", "", "", '"Assignment"', False)
+    core = cf.ContextCore("Required memory and books: KEEP.", "", "", "", "", "", '"Assignment"')
     plan = cf.build_context_fit_plan(None, core, {}, preferred_mode="max", route_resolver=cf.resolve_context_fit_route)
     kw["tools"]._ctx.context_fit_plan = plan
     send_smaller = recovery._send_smaller

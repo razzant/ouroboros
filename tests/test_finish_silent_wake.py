@@ -1017,9 +1017,8 @@ def test_provider_death_after_refused_quiet_selection_keeps_words_internal(wake,
     def route(task, **_kw):
         return {"model": task.get("model", "test-model"), "provider": "openai", "use_local": False}, evidence
     monkeypatch.setattr(context, "_context_fit_route", route)
-    core = cf.ContextCore(base_prompt="Wake system.", bible_md="", architecture_md="", development_md="",
-        semi_stable_text="", dynamic_text="", user_content_json=json.dumps("Wake: no one has asked for a task."),
-        docs_need_development=False)
+    core = cf.ContextCore(base_prompt="Wake system.", bible_md="", body_map="", development_md="",
+        semi_stable_text="", dynamic_text="", user_content_json=json.dumps("Wake: no one has asked for a task."))
     wake.ctx.context_fit_plan = cf.build_context_fit_plan(
         SimpleNamespace(drive_root=wake.root), core, {"model": "test-model"}, preferred_mode="max",
         route_resolver=route, tool_schemas=loop.initial_tool_schemas(wake.registry))

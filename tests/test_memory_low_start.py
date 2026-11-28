@@ -1,4 +1,4 @@
-"""One host line in Main per open period of each cause of fresh starts that the window took from whole books in my
+"""One host line in Main per open period of each cause of fresh starts that the window took from my
 human's Max (owner A, 07.11.2026, which replaced the line per start of 1B, 29.10; every cause since 22.11.2026, a
 period per cause by the coordinator's option C, 22.11.2026).
 
@@ -19,13 +19,13 @@ from tests.test_memory_max_room import _core, _crowded_window, _fact, _start
 
 
 def _room(cause="crowded", *, window=1_000_000, zero_need=900_000, floor_need=None, levels=1, room_id=None):
-    if cause == "route" and floor_need is None:  # the books, core and work room alone exceed this route's window
+    if cause == "route" and floor_need is None:  # the Body Map, core and work room alone exceed this route's window
         floor_need, zero_need = window + 10_000, window + 80_000
     floor_need = zero_need - 70_000 if floor_need is None else floor_need
     return {"cause": cause, "window": window, "allowance": 40_000, "floor_need": floor_need,
             "schemas": zero_need - floor_need, "zero_need": zero_need, "need": zero_need + 150_000, "story": 110_000,
             "unfolded": 60_000, "room": 40_000, "reserve": 65_536, "work": 125_000 * levels, "levels": levels,
-            "room_id": room_id, "parts": [["books", 400_000], ["core", 30_000]]}
+            "room_id": room_id, "parts": [["body map", 4_000], ["core", 30_000]]}
 
 
 def _plan(room, *, role="integrator", model=""):
@@ -44,26 +44,27 @@ def sent(monkeypatch):
 
 def test_a_start_memory_lowered_to_low_says_so_without_numbers_or_advice():
     line = low_start_line(_plan(_room()), "low", "rootA")
-    assert line == ("Task rootA runs in Low for now, not in your Max: the whole books did not fit beside my memory even "
-                    "in its shortest tellings. Your setting stays Max.")
+    assert line == ("Task rootA runs in Low for now, not in your Max: my memory did not fit the window beside the work's "
+                    "room even in its shortest tellings. Your setting stays Max.")
     assert not any(char.isdigit() for char in line) and len(line.splitlines()) == 1  # numbers stay in the task's facts
     assert not any(word in line for word in ("may bring", "should", "must", "fold", "episode", "again"))
-    # A start that protected words took past the maps frame to Nano is named Nano, never Max (``context_fit``)
+    # A start that protected words took past the Low frame to Nano is named Nano, never Max (``context_fit``)
     assert low_start_line(_plan(_room()), "nano", "rootA") == (
-        "Task rootA runs in Nano for now, not in your Max: the whole books did not fit beside my memory even in its "
-        "shortest tellings; even the chapter maps did not fit. Your setting stays Max.")
+        "Task rootA runs in Nano for now, not in your Max: my memory did not fit the window beside the work's room even "
+        "in its shortest tellings; Low did not fit either. Your setting stays Max.")
 
 
 def test_what_the_request_carries_and_the_route_send_their_own_lines():
     """Consilium of 22.11.2026 (P6, P7): the opening line goes for every cause, each in its own words, no numbers."""
-    request = _room(zero_need=1_100_000, floor_need=950_000)  # the books fit without the tool schemas, not with them
+    request = _room(zero_need=1_100_000, floor_need=950_000)  # the Map fits without the tool schemas, not with them
     assert low_start_line(_plan(request, model="opus"), "low", "rootA") == (  # a period per model: the line names it
         "Task rootA runs in Low for now, not in your Max: even with no memory, what the request itself carries tips "
         "this start over the window on opus. Your setting stays Max.")
     assert "over the window on this route. Your" in low_start_line(_plan(request), "low", "rootA")  # no model named
     assert low_start_line(_plan(_room("route"), model="opus"), "low", "rootA") == (
-        "Task rootA runs in Low for now, not in your Max: on opus the window cannot hold the whole books beside the rest "
-        "of this start and the work's room even with no memory; folding my memory cannot change that. Your setting stays Max.")
+        "Task rootA runs in Low for now, not in your Max: on opus the window cannot hold my core, the body map and the "
+        "rest of this start beside the work's room even with no memory; folding my memory cannot change that. Your "
+        "setting stays Max.")
     assert "on this route the window" in low_start_line(_plan(_room("route")), "low", "rootA")  # no model named
 
 
@@ -145,7 +146,7 @@ def test_each_cause_has_its_own_period_closed_by_a_held_start_of_its_openers_roo
     bit = tmp_path.resolve() / "state" / "low_start_episode.json"
     bit.parent.mkdir(parents=True)
     bit.write_text(json.dumps({"since": "2026-11-21T10:00:00+00:00", "task": "old", "levels": 1}), encoding="utf-8")
-    request = {"zero_need": 1_100_000, "floor_need": 950_000}  # the books fit without the tool schemas, not with them
+    request = {"zero_need": 1_100_000, "floor_need": 950_000}  # the Map fits without the tool schemas, not with them
     starts = (("rootA", "crowded", 1, "1", "", {}),  # the old episode holds no period: the memory line
               ("rootB", "route", 1, "1", "opus", {}),  # the open memory period never silences the route line
               ("rootC", "crowded", 1, "1", "", {}), ("rootD", "route", 1, "1", "opus", {}),  # both open: silent

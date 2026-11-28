@@ -634,16 +634,21 @@ def build_goal_section(
     return "\n".join(sections)
 
 
-def review_subject_pulse(review_root: Any, layer: str, managed: Any = None) -> str:
+def review_subject_pulse(review_root: Any, layer: str, managed: Any = None, frozen: Any = None) -> str:
     """The diff pulse a review brief carries: ``review.diff_pulse`` over the reading root's
     index, which holds the subject. Only the body has a contribution base to grow from, and
     a managed resolution is reviewed as its declared delta rather than as that growth, so
-    neither another root's subject nor a managed one carries a pulse."""
+    neither another root's subject nor a managed one carries a pulse. A ``frozen`` subject
+    read in its isolated checkout that is not the gate's own (a ``base..head`` range, an index
+    or worktree against its parent) is measured from its own parent, so owners, touched flags
+    and removed prose speak of the diff its reviewers read; the gate's subject keeps the
+    contribution base, as the commit gate's pulse does."""
     if layer != "body" or managed is not None:
         return ""
     from ouroboros.review import diff_pulse
 
-    return diff_pulse(Path(review_root), staged=True)
+    own = frozen is not None and getattr(frozen, "checkout", "") and not frozen.is_system_index
+    return diff_pulse(Path(review_root), staged=True, subject_parent=frozen.parent_sha if own else "")
 
 
 def review_history_brief(history: Any, *, drive_root: Any, repo_root: Any, task_id: str = "") -> str:

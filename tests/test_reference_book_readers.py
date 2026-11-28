@@ -155,27 +155,27 @@ def test_a_touched_chapter_is_withheld_when_the_prefix_carries_its_book(tmp_path
 
 # --- the documentation gate ------------------------------------------------
 
-def test_the_new_module_gate_takes_the_chapter_that_documents_the_module(monkeypatch, tmp_path):
+def test_the_new_module_gate_asks_the_map_row_and_never_a_chapter_edit(monkeypatch, tmp_path):
+    """A new module owes what makes it a row of the map (its ``[modules]`` entry and a docstring lead). No chapter
+    edit is demanded and none stands in for the row: whether the owning manual says enough is the reviewer's
+    judgment, which the diff pulse serves by naming that manual (BIBLE P3; ``tests/test_diff_pulse.py``)."""
     from ouroboros import commit_admission
     from ouroboros.tools import review
 
     # Synthetic staged paths need matching synthetic blobs. Reading the actual
     # checkout's index makes this unit test depend on an in-flight version bump.
-    values = {"VERSION": "1.2.3\n", "docs/ARCHITECTURE.md": "# Ouroboros v1.2.3 — Architecture\n"}
+    values = {"VERSION": "1.2.3\n", "docs/ARCHITECTURE.md": "# Ouroboros v1.2.3 — Architecture\n",
+              "ouroboros/brand_new_owner.py": '"""What the new owner is for."""\n',
+              "ouroboros/domains.toml": '[domains]\nD01 = "Core"\n\n[modules]\n'}
     monkeypatch.setattr(review, "_git_show_staged", lambda repo, path: values.get(path))
     monkeypatch.setattr(commit_admission, "_head_text", lambda repo, path: values.get(path))
     staged = "A  ouroboros/brand_new_owner.py\n"
-    blocked = review._preflight_check("add an owner", staged, tmp_path)
-    assert blocked and "Architecture book" in blocked
+    for documented in ("", "M  docs/ARCHITECTURE.md\n", "M  docs/architecture/01-high-level-architecture.md\n"):
+        blocked = review._preflight_check("add an owner", staged + documented, tmp_path)
+        assert blocked and "no `[modules]` row" in blocked and "Architecture book" not in blocked, documented
 
-    for documented in ("docs/ARCHITECTURE.md", "docs/architecture/01-high-level-architecture.md"):
-        assert review._preflight_check(
-            "add an owner", staged + f"M  {documented}\n", tmp_path,
-        ) is None, documented
-
-    assert review._preflight_check(
-        "add an owner", staged + "M  docs/reference-books-migration.md\n", tmp_path,
-    ) is not None, "a docs file outside the book documents no module"
+    values["ouroboros/domains.toml"] += '"ouroboros/brand_new_owner.py" = "D01"\n'
+    assert review._preflight_check("add an owner", staged, tmp_path) is None, "the row and the docstring are all it owes"
 
 
 # --- chapter reads under the measured first show ---------------------------
@@ -203,16 +203,24 @@ def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
     assert "docs/architecture/" in UNTRUNCATED_REPO_READ_PREFIXES
 
 
-def test_a_chapter_larger_than_its_frame_gets_a_range_never_a_silent_cut():
+def test_a_chapter_larger_than_its_frame_gets_a_range_never_a_silent_cut(tmp_path):
     """A chapter read is whole only under a frame that actually holds it: a frame
     smaller than the largest chapter receives a range with its next cursor, never a
-    silent cut, so range delivery stays load-bearing. The test states no size limit
-    for any chapter; the book's size rule is pairwise per book."""
+    silent cut, so range delivery stays load-bearing. Whether every chapter fits one
+    default read is the size lane's own test (``tests/test_reference_book_budgets.py``);
+    here that band's two numbers are pinned to the reader's own."""
     from ouroboros.loop_tool_execution import _truncate_tool_result
     from ouroboros.reference_books import load_reference_book
-    from ouroboros.tool_capabilities import UNTRUNCATED_REPO_READ_PREFIXES
+    from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS, UNTRUNCATED_REPO_READ_PREFIXES
     from ouroboros.tool_result_delivery import RESULT_VIEW_MARKER
 
+    from ouroboros import reference_books
+    from ouroboros.tools.registry import ToolRegistry
+
+    # The chapter band of the size rule is the default read itself: its two numbers are the tool's own.
+    read_file = next(row for row in ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data").schemas() if row["function"]["name"] == "read_file")
+    assert reference_books.CHAPTER_READ_LINES == read_file["function"]["parameters"]["properties"]["max_lines"]["default"]
+    assert reference_books.CHAPTER_READ_CHARS == TOOL_RESULT_LIMITS["read_file"]
     chapters = [chapter for book_id in BOOK_ENTRYPOINTS for chapter in load_reference_book(REPO, book_id).chapters]
     for chapter in chapters:
         assert chapter.source_path.startswith(UNTRUNCATED_REPO_READ_PREFIXES)

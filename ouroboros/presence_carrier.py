@@ -626,7 +626,7 @@ def saved_turn_record(task: Mapping[str, Any], drive_root: Any, *, carried: Any 
         base.pop(key, None)
     base.update({key: copy.deepcopy(task[key]) for key in _QUEUE_FACTS if key in task})
     base.update(id=task_id, type="presence", source="presence", _is_direct_chat=True, _presence_turn=True,
-                chat_id=task.get("chat_id", base.get("chat_id")), context_requires_development=False)
+                chat_id=task.get("chat_id", base.get("chat_id")))
     metadata = base["metadata"] = dict(base.get("metadata") or {})
     metadata["presence_request_waits"] = False  # no request waits on saved work: its poll and replay read the row
     if str(base.get("workspace_root") or "").strip() and not metadata.get("resource_intent"):
@@ -972,7 +972,7 @@ def carry_saved_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_root
                  "_is_direct_chat": True, "status": str(ended.get("status") or ""),
                  "reason_code": str(ended.get("reason_code") or ""), "outcome_axes": ended.get("outcome_axes") or {}}]
     if built is not task:  # a seed recovery could not adopt: the turn's own built fields from the row its start wrote
-        task = {**task, **{key: built[key] for key in (*_STORED_FIELDS, "text", "context_requires_development")
+        task = {**task, **{key: built[key] for key in (*_STORED_FIELDS, "text")
                            if key in built}}
     task.pop(PRESENCE_RUN_KEY, None)
     metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}

@@ -35,7 +35,7 @@ from ouroboros.tool_capabilities import (
     requested_result_view, routing_action_for_tool, completion_control_call, substantive_tool_calls,
 )
 from ouroboros.tool_result_delivery import (
-    FitCandidate, prepare_producer_sources, project_tool_result_batch, reader_text, render_result_view,
+    FitCandidate, delivery_notes, prepare_producer_sources, project_tool_result_batch, reader_text, render_result_view,
     split_allowance, typed_result_facts, with_delivery_note, with_producer_source,
 )
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
@@ -1457,13 +1457,12 @@ def process_tool_results(
     for exec_result in results:
         record_tool_activity(ctx, exec_result)
     from ouroboros.artifacts import task_id_for_artifacts
-    from ouroboros.mark_anchors import anchored_note
     from ouroboros.delegation_knowledge_index import with_knowledge_index
 
-    # A mark the mind tied to an action trails what the mind sees of that call, once per task: a
-    # delivery note measured with the batch and kept beside the retained producer payload, so the
+    # What the host adds to a call (``delivery_notes``) trails what the mind sees of it: a delivery
+    # note measured with the batch; a mark's note keeps the clean producer payload beside it, so the
     # host readers below (acknowledgements, receipts, result review) parse the result without it.
-    notes = [anchored_note(ctx, row["fn_name"], row.get("tool_args") or {}) for row in results]
+    notes = delivery_notes(ctx, results)
     results = prepare_producer_sources(with_knowledge_index(ctx, results), getattr(ctx, "drive_root", None),
                                        task_id_for_artifacts(ctx) if ctx is not None else "", notes)
     review_updates, review_pending = [], {}

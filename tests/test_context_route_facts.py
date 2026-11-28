@@ -24,8 +24,8 @@ def evidence(monkeypatch):
 def core(root, *, memory=False):
     section = HostSection("runtime", "## Runtime\n" + "observed details " * 6000,
                           "## Runtime\nThe operative facts.")
-    return fit.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", architecture_md="# Architecture",
-        development_md="# Development", docs_need_development=False, semi_stable_text="IDENTITY",
+    return fit.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", body_map="# Architecture",
+        development_md="# Development", semi_stable_text="IDENTITY",
         dynamic_text=section.full_text, user_content_json=json.dumps("Exact owner words."),
         dynamic_sections=(section,), section_root=str(root), section_task_id="route-facts-test",
         memory_view_json=memory_view.snapshot_json(syn.snapshot(story=syn.pages(3, 4000))) if memory else "")

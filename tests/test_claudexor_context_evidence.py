@@ -394,7 +394,7 @@ def _built(monkeypatch, root, resolver_for, task=TASK):
     monkeypatch.setattr(config, "DATA_DIR", root)
     monkeypatch.setattr(server_runtime, "apply_runtime_provider_defaults", lambda s: (s, False, []))
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: root)
-    core = cf.ContextCore("Core governance. " * 4000, "", "", "", "", "", '"Assignment"', False)
+    core = cf.ContextCore("Core governance. " * 4000, "", "", "", "", "", '"Assignment"')
     with context_timing.measured_sections():
         plan = cf.build_context_fit_plan(None, core, task, preferred_mode="max", route_resolver=resolver_for(task))
         return plan, context_timing.section_spans()
@@ -475,7 +475,7 @@ def test_a_cold_starts_failed_route_read_answers_for_the_route_it_asked_about(tm
         state["route"].update(active_model=task["model"], active_model_override=MODEL)
     resolver, effort = owner_wait.context_start_route(SimpleNamespace(task_metadata={}), task, state, "high")
     core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity",
-                          "Facts", '"Assignment"', False)
+                          "Facts", '"Assignment"')
     plan = cf.build_context_fit_plan(None, core, task, preferred_mode="max", route_resolver=resolver,
                                      reasoning_effort=effort)
     assert (plan.model, plan.provider, plan.status, plan.window_tokens) == (MODEL, "claudexor", "failed", 0)
@@ -501,7 +501,7 @@ def test_a_late_answer_on_another_provider_walks_again_only_where_the_request_sh
         for n in range(60)]  # small enough for a custom catalog to carry
     snap = syn.snapshot(room_facts=syn.room("1", lane2=100), conversations=[], story=syn.pages(10, 2_000))
     core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity", "Facts",
-                          json.dumps("Assignment. " + "Retained evidence. " * 1_000), False,
+                          json.dumps("Assignment. " + "Retained evidence. " * 1_000),
                           memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(cf, "_context_route", lambda _task: ({"provider": "claudexor", "model": "fixture"}, {}))
@@ -1261,7 +1261,7 @@ def _owner_mode_build(monkeypatch, root, mode, windows, snapshot, *, early=True)
         calls.append(1)
         return cf.resolve_context_fit_route(task, allow_fetch=allow_fetch)
     core = cf.ContextCore("Core governance. " * 1500, "BIBLE text. " * 300, "ARCH text. " * 800, "DEV text. " * 300,
-                          "Semi stable.", "Dynamic.", '"Assignment"', False, memory_view_json=snapshot_json(snapshot))
+                          "Semi stable.", "Dynamic.", '"Assignment"', memory_view_json=snapshot_json(snapshot))
     task = {"model": MODEL, "model_role": "main", "task_metadata": {}}
     plan = cf.build_context_fit_plan(None, core, task, preferred_mode=mode, route_resolver=resolver(task, counted))
     return plan, len(calls)

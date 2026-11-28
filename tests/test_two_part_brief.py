@@ -216,15 +216,20 @@ def _fixture_js(lines: int, word: str = "fixture") -> bytes:
     return "".join(f"// {word} line {index:05d}: " + "x" * 60 + "\n" for index in range(lines)).encode()
 
 
-# (comment-touched file lines, added test file lines or 0, window, the pre-PR target's delivery), measured against the
+# The delivery witnesses below were first pinned to what the target before razzant/ouroboros#4325 delivered. The
+# resident Body Map change then added governance text every body packet inlines, deliberately: BIBLE.md +402
+# characters and the change-review checklist +903 (both approved by the owner), chapter 10's Closed roads +1,060,
+# the books' entry lines and the Reference Atlas line +242; about 650 tokens. The expectations are re-measured to
+# what the packet delivers with that text (28 Nov 2026, against the target at ca7009c149c1, whose own boundary is
+# named beside each): one line of the fixture, or one 250-token step of the window, less and the witness fails.
 
-
-PRE_PR_DELIVERY = [
+# (comment-touched file lines, added test file lines or 0, window, the delivery held)
+MEASURED_DELIVERY = [
     (900, 0, 131_072, "full"),
     (150, 220, 100_000, "diff"),
-    (150, 302, 100_000, "diff"),     # the target's last fitting size: a larger packet fixed cost refuses it
-    (150, 320, 100_000, "refused"),  # both refuse: the control that keeps the boundary honest
-    (306, 0, 100_000, "full"),       # the target's last whole-source size at this window
+    (150, 279, 100_000, "diff"),     # the last fitting size (that target: 305): a larger fixed cost refuses it
+    (150, 320, 100_000, "refused"),  # refused there and here: the control that keeps the boundary honest
+    (285, 0, 100_000, "full"),       # the last whole-source size at this window (that target: 311)
     (312, 0, 100_000, "diff"),
     (900, 0, 256_000, "full"),       # roomy control
 ]
@@ -234,21 +239,19 @@ FIXTURE_SENTINEL = "// fixture line 00007: "  # inside the source, outside the d
 RANK = {"refused": 0, "diff": 1, "full": 2}
 
 
-def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(tmp_path, monkeypatch):
-    """The expectations in ``PRE_PR_DELIVERY`` are what the pre-PR target (razzant/ouroboros, with its own
-    governance_context, context_layout and governance documents; measured 27 Nov 2026 at bcac9f84126b, ad9e98f10198
-    and a4c694fb4f21, as the boundaries move with the target's documents) delivered to a packet seat for exactly
-    these bytes ("full" = the touched file's whole source, "diff" = the diff with the snapshot omitted, "refused" = no
-    packet). The subject is frozen synthetic bytes; the books,
+def test_a_tool_less_packet_delivers_at_least_its_measured_delivery(tmp_path, monkeypatch):
+    """The expectations in ``MEASURED_DELIVERY`` are what a packet seat is delivered for exactly these bytes ("full" =
+    the touched file's whole source, "diff" = the diff with the snapshot omitted, "refused" = no packet), measured
+    as the comment above the table says. The subject is frozen synthetic bytes; the books,
     their navigation, tier-1 governance, the builder and the cold sizing are the real ones, which is
     what this guards. A failure means the packet's fixed cost (navigation, tier-1 governance, the selected sections)
-    grew past what the pre-PR target spent, so a change now loses its snapshot or its review. A legitimate
-    re-measure follows only a deliberate change of that fixed cost, against the same target."""
+    grew past what was measured, so a change now loses its snapshot or its review. A legitimate
+    re-measure follows only a deliberate change of that fixed cost, with its cause stated by source."""
     from ouroboros.tools import review as review_tool
     from ouroboros.tools.registry import ToolContext
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    for index, (touched, added, window, delivered) in enumerate(PRE_PR_DELIVERY):
+    for index, (touched, added, window, delivered) in enumerate(MEASURED_DELIVERY):
         _installed, subject = _installed_and_subject(tmp_path / str(index))
         (subject / "web" / "modules").mkdir(parents=True)
         (subject / "web" / "modules" / "fixture.js").write_bytes(_fixture_js(touched))
@@ -265,7 +268,7 @@ def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(t
         frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(subject), "index", surface="commit_gate",
                                                        governance_root=str(root), layer="body"))
         monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: window)
-        where = f"packet fixed cost grew past the pre-PR target's: {(touched, added, window)}"
+        where = f"packet fixed cost grew past the measured delivery: {(touched, added, window)}"
         try:
             text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive",
                                         goal="Review these edits")["system"]
@@ -274,7 +277,7 @@ def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(t
             continue
         omitted = "Full post-change snapshots were omitted" in text
         got = "diff" if omitted else "full"
-        assert RANK[got] >= RANK[delivered], where  # strictly better than the target is not a failure
+        assert RANK[got] >= RANK[delivered], where  # strictly better than measured is not a failure
         staged = text.split("## Staged diff\n\n", 1)[1].split("\n\n## Changed files", 1)[0].strip()
         # the delivered diff section is exactly the frozen full or -U0 rendering: headers, order and context included
         assert staged in (frozen.diff_text.strip(), frozen.render_prompt_diff(0).strip()), where
@@ -441,11 +444,13 @@ def test_a_chapter_opening_naming_a_touched_file_is_sent_once(tmp_path, monkeypa
 
 # Real history replayed by a reviewer (rev-pr2j), frozen as synthetic files of the same names and sizes and the same
 # numbers of changed lines: (paths with (added, deleted, bytes before), window, the target's rung, sections it selected).
+# The window is the smallest 250-token step at which this packet carries both sections (``MEASURED_DELIVERY``'s
+# comment; that target: 100,000 for both).
 HISTORY = [
-    ({"docs/DESIGN.md": (1, 1, 321_047), "web/ui.css": (0, 2, 120_198)}, 100_000, "diff",
+    ({"docs/DESIGN.md": (1, 1, 321_047), "web/ui.css": (0, 2, 120_198)}, 100_250, "diff",
      ("Navigation and shared UI contracts", "opening block 2 (excerpt: its lines naming a touched file)")),
     ({"docs/DESIGN.md": (1, 1, 317_362), "tests/test_phone_keyboard_recovery_browser.py": (5, 5, 81_942),
-      "tests/test_ui_coherence_browser.py": (1, 1, 89_734), "web/ui.css": (1, 1, 113_592)}, 100_000, "diff",
+      "tests/test_ui_coherence_browser.py": (1, 1, 89_734), "web/ui.css": (1, 1, 113_592)}, 101_250, "diff",
      ("Navigation and shared UI contracts", "opening block 2 (excerpt: its lines naming a touched file)")),
 ]
 
@@ -455,7 +460,7 @@ def test_replayed_history_keeps_the_target_sections_and_directory_rows(tmp_path,
                                                                       sections):
     """A chapter opening already carried by the packet navigation is not selected again, so the change-specific share
     goes to the sections and directory rows the pre-PR target selected for the same paths (measured 27 Nov 2026 at
-    7981018bb40e with the target's governance code and documents)."""
+    7981018bb40e with the target's governance code and documents), at the window ``HISTORY`` holds each to."""
     from ouroboros.tools import review as review_tool
     from ouroboros.tools.registry import ToolContext
 
@@ -514,10 +519,11 @@ def test_a_packet_sendable_with_the_resident_opening_selected_stays_sendable(mon
     assert "REVIEW_BLOCKED" in error
 
 
-def test_a_many_file_change_gets_every_full_body_where_the_pre_pr_target_did(tmp_path, monkeypatch):
-    """Thirteen synthetic web modules with one trailing comment each: at 262,750 the pre-PR target (7981018bb40e,
-    measured with its own governance code and documents) sends all thirteen full bodies; so must this packet, whose
-    changed-files list points at the file headings it already carries instead of repeating thirteen paths."""
+def test_a_many_file_change_gets_every_full_body_at_its_measured_window(tmp_path, monkeypatch):
+    """Thirteen synthetic web modules with one trailing comment each: at 263,750, the smallest 250-token step where
+    this packet fits them (``MEASURED_DELIVERY``'s comment; the target before #4325 and at ca7009c149c1: 262,750),
+    it sends all thirteen full bodies, its changed-files list pointing at the file headings it already carries
+    instead of repeating thirteen paths."""
     from ouroboros.tools import review as review_tool
     from ouroboros.tools.review_admission import CHANGED_FILES_ARE_HEADINGS
     from ouroboros.tools.registry import ToolContext
@@ -539,7 +545,7 @@ def test_a_many_file_change_gets_every_full_body_where_the_pre_pr_target_did(tmp
     ctx._review_iteration_count = 0
     frozen = freeze_subject(ctx, ReviewSubjectSpec("system_repo", str(subject), "index", surface="commit_gate",
                                                    governance_root=str(root), layer="body"))
-    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 262_750)
+    monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: 263_750)
     text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
     assert "Full post-change snapshots were omitted" not in text
     assert all(f"\n### {path}\n" in text for path in paths) and CHANGED_FILES_ARE_HEADINGS in text

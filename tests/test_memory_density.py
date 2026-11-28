@@ -61,9 +61,8 @@ def test_startup_plan_names_the_view_before_selecting_a_density(tmp_path, monkey
 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **kw: ([], ""))
-    core = context_fit.ContextCore(base_prompt="p", bible_md="b", architecture_md="a", development_md="d",
-                                  semi_stable_text="s", dynamic_text="y", user_content_json='"hello"',
-                                  docs_need_development=False)
+    core = context_fit.ContextCore(base_prompt="p", bible_md="b", body_map="a", development_md="d",
+                                  semi_stable_text="s", dynamic_text="y", user_content_json='"hello"')
     seen = []
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *a, **kw: seen.append(kw["view_kind"]) or 1.0)
     resolver = lambda *a, **kw: ({"provider": "openai", "model": "model", "base_url": "", "use_local": False},
