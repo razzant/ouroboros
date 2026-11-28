@@ -275,14 +275,17 @@ class MemoryViewSnapshot:
     def active(self) -> bool:
         return self.store_status.get("state") == "active"
 
-    def piece(self, key: Any, make: Callable[[], str]) -> int:
+    def piece(self, key: Any, make: Callable[[], str], count: Optional[Callable[[], int]] = None) -> int:
         """The characters one local form of this view adds to a request's JSON, made once for this snapshot by building
-        its text (``view_pieces``); a whole text's price is their sum (``room_chars``). Only the count stays, as the
+        its text (``view_pieces``), or by ``count`` where that form has its own exact price (this room's block,
+        ``room_block_chars``); a whole text's price is their sum (``room_chars``). Only the count stays, as the
         floor prices far more forms than it delivers: delivery builds its texts again (``render_story`` and
         ``render_room``). A non-field attribute like the floor's element table: ``snapshot_json``, equality and
         ``dataclasses.replace`` never see it, and it lives as long as the snapshot object."""
         pieces = self.__dict__.setdefault("_pieces", {})
-        if key not in pieces:
+        if key not in pieces and count is not None:
+            pieces[key] = count()
+        elif key not in pieces:
             counted("view_pieces", key=(id(self), key))
             pieces[key] = json_chars(make())
         return pieces[key]
@@ -1434,14 +1437,10 @@ def room_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, f
     sizes = snapshot.__dict__.setdefault("_room_sizes", {})
     key = tuple((step, ids) for step, ids in level.addressed if step in (*_ROOM_STEPS, 'F6w', 'F6g', 'F6a'))
     if key not in sizes:
-        gone, blocks = dict(level.addressed), snapshot.__dict__.setdefault("_room_blocks", {})
+        gone = dict(level.addressed)
 
         def price(piece, make):  # this room's block from its runs (``room_block_chars``), every other piece whole
-            if piece[0] != "room":
-                return snapshot.piece(piece, make)
-            if piece not in blocks:
-                blocks[piece] = room_block_chars(snapshot, gone)
-            return blocks[piece]
+            return snapshot.piece(piece, make, (lambda: room_block_chars(snapshot, gone)) if piece[0] == "room" else None)
         chars = [count for count in _room_parts(snapshot, gone, price) if count]
         sizes[key] = sum(chars) + 4 * max(0, len(chars) - 1), bool(chars)
     total, present = sizes[key]

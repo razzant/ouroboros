@@ -802,3 +802,21 @@ def test_a_saved_level_naming_a_step_twice_explains_the_start_room_alike():
                                          output_reserve=100, ratio=1.0, non_memory_tokens=fixed, level=level,
                                          prices=prices).note.splitlines()[-1] for prices in (None, {})]
         assert lines[0] == lines[1] and words in lines[0], (room, lines)
+
+
+def test_the_resident_facts_row_reads_the_room_price_the_fit_kept(tmp_path, monkeypatch):
+    """The facts row's "this room's block" (``context_view_facts._resident_text``) reads the one price store the fit
+    filled: after a fit it draws the room whole 0 times, as on the development branch, and on a snapshot no fit priced
+    it prices the block from its runs (0 draws again), the same number."""
+    from ouroboros import context_view_facts as facts
+
+    core = _core(tmp_path, connections=2_000, snap=_snapshot(marks=12))
+    plan = fit_on(_env(core), core, window=150_000, mode="max")()
+    snapshot = mv.snapshot_from_json(core.memory_view_json)
+    level = mf.kept_level(snapshot, plan.projection(plan.initial_mode).memory_facts)
+    draws, real = [], mv._room_text
+    monkeypatch.setattr(mv, "_room_text", lambda *a, **kw: draws.append(1) or real(*a, **kw))
+    priced = facts._resident_text(snapshot, level)
+    unpriced = facts._resident_text(replace(snapshot), level)
+    assert "this room's block" in priced and draws == []
+    assert priced.split("this room's block")[1] == unpriced.split("this room's block")[1]

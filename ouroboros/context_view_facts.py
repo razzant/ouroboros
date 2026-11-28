@@ -249,7 +249,8 @@ def _resident_text(snapshot, level):
     room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
     if room:
         steps = tuple((step, gone.get(step, ())) for step in mv._ROOM_STEPS)
-        sizes.append(f"this room's block {floor.tokens_of(snapshot.piece(('room', steps), lambda: mv._room_text(room, gone))):,}")
+        chars = snapshot.piece(("room", steps), lambda: mv._room_text(room, gone), lambda: mv.room_block_chars(snapshot, gone))
+        sizes.append(f"this room's block {floor.tokens_of(chars):,}")  # the price ``room_chars`` keeps, never a draw
     if not sizes:
         return ""
     return (f"; resident here, measured {utc_now_iso().replace('T', ' ')[:16]} UTC ({RESIDENT_BASIS}): "
