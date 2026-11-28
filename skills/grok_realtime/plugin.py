@@ -428,9 +428,9 @@ class GrokSession(JsonSession):
                     'response.audio_transcript.done', 'response.output_audio_transcript.done',
                     'conversation.item.input_audio_transcription.completed'}:
             owner = kind.startswith('conversation.')
-            # R6: owner "completed" events can still have in_progress status.
-            # Deltas append; only a full transcript replaces the earlier words.
-            final = (event.get('status') == 'completed' if owner else kind.endswith('.done'))
+            # Owner "completed" is final unless it says otherwise: R6 (Oct 2026) saw status in_progress; the
+            # 28.11.2026 wire sends one completed per utterance with no status. Deltas append; a transcript replaces.
+            final = (event.get('status') in {None, 'completed'} if owner else kind.endswith('.done'))
             transcripts = self.input_transcripts if owner else self.output_transcripts
             transcripts.discard(item) if final else transcripts.add(item)
             if not owner and final:
