@@ -638,6 +638,7 @@ def _start_supervisor_liveness_watchdog(
         wedged_tasks: set[str] = set()
         turn_phases = _TurnPhaseWatch(interval)
         asgi_beat = AsgiLateWatch(_loop_thread_stack, has_ws_clients)
+        pass_started: Optional[float] = None  # when this watchdog's previous pass began
 
         def stopped() -> bool:  # this generation ended (its own token), its lifespan stops or the process restarts
             return (_restart_requested.is_set() or _supervisor_stop.is_set()
@@ -645,6 +646,7 @@ def _start_supervisor_liveness_watchdog(
 
         while not stopped():
             slept_since = time.monotonic()
+            last_pass = 0.0 if pass_started is None else slept_since - pass_started  # the previous pass's own time
             time.sleep(interval)
             if stopped():  # asked again on waking: an ended generation or a begun teardown reports nothing
                 break
@@ -653,12 +655,12 @@ def _start_supervisor_liveness_watchdog(
             # heartbeat in agent.py), so a wall-clock jump — NTP step, DST/timezone
             # change, manual set, VM resume — can neither fabricate a stall/wedge
             # nor mask a real one on either half.
-            now = time.monotonic()
+            now = pass_started = time.monotonic()
             # (0) The ASGI loop's own beat, looked at FIRST: its stamp and stack are taken before any row of
             # this pass is written, so a beat that resumes while a sink below waits on the disk cannot erase
-            # the episode; the row, with this watchdog's own lateness, is journaled at the end of the pass.
+            # the episode; the row, with this watchdog's own timing, is journaled at the end of the pass.
             try:
-                late = asgi_beat.tick(now, now - slept_since - interval)
+                late = asgi_beat.tick(now, now - slept_since - interval, last_pass)
                 asgi_row = {"ts": utc_now_iso(), **late} if late is not None else None
             except Exception:
                 asgi_row = None

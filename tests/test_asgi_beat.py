@@ -6,8 +6,8 @@ which a beat falls a whole interval behind while browser sockets are open: never
 time, never without an open socket, never twice for one episode, never while the server stops; a watchdog
 whose generation ended, whose lifespan stopped or whose process restarts while it slept writes no row at all.
 The watchdog looks at the beat before it writes any row of its pass, and the row carries the watchdog's own
-lateness (a blocked loop or a process that stood still). Every case runs the real heartbeat on a real event
-loop thread, or the real watchdog thread on a hand-moved clock.
+timing (how late its sleep ended, how long its previous pass ran). Every case runs the real heartbeat on a real
+event loop thread, or the real watchdog thread on a hand-moved clock.
 """
 from __future__ import annotations
 
@@ -92,26 +92,27 @@ def test_a_blocked_loop_gives_one_row_with_its_stack_and_a_healthy_or_unwatched_
     release = threading.Event()
     try:
         _until(lambda: beat.stamp is not None)
-        assert watch.tick(time.monotonic(), 0.0) is None, "a loop that beats on time has no row"
+        assert watch.tick(time.monotonic(), 0.0, 0.0) is None, "a loop that beats on time has no row"
         serving.hold(release)
         time.sleep(3 * BEAT_SEC)  # past due by more than one whole beat
-        row = watch.tick(time.monotonic(), 0.0)
+        row = watch.tick(time.monotonic(), 0.0, 0.0)
         assert row is not None and row["type"] == "asgi_loop_late" and row["resumed"] is False, row
-        assert row["overdue_sec"] >= 0.0 and row["watchdog_late_sec"] == 0.0
-        assert set(row) <= {"type", "overdue_sec", "watchdog_late_sec", "resumed", "stack", "stack_truncated"}
+        assert row["overdue_sec"] >= 0.0 and row["watchdog_late_sec"] == 0.0 and row["watchdog_pass_sec"] == 0.0
+        assert set(row) <= {"type", "overdue_sec", "watchdog_late_sec", "watchdog_pass_sec", "resumed", "stack",
+                            "stack_truncated"}
         assert any(frame.endswith(" in _hold_the_loop") for frame in row["stack"]), row["stack"]
-        assert watch.tick(time.monotonic(), 0.0) is None, "one episode, one row"
+        assert watch.tick(time.monotonic(), 0.0, 0.0) is None, "one episode, one row"
         stamp = beat.stamp
         release.set()
         _until(lambda: beat.stamp != stamp)
-        assert watch.tick(time.monotonic(), 0.0) is None, "the loop beats on time again"
+        assert watch.tick(time.monotonic(), 0.0, 0.0) is None, "the loop beats on time again"
         sockets_open[0] = False
         release.clear()
         serving.hold(release)
         time.sleep(3 * BEAT_SEC)
-        assert watch.tick(time.monotonic(), 0.0) is None, "no open socket: nobody waits on this loop's beat"
+        assert watch.tick(time.monotonic(), 0.0, 0.0) is None, "no open socket: nobody waits on this loop's beat"
         sockets_open[0] = True
-        assert watch.tick(time.monotonic(), 0.0)["type"] == "asgi_loop_late", "the same episode, now with a socket"
+        assert watch.tick(time.monotonic(), 0.0, 0.0)["type"] == "asgi_loop_late", "the same episode, now with a socket"
     finally:
         release.set()
         serving.stop()
@@ -129,9 +130,9 @@ def test_a_stopping_server_has_no_row_and_the_same_late_beat_rows_once_it_serves
     beat.stamp, beat.interval, beat.ident = now - 100.0, 15.0, threading.get_ident()
     watch = asgi_beat.AsgiLateWatch(server_liveness._loop_thread_stack, lambda: True, beat)
     latched.set()
-    assert watch.tick(now, 0.0) is None, f"{flag} is latched: the server is stopping"
+    assert watch.tick(now, 0.0, 0.0) is None, f"{flag} is latched: the server is stopping"
     latched.clear()
-    row = watch.tick(now, 0.0)
+    row = watch.tick(now, 0.0, 0.0)
     assert row is not None and row["type"] == "asgi_loop_late" and row["overdue_sec"] == 85.0, row
 
 
@@ -205,13 +206,13 @@ def test_the_liveness_watchdog_journals_a_late_asgi_beat_once(monkeypatch):
     [(path, row)] = rows
     assert PurePath(path).as_posix().endswith("logs/supervisor.jsonl")
     assert row["type"] == "asgi_loop_late" and row["overdue_sec"] == 85.0 and row["resumed"] is False
-    assert row["watchdog_late_sec"] == 0.0, "the watchdog woke on time: the loop stood while the process ran"
+    assert row["watchdog_late_sec"] == 0.0 and row["watchdog_pass_sec"] == 0.0, "a sleep on time, no pass before it"
     assert row["stack"] and "ts" in row
 
 
 def test_a_process_that_stood_still_shows_in_the_watchdogs_own_lateness(monkeypatch):
     """The watchdog's own sleep ends 40 s late, as when the whole process (or the machine) stood still: the row
-    says so, where a loop blocked while other threads ran says 0 (above)."""
+    says so, where a watchdog whose sleep ended on time says 0 (above); its passes stayed short."""
     clock, stop = _HandClock(time.monotonic() + 1000.0, oversleep=40.0), threading.Event()
     rows = _watch_a_late_beat(monkeypatch, clock, stop)
     try:
@@ -220,6 +221,34 @@ def test_a_process_that_stood_still_shows_in_the_watchdogs_own_lateness(monkeypa
         _end_watchdog(stop)
     [late] = [row for _path, row in rows if row["type"] == "asgi_loop_late"]
     assert late["watchdog_late_sec"] == 40.0 and late["overdue_sec"] == 126.0, late
+    assert late["watchdog_pass_sec"] == 0.0, late
+
+
+@pytest.mark.parametrize("stood", [0.0, 40.0])
+def test_a_pass_that_stood_still_shows_in_the_next_rows_watchdog_pass(monkeypatch, stood):
+    """The watchdog's pass stands ``stood`` seconds inside its own supervisor stall row (a journal waiting on the
+    disk, or the process frozen in that pass); every sleep ends on time. The next look's row carries those seconds
+    as ``watchdog_pass_sec`` and none of them as ``watchdog_late_sec``: a short pass reads 0, its sleep not counted."""
+    clock, stop, looks = _HandClock(time.monotonic() + 1000.0), threading.Event(), []
+
+    def sleep_on_time() -> None:
+        if not looks:
+            asgi_beat.ASGI_BEAT.stamp = clock.mono  # the serving loop beats just before the first look
+        looks.append(clock.mono)
+        clock.mono += 1.0  # the one-second sleep ends on time
+
+    def the_pass_stands(row: dict) -> None:
+        if row["type"] == "supervisor_loop_stall":
+            clock.mono += stood
+
+    clock.on_sleep = sleep_on_time
+    rows = _watch_a_late_beat(monkeypatch, clock, stop, supervisor_age=100.0, on_row=the_pass_stands)
+    try:
+        _until(lambda: any(row["type"] == "asgi_loop_late" for _path, row in rows))
+    finally:
+        _end_watchdog(stop)
+    [late] = [row for _path, row in rows if row["type"] == "asgi_loop_late"]
+    assert late["watchdog_pass_sec"] == stood and late["watchdog_late_sec"] == 0.0, late
 
 
 @pytest.mark.parametrize("ending", ["generation", "_supervisor_stop", "_restart_requested"])

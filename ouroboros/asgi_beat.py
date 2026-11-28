@@ -72,10 +72,12 @@ class AsgiLateWatch:
     interval (a beat missed: the heartbeat's own interval, no other number) while ``has_clients`` says browser
     sockets are open and the server is not stopping (a lifespan teardown, a process exit or a restart: their own
     work holds the loop), else None. An episode is one beat stamp: the next beat ends it, so a stamp is reported
-    at most once. The row carries ``overdue_sec``; ``watchdog_late_sec``, how much later than its own interval
-    the watchdog woke for this look (``woke_late``): near zero when the loop stood while the process ran (a
-    blocked loop), about the whole stall when the process or the machine stood still too (the server's twin of
-    the browser watchdog's ``tick_gap_ms``); the loop thread's stack from the watchdog's code-only walker
+    at most once. The row carries ``overdue_sec``; the watchdog's own timing, which with its interval adds up to
+    the gap since its previous look (the server's twin of the browser watchdog's ``tick_gap_ms``):
+    ``watchdog_late_sec``, how much later than that interval its sleep ended (``woke_late``; near zero: the sleep
+    was on time, about the whole stall when the process or the machine stood still during it), and
+    ``watchdog_pass_sec``, how long its previous pass ran (``last_pass``; a freeze or a journal wait inside that
+    pass shows here); the loop thread's stack from the watchdog's code-only walker
     ``stack`` (bounded like a stall row; ``stack_truncated`` when cut); and ``resumed``, true when the loop beat
     again before its stack was taken, so that stack shows where the loop went on, not where it waited. No row
     while the beat is on time, no socket is open or nothing beats."""
@@ -84,7 +86,7 @@ class AsgiLateWatch:
         self._stack, self._has_clients, self._beat = stack, has_clients, beat
         self._reported: Optional[float] = None
 
-    def tick(self, now: float, woke_late: float) -> Optional[dict]:
+    def tick(self, now: float, woke_late: float, last_pass: float) -> Optional[dict]:
         beat = self._beat
         stamp, interval = beat.stamp, beat.interval
         if stamp is None or stamp == self._reported or now - stamp - interval < interval:
@@ -98,5 +100,6 @@ class AsgiLateWatch:
         stack = self._stack(beat.ident, facts=flags)
         self._reported = stamp
         return {"type": "asgi_loop_late", "overdue_sec": round(now - stamp - interval, 1),
-                "watchdog_late_sec": round(max(0.0, woke_late), 1), "resumed": beat.stamp != stamp,
+                "watchdog_late_sec": round(max(0.0, woke_late), 1), "watchdog_pass_sec": round(max(0.0, last_pass), 1),
+                "resumed": beat.stamp != stamp,
                 **({"stack_truncated": True} if flags else {}), **({"stack": stack} if stack else {})}
