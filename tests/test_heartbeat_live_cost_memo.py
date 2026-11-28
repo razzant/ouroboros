@@ -3,8 +3,8 @@
 E3 (FINAL_PLAN): handling a heartbeat opens no store transaction — no ``current.sqlite``
 custody snapshot, no ``usage.sqlite`` read, no path resolution — and stamps liveness from
 the beat's own source time, so a drained backlog never makes a task look freshly alive.
-The root's cost figure on the frame is the one ``LIVE_ROOT_COSTS`` holds; the supervisor's
-once-per-turn usage flush reads it again only for a root whose money moved (its usage) or
+The root's cost figure on the frame is the one ``LIVE_ROOT_COSTS`` holds; a pass of the
+display-projection duty, off the loop, reads it again only for a root whose money moved (its usage) or
 that a heartbeat met for the first time. Each guard is pinned both ways: an unchanged pass
 reads nothing, a change still produces its one read.
 """

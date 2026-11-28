@@ -22,11 +22,14 @@ intake on 27.11.2026:
   observations, with their operation, outcome and generation checks.
 
 A mark made while a pass runs is the next pass's; a pass that cannot start leaves its work due. The
-state pair keeps its synchronous writer (``supervisor.state._save_state_unlocked``), in this thread now.
-All of it is display and diagnostics, never authority: admission, paid dispatch, caps and receipts keep
-their synchronous owners and read ``usage.sqlite``, never ``state.json`` (ARCHITECTURE §10.28). While
-this duty itself stands, the rows other duties' overruns queue wait for it in memory: two per overrunning
-pass.
+state pair keeps its synchronous writer (``supervisor.state._save_state_unlocked``), in this thread now and
+under ``locks/state.lock``: while a pass stands inside that replace, the loop's own state writes wait up to
+that lock's timeout (``update_state``: 4 s) and are then refused typed, and an owner message proceeds
+without its activity stamp (``server.py``: "Owner activity not stamped"); the loop once stood through the
+whole replace itself. All of it is display and diagnostics, never authority: admission, paid dispatch, caps
+and receipts keep their synchronous owners and read ``usage.sqlite``, never ``state.json`` (ARCHITECTURE
+§10.28). While this duty itself stands, the rows other duties' overruns queue wait for it in memory: two per
+overrunning pass.
 
 The process's end takes ONE last pass (``drain``), after the pass in flight and inside the stop grace: the
 loop's context (``bind``) gives it the budget mark of a turn a stop or a restart ended before its look,
