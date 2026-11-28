@@ -1,4 +1,4 @@
-# Ouroboros v7.13.0 — Architecture & Reference
+# Ouroboros v7.13.1-alpha.0 — Architecture & Reference
 
 This is the map of my body (BIBLE P6): what I am made of, what each part lets me do, how I reach it and which limits change my choices. Each chapter opens with that answer for its part; the rest of the chapter is the engineering manual I read before I change that part, §10 holds the invariants every part keeps and the roads already closed, and `ouroboros/domains.toml` names the manuals that own each module domain. This present-tense map explains structure and rationale; module docstrings own mechanisms. Its three mandatory layers: **Structural**, components/modules/endpoints/flows/boundaries; **Operational**, the complete registry of logs/state/configs/paths/environment variables/tools, their locations and use; **Rationale**, why non-trivial decisions hold. Replace affected descriptions. Guards, review and lifecycles need no historical search. History: README.md, tags and Git.
 
