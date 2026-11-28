@@ -274,9 +274,13 @@ def test_chat_inject_reviewed_skill_cannot_bind_panic_owner(tmp_path: pathlib.Pa
 
 @pytest.mark.parametrize("ids,code,stopped", [((17, 17), 202, True), ((0, 0), 503, False), ((17, -1005), 503, False)])
 def test_first_panic_on_a_fresh_install_stops_and_binds_nobody(tmp_path: pathlib.Path, panic_bridge, ids, code,
-                                                                stopped) -> None:
+                                                                stopped, monkeypatch) -> None:
+    from ouroboros import store
     from supervisor import state
 
+    # Opening the state store probes the volume through kernel32 on Windows (the WAL gate), a native call the
+    # panic_bridge's native guard denies for its fake-PID tests: the probe is not what this test is about.
+    monkeypatch.setattr(store, "_filesystem_type", lambda _path: None)
     _seed_token(tmp_path, permissions=["inject_chat"])
     state.init(tmp_path)
     state.init_state()
