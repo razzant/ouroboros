@@ -121,12 +121,32 @@ def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, conten
         raw_actor_records=[],
         review_profile="owner_attested",
     )
-    save_review_state(drive_root, skill.name, review_state)
-    marker_path = skill_state_dir(drive_root, skill.name) / "owner_attestation.json"
-    atomic_write_json(marker_path, with_schema_version(
-        {"attested_at": utc_now_iso(), "content_hash": content_hash},
-        SKILL_OWNER_STATE_SCHEMA_VERSION,
-    ))
+    from ouroboros.nano_activation import refusal_words, review_publication
+    from ouroboros.nano_publication import NanoPublicationRefused
+
+    try:  # the verdict acts only once its marker exists: both are one transition
+        with review_publication(drive_root, skill, review_state):
+            # The count may have lent the lane to a later lifecycle job.
+            if getattr(ctx, "_skill_review_lifecycle_guard", False):
+                from ouroboros.skill_review_runner import _can_persist_review_outcome
+
+                if not _can_persist_review_outcome(
+                        drive_root, skill.name, content_hash,
+                        expected_job_id=str(getattr(ctx, "_skill_review_lifecycle_job_id", "") or "")):
+                    raise NanoPublicationRefused("stale", "the attestation no longer owns this publication")
+            save_review_state(drive_root, skill.name, review_state)
+            marker_path = skill_state_dir(drive_root, skill.name) / "owner_attestation.json"
+            atomic_write_json(marker_path, with_schema_version(
+                {"attested_at": utc_now_iso(), "content_hash": content_hash},
+                SKILL_OWNER_STATE_SCHEMA_VERSION,
+            ))
+    except NanoPublicationRefused as exc:
+        happened, step = refusal_words(exc)
+        _sr._note_unactivated(drive_root, skill.name, content_hash, exc)
+        return _sr.SkillReviewOutcome(
+            skill_name=skill.name, status=_sr.STATUS_PENDING, content_hash=content_hash,
+            error=f"owner-attestation was not saved ({exc.reason}). {happened}; {step}. {exc.detail}",
+        )
     skill.review = review_state
     outcome = _sr.SkillReviewOutcome(
         skill_name=skill.name,

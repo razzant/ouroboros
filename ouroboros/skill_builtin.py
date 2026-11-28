@@ -291,12 +291,15 @@ def reseed_changed_builtins(drive_root: pathlib.Path, *, seed_dir: Optional[path
         logger.info("Built-in skill %s version drift (bundled=%s, installed=%s) — re-seeding",
                     seed.name, seed_version, target_version)
         previous = read_install_record(pathlib.Path(drive_root), seed.name) or {}
-        result = install_builtin_skill(
-            seed.name, drive_root=pathlib.Path(drive_root), seed_dir=seed_root,
-            turn_on_when_ready=previous.get("turn_on_when_ready") is True,
-            installed_by=str(previous.get("installed_by") or "ouroboros"),
-            reason=f"app update {target_version} -> {seed_version}",
-        )
+        from ouroboros.nano_activation import catalogue_write_fence
+
+        with catalogue_write_fence(pathlib.Path(drive_root)):  # the app's own bytes: ordered, never counted
+            result = install_builtin_skill(
+                seed.name, drive_root=pathlib.Path(drive_root), seed_dir=seed_root,
+                turn_on_when_ready=previous.get("turn_on_when_ready") is True,
+                installed_by=str(previous.get("installed_by") or "ouroboros"),
+                reason=f"app update {target_version} -> {seed_version}",
+            )
         if result.get("ok"):
             upgraded += 1
         else:
@@ -476,8 +479,11 @@ def _offer_default_builtins(drive: pathlib.Path, seed_root: pathlib.Path, logger
         if (native / f".post-bootstrap-seed-{name}").exists():
             offered.append(name)  # an earlier release offered it; the owner removed it
             continue
-        result = install_builtin_skill(name, drive_root=drive, seed_dir=seed_root, turn_on_when_ready=True,
-                                       installed_by="ouroboros", reason="on by default for this computer")
+        from ouroboros.nano_activation import catalogue_write_fence
+
+        with catalogue_write_fence(drive):
+            result = install_builtin_skill(name, drive_root=drive, seed_dir=seed_root, turn_on_when_ready=True,
+                                           installed_by="ouroboros", reason="on by default for this computer")
         if result.get("ok"):
             offered.append(name)
         else:

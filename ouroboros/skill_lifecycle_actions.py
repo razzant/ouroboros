@@ -120,7 +120,10 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
     """Enable or disable one skill. Enabling establishes the declared packages itself (the
     seam is idempotent, so Enable on an enabled skill repairs it and Enable again retries a
     failure); ``progress`` receives the job's message while packages install. A first Enable is
-    atomic: a failed load saves Off again. Enable on a skill whose saved switch was already On
+    atomic: a failed load saves Off again. A first Enable first asks the common Nano
+    admission (``nano_activation``: the skill's card and any always-in-context body); a
+    refusal leaves the switch untouched, and an admitted one holds the publication fence
+    across the write. Enable on a skill whose saved switch was already On
     is a repair: its failure is answered and the owner's choice stays On. ``enabled`` answers
     the saved switch either way. A repair the live publication could not finish (a companion still failed,
     another awaiting exit, a reload deferred) answers ``ok`` with the reconcile's typed reason, its
@@ -130,6 +133,7 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
     facts = _review_facts(skill, drive_root)
     collision = skill.load_error.lower().startswith("skill name collision:")
     from ouroboros.deployment_extensions import TRUST_SENTENCES, change_refusal, trust_gap
+    from ouroboros.nano_publication import NanoPublicationRefused, source_bytes
 
     if not enabled and (managed := change_refusal(skill.name, "disable")):  # before the collision unload or a write
         return _refusal("Your organization requires it.", 403, code="managed_by_deployment", detail=managed, **facts)
@@ -151,6 +155,10 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
                             detail=grant_gap_sentence(facts["grants"]), **facts)
         from ouroboros.skill_dependencies import dependency_sentence, ensure_skill_dependencies
 
+        try:
+            switch = source_bytes(skill_state_dir_path(drive_root, skill.name) / "enabled.json")
+        except OSError as exc:
+            return _switch_io_failure(drive_root, skill.name, exc, facts)
         deps_status, detail = (prepared_deps if prepared_deps is not None
                                else ensure_skill_dependencies(drive_root, skill, progress=progress))
         if deps_status not in {"installed", "not_required"}:
@@ -164,16 +172,26 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         return _refusal("cannot persist disable while the skill identity collides; rename one directory first", 400,
                         extension_action="extension_unloaded", extension_reason="name_collision", **facts)
     from ouroboros.extension_registry_state import _lifecycle_lock_for
+    from ouroboros.nano_activation import check_skill_switch, refusal_words, skill_switch_publication
     from ouroboros.skill_loader import load_enabled
 
     # Under the lock a companion refresh holds from its final admission through its spawn (never its stop):
     # the refresh reads this choice, or the reconcile below finds its new process and stops it.
-    with _lifecycle_lock_for(skill.name):
-        if enabled and only_if_unset and (choice := owner_switch(drive_root, skill.name)):
-            return _refusal("The saved switch was left as it is.", code={"on": "already_on", "off": "owner_off"}.get(
-                choice, "switch_unreadable"), enabled=_saved_switch(drive_root, skill.name), **facts)
-        was_on = load_enabled(drive_root, skill.name)  # the saved intent before this attempt, not what is live
-        save_enabled(drive_root, skill.name, enabled, actor=actor, reason=reason)
+    try:
+        with skill_switch_publication(skill, drive_root, enabled=enabled), _lifecycle_lock_for(skill.name):
+            if enabled and only_if_unset and (choice := owner_switch(drive_root, skill.name)):
+                return _refusal("The saved switch was left as it is.", code={"on": "already_on", "off": "owner_off"}.get(
+                    choice, "switch_unreadable"), enabled=_saved_switch(drive_root, skill.name), **facts)
+            was_on = load_enabled(drive_root, skill.name)  # the saved intent before this attempt, not what is live
+            if enabled:
+                check_skill_switch(drive_root, skill, switch, repo_path=repo_path)
+            save_enabled(drive_root, skill.name, enabled, actor=actor, reason=reason)
+    except NanoPublicationRefused as exc:
+        happened, step = refusal_words(exc)
+        return _refusal(f"{happened}, so its switch is unchanged; {step}.", 409,
+                        code=f"nano_publication_{exc.reason}", detail=exc.detail, **facts)
+    except OSError as exc:
+        return _switch_io_failure(drive_root, skill.name, exc, facts)
     skill.enabled = enabled
     state = _reconcile(skill, drive_root, repo_path, enabling=enabled and not was_on)
     failed = enabled and state.get("action") == "extension_load_error"
@@ -186,6 +204,13 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         **({"error": "It could not start.", "code": "load_error", "status_code": 409,
             "detail": str(state.get("load_error") or "extension failed to load")} if failed else {}),
     }
+
+
+def _switch_io_failure(drive_root, name, exc, facts):
+    # A file failure says nothing about size; the switch is reported as it reads now.
+    return _refusal("A file could not be read or written while saving its switch.", 409,
+                    code="switch_io_failed", detail=f"{type(exc).__name__}: {exc}",
+                    enabled=_saved_switch(drive_root, name), **facts)
 
 
 # The only enablement writer whose Off is not a choice: a failed load reverts the toggle.
@@ -239,7 +264,8 @@ def reconcile_turn_on_when_ready(
             return {**out, "action": "load_error", "error": str(result.get("error") or "")}
         code = str(result.get("code") or "")
         return {**out, "action": "not_ready", "missing": ["dependencies" if code == "dependencies_failed" else code],
-                **({"error": result["error"], "detail": result.get("detail", "")} if code == "dependencies_failed" else {})}
+                **({"error": result["error"], "detail": result.get("detail", "")}
+                   if result.get("error") and (code == "dependencies_failed" or code.startswith("nano_publication_")) else {})}
     except Exception as exc:
         log.warning("turn-on-when-ready reconcile failed for %s", skill_name, exc_info=True)
         return {**out, "action": "error", "error": f"{type(exc).__name__}: {exc}"}

@@ -540,6 +540,8 @@ def _knowledge_write(
     # The argument rules every exact editor shares (knowledge_edits); archive still requires its reason.
     version, edits, old_str, reason = normalize_arguments(mode, version, expected_revision, edits, old_str, reason,
                                                           notes, reason_required=("archive",))
+    from ouroboros.nano_publication import NanoPublicationRefused, admission_for
+
     try:
         sanitized = _sanitize_topic(topic)
         lifecycle = mode in ("archive", "restore")
@@ -569,7 +571,12 @@ def _knowledge_write(
             summary=summary, focus=knowledge_store.focus_signature(ctx)["focus"], reason=reason,
             capture_previous=(lambda note: _capture_previous(ctx, note)) if lifecycle else None,
             edits=edits, version=version,
+            admission=admission_for(ctx, address.canonical_root) if address.scope == "global" else None,
         )
+    except NanoPublicationRefused as exc:
+        source = getattr(exc, "source_ref", None)
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_REPORTED_FAILURE", text=exc.tool_detail(),
+                                                     meta={"nano_proposal_source": source} if source else {}))
     except ValueError as exc:
         said = f" ({'; '.join(notes)})" if notes else ""
         return _publish_tool_result(ctx, ToolResult(

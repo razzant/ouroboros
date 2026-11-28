@@ -680,7 +680,10 @@ def install_isolated_dependencies(
         work_domain.write_text(env_root / FINGERPRINT_FILENAME, json.dumps(fingerprint, indent=2) + "\n")
     else:
         atomic_write_json(env_root / FINGERPRINT_FILENAME, fingerprint, trailing_newline=True)
-    atomic_write_json(skill_state_dir(drive_root, skill_name) / DEPS_STATE_FILENAME, fingerprint, trailing_newline=True)
+    from ouroboros.nano_activation import catalogue_write_fence
+
+    with catalogue_write_fence(drive_root):  # a failure adds a not-ready reason to the skill's catalogue card
+        atomic_write_json(skill_state_dir(drive_root, skill_name) / DEPS_STATE_FILENAME, fingerprint, trailing_newline=True)
     if failure:
         raise RuntimeError(failure["error"])
     return fingerprint

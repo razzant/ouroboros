@@ -16,7 +16,7 @@ import json
 import os
 import time
 import unicodedata
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Mapping
@@ -27,6 +27,8 @@ import yaml
 from ouroboros import knowledge_rows, knowledge_versions, text_change, utils
 # The edit compiler lives beside its one caller's module; ``compile_anchored_edits`` stays importable here.
 from ouroboros.knowledge_edits import EditRefused, compile_anchored_edits, compile_edit_items, edit_items, yaml_form
+from ouroboros.knowledge_publication import changes_for, local_revision, prospective_knowledge as prospective_knowledge
+from ouroboros.knowledge_publication import view as publication_view
 from ouroboros.knowledge_versions import body_chars as body_chars
 from ouroboros.markdown_source import MarkdownSource, parse_markdown_navigation, parse_markdown_source
 from ouroboros.platform_layer import file_lock_exclusive, file_unlock
@@ -292,6 +294,9 @@ def _note(address: KnowledgeAddress, raw: bytes) -> KnowledgeNote:
 
 
 def read_knowledge_note(address: KnowledgeAddress, *, captured=None) -> KnowledgeNote:
+    notes, _ = publication_view(address.canonical_root)
+    if address.path in notes:
+        return _note(address, notes[address.path])
     if captured is not None:
         identity, raw = captured
         if utils.file_identity(address.path.stat()) == identity:
@@ -372,11 +377,12 @@ def inventory_knowledge(address: KnowledgeAddress, *, navigation: bool = False,
     is compared in on every platform (``WindowsPath`` would sort them case-folded):
     only that page's notes are opened.
     """
-    if not address.shelf.exists():
-        return ()
+    notes, _ = publication_view(address.canonical_root)
+    paths = set(address.shelf.rglob("*.md"))
+    paths.update(path for path in notes if path.is_relative_to(address.shelf))
     rows, listed, past = [], set(), tuple(f"{after}.md".split("/")) if after else ()
     names = frozenset(body_claims)
-    for path in sorted(address.shelf.rglob("*.md"), key=lambda found: found.relative_to(address.shelf).parts):
+    for path in sorted(paths, key=lambda found: found.relative_to(address.shelf).parts):
         if path == address.shelf / INDEX_FILE or path.relative_to(address.shelf).parts <= past:
             continue
         if limit is not None and len(rows) >= limit:
@@ -389,8 +395,12 @@ def inventory_knowledge(address: KnowledgeAddress, *, navigation: bool = False,
             continue
         listed.add(item)
         try:
-            rows.append(note_descriptor(known_note) if known_note is not None and item.path == known_note.address.path
-                        else _navigation_row(item, bodies, names) if navigation else note_descriptor(read_knowledge_note(item)))
+            if item.path in notes:
+                rows.append(_navigation_descriptor(item, notes[item.path]) if navigation else
+                            note_descriptor(_note(item, notes[item.path])))
+            else:
+                rows.append(note_descriptor(known_note) if known_note is not None and item.path == known_note.address.path
+                            else _navigation_row(item, bodies, names) if navigation else note_descriptor(read_knowledge_note(item)))
         except (OSError, UnicodeDecodeError) as exc:
             rows.append({**item.as_dict(), "title": topic, "summary": "", "revision": None,
                          "read_error": type(exc).__name__})
@@ -405,32 +415,34 @@ def _label(value: str) -> str:
     return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("*", "\\*")
 
 
+def index_entry(row: Mapping[str, Any], *, include_summaries: bool = True) -> str:
+    """One note's entry in the index (``render_knowledge_index``)."""
+    state = row.get("state", "active")
+    topic, title = str(row["topic"]), str(row.get("title") or row["topic"])
+    line = f"- **{_label(topic)}**: [{_label(title)}](<{quote(topic + '.md', safe='/')}>)"
+    if state == "archived":
+        line += " (archived)"
+        if archive := row.get("archive"):
+            line += "\n  Archived at: " + "\n  ".join(archive["at"].splitlines())
+            line += "\n  Reason: " + "\n  ".join(archive["reason"].splitlines())
+    summary = row.get("summary")
+    if include_summaries and isinstance(summary, str) and summary:
+        line += "\n" + "\n".join("  " + part for part in summary.splitlines())
+    elif include_summaries and state != "archived" and not row.get("read_error") and not row.get("parse_error"):
+        line += " (no summary)"  # a gap the author sees; nothing is synthesized from the body
+    if row.get("read_error") or row.get("parse_error") or row.get("archive_error"):
+        line += "\n  (source metadata unavailable; read the original note)"
+    return line
+
+
 def render_knowledge_index(rows: tuple[dict[str, Any], ...], legacy_context: str = "",
                            *, include_summaries: bool = True, view: str = "active", scope: str = "global",
                            selection: tuple[str, ...] = ()) -> str:
     """Generated navigation is separate from authored understanding."""
     if view not in {"active", "archived", "all"}:
         raise ValueError("view must be active, archived or all")
-    entries = []
-    for row in rows:
-        state = row.get("state", "active")
-        if view != "all" and state != view:
-            continue
-        topic, title = str(row["topic"]), str(row.get("title") or row["topic"])
-        line = f"- **{_label(topic)}**: [{_label(title)}](<{quote(topic + '.md', safe='/')}>)"
-        if state == "archived":
-            line += " (archived)"
-            if archive := row.get("archive"):
-                line += "\n  Archived at: " + "\n  ".join(archive["at"].splitlines())
-                line += "\n  Reason: " + "\n  ".join(archive["reason"].splitlines())
-        summary = row.get("summary")
-        if include_summaries and isinstance(summary, str) and summary:
-            line += "\n" + "\n".join("  " + part for part in summary.splitlines())
-        elif include_summaries and state != "archived" and not row.get("read_error") and not row.get("parse_error"):
-            line += " (no summary)"  # a gap the author sees; nothing is synthesized from the body
-        if row.get("read_error") or row.get("parse_error") or row.get("archive_error"):
-            line += "\n  (source metadata unavailable; read the original note)"
-        entries.append(line)
+    entries = [index_entry(row, include_summaries=include_summaries) for row in rows
+               if view == "all" or row.get("state", "active") == view]
     selection_note = ""
     if selection:
         selection_note = "Selection: " + json.dumps(list(selection), ensure_ascii=False) + "\n"
@@ -460,6 +472,18 @@ def outline_keeps_summary(note_type: Any) -> bool:
     return str(note_type or "").casefold().replace("_", " ").replace("-", " ").split()[:1] == [PERSON_TYPE]
 
 
+def outline_entry(row: Mapping[str, Any]) -> str:
+    """One active note's line in the outline (``render_knowledge_outline``)."""
+    topic, title = str(row["topic"]), str(row.get("title") or row["topic"]).strip()
+    line = f"- {topic}" + (f" — {_label(title)}" if title and title != topic else "")
+    summary = row.get("summary")
+    if outline_keeps_summary(row.get("type")) and isinstance(summary, str) and summary.strip():
+        line += "\n" + "\n".join("  " + part for part in summary.splitlines())
+    if row.get("read_error") or row.get("parse_error") or row.get("archive_error"):
+        line += " (source metadata unavailable; read the original note)"
+    return line
+
+
 def render_knowledge_outline(rows: tuple[dict[str, Any], ...], legacy_context: str = "", *,
                              scope: str = "global") -> str:
     """The index at a coarser resolution, never a selection: every active note keeps its line.
@@ -472,14 +496,8 @@ def render_knowledge_outline(rows: tuple[dict[str, Any], ...], legacy_context: s
     active = [row for row in rows if row.get("state", "active") == "active"]
     groups: dict[str, list[str]] = {}
     for row in active:
-        topic, title = str(row["topic"]), str(row.get("title") or row["topic"]).strip()
-        line = f"- {topic}" + (f" — {_label(title)}" if title and title != topic else "")
-        summary = row.get("summary")
-        if outline_keeps_summary(row.get("type")) and isinstance(summary, str) and summary.strip():
-            line += "\n" + "\n".join("  " + part for part in summary.splitlines())
-        if row.get("read_error") or row.get("parse_error") or row.get("archive_error"):
-            line += " (source metadata unavailable; read the original note)"
-        groups.setdefault(topic.rsplit("/", 1)[0] + "/" if "/" in topic else "", []).append(line)
+        topic = str(row["topic"])
+        groups.setdefault(topic.rsplit("/", 1)[0] + "/" if "/" in topic else "", []).append(outline_entry(row))
     body = "\n\n".join((f"{group}\n" if group else "") + "\n".join(lines)
                         for group, lines in sorted(groups.items(), key=lambda item: (item[0] != "", item[0])))
     archived = sum(row.get("state") == "archived" for row in rows)
@@ -541,7 +559,8 @@ def active_claims(drive_root: Path, *, inventory: tuple[dict[str, Any], ...] | N
     rows = inventory_knowledge(shelf, navigation=True) if inventory is None else inventory
     found: dict[str, list[KnowledgeAddress]] = {}
     eligible = (row for row in rows if row.get("scope") == "global" and row.get("state") == "active" and row.get("claims"))
-    for topic, names in knowledge_versions.inventory_claim_names(shelf.shelf, eligible):
+    _, proposed_claims = publication_view(shelf.canonical_root)
+    for topic, names in knowledge_versions.inventory_claim_names(shelf.shelf, eligible, proposed=proposed_claims):
         address = replace(shelf, topic=topic)
         for name in names:
             found.setdefault(name, []).append(address)
@@ -640,6 +659,7 @@ def knowledge_links(note: KnowledgeNote, *, before_byte: int | None = None) -> t
     """Resolve authored links from their physical source; missing notes are gaps."""
     if note.source is None:
         return ()
+    proposed, _ = publication_view(note.address.canonical_root)
     rows = []
     for link in note.source.links:
         if before_byte is not None and link.span.end_byte > before_byte:
@@ -657,8 +677,11 @@ def knowledge_links(note: KnowledgeNote, *, before_byte: int | None = None) -> t
             row.update(status="same_source", path=str(note.address.path))
         else:
             try:
-                target = (note.address.path.parent / unquote(url.path)).resolve()
-                row.update(path=str(target), status="present" if target.is_file() else "unwritten")
+                linked = note.address.path.parent / unquote(url.path)
+                # An atomic replacement at this address changes what a symlink
+                # means too. Otherwise use the usual filesystem resolution.
+                target = linked if linked in proposed else linked.resolve()
+                row.update(path=str(target), status="present" if target in proposed or target.is_file() else "unwritten")
             except (OSError, ValueError, RuntimeError) as exc:
                 rows.append({**row, "status": "unavailable", "error": type(exc).__name__})
                 continue
@@ -838,6 +861,7 @@ def write_knowledge_note(
     reason: str = "", capture_previous: Callable[[KnowledgeNote], dict[str, Any]] | None = None,
     edits: Any = None, version: str | None = None,
     precondition: Callable[[Any, Any], str] | None = None,
+    admission: Any = None,
 ) -> KnowledgeWriteResult:
     """Publish a note against the actual current source, with no inference lock.
 
@@ -922,7 +946,13 @@ def write_knowledge_note(
         except knowledge_versions.VersionUnavailable as exc:
             target = exc
     journal = address.shelf.parent / knowledge_versions.JOURNAL_NAME
-    with knowledge_write_lock(address.shelf):
+    from ouroboros.nano_publication import NanoPublicationRefused, publication_fence
+
+    with ExitStack() as locks:
+        checked = admission is not None and not locks.enter_context(admission.ordinary())
+        if admission is None and address.scope == "global":
+            locks.enter_context(publication_fence(address.canonical_root))
+        locks.enter_context(knowledge_write_lock(address.shelf))
         # Re-resolve inside the lock; a changed symlink cannot redirect a write.
         address.path.resolve().relative_to(address.shelf.resolve())
         address = shelf_spelling(address)
@@ -997,7 +1027,27 @@ def write_knowledge_note(
                 "restored": not knowledge_versions.publication_bound_to_source(rows, address, writer, writer_input_ref)}
                if rows is not None else {}))
         unchanged = current is not None and raw == current.raw
-        if unchanged and not (claims and claims.changed):
+        unchanged_publication = unchanged and not (claims and claims.changed)
+        revised = {**(fields or {}), **({"summary": summary} if summary is not None else {})}
+        if not unchanged_publication and current is not None and (mode == "edit" or (mode == "append" and summary is not None)) and (
+                updated.parse_error or (
+                bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
+                updated.raw[:current.source.body_span.start_byte] !=
+                current.raw[:current.source.body_span.start_byte]) and (
+                not revised or yaml_form(updated.metadata) != yaml_form(_merged_fields(current.metadata, revised)))):
+            return KnowledgeWriteResult(False, f"invalid_note: {mode} cannot change frontmatter", current, revision)
+        if checked and (not unchanged or claims and claims.path):
+            tracked_journal = journal if precondition is not None else None
+            observed = local_revision(address, tracked_journal, claims)
+            changes = changes_for(address, current, updated, claims)
+            locks.close()  # no store or publication lock across counting
+            locks.enter_context(admission.publication(changes))
+            locks.enter_context(knowledge_write_lock(address.shelf))
+            if (shelf_spelling(address) != address or local_revision(address, tracked_journal, claims) != observed
+                    or ((address.path.read_bytes() if address.path.exists() else None) !=
+                        (current.raw if current is not None else None))):
+                raise NanoPublicationRefused("stale", "Knowledge shelf changed before the checked write")
+        if unchanged_publication:
             try:
                 if lifecycle or (claims and claims.needs_publication(revision)):
                     # Equal note bytes are no proof a prior index publication landed.
@@ -1015,17 +1065,6 @@ def write_knowledge_note(
                                          "change_chars": 0, "removed_chars": 0, "added_chars": 0, "removed_headings": [],
                                          "added_headings": [], "removed_sections": [], "body_changed": False,
                                          "summary_changed": False}, claims=claims)
-        # A body edit keeps the preamble bytes; revised fields (a YAML-only edit's,
-        # a summary beside an edit or append) may re-render them only if every other
-        # field keeps its value (``type`` defaults, as the merge does), compared by exact YAML spelling.
-        revised = {**(fields or {}), **({"summary": summary} if summary is not None else {})}
-        if current is not None and (mode == "edit" or (mode == "append" and summary is not None)) and (
-                updated.parse_error or (
-                bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
-                updated.raw[:current.source.body_span.start_byte] !=
-                current.raw[:current.source.body_span.start_byte]) and (
-                not revised or yaml_form(updated.metadata) != yaml_form(_merged_fields(current.metadata, revised)))):
-            return KnowledgeWriteResult(False, f"invalid_note: {mode} cannot change frontmatter", current, revision)
         old_text = current.text if current else ""
         change = text_change.exact_change(old_text, updated.text)
         delta = knowledge_versions.note_delta(current, updated, change)

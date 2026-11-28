@@ -5,6 +5,8 @@ import hashlib
 import inspect
 import json
 import os
+import sys
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -61,6 +63,30 @@ def render_tool_arguments_on_retry(render):
     return call
 
 
+def with_last_position_logits(environ: Mapping[str, str]) -> dict:
+    """The managed launch's child environment: ``LOGITS_ALL=false`` added unless it configures that choice.
+
+    External fact (llama-cpp-python 0.3.38 pinned source: ``server/settings.py``, ``server/cli.py``,
+    ``server/__main__.py``, ``llama.py``; live Linux stand, 2026-11-26): the server's ``logits_all`` defaults to
+    true, and ``Llama`` then allocates a float32 row per window position at load, 80,128 x 248,320 for Qwen3.5
+    0.8B at ``--n_ctx 80000`` (74.1 GiB, refused on an 8 GiB host), and copies each evaluated token's row into
+    it. Sampling reads the native last-position logits either way; only ``logprobs`` uses the array, so with
+    false the vendor refuses a ``logprobs`` request with its own error. Ouroboros never asks for logprobs.
+
+    A model setting the command line (or a ``CONFIG_FILE`` entry) omits comes from the environment, its name in
+    any letter case, before the field default. ``local_model.start_server`` passes no ``--logits_all``,
+    ``--draft_model`` or ``--config_file``, so its environment alone decides: an operator's ``LOGITS_ALL`` stays in
+    force (``true`` restores logprobs at that memory cost), and a ``DRAFT_MODEL`` (decoded with every position's
+    logits, the array still sized by ``logits_all``) or ``CONFIG_FILE`` (exact name; it owns every model setting)
+    keeps the vendor default. ``main`` adds nothing, so a direct vendor command line keeps its own choices.
+    Recheck on a vendor upgrade: a renamed setting would bring the allocation back unnoticed.
+    """
+    named = {str(key).lower() for key in environ}
+    if named & {"logits_all", "draft_model"} or "CONFIG_FILE" in environ:
+        return dict(environ)
+    return {**environ, "LOGITS_ALL": "false"}
+
+
 def install_object_tool_arguments() -> None:
     """Patch this server process's Jinja formatter once (the vendor server renders every model template with it)."""
     from llama_cpp import llama_chat_format
@@ -69,18 +95,52 @@ def install_object_tool_arguments() -> None:
     if not getattr(formatter.__call__, "_ouroboros_object_arguments", False):
         formatter.__call__ = render_tool_arguments_on_retry(formatter.__call__)
 
+
+def launched_n_ctx() -> int:
+    """The ``--n_ctx`` this server process was launched with; 0 when absent.
+
+    The manager confirms the same value from the launch binding
+    (``owned_server_arguments``), so the effective window the count reports is
+    the one limit both sides name for this single instance; ``model.n_ctx()``
+    alone names the allocation the backend rounded the request to, never extra room.
+    """
+    for index, argument in enumerate(sys.argv):
+        value = None
+        if argument == "--n_ctx" and index + 1 < len(sys.argv):
+            value = sys.argv[index + 1]
+        elif argument.startswith("--n_ctx="):
+            value = argument[len("--n_ctx="):]
+        if value is not None and value.lstrip("+").isdigit():
+            return int(value)
+    return 0
+
+def effective_window(launched: int, allocated: int) -> int:
+    """A backend allocation may cap the launch window, never enlarge it."""
+    return min(launched, allocated) if launched else allocated
+
+
 def measure_chat_input(model: Any, payload: dict) -> dict:
     """Render through the selected provider formatter without running inference.
 
     Only the provider's generic single-completion adapter establishes this
     proof. Custom/multimodal/multiple-generation handlers continue to serve
     ordinary requests but do not acquire a false count or output guarantee.
+    ``context_window`` is the launched effective limit (``launched_n_ctx``);
+    ``raw_context_window`` the same instance's actual allocation beside it.
     """
     import llama_cpp
     from llama_cpp import llama_chat_format
 
+    launched = launched_n_ctx()
+    raw_window = int(model.n_ctx())
+    # The backend rounds `--n_ctx` up to its batch multiple (a requested 80,000
+    # was measured 80,128), and that rounding is never extra room; an allocation
+    # smaller than requested caps the claim. An absent launch argument leaves the
+    # raw allocation standing alone, as before.
+    serving_window = effective_window(launched, raw_window)
     result = {"supported": False, "input_is_exact": False, "input_tokens": None,
-              "context_window": int(model.n_ctx()), "process_id": os.getpid(),
+              "context_window": serving_window, "raw_context_window": raw_window,
+              "process_id": os.getpid(),
               "native_input_sha256": input_fingerprint(payload),
               "output_limit_enforced": False, "reasoning_included_in_limit": None,
               "reason": "selected_formatter_not_measurable"}
@@ -105,6 +165,7 @@ def measure_chat_input(model: Any, payload: dict) -> dict:
                 "source": "serving_llama_formatter", "library_version": llama_cpp.__version__,
                 "chat_format": str(model.chat_format or ""),
                 "formatter": type(formatter).__name__,
+                "launched_n_ctx": launched,
                 "rendered_prompt_sha256": hashlib.sha256(formatted.prompt.encode("utf-8")).hexdigest(),
             }}
 

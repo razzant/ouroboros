@@ -67,13 +67,19 @@ class PhysicalAttemptContext:
     bible_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
     assembly_witnesses: InitVar[tuple] = ()
     contribution_input: InitVar[Optional[tuple]] = None
+    nano_floor_plan: InitVar[Optional[tuple]] = None  # live capture, never serialized
+    nano_floor_evidence: InitVar[Optional[dict]] = None  # only the physical candidate manifest reads this
+    # A later round of a returned root nothing was sent for (``cold_return.unsent_return``): live, never serialized.
+    nano_floor_return: InitVar[bool] = False
 
     def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]], first_contact_scope: str,
                       first_contact_dispatch: Optional[Tuple[int, str]],
                       first_contact_plan: Optional[Tuple[str, bool]], window_boundary_tokens: Optional[int],
                       window_record: Optional[WindowRecord], dispatch_account: str,
                       bible_source: Optional[Tuple[str, str, int, str]],
-                      assembly_witnesses: tuple, contribution_input: Optional[tuple]) -> None:
+                      assembly_witnesses: tuple, contribution_input: Optional[tuple],
+                      nano_floor_plan: Optional[tuple], nano_floor_evidence: Optional[dict],
+                      nano_floor_return: bool) -> None:
         # Only a witness is kept on the instance: without one, ``vars`` holds just the record's fields, and ``replace``
         # reads the class's None back (it reads every InitVar with ``getattr``).
         if base_prompt_source is not None:
@@ -95,6 +101,12 @@ class PhysicalAttemptContext:
             object.__setattr__(self, "assembly_witnesses", assembly_witnesses)
         if contribution_input is not None:
             object.__setattr__(self, "contribution_input", contribution_input)
+        if nano_floor_plan is not None:
+            object.__setattr__(self, "nano_floor_plan", nano_floor_plan)
+        if nano_floor_evidence is not None:
+            object.__setattr__(self, "nano_floor_evidence", nano_floor_evidence)
+        if nano_floor_return:
+            object.__setattr__(self, "nano_floor_return", True)
 
 
 def with_dispatch_account(context: Optional[PhysicalAttemptContext], account: str) -> Optional[PhysicalAttemptContext]:

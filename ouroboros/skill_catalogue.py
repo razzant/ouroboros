@@ -36,12 +36,14 @@ def discover_context_skills(drive_root: Any) -> List[Any]:
     """One fail-soft discovery shared by a context build's always-in-context block and its catalog: the skills, or a
     ``SkillDiscoveryFailure`` (empty) carrying why discovery failed."""
     from ouroboros.skill_loader import discover_skills
+    from ouroboros.nano_activation import preview_instruction
 
     try:
-        return discover_skills(pathlib.Path(drive_root))
+        skills = discover_skills(pathlib.Path(drive_root))
     except Exception as exc:
         logging.getLogger(__name__).debug("Skill discovery for context failed", exc_info=True)
-        return SkillDiscoveryFailure(exc)
+        skills = SkillDiscoveryFailure(exc)  # a count over it is refused, an ordinary read keeps it
+    return preview_instruction(drive_root, skills)
 
 
 def _reviewed_instructions(skills: Any) -> List[Any]:
@@ -56,6 +58,15 @@ def always_in_context_skills(skills: Any) -> List[Any]:
     return [skill for skill in _reviewed_instructions(skills) if skill.manifest.always_in_context]
 
 
+def always_in_context_fragment(skill: Any) -> str:
+    """The exact fragment one opted-in skill contributes to ``always_in_context_section``:
+    the single projection of its activation, kept beside the renderer so it can never
+    drift from what a context build actually shows."""
+    return (f"### {skill.name} (version {skill.manifest.version or 'unversioned'})\n"
+            f"Files it names: read_file(root='skill_payload', bucket='{skill.location}', "
+            f"skill_name='{skill.name}', path=<that relative path>).\n\n{skill.manifest.body}")
+
+
 def always_in_context_section(skills: Any) -> str:
     """The semi-stable context block: each opted-in skill's reviewed body, whole."""
     chosen = always_in_context_skills(skills)
@@ -67,9 +78,7 @@ def always_in_context_section(skills: Any) -> str:
              "bears on the work, as if the skill had been opened; it never outranks BIBLE.md, the safety rules or an "
              "explicit instruction for the current task."]
     for skill in chosen:
-        parts.append(f"### {skill.name} (version {skill.manifest.version or 'unversioned'})\n"
-                     f"Files it names: read_file(root='skill_payload', bucket='{skill.location}', "
-                     f"skill_name='{skill.name}', path=<that relative path>).\n\n{skill.manifest.body}")
+        parts.append(always_in_context_fragment(skill))
     return "\n\n".join(parts)
 
 

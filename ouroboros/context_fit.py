@@ -10,7 +10,6 @@ only the handle of the fit's own route question (``RouteQuestion``), asked besid
 from __future__ import annotations
 
 import contextvars
-import hashlib
 import json
 import logging
 import math
@@ -33,7 +32,8 @@ from ouroboros.context_measurement import (
 
 from ouroboros.context_layout import reference_doc_sections, whole_development_book
 from ouroboros.section_floor import (HostSection, _governance_blocks as _section_governance, _system_blocks,
-    capture_system_projection, projection_fields, render_governance, rendered_texts, section_views, with_program_history)
+    capture_mode_projections, mode_host_receipts, projection_fields, render_governance, rendered_texts, section_views,
+    with_program_history, captured_core_fingerprint)
 from ouroboros.reference_books import ReferenceBook
 from ouroboros import context_budget
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
@@ -151,15 +151,24 @@ class ContextFitPlan:
                        initial_mode=initial_mode, start=start, first_contact_normal=None)
 
     requested_load_window: Optional[int] = None  # the selected physical load, including Auto (0)
+    counter_status: str = ""  # startup local formatter status, kept distinct from route window status
 
-    def start_schema_names(self, mode: str) -> Optional[Tuple[str, ...]]:
-        """The schema names the start priced, selected for ``mode`` as the start selected them (a live call's own
-        Nano base, else the standing work set); None when the start priced none or was not captured."""
+    def _start_tools(self, mode: str):
         from ouroboros.tool_policy import select_tool_schemas
 
         start, base = json.loads(self.start_tool_schemas_json or "null"), self.start_nano_base
         return None if start is None else select_tool_schemas(
-            start, context_mode=mode, schema_names=base, standing=base is None).chosen
+            start, context_mode=mode, schema_names=base, standing=base is None)
+
+    def start_tool_schemas(self, mode: str) -> Optional[List[Dict[str, Any]]]:
+        selected = self._start_tools(mode)
+        return None if selected is None else list(selected.schemas)
+
+    def start_schema_names(self, mode: str) -> Optional[Tuple[str, ...]]:
+        """The schema names the start priced, selected for ``mode`` as the start selected them (a live call's own
+        Nano base, else the standing work set); None when the start priced none or was not captured."""
+        selected = self._start_tools(mode)
+        return None if selected is None else selected.chosen
 
     def reproject_for_route(self, *, window_tokens: int, known_window: bool, ratio: float, output_reserve: int,
                             tool_schemas: Optional[List[Dict[str, Any]]], start_mode: Optional[str] = None,
@@ -171,7 +180,8 @@ class ContextFitPlan:
                             restoring_held: bool = False, telling_floor: bool = False,
                             books_must_save: bool = False,
                             nano_tools: _Schemas = None, low_tools: _Schemas = None,
-                            tool_frames: _ToolFrames = None, unsent_start: bool = False) -> "ContextFitPlan":
+                            tool_frames: _ToolFrames = None, unsent_start: bool = False,
+                            exact_local_pressure: bool = False) -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
         The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
@@ -265,7 +275,8 @@ class ContextFitPlan:
                     slack=0 if refit else math.ceil(deficit / units) - math.ceil(excess / units),
                     books_must_save=books_must_save, nano_tools=nano_tools, low_tools=low_tools, tool_frames=tool_frames,
                     running_limit=(raw + overhead - book - math.ceil(deficit / units)
-                                   if telling_floor and deficit > 0 and not refit else None), unsent_start=unsent_start)
+                                   if telling_floor and deficit > 0 and not refit else None), unsent_start=unsent_start,
+                    exact_local_pressure=exact_local_pressure)
                 held_cost = contents[start][1].get("held_note_request_tokens") if contents else None
                 if books_must_save and not contents:
                     select_mode = None  # a rejected trial does not select a mode or publish a view
@@ -398,6 +409,7 @@ class ContextCore:
     bible_source: Optional[Tuple[str, str, int, str]] = None
     initial_attachment_facts: Mapping[str, Any] = field(default_factory=dict, compare=False)
     held_note_resume: Optional[Mapping[str, Any]] = None
+    read_failures: Tuple[str, ...] = ()
 
     def required_book_tokens(self, mode: str) -> int:
         """What the directly required handbook adds to the ordinary view of ``mode``, 0 when that view holds it.
@@ -929,14 +941,6 @@ def _integrating(core: ContextCore, role: Any) -> bool:
     return not core.compact_reference_docs and role not in DELEGATED_FOCUS_ROLES
 
 
-def _mode_host_receipts(selected: str, form_mode: str, rows: Iterable[Mapping[str, Any]],
-                        low_maps: Iterable[Mapping[str, Any]], book_maps: Iterable[str]) -> list:
-    if form_mode != "low":
-        return [row for row in rows if not row.get("held_note_form") and row.get("section_id") not in book_maps]
-    seen = {row.get("section_id") for row in rows} if selected == "low" else None
-    return [*rows, *(row for row in low_maps if row.get("section_id") not in seen)] if seen is not None else list(rows)
-
-
 def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...]], user_content_json: str, *, preferred: str,
                       tool_schemas: Optional[List[Dict[str, Any]]], window_tokens: int, known_window: bool, output_reserve: int,
                       ratio: float, start: Optional[str] = None, resident: bool = False,
@@ -950,7 +954,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       nano_base: Optional[Tuple[str, ...]] = None, start_saving: int = 0,
                       running_limit: Optional[int] = None, books_must_save: bool = False,
                       nano_tools: _Schemas = None, low_tools: _Schemas = None, tool_frames: _ToolFrames = None,
-                      unsent_start: bool = False) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict, str]], str]:
+                      unsent_start: bool = False, exact_local_pressure: bool = False, defer_unfit: bool = False,
+                      floor_mode: Optional[str] = None) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict, str]], str]:
     """Select books once, choose memory in one walk. Unsent book forms share the selected memory, not another budget.
 
     Required DEVELOPMENT joins the ordinary fit last; wire admission still charges it. ``retain`` overrides the
@@ -958,9 +963,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     ``admitted`` selects the running rather than start line of ``WindowRecord``. ``sized`` carries a start's priced
     ``(rows, schemas, characters)`` for the same provider/effort shape. ``unsent_start``: a start's ``BOOK_MAPS`` policy.
     """
-    from ouroboros import memory_floor as floor
+    from ouroboros import memory_floor as floor, memory_view_work
     from ouroboros.held_notes import HeldNoteSection, can_replay_frame, frame_key
-    from ouroboros.memory_view import FULL_VIEW, room_chars, snapshot_from_json, story_chars
+    from ouroboros.memory_view import FULL_VIEW, room_chars, story_chars
 
     shown_mode = start or preferred
     mode = select or shown_mode
@@ -971,7 +976,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         core = replace(core, development_required=False)
         governance = {name: _governance_blocks(None, core, mode=name) for name in governance}
     form = {m: "low" if core.compact_reference_docs or m == "nano" else m for m in floor.MODES}
-    snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
+    snapshot = memory_view_work.turn_input_view(core.memory_view_json, preferred, provider, window_record, core.user_content_json, user_content_json, current_messages)
     held_heads = any(isinstance(part, HeldNoteSection) for part in core.dynamic_sections)
     cold_resume, saved = core.held_note_resume is not None, core.held_note_resume or {}
     saved_rows = {row["section_id"]: row for row in saved.get("receipts", ())}
@@ -1007,8 +1012,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                             reserve, ratio, request_cost(selected, sent))
         return can_replay_frame(core, saved_frame, current, saved_rows)
 
-    if not (select or start) and saved_frame and saved_frame[0] in floor.MODES:
-        restored_mode = saved_frame[0]
+    if not (select or start) and saved_frame and (restored_mode := saved_frame[0]) in floor.MODES:
         _, reserve, _, _ = limits(restored_mode)
         if restores_frame(restored_mode, tools_for(restored_mode), reserve):
             mode = restored_mode
@@ -1046,7 +1050,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         # Only the frame changes. A new memory/host concession may not disguise a book switch that costs tokens.
         def price(selected):
             sent = tools_for(selected)
-            forms = section_views(sections[selected], _mode_host_receipts(selected, form[selected], previous, low_maps, floor.BOOK_MAPS))
+            forms = section_views(sections[selected], mode_host_receipts(selected, form[selected], previous, low_maps, floor.BOOK_MAPS))
             same = view(selected, sent, forms, window, boundary, kept=held, level=level) if snapshot else floor.NO_VIEW
             return complete_price(selected, sent, forms, same)
         return price("low") < price("max")
@@ -1063,13 +1067,13 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     def frame(selected):
         nonlocal receipts
-        prior = _mode_host_receipts(selected, form[selected], previous, low_maps, floor.BOOK_MAPS)
+        prior = mode_host_receipts(selected, form[selected], previous, low_maps, floor.BOOK_MAPS)
         available = sections[selected]
         sent = tools_for(selected)
         target, reserve, window, record = limits(selected)
         replay = restores_frame(selected, sent, reserve)
         if replay:
-            prior = _mode_host_receipts(selected, form[selected], saved_rows.values(), low_maps, floor.BOOK_MAPS)
+            prior = mode_host_receipts(selected, form[selected], saved_rows.values(), low_maps, floor.BOOK_MAPS)
             if "knowledge_index" not in saved_rows:
                 available = tuple(part for part in available if part.section_id != "knowledge_index")
         stated[selected] = record.total_equivalent if record and record.usable is not None else None
@@ -1092,8 +1096,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=start_room)  # shortest telling
         goal = running_goal(window, reserve)
         host_saving = owed(measure(selected, sent, section_views(sections[selected], prior)), window, reserve) if asked else 0
+        host_floor = selected == "nano" and floor_mode not in (None, "keep_owner")
         receipts, _ = floor._host_steps(available, prior,  # every frame starts from what was shown
-            optional_fits=lambda forms, level=None: floor.optional_excerpt_fits(
+            optional_fits=None if host_floor else lambda forms, level=None: floor.optional_excerpt_fits(
                 goal if running else host_allowances['window' if kept is None or start_work else 'physical'],
                 0 if running else owed(measure(selected, sent, forms), window, reserve) - slack, (story_before, room_before),
                 lambda *memory: measure(selected, sent, forms, *memory),
@@ -1108,9 +1113,12 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             window=window if known_window else None, reserve=reserve, ratio=ratio, saving=host_saving,
             slack=max(slack, slack + host_saving - asked) if running else slack,  # a trial's growth buys no host outline
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
-            allowance=host_allowances["margin" if kept is None or start_work else "physical"],
+            allowance=None if host_floor else host_allowances["margin" if kept is None or start_work else "physical"],
             budget_mode=selected if kept is None and target and target < window else None,
-            window_bound=host_allowances["window"], retain=retain,  # the window's own start bound, whatever target frames the start
+            window_bound=host_allowances["window"], retain=retain, measure_floor=host_floor,
+            keep_indexes=defer_unfit and floor_mode in ("keep_owner", "before_f7"),
+            exact_local_pressure=(exact_local_pressure and provider == "local" and selected == "nano"
+                                  and "read_file" in sent.chosen),
             optional_walk=(lambda forms: view(selected, sent, forms, window, boundary)) if snapshot else None,
             maps_told=(lambda forms: told(forms, False)) if spares and selected == "low" else None)
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
@@ -1149,8 +1157,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         forms = section_views(sections[mode], receipts) if forms is None else forms
         price = measure(mode, sent, forms)
         return view(mode, sent, forms, window, boundary, saving=owed(price, window, reserve), fixed=price,
-                    kept=None if kept is None else held, level=level,
-                    start_saving=start_saving, telling_floor=telling_floor, request_limit=running_goal(window, reserve))
+                    kept=None if kept is None else held, level=level, start_saving=start_saving,
+                    telling_floor=telling_floor, request_limit=running_goal(window, reserve),
+                    shortest={"keep_owner": "keep_owner", "before_f7": True, "before_f7_outline": True,
+                              "minimum": "all"}.get(floor_mode, False) if mode == "nano" else False)
 
     def spare(fit, forms):
         return window - reserve - math.ceil(measure(mode, sent, forms, fit.story_chars, fit.room_chars) * ratio)
@@ -1189,7 +1199,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         # A held view stays where Nano can buy no room. Without heads this can be decided before drawing Nano (a cold Nano too).
         stays = (last is not None and not (held_heads or whole_core.development_required)
                  and window - reserve <= last[3] - last[2] and fixed >= last[1])
-        shown = floor.NO_VIEW if stays or (mode != "nano" or kept is None and not cold_resume and current_messages is None and not held_heads) and overflows() else running_shown or render()
+        skip = (mode != "nano" or kept is None and not cold_resume and current_messages is None and not held_heads)
+        shown = floor.NO_VIEW if stays or (skip and not defer_unfit and overflows()) else running_shown or render()
         if mode == "nano" or not overflows(shown):
             break
         # A live trial still has to reselect tools and measure its chosen wire reserve.
@@ -1209,8 +1220,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     compare_wire = held_heads or running or whole_core.development_required or nano_tools is not None or tool_frames is not None
     if last is not None and (stays or compare_wire and wire_room(shown) <= last[-2]):
         sent, fixed, reserve, window, boundary, allowances, receipts, shown, _, mode = last
-    if kept is None and not cold_resume and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
-        core_alone = overflows()  # then a Nano frame without held heads rendered no memory (the loop's cold skip)
+    if not defer_unfit and kept is None and not cold_resume and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
+        core_alone = overflows()  # a Nano frame without held heads may still have skipped rendering
         from ouroboros.context_view_facts import refusal_parts  # names what the refused request holds
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
                                else "Protected owner words and the minimum view cannot fit the usable input",
@@ -1227,15 +1238,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         require_admission=kept is None and known_window and current_messages is None and provider != "local")
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
-    contents = {}
-    for m in floor.MODES:
-        rows = _mode_host_receipts(m, form[m], receipts, low_maps, floor.BOOK_MAPS)
-        facts = {**receipt, "held_note_request_tokens": request_cost(mode, sent)} if held_heads and m == mode else receipt
-        system, observation = capture_system_projection(whole_core, whole_governance[form[m]], story, room, m,
-            section_views(sections[m], rows), rows, whole, shown=shown,
-            facts={**facts, "host_sections_addressed": rows} if rows else facts)
-        contents[m] = (system, observation, room_data)
-    return contents, mode
+    return capture_mode_projections(whole_core, whole_governance, form, sections, receipts, low_maps,
+        story, room, room_data, whole, shown, receipt, mode, request_cost(mode, sent) if held_heads else None,
+        book_maps=floor.BOOK_MAPS), mode
 
 
 def _whole_request(core, governance, mode, current_messages=None):
@@ -1367,6 +1372,7 @@ def build_context_fit_plan(
     tool_schemas: Optional[List[Dict[str, Any]]] = None,
     reasoning_effort: str = "",
     nano_base: Optional[Tuple[str, ...]] = None,
+    count_only: bool = False,
 ) -> ContextFitPlan:
     """Capture route facts, choose books and fit one start view, measured in the shape the route's provider and the
     first send's ``reasoning_effort`` give the request (``context_measurement._request_shapes``); ``nano_base``: a live call's own Nano
@@ -1389,7 +1395,7 @@ def build_context_fit_plan(
     restored = core.held_note_resume or {}
     current_messages = restored.get("messages")
     fresh_chat = (bool(task.get("_is_direct_chat")) and view_kind == "owner_turn" and preferred in {"max", "low"}
-                  and not restored and not getattr(route_resolver, "route_fields", None) and nano_base is None)
+                  and core.held_note_resume is None and not getattr(route_resolver, "route_fields", None) and nano_base is None)
     if (saved_schemas := restored.get("tool_schemas")) is not None:
         tool_schemas = saved_schemas
         nano_base = tuple(schema["function"]["name"] for schema in tool_schemas)
@@ -1425,24 +1431,42 @@ def build_context_fit_plan(
         limits = tuple((limit.tokens, limit.kind) if limit else None for limit in (window_record.input, window_record.total))
         return SimpleNamespace(route=route, evidence=evidence, output_reserve=output_reserve, working_reserve=working_reserve,
                                window_basis=window_basis, bound=bound, window_record=window_record, ratio=ratio,
-                               known_window=window_record.usable is not None,
+                               known_window=window_record.usable is not None, counter_status="",
                                walked=(limits, window_record.usable is not None, output_reserve, working_reserve, ratio,
                                        _custom_ladder(provider, reasoning_effort)))
 
-    def project(state, user_content_json, **options):
+    def project(state, user_content_json, *, core_override=None, **options):
         provider = str(state.route.get("provider") or "")
+        used_core = core if core_override is None else core_override
+        used_gov = governance if core_override is None else {f: _governance_blocks(env, used_core, mode=f) for f in ("max", "low")}
         try:
-            return _view_projections(core, governance, user_content_json,
+            return _view_projections(used_core, used_gov, user_content_json,
                 preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
                 known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
                 working_reserve_tokens=state.working_reserve, provider=provider, reasoning_effort=reasoning_effort,
-                sized=(rows, schemas, sized[provider]), nano_base=nano_base, current_messages=current_messages,
-                ratio=state.ratio, work_room_levels=levels, **options)
+                sized=(rows, schemas, sized[provider]) if core_override is None else None, nano_base=nano_base,
+                current_messages=current_messages, ratio=state.ratio, work_room_levels=levels, **options)
         except MinimumViewUnfit as unfit:  # the refusal names its serving program and window in effect
             from ouroboros.context_view_facts import refusal_route
             raise refusal_route(unfit, state.route, replace(state.window_record, reserve=unfit.response_reserve_tokens))
 
+    fitted_core = core
+
     def walk(state):
+        nonlocal fitted_core
+        fitted_core = core
+        if count_only:
+            from ouroboros.section_floor import predicted_section
+
+            # This input is never sent: do not materialize section addresses or
+            # reject it from an estimator. The paired serving count prices it.
+            preview = SimpleNamespace(**{**vars(state), "known_window": False})
+            return (*project(preview, core.user_content_json, retain=predicted_section), {})
+        if preferred == "nano":
+            from ouroboros.nano_minimum import walk_local_root_start
+            if (exact := walk_local_root_start(env, core, task, state, schemas, project)) is not None:
+                selected, mode, delivered, fitted_core = exact
+                return selected, mode, delivered
         try:
             return (*project(state, core.user_content_json), {})
         except MinimumViewUnfit as unfit:
@@ -1462,7 +1486,7 @@ def build_context_fit_plan(
             raise
         refused, contents, initial_mode, delivered = unfit, {}, "", {}
     guard = early and route_resolver.early and (refused or narrowed_by_window(contents, initial_mode, preferred, state, delivered))
-    if guard or not state.known_window:
+    if (guard or not state.known_window) and state.counter_status != "unavailable":
         # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view, or none,
         # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
         # the same frame is not repeated unless it was refused. A start whose route named no window asks it once more
@@ -1476,9 +1500,12 @@ def build_context_fit_plan(
             late = frame(*answer(lambda: route_resolver.again(task, failed=failed) if early else timed(
                 "fit.route", route_resolver, {**task, "route_read_again": True} if failed else task, allow_fetch=True)))
             if guard or late.known_window or getattr(late.evidence, "status", "") != "failed":
-                if refused is not None or late.walked != state.walked:
+                if (refused is not None or late.walked != state.walked
+                        or fitted_core is not core and (late.route != state.route
+                                                        or late.evidence.route_fp != state.evidence.route_fp)):
                     contents, initial_mode, delivered = walk(late)
                 state = late
+    core = fitted_core  # refits and repeated counts must draw the same Runtime source form
     route, evidence, window_record, known_window = state.route, state.evidence, state.window_record, state.known_window
     # Only the ordinary walk can trigger the guard; the soft hint reads the final binding, even when no rewalk was needed.
     normal, first_contact = None, ""
@@ -1539,59 +1566,24 @@ def build_context_fit_plan(
     normal_start = (*(_projection(mode, normal[0]) for mode in ("max", "low", "nano")), normal[1], started(*normal)
                     ) if normal is not None else None
 
-    core_payload = json.dumps(
-        {
-            "base_prompt": core.base_prompt,
-            "bible_md": core.bible_md,
-            "architecture_md": core.architecture_md,
-            "development_md": core.development_md,
-            "semi_stable_text": core.semi_stable_text,
-            "host_sections": [part.__getnewargs__()
-                              for part in (*core.semi_stable_sections, *core.dynamic_head_sections, *core.dynamic_sections)],
-            "dynamic_head_text": core.dynamic_head_text,
-            "dynamic_text": core.dynamic_text,
-            "memory_view_json": core.memory_view_json,
-            **({"connections": list(core.connections)} if any(core.connections) else {}),
-            **({"supplementary_messages": json.loads(core.supplementary_messages_json)}
-               if json.loads(core.supplementary_messages_json) else {}),
-            "user_content": user_content,
-            "docs_need_development": core.docs_need_development,
-            **({"development_required": True} if core.development_required else {}),
-            "compact_reference_docs": core.compact_reference_docs,
-            "reference_book_errors": core.reference_book_errors,
-            "reference_sources": [(book.book_id, source.source_path, source.sha256)
-                                  for book in core.reference_books for source in (book.entrypoint, *book.chapters)],
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
     return ContextFitPlan(
-        view_kind=view_kind,
-        core_sha256=hashlib.sha256(core_payload.encode("utf-8")).hexdigest(),
-        preferred_mode=preferred,
-        initial_mode=initial_mode,
-        model=str(route["model"] or ""),
-        provider=str(route["provider"] or ""),
-        route_fp=str(evidence.route_fp or ""),
-        status="confirmed" if known_window else str(evidence.status or ""),
-        stale=False if known_window else bool(evidence.stale),
-        window_tokens=window_record.total_equivalent,
-        output_reserve_tokens=output_reserve,
-        working_reserve_tokens=working_reserve,
-        window_basis=window_basis,
+        view_kind=view_kind, core_sha256=captured_core_fingerprint(core, user_content),
+        preferred_mode=preferred, initial_mode=initial_mode,
+        model=str(route["model"] or ""), provider=str(route["provider"] or ""), route_fp=str(evidence.route_fp or ""),
+        status="confirmed" if known_window else str(evidence.status or ""), counter_status=state.counter_status,
+        stale=False if known_window else bool(evidence.stale), window_tokens=window_record.total_equivalent,
+        output_reserve_tokens=output_reserve, working_reserve_tokens=working_reserve, window_basis=window_basis,
         user_content_json=core.user_content_json,
-        max_projection=max_projection,
-        low_projection=low_projection,
-        nano_projection=nano_projection,
+        max_projection=max_projection, low_projection=low_projection, nano_projection=nano_projection,
         model_role=str(route.get("model_role") or "main"),
         model_route=evidence_model_route(evidence, route["model"]) if route["provider"] == "claudexor" else {},
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
         route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
         window_evidence=window_evidence(evidence, window_record),
         requested_load_window=window_record.load,  # the load its record was resolved for, never another scope's
-        core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
-        start_nano_base=nano_base,
-        start_reasoning_effort=reasoning_effort,
-        start=started(contents, initial_mode), first_contact=first_contact,
-        first_contact_normal=normal_start,
+        # Local templates may print tool JSON in insertion order. Preserve the
+        # same schema representation the start fit received from the registry.
+        core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False),
+        start_nano_base=nano_base, start_reasoning_effort=reasoning_effort,
+        start=started(contents, initial_mode), first_contact=first_contact, first_contact_normal=normal_start,
     )

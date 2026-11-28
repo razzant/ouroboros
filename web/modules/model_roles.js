@@ -9,8 +9,9 @@ import { bindSourcePickers } from './source_picker.js';
 import { createScopedModelCatalog, modelSlotCatalogQuery, catalogReadNote, invalidateModelCatalogReads, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
 import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, settingsReadMessage, settingsSnapshot, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
-import { HAND_WRITTEN, rowsOf } from './settings_rows.js';
-import { setResult } from './ui_primitives.js';
+import { HAND_WRITTEN, rowById, rowsOf } from './settings_rows.js';
+import { nanoMemoryWords } from './settings_local_model.js';
+import { setResult, setRowMeta } from './ui_primitives.js';
 import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_status_store.js';
 import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
@@ -1088,14 +1089,33 @@ function mountModels(container, { path, ctx }) {
             <div class="settings-rows">${doors.map(door).join('')}</div></section>
         <section class="ui-card settings-card"><div class="settings-rows">${plain}</div></section>
         <section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold>
-            <summary>More: processing, prompt cache, requests at once</summary>
-            <div class="settings-rows" data-models-fold></div></details></section>`;
+            <summary data-models-more>More: processing, prompt cache, requests at once</summary>
+            <div class="settings-rows" data-models-fold></div>
+            <p class="settings-card-note" data-nano-details data-i18n-fmt hidden></p></details></section>`;
     // The catalogue's own result (settings_catalog.js writes it by this id) stands under its row's words and door, as
     // every row's result does (settings.css "A row's result").
     container.querySelector('[data-setting-row="models:catalogue"]')
         ?.appendChild(Object.assign(container.ownerDocument.createElement('span'), { id: 'settings-model-catalog-status', className: 'ui-result settings-row-result' }));
     const bound = bindSettingRows(container, { rows: doors, ask: ctx.ask, custom, openDoor: (row) => ctx.openSettings(row.control.to) });
     const foldHost = container.querySelector('[data-models-fold]');
+    const contextMeta = container.querySelector('[data-setting-row="models:context"] [data-setting-meta]');
+    const nanoDetails = container.querySelector('[data-nano-details]');
+    const more = container.querySelector('[data-models-more]');
+    let paintedNano = false;
+    const paintNano = (fact) => {
+        const words = nanoMemoryWords(fact);
+        paintedNano = Boolean(words);
+        const normal = rowById('models:context').meta;
+        setRowMeta(contextMeta, words?.text || normal);
+        contextMeta?.toggleAttribute('data-i18n-fmt', Boolean(words));
+        if (words?.warn) contextMeta?.setAttribute('data-tone', 'warn'); else contextMeta?.removeAttribute('data-tone');
+        if (more) more.textContent = words ? 'More: processing, prompt cache, requests at once, Nano memory'
+            : 'More: processing, prompt cache, requests at once';
+        if (nanoDetails) {
+            nanoDetails.hidden = !words;
+            if (nanoDetails.textContent !== (words?.detail || '')) nanoDetails.textContent = words?.detail || '';
+        }
+    };
     const entryResult = container.querySelector('[data-entry-result]');
     let fold = null;
     let shown = '', drawnFallbacks = '';   // the fallbacks as drawn: a press acts on these, never on a list that changed meanwhile
@@ -1208,7 +1228,8 @@ function mountModels(container, { path, ctx }) {
             warn(`models:${slot}`, keyWords(settings[slots[slot]?.settingKey], local(slot)));
         }
         say('models:websearch', Object.fromEntries(SEARCH_SOURCES)[settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto'] || String(settings.OUROBOROS_WEBSEARCH_BACKEND));
-        say('models:context', CONTEXT_WORDS[String(settings.OUROBOROS_CONTEXT_MODE || '').toLowerCase()] || String(settings.OUROBOROS_CONTEXT_MODE || ''));
+        const contextMode = String(settings.OUROBOROS_CONTEXT_MODE || '').trim().toLowerCase();
+        say('models:context', CONTEXT_WORDS[contextMode] || String(settings.OUROBOROS_CONTEXT_MODE || ''));
         // The fold's rows are drawn once their values are read.
         if (!fold) {
             const rows = rowsOf('models', { fold: true });
@@ -1217,8 +1238,16 @@ function mountModels(container, { path, ctx }) {
         }
         fold.paint();
         bound.paint();
+        paintNano(contextMode === 'nano' ? settings._meta?.nano_publication : null);
     };
-    const read = async () => { try { paint(await ctx.readSettings()); } catch { /* the page keeps what it shows */ } };
+    let readId = 0;
+    const read = async () => {
+        const id = ++readId;
+        try { const settings = await ctx.readSettings(); if (id === readId) paint(settings); }
+        catch {
+            if (id === readId) paintNano(paintedNano ? { status: 'not_claimed', reason: 'settings_read_failed' } : null);
+        }  // Do not keep a previous claim after a failed refresh.
+    };
     // The fallbacks as one write: `change` answers the next list from the fresh one, or null to leave it.
     const writeFallbacks = async (button, change, saved) => {
         setResult(entryResult, {});

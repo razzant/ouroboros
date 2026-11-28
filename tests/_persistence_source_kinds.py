@@ -712,7 +712,6 @@ UNROWED_SOURCE_KINDS = frozenset().union(
         "left-review-*-*-*.json": "review_pause._left_review_mark",
         "legacy_{blocks,meta}-*.json": "chronicle_import._import",
         "legacy_flat-*.md": "chronicle_import._import",
-        "memory_fallback_response-*.md": "memory_fallback._refuse",
         "plan-dialogue-*-*.jsonl": "tools.plan_dialogue.attach_own_dialogue",
         "plan-evidence-*.txt": "tools.plan_evidence.own_source_retention.retain",
         "plan-revision-*-*.json": "plan_record.retain_revision",

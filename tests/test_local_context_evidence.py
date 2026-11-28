@@ -193,6 +193,40 @@ def test_serving_measurement_keeps_input_and_instance_binding(manager, monkeypat
     assert manager.measure_prepared_input(payload)["supported"] is False
 
 
+def test_the_count_names_the_instance_not_its_padded_allocation(manager, monkeypatch):
+    """Synthetic release numbers: the backend pads a launched `--n_ctx` (80,000 -> 80,128).
+    A count naming the launched effective window beside that raw allocation is this same
+    instance's count, not a route change; the padded allocation presented as the window
+    alone stays unconfirmable against the manager's own launch argument."""
+    import requests
+    from ouroboros.local_model_server import input_fingerprint
+
+    manager._context_length = 131_072
+    manager._serving_context_length = 80_000
+    manager._measurement_route = True
+    monkeypatch.setenv("LOCAL_MODEL_PORT", str(manager._port))
+    payload = {"model": "local-model", "messages": [{"role": "user", "content": "source"}]}
+    fingerprint = input_fingerprint(payload)
+
+    def response(window):
+        measured = Mock(status_code=200)
+        measured.json.return_value = {"supported": True, "input_is_exact": True, "input_tokens": 42,
+                                      "context_window": window, "raw_context_window": 80_128,
+                                      "process_id": 123, "native_input_sha256": fingerprint}
+        return measured
+
+    session = MagicMock()
+    session.post.side_effect = [response(80_000), response(80_128)]
+    session_scope = MagicMock()
+    session_scope.__enter__.return_value = session
+    monkeypatch.setattr(requests, "Session", lambda: session_scope)
+    accepted = manager.measure_prepared_input(payload)
+    assert accepted["supported"] and accepted["context_window"] == 80_000
+    assert accepted["raw_context_window"] == 80_128  # rides beside, never as the window
+    refused = manager.measure_prepared_input(payload)
+    assert refused["supported"] is False and refused["reason"] == "measurement_route_changed"
+
+
 @pytest.mark.parametrize("window", [0, 16384, 65536])
 def test_running_local_dispatch_uses_serving_capacity_without_cloud_fallback(
     manager, main_plan, monkeypatch, tmp_path, window,

@@ -205,7 +205,7 @@ def _display_task(task: dict) -> dict:
 
 
 def stop_presentation(task: dict, fences: dict | None = None) -> dict:
-    """The same stop, reason, author and release rule for every surface. No storage probes."""
+    """The shared stop, reason, author and release rule. No storage probes."""
     from ouroboros.control_actor import pause_author
 
     task = _display_task(task)
@@ -241,7 +241,7 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
     text = STOP_TEXT[code]
     if code == "technical_pause":
         from ouroboros.pause_notices import authority_wait_text
-        text = authority_wait_text((point or task.get("budget_pause") or {}).get("cause")) or text
+        text = authority_wait_text((point or task.get("budget_pause") or {}).get("cause"), stop=stop) or text
     entry = {"code": code, "text": text}
     since = (author.get("at") or stop.get("held_at") or stop.get("requested_at") or stop.get("paused_at")
              or (hold_fact(task) or {}).get("held_at"))
@@ -486,6 +486,26 @@ def panic_hold_id(task: dict | None) -> str:
     return _stop_identity(task, hold, None)
 
 
+def _window_offer(drive_root: Any, task: dict, stop: dict) -> dict:
+    from ouroboros.cold_return import RAIL_CONTEXT_WINDOW, window_facts
+
+    return window_facts(_pause_row(drive_root, task)) if stop.get("rail") == RAIL_CONTEXT_WINDOW else {}
+
+
+def current_window_offer_id(drive_root: Any, task: dict, fences: dict) -> str:
+    """The dialog's stop identity, reread at the Resume grant under the queue's control seam."""
+    from ouroboros.parked_deadline import expired_park
+
+    control = queue_control(drive_root, task, fences)
+    view = control["view"]
+    stop = view.get("stop") or {}
+    if (control["phase"] != "budget_paused" or view.get("waiting") or expired_park(task)
+            or not _window_offer(drive_root, task, stop)):
+        return ""
+    basis = _tree_basis(drive_root, task)
+    return _stop_identity(task, stop, basis) if basis is not None else ""
+
+
 def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
     """``current_stop`` beside a queued or parked task's status, read as the census reads its row.
 
@@ -531,7 +551,8 @@ def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
     tree = _tree_basis(drive_root, task)
     from ouroboros.parked_deadline import expired_park
     expired = not live and expired_park(task)  # warm or queued, bound or held: Resume refuses past it
-    return {"state": "pausing" if live else "held",
+    window = _window_offer(drive_root, task, stop) if not live else {}
+    return {"state": "pausing" if live else "held", **({"window": window} if window else {}),
             "cause": stop.get("cause") or ("refusal" if view.get("refusal") else "unknown"),
             "scope": stop.get("scope") or "member", "code": reason.get("code"), "text": reason.get("text"),
             "release": "owner" if view.get("release") == "owner" else "mind" if view.get("resumable") else "none",
@@ -540,6 +561,16 @@ def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
             **({} if queue_snapshot_observation(snapshot)["fresh"] else {"queue_freshness": "stale"}),
             **({} if tree is not None else {"resume_basis": "unreadable"}),
             "identity": _stop_identity(task, stop, tree)}
+
+
+def _pause_row(drive_root: Any, task: dict) -> dict:
+    """The task's durable pause row for a display that names its hold; ``{}`` when it cannot be read."""
+    from ouroboros.budget_pause import budget_pause_row
+
+    try:
+        return budget_pause_row(pathlib.Path(task.get("budget_drive_root") or drive_root), str(task.get("id") or ""))
+    except Exception:
+        return {}
 
 
 def door_holders(task: dict) -> set:

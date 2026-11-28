@@ -15,6 +15,18 @@ def test_workflow_filters_cover_the_lane_and_request_builders():
     workflow = yaml.load(text, Loader=yaml.BaseLoader)
     assert set(workflow["on"]) == {"pull_request", "workflow_dispatch"}
     paths = workflow["on"]["pull_request"]["paths"]
+
+    def selected(path):
+        # Match this lane's literal paths, single-component wildcards and trailing /**.
+        # GitHub applies the last matching pattern; a single * never crosses '/'.
+        for entry in reversed(paths):
+            glob = entry.removeprefix("!")
+            matches = (path.startswith(glob[:-2]) if glob.endswith("/**")
+                       else path.count("/") == glob.count("/") and fnmatchcase(path, glob))
+            if matches:
+                return not entry.startswith("!")
+        return False
+
     for path in (*(node.split("::", 1)[0] for node in gate.TESTS), "ouroboros/context.py", "ouroboros/llm_helper_window.py",
                  "ouroboros/tools/registry.py", "ouroboros/physical_attempt_context.py",
                  "ouroboros/reviewer_window.py", "ouroboros/review_native_episode.py",
@@ -27,19 +39,31 @@ def test_workflow_filters_cover_the_lane_and_request_builders():
                  "ouroboros/code_intelligence_architecture.py", "scripts/regenerate_inventories.py",
                  # the call start's seam (tests/test_live_call_start_fit.py): the agent hands nano_base to the fit
                  "ouroboros/agent.py", "ouroboros/live_conversation.py",
+                 "ouroboros/agent_dispatch.py", "ouroboros/send_clock.py", "ouroboros/cold_return.py",
+                 "ouroboros/server_owner_routing.py", "supervisor/worker_chat_lane.py", "supervisor/budget_resume.py",
+                 "ouroboros/budget_pause.py", "ouroboros/work_stop.py", "supervisor/queue_transitions.py",
+                 "tests/_budget_pause_exact_helpers.py",
+                 "ouroboros/nano_minimum.py", "ouroboros/nano_host_publication.py", "ouroboros/nano_activation.py",
+                 "ouroboros/knowledge_publication.py", "ouroboros/chronicle_publication.py",
+                 "ouroboros/gateway/owner_settings.py", "ouroboros/gateway/safety_settings.py",
+                 "ouroboros/skill_catalogue.py", "ouroboros/skill_lifecycle_actions.py", "ouroboros/settings_integrity.py",
+                 "ouroboros/skill_acceptance.py", "ouroboros/skill_review.py", "ouroboros/skill_review_runner.py",
+                 "ouroboros/skill_source_install.py",
                  "ouroboros/llm_ollama.py", "ouroboros/llm_ollama_wire.py", "ouroboros/llm_ollama_policy.py",
                  "ouroboros/llm_ollama_guard.py", "tests/_ollama.py", "tests/test_local_tool_parsing.py"):
-        assert any(fnmatchcase(path, pattern) for pattern in paths), path
-    assert not any(fnmatchcase("web/styles.css", pattern) for pattern in paths)
+        assert selected(path), path
+    assert not selected("web/styles.css")
     # Owner, 27.11.2026: a pull request that changes only a live call's files runs the gate too; nothing wider.
     for path in ("supervisor/inline_carrier.py", "ouroboros/realtime_setup.py", "ouroboros/live_tool_lane.py",
                  "ouroboros/live_works.py", "ouroboros/host_notice.py", "skills/live_conversation/ui/call.js",
                  "skills/live_conversation/plugin.py", "tests/_memory_scale_fixture.py", "tests/_live_works_fixture.py",
                  # the engines' adapters serialize the call's request (pr2rev1 G20a)
                  "skills/openai_realtime/plugin.py", "skills/gemini_live/plugin.py", "skills/grok_realtime/plugin.py"):
-        assert any(fnmatchcase(path, pattern) for pattern in paths), path
-    assert not any(fnmatchcase("skills/weather/plugin.py", pattern) for pattern in paths)
+        assert selected(path), path
+    assert not selected("skills/weather/plugin.py")
     assert text.startswith("# Owner exception, 2026-11-15:") and "Second exception, 2026-11-27:" in text
+    for separate_qa in ("tests/test_cold_return_window_park_browser.py", "tests/system_e2e/test_cold_return_window_park.py"):
+        assert not selected(separate_qa), separate_qa
     assert workflow["permissions"] == {"contents": "read"}
     jobs = list(workflow["jobs"].values())
     assert len(jobs) == 1 and jobs[0]["runs-on"] == "ubuntu-latest"
@@ -80,6 +104,17 @@ def test_context_gate_has_recovery_homes():
         "tests/test_context_economy_window.py::test_an_account_reprepare_that_selects_nano_narrows_the_shown_low_view_and_keeps_its_provenance",
         "tests/test_context_economy_window.py::test_a_fallback_and_its_return_resend_the_shown_history_byte_for_byte_on_the_wire",
         "tests/test_context_refusal_passes.py::test_a_refused_first_send_retries_the_view_its_route_rebind_narrowed",
+        "tests/test_local_input_measurement.py::test_finalize_measures_the_provider_clean_candidate_not_the_caller_payload",
+        "tests/test_local_input_measurement.py::test_launched_n_ctx_reads_this_process_launch_argument",
+        "tests/test_nano_root_frame.py",
+        "tests/test_nano_startup_exact.py", "tests/test_nano_web_main_entry.py", "tests/test_cold_return.py",
+        "tests/test_send_clock.py::test_only_a_main_loop_opts_in_and_the_zone_is_the_validated_sender_zone",
+        "tests/test_send_clock.py::test_the_local_lane_measures_and_sends_the_same_single_line",
+        "tests/test_nano_activation_boundaries.py::test_worker_enforces_saturated_ordinary_root_and_retains_proposal",
+        "tests/test_nano_activation_boundaries.py::test_never_confirmed_editing_and_previously_confirmed_outage_are_different",
+        "tests/test_nano_activation_boundaries.py::test_instruction_update_checks_candidate_before_replacing_active_bytes",
+        "tests/test_nano_activation_boundaries.py::test_pending_instruction_review_rechecks_before_projecting_its_result",
+        "tests/test_nano_minimum.py::test_two_memory_writers_cannot_spend_the_same_remaining_room",
     }.issubset(gate.TESTS)
 
 

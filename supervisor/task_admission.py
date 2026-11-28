@@ -367,7 +367,10 @@ def restored_handoff_unproven(task: dict, existing: Optional[dict], *, ancestor_
         return possible or existing.get("status") != STATUS_SCHEDULED
     from ouroboros.project_admission import host_unscoped
 
-    return host_unscoped(task) and possible
+    # A park proof can outlive its first carrier's clock, not an unreadable ancestor
+    # or a later dispatch mark; D5 keeps its own restoration path.
+    return host_unscoped(task) and possible and (
+        ancestor_unknown or isinstance(task.get(SEED_RETURN), dict) or not prestart_returned_unsent(task, existing))
 
 
 PRESTART_PROOF = "returned_before_body"  # the carried copy of a pre-body return, in a later hold or Resume record
@@ -431,14 +434,14 @@ def _seed_unsent(task: dict, seed: dict, stored: Optional[dict]) -> dict:
 def prestart_returned_unsent(task: dict, stored: Optional[dict] = None) -> dict:
     """The proof that a lane turn's first attempt came back before its body and never launched since (#2555).
 
-    The carrier's pre-body Pause event, checked by the supervisor's park, is the proof:
-    its scheduled result keeps that limit (``before_task_start``, attempt 1, no calls),
-    and a later quit hold or Resume record carries it by value (``PRESTART_PROOF``). A
-    body start records its attempt and every pooled launch of this scoped row commits its
-    dispatch mark before the put, so a result with neither proves none since. This is not
-    ``admitted_dispatch='none'``: the lane did put the turn on its carrier. ``{}`` when
-    unproven; an unreadable result raises and the caller keeps its hold. Restore,
-    hold revalidation and Resume read the same evidence; readability grants no Resume.
+    The supervisor's park keeps the carrier's positive no-call Pause proof (attempt 1);
+    a quit hold or Resume carries it by value (``PRESTART_PROOF``). The first Main owner
+    carrier can record running (attempt 0) before Nano's count, still before the model
+    loop. Keep that clock; only the park proves no model call. A later assignment from
+    PENDING marks its dispatch before the put, and its start records a positive attempt.
+    This is not ``admitted_dispatch='none'``: the turn reached its first carrier.
+    Restore, hold revalidation and Resume share this proof. ``{}`` is unproven; an
+    unreadable result raises and keeps the hold. Readability grants no Resume.
     A turn a returning stop gave back before its first working save carries its own
     proof on the row (``SEED_RETURN``, D5), valid until the attempt it gave back launches.
     """
@@ -455,10 +458,25 @@ def prestart_returned_unsent(task: dict, stored: Optional[dict] = None) -> dict:
 
         stored = load_task_result(pathlib.Path(task.get("budget_drive_root") or queue.DRIVE_ROOT),
                                   str(task.get("id") or ""), strict=True) or {}
-    if (stored.get("status") != STATUS_SCHEDULED or stored.get("started_at") or stored.get("task_attempt") is not None
-            or stored.get("admission_outcome") == "never_admitted"
+    if (stored.get("status") != STATUS_SCHEDULED or stored.get("admission_outcome") == "never_admitted"
             or "admitted_dispatch" in stored or "admitted_dispatch_attempt" in stored):
         return {}
+    recorded = stored.get("task_attempt")
+    if stored.get("started_at") or recorded is not None:
+        from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+        from ouroboros.dialogue_provenance import run_origin
+        from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+
+        owner = stored.get("execution_owner")
+        task_id = task.get("id")
+        if not (type(recorded) is int and recorded == 0 and isinstance(owner, dict)
+                and type(owner.get("task_attempt")) is int and owner["task_attempt"] == 0
+                and task_id and stored.get("task_id") == owner.get("task_id") == task_id
+                and stored.get("chat_id") == task.get("chat_id") == WEB_UI_CHAT_ID
+                and (owner.get("kind"), owner.get("lane"), owner.get("executor"))
+                == ("direct", LANE_CONVERSATION, EXECUTOR_WORKER)
+                and "admitted_dispatch_mark" not in stored and run_origin(task)["owner_ingress"]):
+            return {}
     limit = stored.get("resource_limit") if isinstance(stored.get("resource_limit"), dict) else {}
     for proof in (limit, limit.get(PRESTART_PROOF)):
         if (isinstance(proof, dict) and proof.get("before_task_start") is True and proof.get("cause") == "owner_pause"

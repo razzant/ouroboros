@@ -593,7 +593,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     current = restore(snapshot, table, taken, added, target, current, level, measure, view_tokens)
     # A Max view floored at my tellings keeps my human's words while its books are whole: when the window cannot
     # hold it, the books go to chapter maps first (the next frame), and only there may the window take them (4A).
-    physical = None if floor is not None and floor_bound is None else allowances.get("physical")
+    physical = -1 if allowances.get("fold_uncovered") else (None if floor is not None and floor_bound is None else allowances.get("physical"))
     for step, ident, _whole, _short in uncovered:
         if physical is None or current <= physical:
             break
@@ -709,11 +709,13 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     ``tool_names``: the schemas the next request sends, which its floor note reads; else those its start priced.
     """
     from ouroboros.context_fit import _governance_blocks, _request_tokens
+    from ouroboros.memory_view_work import turn_input_view
 
     if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
         raise ValueError("This actor has no captured memory view")
-    snapshot = mv.snapshot_from_json(plan.core.memory_view_json)
-    shown = plan.projection(mode)
+    shown = plan.projection(mode)  # the row its delivered input carries stays said once (``turn_input_view``)
+    snapshot = turn_input_view(plan.core.memory_view_json, plan.preferred_mode, plan.provider, plan.window_record,
+                               plan.core.user_content_json, shown.user_content_json or plan.user_content_json)
     level = level_with(snapshot, kept_level(snapshot, shown.memory_facts), addresses, owner_note=owner_note)
     old = shown.memory_facts.get("floor") or {}
     switched = old.get("mode_switch") or {}
@@ -973,15 +975,15 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                 floor_bound=allowances["window"] if binds else None)
     if telling_only:  # TELLING_STAGES also prices openings and conversation forms that omit untold words.
         level = fit_memory_view(snapshot, {}, kept=level or walk['kept'], measure=measure, floor=ORDINARY_STAGES, saving=math.inf)
-    elif shortest and level is None:  # A saving no form can pay takes every form in walk order; no physical bound
-        # stops it before owner rows. The physical judgment of host forms never stops at a Max start's telling floor:
-        # what the window cannot hold beside the books is the books' own step (``context_fit``), not an outline's.
-        level = fit_memory_view(snapshot, {**allowances, "physical": None}, saving=math.inf,
-                                **{**walk, **({} if binds else {"floor": None, "keeps": frozenset()})})
+    elif shortest in (True, "all") and level is None:  # A saving no form can pay takes every form in walk order;
+        # only ``shortest="all"`` (after a measured pre-F7 miss) may also address uncovered owner rows.
+        level = fit_memory_view(snapshot, {**allowances, "physical": None, "fold_uncovered": shortest == "all"},
+                                saving=math.inf, **{**walk, **({} if binds else {"floor": None, "keeps": frozenset()})})
     elif level is None:
         if request_limit is not None:
             saving = max(0, non_memory_tokens + measure(walk['kept']) - request_limit)
-        level = fit_memory_view(snapshot, allowances, saving=saving, **walk)
+        used = {**allowances, "physical": None} if shortest == "keep_owner" else allowances
+        level = fit_memory_view(snapshot, used, saving=saving, **walk)
     if start_saving:
         # Another chat's refusal is not physical pressure: only memory with an in-view telling can pay this ask.
         asked_at = level
@@ -1020,7 +1022,7 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 
 # Host producers before the whole-or-outline sections, then the memory walk, all under the same
 # start budget. Running views narrow only under physical pressure or a refusal.
-HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
+HOST_STEPS = ("extension_tool_catalogue", "runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
               "world", "subagents", "architecture_map", "development_map", "return_facts_words")
 # Optional reference sections keep their whole excerpt beside my shortest tellings until physical pressure.
 OPTIONAL_STEPS = ("design_bible",)
@@ -1109,7 +1111,8 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
 
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
                 shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None, told=None,
-                held_least=None, held_bound=None, optional_fits=None, optional_walk=None, maps_told=None, listed=()):
+                held_least=None, held_bound=None, optional_fits=None, optional_walk=None, maps_told=None, listed=(),
+                measure_floor=False, exact_local_pressure=False, keep_indexes=False):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -1164,7 +1167,11 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
                                 non_memory_tokens=0, calibration_ratio=ratio)["physical"]
 
     def finish(remaining, outline_left=False):
-        if held_least is not None and physical is not None and not outline_left:
+        if measure_floor:
+            # Last lawful forms under physical shortage: a count-only projection, never a send view.
+            _held_note_steps(sections, receipts, lambda _: False)
+            _held_note_steps(sections, receipts, lambda _: False, form="reader")
+        elif held_least is not None and physical is not None and not outline_left:
             def fits(forms):  # as the request stands first: memory is priced at its shortest forms only past the bound
                 return (measure is not None and measure(forms) <= held_bound) or held_least(forms, physical) <= held_bound
             remaining = max(0, remaining - _held_note_steps(sections, receipts, fits))
@@ -1195,6 +1202,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         return finish(saving)
     addressed = section_views(sections, receipts)
     candidates = [part for part in sections if part.section_id not in addressed
+                  and not (keep_indexes and part.section_id in WHOLE_OR_OUTLINE_STEPS)
                   and part.section_id not in PROTECTED and not isinstance(part, HeldNoteSection)
                   and part.operative_view is not None
                   and len(part.operative_view) < len(part.full_text)]
@@ -1207,7 +1215,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         measure = shortest = lambda _addressed, *_physical: least
     initial = current = measure(addressed)
     bound = allowance if allowance is not None else physical
-    if (bound is None or current <= bound) and saving == 0:
+    if not measure_floor and (bound is None or current <= bound) and saving == 0:
         return receipts, 0  # this frame's allowance holds the request as it stands: nothing yields, a head least
     soft = bound is not None and bound < physical
     excess = max(0, saving - slack)  # what a window or a refusal measured; slack never outlines
@@ -1218,7 +1226,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
                                                order.get(p.section_id, len(HOST_STEPS)))):
         if part.section_id in addressed:
             continue
-        if (bound is None or current <= bound) and initial - current >= saving:
+        if not measure_floor and (bound is None or current <= bound) and initial - current >= saving:
             break
         if part.section_id in OPTIONAL_STEPS and optional_fits is not None:
             if (whole := keeps(part, addressed)) is not True and _address_optional(
@@ -1228,16 +1236,20 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         if fits is None:
             sent_least = shortest(addressed, physical) if shortest else current  # memory at its shortest forms
             fits = sent_least <= physical
-        if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
+        if not measure_floor and part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
             outline_left = True
             continue  # an outline is a physical step, never a start-room or slack choice
         mapped = maps_told is not None and part.section_id in BOOK_MAPS
         telling = part.section_id in TELLING_SPARED or mapped
         spared = part.section_id in WINDOW_ONLY or telling
-        if part.section_id in WINDOW_ONLY and window_bound is not None and sent_least <= window_bound:
-            continue  # the window's start bound holds it beside memory's shortest forms: no soft frame shortens it
+        local_deficit = exact_local_pressure and initial - current < excess
+        if (measure_floor or keep_indexes) and part.section_id in WINDOW_ONLY and not exact_local_pressure:
+            continue  # a serving count must see the whole form before an exact-shortage trial takes its reader
+        if (not measure_floor and part.section_id in WINDOW_ONLY and window_bound is not None
+                and sent_least <= window_bound and not local_deficit):
+            continue  # an estimate can spare WORLD unless the serving instance proved a shortage this pass still owes
         test = maps_told if mapped else told
-        if telling and (test(addressed) if test else window_bound is None or current <= window_bound):
+        if not measure_floor and telling and (test(addressed) if test else window_bound is None or current <= window_bound):
             continue  # the window holds it beside my shortest telling and the books: neither yields to it
         try:
             row = (retain or retain_section)(part, root=root, task_id=task_id)

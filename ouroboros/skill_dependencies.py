@@ -93,6 +93,10 @@ def _payload_sidecar_specs(skill_dir: pathlib.Path) -> List[Dict[str, Any]]:
     return []
 
 
+def _files_dir(loaded: Any) -> pathlib.Path:
+    return pathlib.Path(getattr(loaded, "files_dir", None) or loaded.skill_dir)
+
+
 def payload_declared_install_specs(loaded: Any) -> List[Dict[str, Any]]:
     """Auto specs declared by HASH-COVERED payload carriers only (6.2=A).
 
@@ -103,7 +107,7 @@ def payload_declared_install_specs(loaded: Any) -> List[Dict[str, Any]]:
     therefore forces re-review, while the installed ``.ouroboros_env`` bytes
     stay outside the hash by design.
     """
-    sidecar = _payload_sidecar_specs(pathlib.Path(loaded.skill_dir))
+    sidecar = _payload_sidecar_specs(_files_dir(loaded))
     if sidecar:
         return sidecar
     return _manifest_install_specs(getattr(loaded, "manifest", None))
@@ -129,7 +133,7 @@ def auto_install_specs_for_skill(drive_root: pathlib.Path, loaded: Any) -> List[
     sidecar.
     """
 
-    if str(getattr(loaded, "source", "") or "") == "clawhub":
+    if str(getattr(loaded, "source", "") or "") == "clawhub" and getattr(loaded, "payload_dir", None) is None:
         try:
             from ouroboros.marketplace.provenance import read_provenance
 
@@ -140,7 +144,7 @@ def auto_install_specs_for_skill(drive_root: pathlib.Path, loaded: Any) -> List[
         except Exception:
             pass
 
-    sidecar = _payload_sidecar_specs(pathlib.Path(loaded.skill_dir))
+    sidecar = _payload_sidecar_specs(_files_dir(loaded))
     if sidecar:
         return sidecar
 

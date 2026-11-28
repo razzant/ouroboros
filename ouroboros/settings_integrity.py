@@ -800,7 +800,7 @@ class SettingsPublicationRefused(RuntimeError):
 
 
 @contextlib.contextmanager
-def settings_publication_boundary(drive_root):
+def settings_publication_boundary(drive_root, *, nano_ticket=None):
     """The one physical publication boundary every settings writer enters around its
     byte commit, at the target profile ``drive_root``.
 
@@ -854,7 +854,11 @@ def settings_publication_boundary(drive_root):
                 f"witness_{status}",
                 f"the profile initialization witness could not be proven ({status}); "
                 "settings not saved")
-        # ``missing`` (confirmed first use) and ``ok`` (ordinary profile) proceed.
-        yield
+        # A settings replacement and a memory publication must agree on which
+        # profile is active. The expensive check, if any, has already finished.
+        from ouroboros.nano_publication import publication_fence
+
+        with nano_ticket.commit() if nano_ticket is not None else publication_fence(root):
+            yield
     finally:
         release_exclusive_file_lock(lock_path, lock_fd)

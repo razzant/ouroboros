@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from ouroboros.utils import atomic_write_json, utc_now_iso
@@ -192,13 +194,54 @@ class _LocalTextEdit:
     before: str
     after: str
     installation: dict | None = None
+    refusal: str = ""  # a typed answer when the Nano capacity check refuses the edit: the writer returns it, writes nothing
+    hold: Any = None  # the counted transition's commit, to enter just before the write (``local_edit_interval``)
+    skill_name: str = ""
 
     def matches(self, previous: str, observed: str) -> bool:
-        return bool(previous and observed != previous and self.before == previous and self.after == observed)
+        return bool(not self.refusal and previous and observed != previous and self.before == previous
+                    and self.after == observed)
+
+
+def _refusal_text(name: str, refusal: Any) -> str:
+    from ouroboros.nano_activation import refusal_words
+
+    happened, step = refusal_words(refusal)
+    return (f"⚠️ SKILL_REPAIR_NANO_{refusal.reason.upper()}: this edit would make {name!r} act in the Nano window. "
+            f"{happened}; {step}. Nothing was written: the earlier files, review and switch stand. {refusal.detail}")
+
+
+@contextmanager
+def local_edit_interval(local_edit: Any):
+    """What a predictable single or batch text write runs inside; yields an object whose ``refusal`` is a typed
+    answer to return (nothing was written) or ``""``.
+
+    With a counted edit the interval enters its commit first: the base the count saw is checked again, so a
+    writer that moved it in between refuses the edit as stale before any byte changes. The commit covers the
+    write and the record of the same digest, and no more. The record keeps its own verification of the digest:
+    the capacity evidence is never a right to act. Without a counted edit it is nothing at all.
+    """
+    from ouroboros.nano_publication import NanoPublicationRefused
+
+    refusal = getattr(local_edit, "refusal", "")
+    with ExitStack() as stack:
+        if not refusal and getattr(local_edit, "hold", None) is not None:
+            try:
+                stack.enter_context(local_edit.hold())
+            except NanoPublicationRefused as exc:
+                refusal = _refusal_text(local_edit.skill_name, exc)
+        yield SimpleNamespace(refusal=refusal)
 
 
 def confirm_local_text_edit(ctx: Any, binding: Any, changes: list) -> _LocalTextEdit | None:
-    """Predict a direct owner-started edit without relying on any grant receipt."""
+    """Predict a direct owner-started edit without relying on any grant receipt.
+
+    The prediction also asks the Nano capacity check about the skill acting from the predicted bytes, before
+    anything is written; a refusal rides on the result (``refusal``) and the file tools return it as is, and the
+    counted transition rides on it (``hold``) for the short interval of the write (``local_edit_interval``).
+    The prediction covers byte-exact text files of the payload only: a manifest or declaration edit, a shell or
+    editor write and a work-copy write are not predicted, so they are neither counted nor accepted here.
+    """
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.skill_grant_follow import installation_of
     from ouroboros.skill_identity import text_edit_release_hashes
@@ -227,7 +270,11 @@ def confirm_local_text_edit(ctx: Any, binding: Any, changes: list) -> _LocalText
         press, origin = metadata.get("ui_control"), run_origin({"metadata": metadata})
         from_skills = (isinstance(press, dict) and press.get("name") == "skill_repair" and press.get("pressed_at")
                        and origin["owner_ingress"] and not origin.get("presence") and not origin.get("parent_task_id"))
-        return _LocalTextEdit(*hashes, installation_of(drive, name, payload) if from_skills else None)
+        from ouroboros.nano_activation import edit_admission
+
+        refusal, hold = edit_admission(pathlib.Path(drive), skill, hashes[1])
+        return _LocalTextEdit(*hashes, installation_of(drive, name, payload) if from_skills else None,
+                              _refusal_text(skill.name, refusal) if refusal else "", hold, skill.name)
     except (OSError, ValueError, SkillPayloadUnreadable):
         log.debug("Could not verify a direct Repair text edit for %s", name, exc_info=True)
         return None

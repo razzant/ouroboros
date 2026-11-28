@@ -3,6 +3,9 @@
 The sending task, not a relay's recipient, owns its speech. A work's last reply
 stays whole after its intermediate replies have yielded to its recorded gist.
 A relay that quotes my human's words belongs to no work: no gist stands for them.
+A plain Web Send's own row in Main, resolved by the identity its ingress kept, is
+said once beside an input that is exactly its words, only on the qualified local
+80k route in owner Nano (``mark_turn_input``, ``turn_input_view``).
 """
 from __future__ import annotations
 
@@ -112,6 +115,79 @@ def model_room(snapshot, level, *, floor_note="", opening_address="", observe=No
 
     system = render_room(snapshot, level, floor_note=floor_note, observe=observe, part=part)
     return system, "\n".join((PROGRAM_HISTORY_HEAD, *data.values())) if data else ""
+
+
+TURN_INPUT_KEY = "turn_input"  # a captured room's fact: the address of my human's row this turn's input carries
+TURN_ORIGIN_KEY = "turn_origin"  # the exact Web source, also for a Reply whose room line cannot yield
+
+
+def mark_turn_input(snapshot, task, row):
+    """Name in the captured room the plain Web row my human's Send in Main kept for this direct turn; else the
+    snapshot as is. ``row`` is that row as the host resolves the turn's ``origin_message_ref`` by its whole identity,
+    row and text digests included (``context._fresh_reply_owner``). The room's open line is the same row by its
+    canonical address and its unique client id, and shows exactly its words and nothing beside them: a Reply,
+    reaction, notice or delivery fact would print there (``dialogue_provenance.render_memory_row``), and attachment,
+    press, quiz, call or transport facts disqualify the row outright.
+
+    A Reply's whole room line does not yield; its same source ref can still replace the repeated Runtime prose.
+    Identity, never likeness: the same words in another row, of another person or another time, are another source."""
+    import dataclasses
+
+    from ouroboros.memory_view import INDENT, MAIN_ROOM
+    from ouroboros.owner_relay import owner_row_address, owner_row_source
+
+    room = snapshot.room
+    if (not room or row is None or not task.get("_is_direct_chat") or str(room.get("room_id")) != MAIN_ROOM
+            or not row.get("client_message_id") or (task.get("metadata") or {}).get("origin_suppressed")
+            or row.get("source") != "web" or any(row.get(key) for key in (
+                "attachments", "text_placeholder", "ui_control", "host_fact", "historical_import",
+                "late_answer", "card_press", "quiz", "transport"))):
+        return snapshot
+    address = owner_row_address(row)
+    ref, words = owner_row_source(row)
+    client = f"chat {MAIN_ROOM} / {row['client_message_id']}"
+    for item in room.get("lane1") or ():
+        if (words and item.get("address") == address and item.get("ref") == client and item.get("owner_side")
+                and item.get("text") == words):
+            marked = {**room, TURN_ORIGIN_KEY: {"address": address, "ref": ref}}
+            if (not row.get("reply_to")
+                    and item.get("line") == item["head"] + " " + words.replace("\n", "\n" + INDENT)):
+                marked[TURN_INPUT_KEY] = address
+            return dataclasses.replace(snapshot, room=marked)
+    return snapshot
+
+
+def turn_input_view(view_json, preferred, provider, window_record, original_input, delivered_input,
+                    current_messages=None):
+    """The captured view one request renders beside its input (``context_fit._view_projections``).
+
+    Only in owner-selected Nano on the qualified local 80k route (``nano_minimum.qualified_local_window``), only when
+    the turn's input is exactly the marked row's words (``mark_turn_input``) and this request delivers that input
+    unchanged (its first user row, when a transcript is given), the row stands in the room by its head: one source is
+    said once, whole (BIBLE P1). A framed, substituted (an exact-source pointer) or changed input, another mode, route
+    or window keeps the room as captured. Shared like the parsed view itself, so its rendered pieces are priced once."""
+    import dataclasses
+    import json
+
+    from ouroboros.memory_view import snapshot_from_json
+    from ouroboros.nano_minimum import qualified_local_window
+
+    snapshot = snapshot_from_json(view_json) if view_json else None
+    address = (snapshot.room or {}).get(TURN_INPUT_KEY) if snapshot is not None else None
+    item = next((row for row in snapshot.room.get("lane1") or () if row.get("address") == address), None) if address else None
+    if current_messages is not None:
+        first = next((row for row in current_messages if row.get("role") == "user"), None)
+        delivered_input = json.dumps(first.get("content"), ensure_ascii=False, sort_keys=True) if first else None
+    if (item is None or preferred != "nano" or provider != "local" or not qualified_local_window(window_record)
+            or delivered_input != original_input
+            or original_input != json.dumps(item["text"], ensure_ascii=False, sort_keys=True)):
+        return snapshot
+    views = snapshot.__dict__.setdefault("_turn_input_views", {})
+    if address not in views:
+        line = f"{item['head']} (words, {item['chars']} chars — this turn's input, delivered whole as its message)"
+        lane1 = [dict(row, line=line) if row is item else row for row in snapshot.room["lane1"]]
+        views[address] = dataclasses.replace(snapshot, room={**snapshot.room, "lane1": lane1})
+    return views[address]
 
 
 def gists(by_room, format_address, *other_sources):

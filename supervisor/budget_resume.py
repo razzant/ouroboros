@@ -33,6 +33,7 @@ def observe_exact_resume(q, task, task_id, result_root, *, gaps):
     Money, Stop and the explicit choice about an unconfirmed start are decided on this observation by the grant.
     """
     from ouroboros.budget_pause import observe_task_runs
+    from ouroboros.cold_return import bound_choice
     from ouroboros.owner_pause import fence_closed, read_fence
     from ouroboros.sleep_custody import RETAINED_REASONS
     from supervisor.continuation_admission import action_writers
@@ -46,7 +47,7 @@ def observe_exact_resume(q, task, task_id, result_root, *, gaps):
     closed = fence_closed(fence)
     owner_paused = closed or reason == "owner"  # the owner's fence can overlay a budget/sleep checkpoint
     external = observe_task_runs(result_root, task_id, reason="budget_resume_uncovered_cost",
-                                 request_stop=not (owner_paused or reason in RETAINED_REASONS))
+                                 request_stop=not (bound_choice() or owner_paused or reason in RETAINED_REASONS))
     fence_id = str(fence.get("fence_id") or "")
     external["resume_fence_id"] = fence_id
     # A saved loop is not proof that its handed tools/processes ended.
@@ -864,14 +865,40 @@ def _rollback_exact_resume_record(task, result_root, task_id, root_task_id, row,
             "held": HOLD_REVOCATION_UNWRITTEN, "grant_id": grant_id}
 
 
+def _resume_pause_selection(result_root, task, task_id, pause_id, *, budget, sleep_wake, panic_only):
+    """Read the durable pause and bind the visible window choice or Panic selection to it."""
+    from ouroboros.budget_pause import STATE_PAUSED, saved_budget_pause
+    from ouroboros.cold_return import _NOT_OFFERED, bound_choice, granted_choice
+    from ouroboros.task_results import load_task_result
+    from ouroboros.work_stop import current_window_offer_id
+
+    try:
+        result_row = load_task_result(result_root, task_id, strict=True) or {}
+    except Exception:
+        return {}, {}, {}, {"ok": False, "error": "pause_record_unreadable", "action": "cancel_or_new_run"}
+    row = saved_budget_pause(result_row)
+    chosen = {}
+    if not sleep_wake and bound_choice():
+        try:
+            identity = current_window_offer_id(result_root, task, budget)
+        except Exception:
+            return result_row, row, {}, dict(_NOT_OFFERED)
+        chosen, refusal = granted_choice(row, identity if row.get("state") == STATE_PAUSED else "")
+        if refusal:
+            return result_row, row, {}, refusal
+    if panic_only and (row.get("reason") not in {"sleep", "authority"} or row.get("pause_id") != pause_id):
+        return result_row, row, {}, {"ok": False, "error": "panic_selection_changed"}
+    return result_row, row, chosen, None
+
+
 def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected_by: str = "",
                         external: Optional[Dict[str, Any]] = None,
                         sleep_wake: bool = False, batch=None, panic_only: bool = False,
                         panic_money=None) -> Dict[str, Any]:
     """Grant from the durable pause, fresh custody, money, Stop and clock checks."""
     from ouroboros.budget_pause import (
-        LIVE_PAUSE_STATES, STATE_PAUSED, STATE_RESUME_GRANTED,
-        saved_budget_pause, set_budget_pause,
+        BudgetPauseSuperseded, LIVE_PAUSE_STATES, STATE_PAUSED, STATE_RESUME_GRANTED,
+        set_budget_pause,
     )
     from ouroboros.cancel_intents import cancel_pending
     from ouroboros.config import explicit_execution_timeout_sec
@@ -879,7 +906,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
     from ouroboros.control_actor import owner_door_bound
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
     from ouroboros.model_wait import execution_elapsed_seconds
-    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
     from supervisor.events_budget import (
         BUDGET_HOLD_KEY, _root_resume_state, _root_resume_grants, hold_root_resume_descendants,
     )
@@ -897,13 +924,10 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         return refusal
     if refusal := _restart_or_update_refusal(q, task, result_root, task_id):
         return refusal
-    try:
-        result_row = load_task_result(result_root, task_id, strict=True) or {}
-    except Exception:
-        return {"ok": False, "error": "pause_record_unreadable", "action": "cancel_or_new_run"}
-    row = saved_budget_pause(result_row)
-    if panic_only and (row.get("reason") not in {"sleep", "authority"} or row.get("pause_id") != pause_id):
-        return {"ok": False, "error": "panic_selection_changed"}
+    result_row, row, chosen, refusal = _resume_pause_selection(
+        result_root, task, task_id, pause_id, budget=q.BUDGET_ROOT_FENCES, sleep_wake=sleep_wake, panic_only=panic_only)
+    if refusal:
+        return refusal
     if task.get("_owner_hold") or result_row.get("_owner_hold"):
         return {"ok": False, "error": "owner_held"}
     if result_row.get("status") in _TRULY_TERMINAL_STATUSES:
@@ -1032,7 +1056,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         "refresh_planning_threshold": str(row.get("rail") or "") in {
             "graceful_ceiling", "wrapup_last_fit", "soft_land"},
         **({"producer_allowance_lifted": lift} if lift else {}),
-        **renewed,
+        **renewed, **chosen,
     }
     prior_pause = dict(pause)
     handoff = {
@@ -1051,6 +1075,11 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
             'root_resume_generation', 'root_fence_id', 'root_resume_basis') if key in grant},
     }
 
+    def update_grant_record(current):
+        if chosen and task_id == root_task_id and current.get("owner_pause") != result_row.get("owner_pause"):
+            raise BudgetPauseSuperseded("window offer's owner Pause changed")
+        return lifted_record(current, lift) if lift else current
+
     def record_grant():
         if sleep_wake:
             if deadline is not None and deadline <= utc_now():
@@ -1066,7 +1095,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
                           "resume_generation": generation},
                          expected_pause_id=pause_id, expected_state=str(row.get("state") or ""),
                          expected_grant_id=str((row.get("grant") or {}).get("grant_id") or ""),
-                         row_update=(lambda current: lifted_record(current, lift)) if lift else None)
+                         row_update=update_grant_record if chosen or lift else None)
 
     held_siblings, rebound_holds, released_hold = [], {}, None
     def granted():
@@ -1110,6 +1139,9 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
     try:
         record_grant()
     except Exception as exc:
+        if chosen and isinstance(exc, BudgetPauseSuperseded):
+            from ouroboros.cold_return import _NOT_OFFERED
+            return dict(_NOT_OFFERED)
         return {"ok": False, "error": "grant_not_recorded", "detail": str(exc)[:200]}
     task.pop("_budget_pause", None)
     task["_budget_pause_resume"] = handoff
