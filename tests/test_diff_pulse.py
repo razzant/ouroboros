@@ -64,8 +64,7 @@ def test_the_pulse_counts_every_wave_since_the_contribution_base(tmp_path):
     # What the last wave alone shows hides the module wave 1 created.
     assert "custody.py" not in _git(repo, "diff", "--name-only", "HEAD")
 
-    fact, shape, directory, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
-    assert directory.startswith("New runtime modules: ouroboros/custody.py, ouroboros/fresh.py; ")  # both waves' modules
+    fact, shape, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")  # an edit's own file: no directory fact
     assert fact.startswith(f"Diff pulse since canonical/ouroboros merge-base {base[:12]}: ")
     assert "files 3, lines +295/-0 (net +295)" in fact
     assert "new files: ouroboros/custody.py, ouroboros/fresh.py;" in fact
@@ -626,10 +625,21 @@ def test_a_change_that_adds_a_runtime_module_says_whether_the_module_directory_i
     assert line.format("ouroboros/fresh.py, supervisor/also.py", "not in this change") in diff_pulse(repo)
     _write(repo, directory, 1, "# 1.1 Module Directory\n\nRows.\n- fresh.py: a new row.\n")
     assert line.format("ouroboros/fresh.py, supervisor/also.py", "in this change") in diff_pulse(repo)
+    # It follows the shown files like its sibling notes: an edit's receipt for another file does not repeat it.
+    assert "runtime modules" not in diff_pulse(repo, ["ouroboros/core.py"])
+    assert line.format("ouroboros/fresh.py", "in this change") in diff_pulse(repo, ["ouroboros/fresh.py"])
     # Staged, the fact is the index's: only what the commit would add, and the directory only if staged with it.
     _git(repo, "add", "ouroboros/fresh.py")
     staged = diff_pulse(repo, ["ouroboros/fresh.py"], staged=True)
     assert line.format("ouroboros/fresh.py", "not in this change") in staged
+    # A move is told as a move (Git's own rename detection), beside what is new; a deletion alone says nothing.
+    _git(repo, "mv", "ouroboros/core.py", "ouroboros/moved.py")
+    moved = diff_pulse(repo, staged=True)
+    assert ("New runtime modules: ouroboros/fresh.py; moved runtime modules: ouroboros/moved.py (from ouroboros/core.py); "
+            f"the hand-kept module directory `{directory}` is not in this change.") in moved
+    _git(repo, "reset", "-q", "--hard")
+    _git(repo, "rm", "-q", "ouroboros/core.py")
+    assert "runtime modules" not in diff_pulse(repo, staged=True)
 
 
 def _touched(repo: Path) -> Path:

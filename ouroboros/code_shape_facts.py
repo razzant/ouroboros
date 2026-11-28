@@ -471,18 +471,27 @@ def ownership_note(shown: Iterable[str], changed: Iterable[str], manifest: Optio
 
 
 MODULE_DIRECTORY = "docs/architecture/01-module-directory.md"
-RUNTIME_PACKAGES = ("ouroboros/", "supervisor/")  # where a new ``.py`` file is a runtime module (the preflight's rule)
+RUNTIME_PACKAGES = ("ouroboros/", "supervisor/")
 
 
-def directory_note(added: Iterable[str], changed: Iterable[str]) -> str:
-    """For a change that adds a runtime module (a ``.py`` file under ``RUNTIME_PACKAGES``): whether the hand-kept
-    module directory is in the change. A literal fact about the diff for the mind and the reviewer, never a gate
-    (BIBLE P3) and nothing when no module is added."""
-    modules = sorted(path for path in added if path.startswith(RUNTIME_PACKAGES) and path.endswith(".py"))
-    if not modules:
+def runtime_module(path: str) -> bool:
+    """A Python file of the runtime packages: what the new-module preflight and the directory fact both mean."""
+    return path.startswith(RUNTIME_PACKAGES) and path.endswith(".py")
+
+
+def directory_note(added: Iterable[str], changed: Iterable[str], moved: Optional[Mapping[str, str]] = None) -> str:
+    """For runtime modules a change adds or moves (``moved``: new path -> the path Git says it was renamed from):
+    whether the hand-kept module directory is in the change. A literal fact about the diff for the mind and the
+    reviewer, never a gate (BIBLE P3), and nothing when the given files add or move no module."""
+    moved = moved or {}
+    new = sorted(path for path in added if runtime_module(path) and path not in moved)
+    renamed = sorted(f"{path} (from {moved[path]})" for path in added if runtime_module(path) and path in moved)
+    if not (new or renamed):
         return ""
+    named = "; ".join(part for part in (f"New runtime modules: {', '.join(new)}" if new else "",
+                                        f"{'m' if new else 'M'}oved runtime modules: {', '.join(renamed)}" if renamed else "") if part)
     state = "in this change" if MODULE_DIRECTORY in set(changed) else "not in this change"
-    return f"New runtime modules: {', '.join(modules)}; the hand-kept module directory `{MODULE_DIRECTORY}` is {state}."
+    return f"{named}; the hand-kept module directory `{MODULE_DIRECTORY}` is {state}."
 
 
 def removed_prose_note(documents: Iterable[str], at_base: Mapping[str, Optional[str]],

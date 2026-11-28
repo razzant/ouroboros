@@ -202,6 +202,24 @@ _PREFLIGHT_CASES = [
         "A  ouroboros/pack/__init__.py\nM  ouroboros/domains.toml",
         None,
     ),
+    (   # a moved module is a new path: as the gate hands it (an added path) and as a raw rename line
+        "moved_module_without_its_manifest_row_blocked",
+        "move a module",
+        "D  ouroboros/old_module.py\nA  ouroboros/new_module.py",
+        ("PREFLIGHT_BLOCKED", "no `[modules]` row", "ouroboros/new_module.py"),
+    ),
+    (
+        "renamed_module_line_without_its_manifest_row_blocked",
+        "move a module",
+        "R  ouroboros/old_module.py -> ouroboros/new_module.py",
+        ("PREFLIGHT_BLOCKED", "no `[modules]` row", "ouroboros/new_module.py"),
+    ),
+    (
+        "renamed_module_line_with_its_row_passes",
+        "move a module",
+        "R  ouroboros/old_module.py -> ouroboros/new_module.py\nM  ouroboros/domains.toml",
+        None,
+    ),
     (
         "modified_module_without_architecture_passes",
         "update existing module",
@@ -222,7 +240,31 @@ _SUBJECT_FILES = {  # what the subject's index holds for the new-module cases, b
     "new_module_with_its_row_and_docstring_passes_without_a_staged_manual": {
         "ouroboros/domains.toml": _ROW, "ouroboros/new_module.py": _DOCUMENTED},
     "new_package_init_needs_no_docstring": {"ouroboros/domains.toml": _ROW, "ouroboros/pack/__init__.py": ""},
+    **{case: {"ouroboros/domains.toml": '[domains]\nD01 = "Core"\n\n[modules]\n', "ouroboros/new_module.py": _DOCUMENTED}
+       for case in ("moved_module_without_its_manifest_row_blocked", "renamed_module_line_without_its_manifest_row_blocked")},
+    "renamed_module_line_with_its_row_passes": {"ouroboros/domains.toml": _ROW, "ouroboros/new_module.py": _DOCUMENTED},
 }
+
+
+def test_a_git_mv_of_a_runtime_module_reaches_the_preflight_as_a_new_path(tmp_path):
+    """The gate's own reading of the index: a real ``git mv`` arrives as the deleted old path and the added new one,
+    so the new path owes its ``[modules]`` row like any new module."""
+    import subprocess
+
+    review = _get_review_module()
+    repo = tmp_path / "repo"
+    (repo / "ouroboros").mkdir(parents=True)
+    (repo / "ouroboros" / "old_module.py").write_text(_DOCUMENTED, encoding="utf-8")
+    (repo / "ouroboros" / "domains.toml").write_text(
+        '[domains]\nD01 = "Core"\n\n[modules]\n"ouroboros/old_module.py" = "D01"\n', encoding="utf-8")
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "base"],
+                 ["mv", "ouroboros/old_module.py", "ouroboros/new_module.py"]):
+        subprocess.run([*git, *args], check=True, capture_output=True)
+    staged = review._build_preflight_staged(str(repo))
+    assert staged.splitlines() == ["D  ouroboros/old_module.py", "A  ouroboros/new_module.py"]
+    blocked = review._preflight_check("move a module", staged, repo, neutral_allowed=True)
+    assert blocked and "PREFLIGHT_BLOCKED" in blocked and "no `[modules]` row" in blocked and "new_module.py" in blocked
 
 
 def test_preflight_check(subtests, monkeypatch, tmp_path):

@@ -1516,7 +1516,12 @@ def diff_pulse(
                                    base_manifest=at_base[shapes.MANIFEST_PATH], removed=gone)
     prose = shapes.removed_prose_note(governed, at_base, current, unread=unread_prose, locator=(
         f"git diff {'--cached ' if staged else ''}{base[:12]} -- {' '.join(governed)}")) if set(governed) & set(shown) else ""
-    return "\n".join(part for part in (fact, shape, owners, shapes.directory_note(created, changed), prose,
+    # The directory fact follows the shown files like its sibling notes; Git's own rename detection tells a move.
+    modules, moved = [path for path in shown if path in created and shapes.runtime_module(path)], {}
+    if modules and any(shapes.runtime_module(path) for path in gone):
+        pairs = (diff(base, "--name-status", "-M", "--diff-filter=R") or b"").decode("utf-8", "replace").split("\0")
+        moved = dict(zip(pairs[2::3], pairs[1::3]))
+    return "\n".join(part for part in (fact, shape, owners, shapes.directory_note(modules, changed, moved), prose,
                                        book_balance_note(root, shown, staged=staged), DIFF_PULSE_QUESTION) if part)
 
 

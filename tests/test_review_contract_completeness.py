@@ -367,9 +367,14 @@ def test_every_line_a_body_seat_is_handed_is_in_its_contract(tmp_path, monkeypat
     reviewed twice with other staged changes and data; the commit gate's packet and retrieving seats share these
     builders. The pulse's counts and paths, as the brief received them, are host facts; its judgment question and
     the books' growth rule are the contract's."""
-    from ouroboros.reference_books import BOOK_GROWTH_RULE
+    from ouroboros.reference_books import BOOK_GROWTH_RULE, CHAPTER_BAND_RULE
     from ouroboros.review import DIFF_PULSE_QUESTION
     from ouroboros.tools import git as git_mod
+    from ouroboros.tools.review_admission import change_brief_words
+
+    # Both rules the pulse can end with are the contract's words on the body, and no other layer's.
+    assert {BOOK_GROWTH_RULE, CHAPTER_BAND_RULE} <= set(change_brief_words("body")[0])
+    assert not {BOOK_GROWTH_RULE, CHAPTER_BAND_RULE} & set(change_brief_words("core")[0])
     from ouroboros.tools import review as review_tool
     from ouroboros.tools import review_helpers
     from ouroboros.tools.registry import ToolContext

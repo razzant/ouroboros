@@ -171,8 +171,8 @@ def _preflight_check(commit_message: str, staged_files: str,
     # active_staged excludes deletions for companion-file checks.
     staged_set = {path for _, path in file_status}
     active_staged = {path for status, path in file_status if status != "D"}
-    # Added/Copied count as new modules; renames do not.
-    new_files = {path for status, path in file_status if status in ("A", "C")}
+    # Added and copied paths are new; a rename's new path is too (every caller hands it as an added path already).
+    new_files = {path for status, path in file_status if status in ("A", "C", "R")}
     from ouroboros.commit_admission import release_metadata_diagnostics, format_release_metadata_preflight
     release_error = format_release_metadata_preflight(release_metadata_diagnostics(
         repo_dir, sorted(active_staged), source="index",
@@ -193,7 +193,10 @@ def _preflight_check(commit_message: str, staged_files: str,
     # no manual edit is demanded here, since a mandatory touch buys an edit that documents nothing (BIBLE P3:
     # review coverage is diagnostic, never a veto). ``repo_dir``'s index is the subject, a frozen base..head
     # review's isolated checkout included; an index that cannot be read is unavailable evidence, never a pass.
-    new_logic_files = sorted(f for f in new_files if f.startswith(("ouroboros/", "supervisor/")) and f.endswith(".py"))
+    # A package's `__init__.py` owes its row but no docstring lead.
+    from ouroboros.code_shape_facts import runtime_module
+
+    new_logic_files = sorted(f for f in new_files if runtime_module(f))
     if new_logic_files:
         import ast
 

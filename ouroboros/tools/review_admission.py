@@ -462,7 +462,7 @@ def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = Tr
     from ouroboros.owner_words import reviewer_words_material
     from ouroboros.review_words import words_material
     from ouroboros.preflight_receipts import execution_material
-    from ouroboros.reference_books import BOOK_GROWTH_RULE
+    from ouroboros.reference_books import BOOK_GROWTH_RULE, CHAPTER_BAND_RULE
     from ouroboros.review import DIFF_PULSE_QUESTION
     from ouroboros.review_evidence import evidence_material
     from ouroboros.review_history import history_material
@@ -476,7 +476,7 @@ def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = Tr
 
     every = [*intent_material(), *wave_label_material(), *round_material(), *history_material(), *words_material(),
              *reviewer_words_material(), *execution_material(), *managed_material((True,)),
-             *((DIFF_PULSE_QUESTION, BOOK_GROWTH_RULE) if layer == "body" else ())]
+             *((DIFF_PULSE_QUESTION, BOOK_GROWTH_RULE, CHAPTER_BAND_RULE) if layer == "body" else ())]
     if not packet:
         return every, [], [*retrieving_material(layer), *evidence_material(("session", "native")),
                            *managed_material((False,))] if retrieving else []
