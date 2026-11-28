@@ -1,0 +1,30 @@
+{
+  "core_base": "9f6fad44a369a1eaf079129a6d4a69539f25dd86",
+  "core_head": "41bf465b65fcf725d9e5cb65b8a284cc93d49ee8",
+  "core_tree": "4f28bd37241a2854c35143140d71a111802d37ed",
+  "files": {
+    "track08-3122-composed-r7-driver.py.in": {
+      "bytes": 16390,
+      "sha256": "30badd81e50e335f39e9d5db34c70eadd4ffea6bf4d44b00bb47a9ec73b42807"
+    },
+    "track08-3122-composed-r8-driver.py.in": {
+      "bytes": 16684,
+      "sha256": "d1dd73598b0b09c12799d24b1e62905a14111a1b435ad07d8f10def67d731d8f"
+    },
+    "track08-3122-prepublication-pair.json": {
+      "bytes": 14195,
+      "sha256": "189d3dff8c386bb9f1cc100609f244c4910eb5769008dd1b617270a31dfa84be"
+    },
+    "track08-3122-r7-witness.zip": {
+      "bytes": 22667,
+      "sha256": "ccc24b56d46a089e6f27a7bdbc1c608ed86365b0a5ca952cee05e2aa84a72068"
+    },
+    "track08-3122-r8-witness.zip": {
+      "bytes": 23487,
+      "sha256": "d6c953fd42cd57c85a276e04bc7c09d20277eaaefcc1fd5bb80f1d4a91c05c6a"
+    }
+  },
+  "hub_head": "c42c25082128474a27acdf251d3793da6551ee68",
+  "hub_release_digest": "b732f2b1696262ce3889661218f4a8f717a859555d2a4d3562535b769d03e137",
+  "hub_tree": "941012431d7393d2c97dda18aa3653bc691b7d37"
+}
