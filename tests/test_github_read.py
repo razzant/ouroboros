@@ -676,6 +676,29 @@ def test_detail_full_returns_github_objects_whole_and_fields_project_them(gh):
     assert payload["item"] == {"number": 7, "title": "Issue 7"} and payload["omitted"] == ["fields not present: nope"]
 
 
+def test_the_queue_read_pr_merge_names_shows_auto_merge_which_the_concise_pr_omits(gh):
+    """``pr_merge`` refuses beside an auto-merge queue and names this exact read for watching it."""
+    import ast
+
+    from ouroboros.merge_receipts import read_only_lookup
+
+    call = ast.parse(read_only_lookup(f"{BASE}/pull/7", 7, queue=True), mode="eval").body
+    named = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+    queue = {"enabled_by": {"login": "dev"}, "merge_method": "squash"}
+
+    def answer(p, argv, kw):
+        if p.route != "graphql":
+            return json.dumps(_pr(7, auto_merge=queue))
+        node = {"id": "PR_node7", "commits": {"totalCount": 1}, "reviewDecision": None}
+        return json.dumps({"data": {"nodes": [node]}})
+
+    gh.answer = answer
+    assert call.func.id == "github_read" and named["repo"] == "github.example/owner/selected"
+    _line, payload = _payload(gh.read(**named))
+    assert payload["item"] == {"state": "open", "merged_at": None, "auto_merge": queue} and "omitted" not in payload
+    assert "auto_merge" not in _payload(gh.read(method="get", kind="pr", target=7))[1]["item"]
+
+
 def test_a_result_beyond_the_tool_limit_is_saved_whole_as_a_task_artifact(gh, monkeypatch):
     from ouroboros.artifacts import task_artifact_dir_path
 

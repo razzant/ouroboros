@@ -155,13 +155,19 @@ def _exit_failure(cmd: List[str], res: subprocess.CompletedProcess, stderr: str)
     HTTP NNN: …`` — from every other command. A marker quoted mid-sentence is prose, not a status.
     HTTP status alone proves nothing about which CLI step failed; a caller that knows its command sent one
     request reads it (``_merge_answer``)."""
-    err = redact_known_values(stderr or "", [github_token_from_env_or_settings()])
+    err = _redact_gh_diagnostic(stderr or "")
     status = _GH_STATUS_RE.search(err)
     head = " | ".join([line.strip() for line in err.splitlines() if line.strip()][:3])
     head = truncate_within_limit(head, 600)
     return GhResult(False, "⚠️ GH_ERROR: " + head, res.returncode,
                     int(status.group(1) or status.group(2)) if status else None, "exit")
 
+
+
+def _redact_gh_diagnostic(text: str) -> str:
+    return redact_known_values(text, [github_token_from_env_or_settings(),
+                                      os.environ.get("GH_ENTERPRISE_TOKEN", ""),
+                                      os.environ.get("GITHUB_ENTERPRISE_TOKEN", "")])
 
 
 def _capture_stdout(cmd: List[str], cwd: pathlib.Path, env: dict, timeout: int, path: pathlib.Path,
@@ -326,7 +332,7 @@ def _refused(ctx: ToolContext, text: str, failure: str, typed: Optional[ToolResu
 
 def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None,
             *, repo: object = _GENERIC_TRANSPORT, capture_to: Optional[pathlib.Path] = None,
-            max_bytes: int = 0) -> GhResult:
+            max_bytes: int = 0, diagnostic_only: bool = False) -> GhResult:
     # Public repository tools pass repo, including '' for Project focus. Their generic follow-up legs
     # inherit the invocation's read context. Publication/Hub calls omit repo outside that invocation,
     # so target refusals here cannot shadow their final result with this tool's argument-error sidecar.
@@ -350,6 +356,9 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
         from ouroboros.tool_access import build_resolved_resource_binding, folderless_scratch_dir
 
         cwd, env = pathlib.Path(ctx.repo_dir), _gh_env(ctx)
+        if diagnostic_only:
+            env.pop("GH_DEBUG", None)  # API tracing can dump response bodies into stderr.
+            env.pop("DEBUG", None)  # The deprecated spelling still works in older gh.
         cmd = ["gh", *args]
         unbound = "⚠️ GH_TARGET_UNAVAILABLE: no directory could be bound for gh: {}"
         # A github_read call that named its repository reads GitHub, not a checkout (#3613): each leg, the ones that
@@ -436,12 +445,12 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
             return _refused(
                 ctx, "⚠️ GH_ERROR: `gh` CLI not found. Install GitHub CLI and ensure it is on PATH (https://cli.github.com/)",
                 "cli_missing", no_effect=first_submission)
-        detail = truncate_within_limit(redact_known_values(str(e), [github_token_from_env_or_settings()]), 600)
+        detail = truncate_within_limit(_redact_gh_diagnostic(str(e)), 600)
         return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception")
     except subprocess.TimeoutExpired:
         return GhResult(False, f"⚠️ GH_TIMEOUT: exceeded {timeout}s.", None, None, "timeout")
     except Exception as e:
-        detail = truncate_within_limit(redact_known_values(str(e), [github_token_from_env_or_settings()]), 600)
+        detail = truncate_within_limit(_redact_gh_diagnostic(str(e)), 600)
         return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception")
 
 
@@ -677,37 +686,49 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
                  "scope": review_scope, "verdict": review_verdict}
                 if (reviewed_head_sha or review_verdict or (review_task_ids and not record_id)) else None)
     receipt = run_pr_merge(
-        ctx, lambda args, **kw: _gh_run(args, ctx, repo=repo, **kw), lambda args, **kw: _gh_run(args, ctx, **kw),
-        lambda args, **kw: _merge_answer(_gh_run(args, ctx, **kw)),
+        ctx, lambda args, **kw: _gh_run(args, ctx, repo=repo, diagnostic_only=True, **kw),
+        lambda args, **kw: _gh_run(args, ctx, diagnostic_only=True, **kw),
+        lambda args, **kw: _merge_answer(_gh_run(args, ctx, diagnostic_only=True, **kw)),
         drive_root=canonical_data_root(ctx), task_id=str(ctx.task_id or ""), number=int(number or 0),
         expected_head_sha=expected_head_sha, method=method, continue_receipt_id=str(continue_receipt_id or "").strip(),
         review={"declared": declared, "task_ids": list(review_task_ids or []), "record_id": record_id, "checks": checks})
     if receipt.get("refused"):
         code = "TOOL_ARG_ERROR" if receipt["refused"] == "arguments" else "TOOL_ERROR"
         return _refuse(ctx, f"⚠️ PR_MERGE_REFUSED: {receipt['refused']} — {receipt.get('detail', '')}", code, no_effect=True)
-    from ouroboros.merge_receipts import card_row_text, no_effect_request, queued_earlier_note
+    from ouroboros.merge_receipts import (NOT_SUBMITTED, card_row_text, no_effect_request, queued_earlier_note,
+                                          read_only_lookup)
 
     status = (receipt.get("outcome") or {}).get("status", "unknown")
     # The stored outcome is GitHub's readback; the receipt's own request may still be proven to have changed nothing.
     ended = no_effect_request(receipt).removeprefix("request ")
     refused = bool(ended) and status != "merged"
     effect = receipt.get("effect") or {}
-    # While an earlier request of this PR stays unconfirmed a plain call only reads back; a decision may send one.
-    after = ("GitHub shows the PR merged by another request." if status == "merged" else
-             "Plain repeat calls only read it back; to decide one new request for the same head and method, call "
-             f"pr_merge with continue_receipt_id='{receipt['receipt_id']}'." if receipt.get("plain_held")
-             and status in ("unknown", "refused") and not effect.get("ok") and not receipt.get("continued_by") else
-             "A new pr_merge call for the PR's current head may send one." if status == "refused" else
-             "Until GitHub shows the PR open without a queue, repeat calls only read it back.")
+    # pr_merge is a merge request, never the status reader, and no answer promises what a later call will do: another
+    # call's readback can end the hold this one sees. Status is github_read's; a repeat belongs to merge intent.
+    held = bool(receipt.get("plain_held"))
+    reads = read_only_lookup((receipt.get("repo") or {}).get("url"), receipt["number"], queue=bool(
+        (receipt.get("observed_after") or {}).get("auto_merge"))) + " reads the PR without merging."
+    # A new decision follows a request whose effect is recorded and settled; an intent alone may still be sent.
+    after = ("GitHub shows the PR merged by another request." if status == "merged" else (
+        "A new pr_merge call for the PR's current head may send one." if not held else
+        "pr_merge reads back only as long as a receipt of this PR is still observed, then may send a new merge "
+        "request: call it only to merge." + (
+            " To decide one new request for the same head and method, call pr_merge with "
+            f"continue_receipt_id='{receipt['receipt_id']}'." if status in ("unknown", "refused") and effect
+            and receipt.get("state") == "settled" and not effect.get("ok") and not receipt.get("continued_by")
+            else "")) + f" {reads}")
     lines = [card_row_text(receipt, codes=True), f"receipt_id={receipt['receipt_id']} (task result: merge_receipts)"]
     if receipt.get("continues"):
         lines.append(f"This request continues receipt {receipt['continues']}, whose own outcome stays as recorded"
                      + ("; the merge GitHub shows is not attributed to either request." if status == "merged" else "."))
     prior = receipt.get("prior_status", "unknown") if receipt.get("readback_only") else None
-    if receipt.get("rejoined"):
-        lines.append("This decision already sent its request as this receipt, so this call only read GitHub back "
-                     "and sent no new merge request. " + (f"Receipt {receipt['continued_by']} continued it since; "
-                     "plain pr_merge calls observe that latest attempt." if receipt.get("continued_by") else after))
+    if receipt.get("rejoined"):  # only the receipt's recorded effect says whether the decision's request went out
+        sent_as = ("already sent its request as this receipt" if effect and effect.get("failure") not in NOT_SUBMITTED
+                   else "already has this receipt, whose merge request "
+                   + ("never reached GitHub" if effect else "is not recorded as sent"))
+        since = f"Receipt {receipt['continued_by']} continued it since. " if receipt.get("continued_by") else ""
+        lines.append(f"This decision {sent_as}, so this call only read GitHub back and sent no new merge request. "
+                     + since + after)
     elif prior == "merged":
         lines.append("This PR's merge is already recorded in this receipt, so this call only read GitHub back "
                      "and sent no new merge request.")
@@ -721,10 +742,10 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
         lines.append("An earlier request for this PR had no confirmed outcome, so this call only read GitHub back "
                      "and sent no new merge request. " + ("GitHub now shows the PR merged." if status == "merged"
                                                          else after))
-    elif ended and (status != "refused" or receipt.get("plain_held")):
+    elif ended and (status != "refused" or held):
         lines.append(f"This merge request was {ended} and changed nothing, so it holds no task custody. {after}")
-    elif status == "unknown" and not effect.get("ok"):
-        lines.append(after)
+    if status != "merged" and not any(reads in line for line in lines):
+        lines.append(after)  # every answer short of a merge names the read that cannot merge
     # The receipt's retained, already bounded and redacted gh facts belong in this local
     # response (#1555); the public PR-body block never carries them.
     if effect and not effect.get("ok"):
@@ -737,20 +758,29 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
         # The first line already names the latest readback beside an earlier queue state.
         lines.append(("Earlier GitHub readback: " if queued_earlier_note(receipt) else "GitHub readback: ")
                      + f"{receipt['outcome']['reason']}.")
+    if "snapshot_gap" in receipt:
+        # gh's view never authorizes a send; reading the PR needs no pr_merge call, whose next one may send.
+        reading = "The observation and review coverage above are from the retained receipt." if receipt.get(
+            "retained_observation") else "The technical readback does not establish the current PR base SHA."
+        lines.append(f"GitHub PR snapshot unavailable ({receipt['snapshot_gap'] or 'no diagnostic'}). {reading}"
+                     + ("" if any(reads in line for line in lines) else f" {reads}"))
     publication = receipt.get("publication") or {}
     if receipt.get("receipt_write_gap"):
         lines.append("⚠️ Merge receipt persistence is unknown after the external effect: "
                      + receipt["receipt_write_gap"])
-    # A refusal refreshes only a projection that already existed, and a repeat call would send a new request.
+    # Only a call that still reads this receipt back retries an owed projection, and a refusal refreshes only a
+    # projection that already existed. While a receipt of the PR is observed a plain call reads back; once none
+    # is, a call may send: neither wording promises what a later call does.
     owed = status in ("merged", "queued")
-    stale = "; it may still show the earlier outcome, and a new pr_merge call would send a new merge request."
+    stale = "; it may still show the earlier outcome, and a new pr_merge call may send a new merge request."
+    retry = ("; a later pr_merge call retries it only if it still reads this receipt back, and is otherwise a new "
+             "merge request: call it only to merge.")
     if (owed or publication) and (publication.get("body") or {}).get("status") != "published":
-        lines.append("⚠️ The PR-body receipt block was not confirmed"
-                     + ("; call pr_merge again to retry publication only." if owed else stale))
+        lines.append("⚠️ The PR-body receipt block was not confirmed" + (retry if owed or held else stale))
     card = publication.get("card") or {}
     if (owed or publication) and card.get("status") not in ("owed", "delivered"):
         lines.append("⚠️ The task-card receipt is not confirmed: " + str(card.get("reason") or "publication unknown")
-                     + ("; call pr_merge again for observation/publication only." if owed else stale))
+                     + (retry if owed or held else stale))
     text = "\n".join(lines)
     word = "refused" if refused else status
     accepted = word in ("merged", "queued")
@@ -789,9 +819,12 @@ def get_tools() -> List[ToolEntry]:
                 "expect and the method (never auto-merge, a merge queue or admin; nothing is sent while GitHub shows "
                 "auto-merge or the PR blocked, behind or conflicting), records the host review record you name or the "
                 "review you declare beside what the host observes, reads GitHub back, and writes the receipt to this "
-                "task's record, its card and the PR body. A missing review is recorded loudly, never a lock. A plain "
-                "repeat after an unknown or queued merge only reads GitHub back and publishes; continue_receipt_id is "
-                "the explicit decision to send one new request after an unconfirmed one. "
+                "task's record, its card and the PR body. A missing review is recorded loudly, never a lock. Call it "
+                "only to merge, never to check status: github_read(method='get', kind='pr', target=NUMBER, "
+                "repo='[HOST/]OWNER/REPO') reads a PR without merging. A plain repeat reads an earlier unknown or "
+                "queued request's receipt back and publishes it only if that receipt is still observed when the call "
+                "runs; otherwise it sends. continue_receipt_id is the explicit decision to send one new request "
+                "after an unconfirmed one. "
                 "Distinct from stage_pr_merge, which stages a local merge for a reviewed commit."
             ),
             "parameters": {"type": "object", "properties": {

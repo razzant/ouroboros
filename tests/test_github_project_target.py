@@ -596,6 +596,34 @@ def test_read_only_child_reads_github_where_a_writer_would(tmp_path, request, mo
     assert all((selected, ambient) == (str(folder), False) for argv, selected, ambient in launched if argv[1] != "api")
 
 
+@pytest.mark.parametrize("repo", ["", "owner/selected", "github.example/owner/selected"])
+def test_pr_merge_snapshot_follows_the_resolved_enterprise_pr(tmp_path, gh_calls, monkeypatch, repo):
+    ctx, project = _context(tmp_path, "queued")
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    monkeypatch.setenv("GH_HOST", "github.example")
+    view = subprocess.run
+    snapshot_calls = []
+
+    def run(argv, **kwargs):
+        if argv[:3] == ["gh", "api", "graphql"]:
+            snapshot_calls.append((argv, json.loads(kwargs["input"])["variables"]))
+            snapshot = {"number": 7, "url": f"{BASE}/pull/7", "body": "", "state": "OPEN", "headRefOid": MOVED,
+                        "baseRefName": "main", "baseRefOid": "c" * 40, "mergeStateStatus": "CLEAN", "isDraft": False,
+                        "autoMergeRequest": None, "mergeCommit": None, "mergedAt": None}
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"data": {"repository": {"pullRequest": snapshot}}}),
+                                   stderr="")
+        return view(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = _registry(ctx).execute_result("pr_merge", {"number": 7, "expected_head_sha": SHA, "method": "merge", "repo": repo})
+    assert "PR_MERGE_REFUSED: head_moved" in result.text
+    assert snapshot_calls == [(["gh", "api", "graphql", "--hostname", "github.example", "--input", "-"],
+                               {"owner": "owner", "name": "selected", "number": 7})]
+    (argv, kwargs), = [(argv, kw) for argv, kw in gh_calls if argv[:3] == ["gh", "pr", "view"]]
+    assert kwargs["cwd"] == str(project) and (argv[-2:] == ["--repo", repo] if repo else "--repo" not in argv)
+    assert not any("PUT" in argv for argv, _ in gh_calls)
+
+
 def test_read_only_child_keeps_every_other_github_gate(tmp_path, gh_calls, monkeypatch):
     """Read authority for gh's directory widens nothing else: writes, merge and the shell stay withheld, and the
     network and disabled-method gates still refuse before any gh launch."""

@@ -8,6 +8,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import re
 import shutil
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -46,13 +47,25 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
     prefix, suffix = 'Résumé "quoted" \\ path.\r\n\n', '\n\nOwner footer.  \n'
     note = "\nAdded during merge: @literal-file-name.\n"
     world.gh.pr["body"] = prefix + "<!-- ouroboros:merge-receipt ab -->\nold\n<!-- /ouroboros:merge-receipt -->" + suffix
-    writes = []
+    writes, snapshots = [], []
+    required = {"number", "url", "body", "state", "headRefOid", "baseRefName", "baseRefOid", "mergeStateStatus",
+                "isDraft", "autoMergeRequest", "mergeCommit", "oid", "mergedAt"}
 
     def process(argv, **kw):
         assert kw["env"] == selected_env  # every call retains the same selected identity
         args = argv[1:]
         if args[:1] == ["pr"]:
             assert args[-2:] == ["--repo", repo]
+        if args[:2] == ["api", "graphql"]:
+            assert args == ["api", "graphql", "--hostname", hostname, "--input", "-"] and not writes
+            request = json.loads(kw["input"])
+            assert set(request) == {"query", "variables"}
+            query = " ".join(request["query"].split())  # field order is free; scope and fields are not
+            assert "repository(owner: $owner, name: $name) { pullRequest(number: $number) {" in query
+            assert required <= set(re.findall(r"[A-Za-z]+", query))
+            assert not re.search(r"organization|viewer|login|membersWithRole|teams", query, re.I)
+            assert request["variables"] == {"owner": "chosen", "name": "repository", "number": 7}
+            snapshots.append(sum(sent(c) for c in world.gh.calls))
         if args[:1] == ["api"] and "PATCH" in args:
             assert args == ["api", "repos/chosen/repository/pulls/7", "--hostname", hostname,
                             "--method", "PATCH", "--input", "-"]
@@ -77,8 +90,8 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
     assert writes == [{"body": expected}] and world.gh.pr["body"] == expected
     assert world.gh.pr["title"] == "demo"
     assert receipt["publication"]["card"]["status"] == "owed"
-    assert not any(c[:2] == ["pr", "edit"] or c[:2] == ["api", "graphql"] or c[0] == "auth"
-                   for c in world.gh.calls)
+    assert snapshots == [0, 1] and sum(sent(c) for c in world.gh.calls) == 1
+    assert not any(c[:2] == ["pr", "edit"] or c[0] == "auth" for c in world.gh.calls)
 
 
 @pytest.mark.parametrize("failure", ["EOF", "gh: Server Error (HTTP 502)", "gh: Resource not accessible by integration (HTTP 403)",
@@ -420,29 +433,36 @@ def test_proven_rejection_survives_unavailable_readback(world):
 
 
 def test_receipt_revision_is_canonical_and_idempotent_across_fact_enrichment(world, monkeypatch):
+    """A fact the receipt gains advances its revision once, with a new card delivery; the same facts again, and a
+    later lost read of a commit tree it already holds (a commit's tree never changes), advance nothing."""
     gh = world.gh
-    registered_merge(world)
-    first = _receipts(world)[0]
-    registered_merge(world)
-    unchanged = _receipts(world)[0]
-    assert unchanged["revision"] == first["revision"]
-    assert unchanged["publication"]["card"]["delivery_id"] == first["publication"]["card"]["delivery_id"]
 
     def missing_head_tree(args, *a, **kw):
         if args[:1] == ["api"] and args[1].endswith(HEAD):
+            gh.calls.append(list(args))
             return github.GhResult(False, "lost read", 1, 502, "exit")
         return gh(args, *a, **kw)
 
     monkeypatch.setattr(github, "_gh_run", missing_head_tree)
     registered_merge(world)
     gap = _receipts(world)[0]
+    assert "tree_comparison_unavailable" in gap["coverage"]["gaps"]
+    registered_merge(world)
+    unchanged = _receipts(world)[0]
+    assert unchanged["revision"] == gap["revision"]
+    assert unchanged["publication"]["card"]["delivery_id"] == gap["publication"]["card"]["delivery_id"]
     monkeypatch.setattr(github, "_gh_run", gh)
     registered_merge(world)
     recovered = _receipts(world)[0]
-    assert first["revision"] < gap["revision"] < recovered["revision"]
-    assert merge_receipts.card_row_text(recovered) == merge_receipts.card_row_text(first)
-    assert recovered["publication"]["card"]["delivery_id"] != first["publication"]["card"]["delivery_id"]
+    assert gap["revision"] < recovered["revision"] and recovered["coverage"]["reviewed_head_tree"] == TREE
+    assert "tree_comparison_unavailable" not in recovered["coverage"]["gaps"]
+    assert recovered["publication"]["card"]["delivery_id"] != gap["publication"]["card"]["delivery_id"]
     assert recovered["outcome"]["attribution"] == "this_call" and recovered["outcome"]["merge_sha"] == MERGE
+    monkeypatch.setattr(github, "_gh_run", missing_head_tree)
+    reads = len(gh.calls)
+    registered_merge(world)
+    assert _receipts(world) == [recovered]
+    assert not any(c[:1] == ["api"] and "/commits/" in c[1] for c in gh.calls[reads:])  # known trees are not read again
 
 
 def bounded_receipt_history(world, monkeypatch):
@@ -572,10 +592,12 @@ def test_frozen_history_page_refreshes_receipt_without_changing_positions(world,
 
     before = bounded_receipt_history(world, monkeypatch)
     endpoint = make_chat_history_endpoint(world.root)
-    (canonical,) = _receipts(world)
-    canonical["coverage"]["gaps"] = ["head_tree_unavailable"]
-    current = merge_receipts.write_receipt(world.root, "merge-task", canonical)
-    assert current["revision"] == 4
+    # A newer canonical revision, stored as such: the receipt lock derives a merged receipt's coverage itself.
+    record = read_result(world.root, "merge-task")
+    (current,) = record["merge_receipts"]
+    current["coverage"]["gaps"], current["revision"] = ["head_tree_unavailable"], 4
+    seed_result(world.root, "merge-task", record)
+    assert _receipts(world) == [current]
     # No new delivery: re-reading a physically frozen page must still obtain current truth.
     after = json.loads(asyncio.run(endpoint(SimpleNamespace(query_params={
         "chat_id": "7", "cursor": before["page_cursor"],
