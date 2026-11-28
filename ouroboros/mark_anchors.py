@@ -17,7 +17,7 @@ the snapshot its marks came from and rides beside the view, never hashed with it
 (``ContextCore.memory_view_sequence``); my continuation keeps the first one
 (``_mark_changes_since``, ``owner_wait``), so a cold resume, whose new capture shows only
 the marks then in force, reads every change since it again. Scope is my view's own rule
-(``memory_view.mark_in_view``) for the room my task is in now: when my task or an ancestor
+(``memory_view_marks.mark_in_view``) for the room my task is in now: when my task or an ancestor
 moves to another Project, every change since that boundary is read again for the new room
 and my old room's changes stop. Another room's room mark never travels, even to a focus
 whose start view holds every room's marks: that is the scope rule, not an oversight (the
@@ -195,7 +195,8 @@ def _stated(messages: List[Dict[str, Any]]) -> Dict[int, str]:
 
 def _change_lines(change: Dict[str, Any], label: Any) -> List[str]:
     """One change: its journal sequence and mark, what changed, who and when, then the mark's own words indented."""
-    from ouroboros.memory_view import _minute, mark_entry
+    from ouroboros.memory_inventory import minute as _minute
+    from ouroboros.memory_view_marks import mark_entry
     from ouroboros.memory_view_legacy import INDENT, indented
 
     entry, kind = mark_entry(change["mark"], label), change.get("kind")
@@ -253,7 +254,8 @@ def append_mark_changes(ctx: Any, messages: List[Dict[str, Any]]) -> bool:
         from ouroboros.chronicle_store import ChronicleStore, is_late_review_mark
         from ouroboros.context_budget import bound_host_row
         from ouroboros.context_view_facts import memory_snapshot
-        from ouroboros.memory_view import mark_in_view, room_labeler
+        from ouroboros.memory_view import room_labeler
+        from ouroboros.memory_view_marks import mark_in_view
         from ouroboros.tool_access import canonical_data_root
 
         plan = getattr(ctx, "context_fit_plan", None)
