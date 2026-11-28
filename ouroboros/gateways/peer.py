@@ -11,8 +11,9 @@ headers are read at each request and never kept, printed or returned. A refusal 
 definite and carries its ``refusal_code``. Anything else on a send (503 ``unconfirmed``, another 5xx, an answer
 that does not name the letter, a dead transport) leaves acceptance unknown: only the same letter id with the same
 bytes (``letter_bytes``) may be sent again. An answer to a question is itself a letter (``in_reply_to``) whose id
-derives from the question and the answer, so the same answer sent again is the same letter. This step's links are
-loopback addresses on one computer; another address is refused before the secret leaves.
+derives from the question and the answer, so the same answer sent again is the same letter. Same-computer URL links
+stay on loopback addresses (other URLs are refused before the secret leaves); cross-machine channel links send only to
+the derived POSIX Unix-domain socket for the link.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import json
 import logging
 import math
 import re
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -31,6 +33,8 @@ log = logging.getLogger(__name__)
 UNCONFIRMED = "unconfirmed"
 NOTHING_SENT = frozenset({
     "peer_link_unavailable", "peer_url_refused",
+    "peer_channel_refused", "peer_door_unsupported", "peer_door_dir_invalid",
+    "invalid_session", "channel_session_invalid", "channel_end_missing",
     "place_silent", "place_paused", "places_unreadable",
     "peer_answer_conflict", "peer_answer_pin_unavailable",
     "answer_held",  # the sending task's own launch gate (``delegate_interactions._peer_answer_post``)
@@ -88,6 +92,12 @@ def _unavailable(code: str, message: str, status: int = 0, refusal: str = "") ->
     exc = ClaudexorUnavailable(code, message, status_code=status)
     exc.refusal_code = refusal  # the receiver's own typed refusal; empty for everything else
     return exc
+
+
+def peer_cancel_proven_unsent(engine_ref: Any, exc: Any) -> bool:
+    """An offline peer's proved pre-send refusal leaves a recovered Stop owed, not ambiguous."""
+    return (isinstance(engine_ref, dict) and engine_ref.get("kind") == "peer"
+            and (getattr(exc, "channel_connect_failed", False) or exc.code in NOTHING_SENT))
 
 
 def _this_letter(body: Any, run_id: Any) -> Dict[str, Any]:
@@ -202,12 +212,36 @@ class PeerGateway:
     _endpoint = None
 
     def __init__(self, link: Any, *, timeout_sec: Optional[float] = None) -> None:
+        from ouroboros import peer_channel
+
         self._link = link
         self.engine_ref = {"kind": "peer", "place_id": link.place_id, "link_id": link.link_id}
         self.store_identity = ""
-        self._client = httpx.Client(base_url=str(link.peer_url).rstrip("/"), trust_env=False,  # no proxy sees the key
-                                    timeout=httpx.Timeout(timeout_sec if timeout_sec is not None else _READ_TIMEOUT_SEC,
-                                                          connect=_CONNECT_TIMEOUT_SEC))
+        self._timeout_sec = timeout_sec if timeout_sec is not None else _READ_TIMEOUT_SEC
+        self._channel_tls = threading.local()
+        if peer_channel.is_channel_link(link):
+            self._client = peer_channel.peer_http_client(
+                channel_resolver=self._resolve_active_channel_socket,
+                timeout_sec=self._timeout_sec,
+                connect_timeout_sec=_CONNECT_TIMEOUT_SEC,
+            )
+        else:
+            self._client = peer_channel.peer_http_client(
+                peer_url=str(link.peer_url or ""),
+                timeout_sec=self._timeout_sec,
+                connect_timeout_sec=_CONNECT_TIMEOUT_SEC,
+            )
+
+    def _resolve_active_channel_socket(self) -> str:
+        from ouroboros import peer_channel, peer_links
+
+        bound = getattr(self._channel_tls, "socket_path", "")
+        if bound:
+            return bound
+        link = self._link
+        now = peer_links.outgoing_link(link.place_id, drive_root=link.drive_root) or peer_links.stopping_link(
+            link.place_id, drive_root=link.drive_root)
+        return str(peer_channel.channel_socket_for_link(now or link))
 
     def handshake(self, **_kw: Any) -> Dict[str, Any]:
         return {}
@@ -239,7 +273,7 @@ class PeerGateway:
     def _exchange(self, method: str, path: str, *, content: Optional[bytes] = None,
                   timeout_sec: Optional[float] = None, stop: str = "") -> Tuple[Any, bool]:
         """One request and whether it went through a Pause of my place (only my Stop's own requests do)."""
-        from ouroboros import peer_links
+        from ouroboros import peer_channel, peer_links
         from ouroboros.peer_links import PeerLinkError
 
         # The link as it stands at this request, like its key: a client kept across a Pause, an unmarking or a
@@ -250,24 +284,49 @@ class PeerGateway:
         paused = now is None and bool(stop)
         if paused:
             now = peer_links.stopping_link(link.place_id, drive_root=link.drive_root)
-        if (now is None or (now.link_id, now.place_id, now.peer_url, now.peer_install_id)
-                != (link.link_id, link.place_id, link.peer_url, link.peer_install_id)):
+        if now is None or peer_channel.link_identity(now) != peer_channel.link_identity(link):
             raise _unavailable("peer_link_unavailable", "no usable link to that place here now (unknown, revoked, "
                                                         "paused, its code unconfirmed or not marked mine); nothing "
                                                         "was sent")
-        if not peer_links.loopback_url(now.peer_url):
-            raise _unavailable("peer_url_refused", "this step's links are loopback addresses on one computer; "
-                                                   "nothing was sent")
+        ok, err_code, err_msg = peer_channel.link_target_valid(now)
+        if not ok:
+            raise _unavailable(err_code, err_msg)
+        channel = peer_channel.is_channel_link(now)
+        target_str = ""
+        if channel:
+            target_sock = peer_channel.channel_socket_for_link(now)
+            if not target_sock.exists():
+                exc = _unavailable("channel_unavailable",
+                                   f"the channel socket to the linked Ouroboros is not present ({target_sock.name})")
+                exc.channel_connect_failed = True
+                exc.channel_transport_error = True
+                raise exc
+            target_str = str(target_sock)
         try:  # read at this request: the secret stays in its file between sends
-            headers = {**self._link.auth_headers(), "Content-Type": "application/json"}
+            headers = {**now.auth_headers(), "Content-Type": "application/json"}
         except PeerLinkError as exc:
             raise _unavailable("peer_link_unavailable", f"this link has no key here; nothing was sent ({exc.code})")
         bound = {"timeout": httpx.Timeout(timeout_sec, connect=_CONNECT_TIMEOUT_SEC)} if timeout_sec is not None else {}
+        if channel:
+            self._channel_tls.socket_path = target_str
         try:
             response = self._client.request(method, path, content=content, headers=headers, **bound)
-        except httpx.HTTPError as exc:
-            raise _unavailable("peer_unreachable", f"the linked Ouroboros did not answer {method} {path}: "
-                                                   f"{type(exc).__name__}") from exc
+        except (httpx.HTTPError, OSError) as exc:
+            if channel and peer_channel.is_channel_connect_failure(exc):
+                err = _unavailable("channel_unavailable",
+                                   f"the channel to the linked Ouroboros refused connection on {method} {path}: "
+                                   f"{type(exc).__name__}")
+                err.channel_connect_failed = True
+                err.channel_transport_error = True
+                raise err from exc
+            err = _unavailable("peer_unreachable", f"the linked Ouroboros did not answer {method} {path}: "
+                                                   f"{type(exc).__name__}")
+            if channel:
+                err.channel_transport_error = True
+            raise err from exc
+        finally:
+            if channel:
+                self._channel_tls.socket_path = ""
         if response.status_code >= 400:
             self._raise_refusal(response)
         try:
@@ -327,7 +386,9 @@ class PeerGateway:
         except Exception as exc:
             status = int(getattr(exc, "status_code", 0) or 0)
             refusal = str(getattr(exc, "refusal_code", "") or "")
-            if getattr(exc, "code", "") in NOTHING_SENT or (refusal and 400 <= status < 500):
+            if (getattr(exc, "code", "") in NOTHING_SENT
+                    or getattr(exc, "channel_connect_failed", False)
+                    or (refusal and 400 <= status < 500)):
                 raise
             raise _unavailable(UNCONFIRMED, f"whether the letter was accepted is unknown: {exc}", status) from exc
         if not isinstance(body, dict) or str(body.get("letter_id") or "") != letter_id:
@@ -353,7 +414,9 @@ class PeerGateway:
         except Exception as exc:
             status = int(getattr(exc, "status_code", 0) or 0)
             refusal = str(getattr(exc, "refusal_code", "") or "")
-            if getattr(exc, "code", "") in NOTHING_SENT or (refusal and 400 <= status < 500):
+            if (getattr(exc, "code", "") in NOTHING_SENT or (refusal and 400 <= status < 500)
+                    or getattr(exc, "channel_connect_failed", False)
+                    or getattr(exc, "channel_transport_error", False)):
                 raise
             raise _unavailable(UNCONFIRMED, f"whether the message was received is unknown: {exc}", status) from exc
         if (not isinstance(body, dict) or str(body.get("letter_id") or "") != lid
@@ -510,12 +573,29 @@ class PeerGateway:
         network POST (outside any lock). Only the receiver's ``LetterAnswerReceipt`` for this reply letter (its id,
         its exact ``in_reply_to``, ``delivered`` and the mailbox record ``msg_id`` its words landed as) confirms
         delivery, the same for a repeat of the same bytes; any other response or unnamed 4xx raises ``unconfirmed``."""
+        from ouroboros import peer_channel, peer_links
         from ouroboros.peer_links import PeerLinkError
 
         letter_id, body, raw = peer_answer_letter(run_id, interaction_id, answers)
         self._check_outgoing_speech()
+        now = peer_links.outgoing_link(self._link.place_id, drive_root=self._link.drive_root)
+        if now is None or peer_channel.link_identity(now) != peer_channel.link_identity(self._link):
+            raise _unavailable("peer_link_unavailable", "no usable link to that place here now (unknown, revoked, "
+                                                        "paused, its code unconfirmed or not marked mine); nothing "
+                                                        "was sent")
+        ok, err_code, err_msg = peer_channel.link_target_valid(now)
+        if not ok:
+            raise _unavailable(err_code, err_msg)
+        if peer_channel.is_channel_link(now):
+            target_sock = peer_channel.channel_socket_for_link(now)
+            if not target_sock.exists():
+                exc = _unavailable("channel_unavailable",
+                                   f"the channel socket to the linked Ouroboros is not present ({target_sock.name})")
+                exc.channel_connect_failed = True
+                exc.channel_transport_error = True
+                raise exc
         try:
-            self._link.auth_headers()
+            now.auth_headers()
         except PeerLinkError as exc:
             raise _unavailable("peer_link_unavailable", f"this link has no key here; nothing was sent ({exc.code})")
         if before_send is not None:
@@ -523,7 +603,7 @@ class PeerGateway:
         try:
             resp = self._request("POST", "/api/letters", content=raw, timeout_sec=timeout_sec)
         except Exception as exc:
-            if str(getattr(exc, "code", "") or "") in NOTHING_SENT:
+            if str(getattr(exc, "code", "") or "") in NOTHING_SENT or getattr(exc, "channel_connect_failed", False):
                 raise
             refusal = str(getattr(exc, "refusal_code", "") or "")
             status = int(getattr(exc, "status_code", 0) or 0)
@@ -563,10 +643,10 @@ class PeerGateway:
 
 def peer_gateway(ref: Any, *, timeout_sec: Optional[float] = None) -> PeerGateway:
     """The gateway of a ``{"kind": "peer", "place_id", "link_id"}`` record through its current link; a link that is
-    gone, revoked, unconfirmed or not marked mine, or an address beyond this computer, raises typed: a peer record
+    gone, revoked, unconfirmed or not marked mine, or an invalid transport target, raises typed: a peer record
     never falls back to another engine. A Paused place still yields one whose requests carry only my side's Stop of
     its own letter and that Stop's read-back (``PeerGateway._request``)."""
-    from ouroboros import peer_links
+    from ouroboros import peer_channel, peer_links
 
     ref = ref if isinstance(ref, dict) else {}
     place_id = str(ref.get("place_id") or "")
@@ -574,7 +654,7 @@ def peer_gateway(ref: Any, *, timeout_sec: Optional[float] = None) -> PeerGatewa
     if link is None or link.link_id != str(ref.get("link_id") or ""):
         raise _unavailable("peer_link_unavailable", "no usable link to that place here (unknown, revoked, paused, "
                                                     "its code unconfirmed or not marked mine); nothing was sent")
-    if not peer_links.loopback_url(link.peer_url):
-        raise _unavailable("peer_url_refused", "this step's links are loopback addresses on one computer; "
-                                               "nothing was sent")
+    ok, err_code, err_msg = peer_channel.link_target_valid(link)
+    if not ok:
+        raise _unavailable(err_code, err_msg)
     return PeerGateway(link, timeout_sec=timeout_sec)

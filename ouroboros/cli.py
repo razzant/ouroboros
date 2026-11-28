@@ -45,6 +45,17 @@ class StreamInterruptedCLIError(ConnectionCLIError):
     """An answered event stream that broke off: a read timeout, reset or truncated response."""
 
 
+def _read_http_error(exc: urllib.error.HTTPError, base_url: str) -> str:
+    try:
+        return exc.read().decode("utf-8", errors="replace")
+    except (http.client.HTTPException, TimeoutError, ConnectionError, OSError) as read_exc:
+        err = StreamInterruptedCLIError(
+            f"HTTP {exc.code} response from Ouroboros server at {base_url} was interrupted: {read_exc}"
+        )
+        err.status_code = exc.code  # type: ignore[attr-defined]
+        raise err from read_exc
+
+
 class OuroborosHTTPClient:
     def __init__(self, base_url: str = "", timeout: float = 30.0):
         self.base_url = (base_url or _default_base_url()).rstrip("/")
@@ -73,17 +84,28 @@ class OuroborosHTTPClient:
             with urllib.request.urlopen(req, timeout=self.timeout if timeout is None else timeout) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
+            raw = _read_http_error(exc, self.base_url)
+            payload = None
             try:
-                payload = json.loads(raw)
-                message = payload.get("error") or raw
+                parsed = json.loads(raw)
+                payload = parsed if isinstance(parsed, dict) else None
+                message = (parsed.get("error") if isinstance(parsed, dict) else None) or raw
             except Exception:
                 message = raw or str(exc)
-            raise CLIError(f"HTTP {exc.code}: {message}") from exc
+            err = CLIError(f"HTTP {exc.code}: {message}")
+            err.status_code = exc.code  # type: ignore[attr-defined]
+            err.payload = payload  # type: ignore[attr-defined]
+            raise err from exc
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (http.client.HTTPException, TimeoutError, ConnectionResetError, BrokenPipeError)):
+                raise StreamInterruptedCLIError(
+                    f"response from Ouroboros server at {self.base_url} was interrupted: {exc.reason}"
+                ) from exc
             raise ConnectionCLIError(f"cannot reach Ouroboros server at {self.base_url}: {exc}") from exc
-        except TimeoutError as exc:
-            raise ConnectionCLIError(f"request to Ouroboros server timed out at {self.base_url}") from exc
+        except (http.client.HTTPException, TimeoutError, ConnectionError, OSError) as exc:
+            raise StreamInterruptedCLIError(
+                f"response from Ouroboros server at {self.base_url} was interrupted: {exc}"
+            ) from exc
         if not raw.strip():
             return {}
         try:
@@ -103,13 +125,18 @@ class OuroborosHTTPClient:
                     return b""
                 return resp.read()
         except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
+            raw = _read_http_error(exc, self.base_url)
+            payload = None
             try:
-                payload = json.loads(raw)
-                message = payload.get("error") or raw
+                parsed = json.loads(raw)
+                payload = parsed if isinstance(parsed, dict) else None
+                message = (parsed.get("error") if isinstance(parsed, dict) else None) or raw
             except Exception:
                 message = raw or str(exc)
-            raise CLIError(f"HTTP {exc.code}: {message}") from exc
+            err = CLIError(f"HTTP {exc.code}: {message}")
+            err.status_code = exc.code  # type: ignore[attr-defined]
+            err.payload = payload  # type: ignore[attr-defined]
+            raise err from exc
         except urllib.error.URLError as exc:
             raise ConnectionCLIError(f"cannot download from Ouroboros server at {self.base_url}: {exc}") from exc
 
@@ -124,7 +151,7 @@ class OuroborosHTTPClient:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 yield from _parse_sse_lines(resp)
         except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
+            raw = _read_http_error(exc, self.base_url)
             raise CLIError(f"HTTP {exc.code}: {raw}") from exc
         except urllib.error.URLError as exc:
             raise ConnectionCLIError(f"cannot stream from Ouroboros server at {self.base_url}: {exc}") from exc
@@ -786,6 +813,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_marketplace_parser(subparsers)
     _add_local_model_parser(subparsers)
     _add_mcp_parser(subparsers)
+    from ouroboros.cli_peer import add_link_parser
+
+    add_link_parser(subparsers)
     return parser
 
 

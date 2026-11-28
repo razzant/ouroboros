@@ -1433,7 +1433,7 @@ _SECRET_PATTERNS = _re.compile(
     r'|gsk_[A-Za-z0-9]{30,}'      # Groq API key
     r'|sk-[A-Za-z0-9]{40,}'       # OpenAI API key
     r'|(?:(?<=bot)|\b)[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b'  # Telegram bot token (digits:secret; matches the /bot<id>:<secret>/ URL form — no \b exists between 'bot' and a digit)
-    r'|\bouroboros-invite:1:[A-Za-z0-9_\-]{16,}'  # a linked-Ouroboros invitation carries a one-time token
+    r'|' + (OUROBOROS_INVITE_PATTERN := r'\bouroboros-invite:[12]:[A-Za-z0-9_\-]{16,}')  # shared with secret_masking
 )
 _SECRET_URL_CREDENTIAL_RE = _re.compile(
     r'(?i)\b(?:postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^/\s:@]+:[^/\s@]+@'

@@ -40,6 +40,7 @@ from ouroboros.utils import atomic_write_json, update_json_locked, utc_now_iso, 
 PROTOCOL = 1
 CONNECTOR = "ouroboros"
 INVITE_PREFIX = "ouroboros-invite:1:"
+INVITE_V2_PREFIX = "ouroboros-invite:2:"
 INVITE_TTL_SEC = 15 * 60
 LINK_HEADER, INSTALL_HEADER, PROTOCOL_HEADER = "X-Ouroboros-Link", "X-Ouroboros-Install", "X-Ouroboros-Protocol"
 INVITE_HEADER = "X-Ouroboros-Invite"
@@ -416,13 +417,56 @@ def sending_record(root: Any, link_id: str, letter_id: str) -> dict | None:
     return value
 
 
+def retain_unsent_envelope(root: Any, link_id: str, letter_id: str, **envelope: Any) -> bool:
+    """Retain the address for explicit retry if the queue write failed before any send."""
+    from ouroboros.utils import json_update_lock
+
+    path = _sending_path(root, link_id, letter_id)
+    try:
+        with json_update_lock(registry_path(root)):
+            row = read_registry(root)["links"].get(link_id)
+            if not isinstance(row, dict) or row.get("revoked_at"):
+                return False
+            if sending_record(root, link_id, letter_id) is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_json(path, {"letter_id": letter_id, **envelope, "pre_transmission": True,
+                                         "passes": 0, "first_at": utc_now_iso()}, fsync=True)
+    except (OSError, PeerLinkError):
+        return False
+    return True
+
+
+def _write_sending_deadline_locked(root: Any, lid: str, letter_id: str, at: float, step: int) -> bool:
+    """Keep the latest deadline on one unsettled wire record while holding the registry lock."""
+    row = sending_record(root, lid, letter_id)
+    if row is None:
+        return False
+    atomic_write_json(_sending_path(root, lid, letter_id), {**row,
+        "not_before": max(float(row.get("not_before") or 0.0), at),
+        "retry_step": max(int(row.get("retry_step") or 0), step)}, fsync=True)
+    return True
+
+
+def set_sending_deadline(root: Any, lid: str, letter_id: str, at: float, step: int) -> bool:
+    """Persist a retry deadline on one unsettled wire record."""
+    from ouroboros.utils import json_update_lock
+
+    try:
+        with json_update_lock(registry_path(root)):
+            link = read_registry(root)["links"].get(lid) or {}
+            return bool(link and not link.get("revoked_at")
+                        and _write_sending_deadline_locked(root, lid, letter_id, at, step))
+    except (OSError, PeerLinkError):
+        return False
+
+
 def record_sending(root: Any, link_id: str, letter_id: str, *, account_id: str, text: str, reply_to: str,
                    origin: Mapping[str, str], place_id: str = "") -> int:
     """Before a call's first physical send of my message ``letter_id`` (``peer_replies.send_peer_message``):
     from here an attempt of it may arrive, so no later refusal reads as its end. Kept until its delivered or failed
     receipt lands (``settle_sending``), with the words and address a start needs to say an interrupted attempt in its
-    room (``resume_owed``) and ``passes``, the calls that sent it; returns that count. A record that cannot be written
-    is ``peer_links_unreadable``, and nothing is sent then (read and replaced under the registry's writer lock)."""
+    room (``resume_owed``) and ``passes``, the calls that sent it; returns that count. A record that cannot be
+    written is ``peer_links_unreadable``."""
     from ouroboros.utils import json_update_lock
 
     path = _sending_path(root, link_id, letter_id)
@@ -443,8 +487,8 @@ def record_sending(root: Any, link_id: str, letter_id: str, *, account_id: str, 
             kept_reply_to = str(old["reply_to"]) if ("reply_to" in old and old["reply_to"] is not None) else str(reply_to)
             kept_origin = (dict(old["origin"]) if isinstance(old.get("origin"), Mapping) and old.get("origin")
                            else dict(origin))
-            preserved = {k: old[k] for k in ("confirmed_state", "confirmed_at", "confirmed_code", "confirmed_message")
-                         if old.get(k)}
+            preserved = {k: old[k] for k in ("confirmed_state", "confirmed_at", "confirmed_code",
+                                             "confirmed_message", "not_before", "retry_step") if old.get(k)}
             atomic_write_json(path, {"letter_id": letter_id, "account_id": kept_account,
                                      "place_id": str(old.get("place_id") or place_id or ""),
                                      "text": kept_text, "reply_to": kept_reply_to, "origin": kept_origin,
@@ -508,10 +552,9 @@ def confirm_sending(root: Any, link_id: str, letter_id: str, *, state: str, acco
     return updated
 
 
-def rollback_sending(root: Any, link_id: str, letter_id: str, *, expected_passes: int) -> bool:
-    """Undo a pass recorded by ``record_sending`` when nothing of that call left on the wire: removes the record if it
-    was the first pass (``expected_passes <= 1``), else decrements ``passes`` by 1. Never touches a confirmed record
-    or a record whose pass count changed."""
+def rollback_sending(root: Any, link_id: str, letter_id: str, *, expected_passes: int,
+                     keep_record: bool = False, pre_transmission: bool = False) -> bool:
+    """Undo a pass recorded by ``record_sending`` (or retain with ``pre_transmission`` when unsent)."""
     from ouroboros.utils import json_update_lock
 
     path = _sending_path(root, link_id, letter_id)
@@ -520,10 +563,13 @@ def rollback_sending(root: Any, link_id: str, letter_id: str, *, expected_passes
             old = sending_record(root, link_id, letter_id)
             if old is None or old.get("confirmed_state") or int(old.get("passes") or 0) != int(expected_passes):
                 return False
-            if int(expected_passes) <= 1:
+            if int(expected_passes) <= 1 and not keep_record:
                 path.unlink(missing_ok=True)
                 return True
-            atomic_write_json(path, {**old, "passes": int(expected_passes) - 1, "at": utc_now_iso()}, fsync=True)
+            new_passes = max(0, int(expected_passes) - 1)
+            updated = {**old, "passes": new_passes, "at": utc_now_iso(),
+                       **({"pre_transmission": True} if pre_transmission and new_passes == 0 else {})}
+            atomic_write_json(path, updated, fsync=True)
             return True
     except OSError as exc:
         raise PeerLinkError("peer_links_unreadable", f"the sending record could not be rolled back now: "
@@ -555,11 +601,13 @@ def _drop_link_files(root: Any, link_id: str) -> None:
     """A revoked link's files here: its key, the receipts of its answers and messages and the replies it was owed. My
     messages to it still unsettled (``sent/``) stay: such a record may be the only sign that an attempt arrived, and it
     leaves only once its room's receipt says so (``peer_replies._reconcile_sending``)."""
-    for folder in ("replies", "messages", "owed"):
+    from ouroboros.peer_channel_queue import is_parked_queue_name
+
+    for folder in ("replies", "messages", "owed", "queued"):
         directory = token_path(root, link_id).parent / folder
         with contextlib.suppress(FileNotFoundError, NotADirectoryError):
             for entry in list(directory.iterdir()):
-                if _RECEIPT_NAME.fullmatch(entry.name):
+                if _RECEIPT_NAME.fullmatch(entry.name) or (folder == "queued" and is_parked_queue_name(entry.name)):
                     entry.unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             directory.rmdir()
@@ -610,7 +658,7 @@ def _bool(value: Any, field: str) -> bool:
 
 
 def loopback_url(url: Any) -> bool:
-    """An ``http`` address on this computer: this step's links join two installations of one computer only."""
+    """An ``http`` loopback address on this computer (for same-computer URL links; channel links use derived Unix sockets)."""
     parts = urllib.parse.urlsplit(str(url or ""))
     if parts.scheme != "http" or not parts.hostname:
         return False
@@ -623,8 +671,8 @@ def loopback_url(url: Any) -> bool:
 def _url(value: Any, field: str) -> str:
     text = _text(value, field, limit=500)
     if not loopback_url(text):
-        raise PeerLinkError("peer_url_refused", f"{field} must be an http address on this computer (loopback): "
-                            "this step links two installations of one computer")
+        raise PeerLinkError("peer_url_refused", f"{field} must be an http loopback address on this computer; "
+                            "another computer uses a channel invitation")
     return text.rstrip("/")
 
 
@@ -763,40 +811,57 @@ def letter_facts_line(root: Any, letter: Any) -> str:
     return peer_facts_line(peer, place_permissions(root, place, peer))
 
 
-def _encode_invite(payload: Mapping[str, Any]) -> str:
+def _encode_invite(payload: Mapping[str, Any], *, prefix: str = INVITE_PREFIX) -> str:
     raw = json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return INVITE_PREFIX + base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    return prefix + base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
 def parse_invite(text: Any) -> dict:
-    if not isinstance(text, str) or not text.strip().startswith(INVITE_PREFIX):
+    if not isinstance(text, str):
         raise PeerLinkError("invite_invalid", "this is not an Ouroboros invitation")
-    body = text.strip()[len(INVITE_PREFIX):]
+    stripped = text.strip()
+    if stripped.startswith(INVITE_PREFIX):
+        prefix, keys = INVITE_PREFIX, {"link_id", "install_id", "url", "label", "key_sha256", "token", "may_start", "expires_at"}
+    elif stripped.startswith(INVITE_V2_PREFIX):
+        prefix, keys = INVITE_V2_PREFIX, {"link_id", "install_id", "door_dir", "label", "key_sha256", "token", "may_start", "expires_at"}
+    else:
+        raise PeerLinkError("invite_invalid", "this is not an Ouroboros invitation")
+    body = stripped[len(prefix):]
     try:
         payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode("utf-8"))
     except (ValueError, UnicodeError) as exc:
         raise PeerLinkError("invite_invalid", "the invitation is damaged") from exc
-    keys = {"link_id", "install_id", "url", "label", "key_sha256", "token", "may_start", "expires_at"}
     if not isinstance(payload, dict) or set(payload) != keys:
         raise PeerLinkError("invite_invalid", "the invitation has an unknown shape")
     _valid_link_id(payload["link_id"])
+    if prefix == INVITE_V2_PREFIX and (not isinstance(payload.get("door_dir"), str) or not payload["door_dir"].strip()):
+        raise PeerLinkError("invite_invalid", "the invitation has an invalid door_dir")
     if str(payload["expires_at"]) <= _dt.datetime.now(_dt.timezone.utc).isoformat():
         raise PeerLinkError("invite_expired", "the invitation has expired; ask for a new one", 410)
     return payload
 
 
-def create_invite(root: Any, *, own_url: str, label: str = "", own_label: str = "", note: str = "",
-                  may_start: bool) -> dict:
+def create_invite(root: Any, *, own_url: str = "", label: str = "", own_label: str = "", note: str = "",
+                  may_start: bool, remote: bool = False) -> dict:
     """My human's invitation at A: A's secret is written, the one-time token kept as a hash for 15 minutes.
-    ``label`` names the coming Ouroboros here; ``may_start`` and ``note`` are my human's facts for its place."""
-    own_url, may_start = _url(own_url, "own_url"), _bool(may_start, "may_start")
+    ``label`` names the coming Ouroboros here; ``may_start`` and ``note`` are my human's facts for its place.
+    With ``remote=True`` (v2), requires a running POSIX letters door and encodes its ``door_dir`` instead of ``url``."""
+    from ouroboros import peer_channel
+
+    remote = _bool(remote, "remote")
+    may_start = _bool(may_start, "may_start")
+    door_dir, door_socket = ("", "")
+    if remote:
+        door_dir, door_socket = peer_channel.require_door_running(root)
+    else:
+        own_url = _url(own_url, "own_url")
     label, own_label = _label(label, "label"), _label(own_label, "own_label")
     note = _text(note, "note", limit=2000, required=False)
     link_id, secret, token = uuid.uuid4().hex, _new_secret(), secrets.token_urlsafe(32)
     install_id, expires_at, key = _own_install_id(root), _deadline(INVITE_TTL_SEC), uuid.uuid4().hex
     row = {"token_sha256": _sha256(token), "link_id": link_id, "expires_at": expires_at, "attempt": key,
            "own_key_sha256": _sha256(secret), "own_install_id": install_id, "label": label, "note": note,
-           "may_start": may_start, "created_at": utc_now_iso()}
+           "may_start": may_start, "created_at": utc_now_iso(), **({"remote": True} if remote else {})}
     # The row first: a key never lands without a dated row that takes it away (``_retire_expired``), and a row
     # whose key did not land authorises nothing (``introduce`` needs the key).
     update_registry(root, lambda document: document["invites"].__setitem__(key, row))
@@ -807,6 +872,13 @@ def create_invite(root: Any, *, own_url: str, label: str = "", own_label: str = 
             with contextlib.suppress(PeerLinkError):
                 update_registry(root, lambda document: document["invites"].pop(key, None))
         raise
+    if remote:
+        invite = _encode_invite({"link_id": link_id, "install_id": install_id, "door_dir": door_dir,
+                                 "label": own_label or "Ouroboros", "key_sha256": row["own_key_sha256"],
+                                 "token": token, "may_start": may_start, "expires_at": expires_at},
+                                prefix=INVITE_V2_PREFIX)
+        return {"invite": invite, "link_id": link_id, "expires_at": expires_at, "remote": True,
+                "door_dir": door_dir, "door_socket": door_socket}
     invite = _encode_invite({"link_id": link_id, "install_id": install_id, "url": own_url,
                              "label": own_label or "Ouroboros", "key_sha256": row["own_key_sha256"],
                              "token": token, "may_start": may_start, "expires_at": expires_at})
@@ -814,23 +886,36 @@ def create_invite(root: Any, *, own_url: str, label: str = "", own_label: str = 
 
 
 def preview_invite(text: Any) -> dict:
+    from ouroboros import peer_channel
+
     payload = parse_invite(text)
+    if "door_dir" in payload:
+        return {"link_id": payload["link_id"], "peer_label": payload["label"],
+                "peer_url": peer_channel.CHANNEL_ADDRESS_LABEL, "remote": True, "transport": "channel",
+                "door_dir": payload["door_dir"], "peer_install_id": payload["install_id"],
+                "remote_may_start": payload["may_start"], "expires_at": payload["expires_at"]}
     return {"link_id": payload["link_id"], "peer_label": payload["label"], "peer_url": payload["url"],
             "peer_install_id": payload["install_id"], "remote_may_start": payload["may_start"],
             "expires_at": payload["expires_at"]}
 
 
-def _post_introduce(url: str, token: str, body: Mapping[str, Any]) -> dict:
-    """The one request carrying an invitation token: straight to the address in the invitation (checked on this
-    computer), never through an environment proxy or a redirect, which would hand the token to someone else."""
+def _post_introduce(url: str, token: str, body: Mapping[str, Any], *, channel_path: Any = "") -> dict:
+    """The one request carrying an invitation token: straight to the local address or verified channel end,
+    never through an environment proxy or a redirect, which would hand the token to someone else."""
     import httpx
+    from ouroboros import peer_channel
 
     try:
-        with httpx.Client(trust_env=False, follow_redirects=False,
-                          timeout=httpx.Timeout(INTRODUCE_TIMEOUT_SEC)) as client:
-            response = client.post(url + "/api/peer-links/introduce", json=dict(body),
-                                   headers={INVITE_HEADER: token, PROTOCOL_HEADER: str(PROTOCOL)})
-    except httpx.HTTPError as exc:
+        if channel_path:
+            with peer_channel.peer_http_client(channel_path=channel_path, timeout_sec=INTRODUCE_TIMEOUT_SEC) as client:
+                response = client.post("/api/peer-links/introduce", json=dict(body),
+                                       headers={INVITE_HEADER: token, PROTOCOL_HEADER: str(PROTOCOL)})
+        else:
+            with httpx.Client(trust_env=False, follow_redirects=False,
+                              timeout=httpx.Timeout(INTRODUCE_TIMEOUT_SEC)) as client:
+                response = client.post(url + "/api/peer-links/introduce", json=dict(body),
+                                       headers={INVITE_HEADER: token, PROTOCOL_HEADER: str(PROTOCOL)})
+    except (httpx.HTTPError, OSError) as exc:
         raise PeerLinkError("introduce_unreachable",
                             f"the other Ouroboros did not answer: {type(exc).__name__}", 502) from exc
     if response.status_code != 200:  # a redirect included: it is an answer, never followed
@@ -846,19 +931,35 @@ def _post_introduce(url: str, token: str, body: Mapping[str, Any]) -> dict:
         raise PeerLinkError("introduce_unreachable", "the other Ouroboros's answer is not JSON", 502) from exc
 
 
-def accept_invite(root: Any, text: Any, *, own_url: str, label: str = "", own_label: str = "", note: str = "",
-                  may_start: bool) -> dict:
+def accept_invite(root: Any, text: Any, *, own_url: str = "", session: str = "", label: str = "", own_label: str = "",
+                  note: str = "", may_start: bool) -> dict:
     """My human's paste at B: B's secret and its place for A, then A records B through ``introduce``. The link id is
     reserved first (``accepting``), so a second paste of the same invitation is ``invite_used`` before it writes
     anything; a refused or unanswered introduction takes back only this attempt's exact key files and reservation,
-    leaving any provisional place Paused and unlinked."""
+    leaving any provisional place Paused and unlinked. For a v2 remote invitation, requires a 12-hex ``session`` and
+    a live, lstat-verified ``l-<link16>.sock`` inside this installation's door directory."""
+    from ouroboros import peer_channel
+
     payload = parse_invite(text)
-    own_url, may_start, peer_url = _url(own_url, "own_url"), _bool(may_start, "may_start"), _url(payload["url"], "url")
+    remote = "door_dir" in payload
+    may_start = _bool(may_start, "may_start")
     label, own_label = _label(label, "label"), _label(own_label, "own_label")
     note = _text(note, "note", limit=2000, required=False)
     link_id, install_id = payload["link_id"], _own_install_id(root)
     if payload["install_id"] == install_id:
         raise PeerLinkError("same_install", "this invitation comes from this same installation")
+    own_end = None
+    peer_url = ""
+    validated_session = ""
+    if remote:
+        validated_session = peer_channel.validate_session(session)
+        own_end = peer_channel.verify_channel_socket(
+            root, peer_channel.opener_socket_path(root, link_id), require_exists=True,
+        )
+    else:
+        if session:
+            raise PeerLinkError("unexpected_fields", "session applies only to cross-machine (v2) invitations")
+        own_url, peer_url = _url(own_url, "own_url"), _url(payload["url"], "url")
     label = label or _label(payload["label"], "the invitation's label") or "Ouroboros"
     attempt, secret = uuid.uuid4().hex, _new_secret()
     key_sha256 = _sha256(secret)
@@ -875,9 +976,15 @@ def accept_invite(root: Any, text: Any, *, own_url: str, label: str = "", own_la
         _write_secret(root, link_id, secret, attempt)
         place_id = _connect_peer_place(root, peer_install_id=payload["install_id"], link_id=link_id,
                                        label=label, note=note, mine=True, may_start=may_start)
-        answer = _post_introduce(peer_url, payload["token"], {
-            "link_id": link_id, "install_id": install_id, "url": own_url, "label": own_label or "Ouroboros",
-            "key_sha256": key_sha256, "may_start": may_start, "protocol": PROTOCOL})
+        if remote:
+            answer = _post_introduce("", payload["token"], {
+                "link_id": link_id, "install_id": install_id, "session": validated_session,
+                "label": own_label or "Ouroboros", "key_sha256": key_sha256, "may_start": may_start,
+                "protocol": PROTOCOL}, channel_path=own_end)
+        else:
+            answer = _post_introduce(peer_url, payload["token"], {
+                "link_id": link_id, "install_id": install_id, "url": own_url, "label": own_label or "Ouroboros",
+                "key_sha256": key_sha256, "may_start": may_start, "protocol": PROTOCOL})
         if (not isinstance(answer, dict) or answer.get("install_id") != payload["install_id"]
                 or answer.get("key_sha256") != payload["key_sha256"] or answer.get("link_id") != link_id):
             raise PeerLinkError("introduce_mismatch", "the answer does not match the invitation", 502)
@@ -885,7 +992,9 @@ def accept_invite(root: Any, text: Any, *, own_url: str, label: str = "", own_la
         row = {"place_id": place_id, "peer_label": label, "peer_url": peer_url,
                "peer_install_id": payload["install_id"], "own_install_id": install_id,
                "inbound_key_sha256": payload["key_sha256"], "key_set_at": utc_now_iso(), "protocol": PROTOCOL,
-               "created_at": utc_now_iso(), "code": code, "remote_may_start": answer.get("may_start")}
+               "created_at": utc_now_iso(), "code": code, "remote_may_start": answer.get("may_start"),
+               **({"transport": peer_channel.TRANSPORT_CHANNEL, "channel_role": peer_channel.ROLE_OPENER,
+                   "channel_session": validated_session} if remote else {})}
 
         def settle(document: dict) -> bool:
             held = document["accepting"].get(link_id)
@@ -928,26 +1037,50 @@ def _invite_by_token(document: Mapping[str, Any], digest: str, *, live: bool = T
     return None
 
 
-def introduce(root: Any, token: Any, body: Any) -> dict:
+def introduce(root: Any, token: Any, body: Any, *, expected_remote: bool | None = None) -> dict:
     """B's call at A under the one-time invitation token: A records B's key hash and creates B's place with the
     facts my human chose when inviting. A token no invitation here names writes nothing; a mismatched install
     (B naming this installation, or this one moved since inviting) is refused before the invitation is touched.
     One introduction holds the invitation at a time (``claimed_by``), and the link lands in the same write that
     marks the invitation used, so no used invitation is left without its link nor a link without its key."""
+    from ouroboros import peer_channel
+
     if not isinstance(token, str) or not token:
         raise PeerLinkError("invite_unknown", "an invitation token is required", 401)
-    keys = {"link_id", "install_id", "url", "label", "key_sha256", "may_start", "protocol"}
-    if not isinstance(body, dict) or set(body) - keys or {"link_id", "install_id", "url", "key_sha256"} - set(body):
-        raise PeerLinkError("unexpected_fields", "introduce accepts exactly: " + ", ".join(sorted(keys)))
+    url_keys = {"link_id", "install_id", "url", "label", "key_sha256", "may_start", "protocol"}
+    channel_keys = {"link_id", "install_id", "session", "label", "key_sha256", "may_start", "protocol"}
+    if not isinstance(body, dict):
+        raise PeerLinkError("unexpected_fields", "introduce body must be a JSON object")
+    is_channel = "session" in body
+    if is_channel and "url" in body:
+        raise PeerLinkError("unexpected_fields", "introduce accepts either url or session, never both")
+    allowed = channel_keys if is_channel else url_keys
+    required = {"link_id", "install_id", "session" if is_channel else "url", "key_sha256"}
+    if set(body) - allowed or required - set(body):
+        raise PeerLinkError("unexpected_fields", "introduce accepts exactly: " + ", ".join(sorted(allowed)))
     if body.get("protocol", PROTOCOL) != PROTOCOL:
         raise PeerLinkError("protocol_unsupported", "protocol 1 is the only one this Ouroboros speaks")
     link_id, peer_install = _valid_link_id(body["link_id"]), _text(body["install_id"], "install_id", limit=64)
-    peer_url, label = _url(body["url"], "url"), _label(body.get("label"), "label")
+    peer_url, channel_session = "", ""
+    if is_channel:
+        channel_session = peer_channel.validate_session(body["session"])
+    else:
+        peer_url = _url(body["url"], "url")
+    label = _label(body.get("label"), "label")
     key = _text(body["key_sha256"], "key_sha256", limit=64)
     remote_may_start = body.get("may_start") if type(body.get("may_start")) is bool else None
     digest, own, attempt = _sha256(token), _current_install_id(root), uuid.uuid4().hex
     if _invite_by_token(read_registry(root), digest, live=False) is None:
         raise PeerLinkError("invite_unknown", "the invitation is unknown, used or expired", 401)
+    if expected_remote is not None and bool(expected_remote) != is_channel:
+        raise PeerLinkError(
+            "invite_transport_mismatch",
+            "v1 invitations are accepted only on the main port; v2 invitations only on the letters door", 400,
+        )
+    if is_channel:
+        peer_channel.verify_channel_socket(
+            root, peer_channel.receiver_socket_path(root, link_id, channel_session), require_exists=True,
+        )
 
     def claim(document: dict) -> Any:
         found = _invite_by_token(document, digest)
@@ -957,11 +1090,17 @@ def introduce(root: Any, token: Any, body: Any) -> dict:
         if (invite.get("used_at") or invite.get("claimed_by") or invite.get("link_id") != link_id
                 or link_id in document["links"]):
             return "invite_unknown"
+        if bool(invite.get("remote")) != is_channel or (
+            expected_remote is not None and bool(invite.get("remote")) != bool(expected_remote)
+        ):
+            return "invite_transport_mismatch"
         if not own or invite.get("own_install_id") != own or peer_install == own:
             return "install_mismatch"
         invite["claimed_by"] = attempt
         return found[0], dict(invite)
     claimed = update_registry(root, claim)
+    if claimed == "invite_transport_mismatch":
+        raise PeerLinkError("invite_transport_mismatch", "invitation transport does not match introduce request", 400)
     if claimed == "install_mismatch":
         raise PeerLinkError("install_mismatch", "this invitation belongs to another installation", 403)
     if not isinstance(claimed, tuple):
@@ -978,7 +1117,9 @@ def introduce(root: Any, token: Any, body: Any) -> dict:
         row = {"place_id": place_id, "peer_label": invite.get("label") or label or "Ouroboros",
                "peer_url": peer_url, "peer_install_id": peer_install, "own_install_id": own,
                "inbound_key_sha256": key, "key_set_at": utc_now_iso(), "protocol": PROTOCOL,
-               "created_at": utc_now_iso(), "code": code, "remote_may_start": remote_may_start}
+               "created_at": utc_now_iso(), "code": code, "remote_may_start": remote_may_start,
+               **({"transport": peer_channel.TRANSPORT_CHANNEL, "channel_role": peer_channel.ROLE_RECEIVER,
+                   "channel_session": channel_session} if is_channel else {})}
 
         def settle(document: dict) -> bool:
             current = document["invites"].get(invite_key)
@@ -1004,8 +1145,9 @@ def introduce(root: Any, token: Any, body: Any) -> dict:
 
 
 def revoke(root: Any, link_id: str) -> dict:
-    """My human's revoke: the secret, the link's answer and message receipts and the replies owed there leave, the
-    inbound key stops matching and the place pauses."""
+    """My human's revoke: the secret, the link's answer and message receipts, queued messages and the replies owed
+    there leave, the inbound key stops matching and the place pauses."""
+    from ouroboros import peer_channel, peer_channel_queue
     from ouroboros.places import AUTHOR_OWNER, STATE_PAUSED, PlaceError, edit_place
 
     link_id = _valid_link_id(link_id)
@@ -1019,6 +1161,8 @@ def revoke(root: Any, link_id: str) -> dict:
     if row is None:
         raise PeerLinkError("link_unknown", "no such link", 401)
     _drop_link_files(root, link_id)
+    peer_channel_queue.retire_link_waits(root, link_id)
+    peer_channel.remove_link_channel_sockets(root, link_id, row)
     try:
         edit_place(root, row["place_id"], "set_state", author=AUTHOR_OWNER, state=STATE_PAUSED)
     except PlaceError as exc:
@@ -1075,17 +1219,24 @@ def link_view(root: Any, link_id: str) -> dict:
     row = read_registry(root)["links"].get(link_id)
     if row is None:
         raise PeerLinkError("link_unknown", "no such link", 401)
+    from ouroboros import peer_channel
     from ouroboros.places import place_records
 
     records = place_records(root)
     place = records.places.get(row["place_id"])
+    is_chan = row.get("transport") == "channel"
+    channel_meta = ({"transport": "channel", "channel_role": row.get("channel_role") or "",
+                     "channel_session": row.get("channel_session") or ""}
+                    if is_chan else {})
     return {"link_id": link_id, "place_id": row["place_id"], "peer_label": row.get("peer_label") or "",
-            "peer_url": row.get("peer_url") or "", "peer_install_id": row.get("peer_install_id") or "",
+            "peer_url": peer_channel.CHANNEL_ADDRESS_LABEL if is_chan else (row.get("peer_url") or ""),
+            "peer_install_id": row.get("peer_install_id") or "",
             "own_install_id": row.get("own_install_id") or "", "code": row.get("code") or "",
             "code_check": _code_check(row), "created_at": row.get("created_at") or "",
             "revoked_at": row.get("revoked_at") or "", "remote_may_start": row.get("remote_may_start"),
             "remote_unknown_at": row.get("remote_unknown_at") or "", "peer": records.peer(row["place_id"]),
-            "state": "removed" if row.get("revoked_at") else (place.state if place is not None else "disconnected")}
+            "state": "removed" if row.get("revoked_at") else (place.state if place is not None else "disconnected"),
+            **channel_meta}
 
 
 def link_card(root: Any, place_id: str) -> dict | None:
@@ -1098,10 +1249,13 @@ def link_card(root: Any, place_id: str) -> dict | None:
     if found is None:
         return None
     link_id, row = found
+    channel_meta = ({"transport": "channel", "channel_role": row.get("channel_role") or "",
+                     "channel_session": row.get("channel_session") or ""}
+                    if row.get("transport") == "channel" else {})
     return {"link_id": link_id, "code": row.get("code") or "", "code_check": _code_check(row),
             "peer_install_id": row.get("peer_install_id") or "", "created_at": row.get("created_at") or "",
             "revoked_at": row.get("revoked_at") or "", "remote_may_start": row.get("remote_may_start"),
-            "remote_unknown_at": row.get("remote_unknown_at") or ""}
+            "remote_unknown_at": row.get("remote_unknown_at") or "", **channel_meta}
 
 
 def mark_remote_unknown(root: Any, link_id: str) -> None:
@@ -1160,6 +1314,9 @@ class OutgoingLink:
     own_install_id: str
     drive_root: str
     remote_unknown_at: str = ""  # the other side answered link_unknown: nothing is sent until a new introduction
+    transport: str = "url"
+    channel_role: str = ""
+    channel_session: str = ""
 
     def auth_headers(self) -> dict[str, str]:
         """The three headers of a letter: this install's current id (a moved data directory is refused there)."""
@@ -1207,4 +1364,7 @@ def _link_of(place_id: str, drive_root: Any, *, paused: bool) -> OutgoingLink | 
                         peer_label=row.get("peer_label") or "Ouroboros",
                         peer_install_id=row.get("peer_install_id") or "",
                         own_install_id=row.get("own_install_id") or "", drive_root=str(root),
-                        remote_unknown_at=row.get("remote_unknown_at") or "")
+                        remote_unknown_at=row.get("remote_unknown_at") or "",
+                        transport=str(row.get("transport") or "url"),
+                        channel_role=str(row.get("channel_role") or ""),
+                        channel_session=str(row.get("channel_session") or ""))

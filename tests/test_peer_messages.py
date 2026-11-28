@@ -578,8 +578,8 @@ def test_claim_2_reply_and_handoff_result_leave_once_with_receipts_and_no_ping_p
 
 def test_claim_2_lost_acknowledgement_and_a_reported_end_send_the_same_letter_never_a_new_turn(tmp_path, monkeypatch):
     """B's reply whose confirmation is lost goes again as the same letter (A keeps one row). A turn whose end was never
-    reported (a crash between its terminal and its delivery) owes its reply: another letter's turn does not sweep it
-    (no history scan); the end reported again sends it once from its recorded turn, never a second model turn."""
+    reported (a crash between its terminal and delivery) owes its reply to the same link. The next pass
+    finds the durable owed record, not chat history, and reporting the end again does not send a duplicate."""
     import ouroboros.peer_replies as replies
     from ouroboros.gateways import peer as peer_gw
 
@@ -619,7 +619,7 @@ def test_claim_2_lost_acknowledgement_and_a_reported_end_send_the_same_letter_ne
                              headers=pair.headers()).status_code == 200
         _poll_until(lambda: "Reply three." in texts_a(), label="A received reply three")
         _poll_until(_replies_idle, label="reply threads ended")
-        assert "Reply two." not in texts_a()  # nothing swept it: it stays owed, with no receipt
+        assert "Reply two." in texts_a()  # a link pass reads every durable owed record on that link
         second = _arrival(pair.root_b, "Second.")["task_id"]
         replies.deliver_owed(pair.root_b, second)  # its end, reported again
         _poll_until(lambda: "Reply two." in texts_a(), label="A received reply two")

@@ -247,7 +247,7 @@ def _post(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
 
     def _refused(exc: Any) -> tuple:
         """A POST that raised: nothing left, acceptance unknown, or the receiver's typed refusal."""
-        if not entered_post or exc.code in NOTHING_SENT:
+        if not entered_post or exc.code in NOTHING_SENT or getattr(exc, "channel_connect_failed", False):
             return _pre_post_refusal(exc.code, str(exc))
         refusal = str(getattr(exc, "refusal_code", "") or "")
         if exc.code == UNCONFIRMED or not refusal:
@@ -363,6 +363,9 @@ def _post(ctx: Any, drive: Any, task_id: str, ids: Dict[str, str], engine_ref: D
         gateway.close()
 
     if handle is not None:
+        from ouroboros import peer_channel_queue
+
+        peer_channel_queue.note_verified_exchange(drive, str(engine_ref["link_id"]))
         # The letter's work runs under the receiver's own authority; here it may change nothing of this workspace.
         bound = custody.bind_started(drive, entry, shape=shape, observed_state=str(handle.get("state") or ""))
         run_id = bound.custody.run_id if bound.custody is not None else invocation_id
@@ -569,13 +572,13 @@ def _message_ouroboros(ctx: Any, place_id: str = "", text: str = "", retry_of: s
     ``reply_to`` (ignoring any newer incoming message that arrived meanwhile). Each physical attempt passes this
     task's short launch gate (``owner_pause.run_operation``). It reads as received only beside its delivered receipt
     in this room."""
-    from ouroboros import delegate_custody as custody, owner_pause, peer_links
+    from ouroboros import (
+        delegate_custody as custody, owner_pause, peer_channel_queue, peer_letters, peer_links,
+    )
     from ouroboros.delegate_shared import AGENT_FAULT_CODE, SUBSTRATE_REFUSAL_CODE, _fail, delegate_result
     from ouroboros.gateway.peer_contracts import LETTER_ID_PATTERN, TEXT_MAX_CHARS
-    from ouroboros.peer_replies import (
-        AttemptHeld, message_letter_id, resolve_message_retry, send_peer_message,
-    )
-    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.peer_replies import message_letter_id, resolve_message_retry
+    from ouroboros.safety_config import coverage_kind
 
     place, drive = str(place_id or "").strip(), custody.custody_root(ctx)
     body_text, retry_id = str(text or ""), str(retry_of or "").strip()
@@ -606,10 +609,17 @@ def _message_ouroboros(ctx: Any, place_id: str = "", text: str = "", retry_of: s
                      place_id=place, **({"letter_id": retry_id, "retry_of": retry_id} if retry_id else {}),
                      host_code=SUBSTRATE_REFUSAL_CODE)
     link_id, account_id = found[0], str(found[1].get("peer_install_id") or "")
-    task_id = str(getattr(ctx, "task_id", "") or "")
+    _coord_drive, root_task_id, coord_task_id = owner_pause._member_coordinates(ctx)
+    task_id = coord_task_id or str(getattr(ctx, "task_id", "") or "")
+    root_task_id = root_task_id or task_id
 
     if retry_id:
         recorded, read_err = resolve_message_retry(drive, link_id, account_id, retry_id)
+        if recorded is None and not read_err:
+            try:
+                recorded = peer_channel_queue.queued_message(drive, link_id, retry_id)
+            except peer_links.PeerLinkError:
+                read_err = "peer_links_unreadable"
         if read_err:
             return _fail(MESSAGE_TOOL_NAME, read_err,
                          "earlier message records cannot be read now; nothing was sent; "
@@ -645,28 +655,71 @@ def _message_ouroboros(ctx: Any, place_id: str = "", text: str = "", retry_of: s
         reply_to = _reply_target(ctx, place)
         letter_id = message_letter_id(link_id, task_id, reply_to, body_text)
 
-    def gate(attempt: Any) -> Any:  # a Pause, Stop or deadline before this attempt keeps it from leaving
-        try:
-            return owner_pause.run_operation(ctx, attempt)
-        except (owner_pause.OwnerPauseRefused, PhysicalDispatchInterrupted) as exc:
-            code = getattr(exc, "code", "") or str(exc) or "owner_paused"
-            raise AttemptHeld(code, f"{exc or code}; nothing was sent") from exc
+    cov_kind = coverage_kind(getattr(ctx, "task_metadata", None) or {})
+    from ouroboros.tools.tool_result import _TOOL_RESULT_STATE
 
-    sent = send_peer_message(drive, place, letter_id=letter_id, text=body_text, reply_to=reply_to,
-                             origin={"kind": "tool", "task_id": task_id}, gate=gate,
-                             link_id=link_id, account_id=account_id)
+    slot = _TOOL_RESULT_STATE.get()
+    registry_dispatched = slot is not None and slot.ctx is ctx
+    approval = peer_letters.current_message_approval(ctx)
+    matched_approval = (
+        isinstance(approval, dict)
+        and approval.get("place_id") == place
+        and approval.get("text") == body_text
+        and approval.get("retry_of") == retry_id
+    )
+    if registry_dispatched and not matched_approval:
+        return _fail(
+            MESSAGE_TOOL_NAME, "approval_snapshot_missing",
+            "the Safety-approved rules snapshot for this message is missing or mismatched; nothing was sent",
+            place_id=place, **({"letter_id": retry_id, "retry_of": retry_id} if retry_id else {}),
+            host_code=SUBSTRATE_REFUSAL_CODE,
+        )
+    if matched_approval:
+        cov_kind = str(approval.get("coverage_kind") or cov_kind)
+        approved_basis = str(approval.get("basis") or "")
+    else:
+        approved_basis = peer_letters.speech_basis(drive, place, kind=cov_kind)
+
+    sent = peer_channel_queue.submit_tool_message(
+        drive, link_id, letter_id, place_id=place, account_id=account_id, text=body_text, reply_to=reply_to,
+        origin={"kind": "tool", "task_id": task_id}, approved_basis=approved_basis, coverage_kind=cov_kind,
+        root_task_id=root_task_id, retry=bool(retry_id), control_required=bool(getattr(ctx, "task_lifecycle_bound", False)),
+        retry_envelope=recorded if retry_id else None,
+    )
     facts = {"place_id": place, "letter_id": letter_id, "link_id": link_id}
     if sent["state"] == "delivered" and sent["recorded"]:
         again = " It was received earlier: nothing was sent again." if sent.get("earlier") else ""
         return delegate_result({"status": "received", **facts, "note": (
             "The linked Ouroboros saved it in its conversation room, and its delivered receipt is in this room. Saved "
             "is not read: it says nothing of a reading, a wake or work there." + again)})
+    if sent["state"] == "queue_failed" or sent.get("queue_error"):
+        err_code = str(sent.get("queue_error_code") or sent.get("code") or "peer_links_unreadable")
+        err_msg = str(sent.get("queue_error") or sent.get("message") or "queue save failed")
+        kept = bool(sent.get("envelope_retained"))
+        hint = f"; keep retry_of={letter_id!r} and the exact same text" if kept else ""
+        return _fail(MESSAGE_TOOL_NAME, err_code, f"the message could not be queued ({err_msg}); nothing new was sent{hint}",
+                     **(facts if kept else {"place_id": place, "link_id": link_id}), host_code=SUBSTRATE_REFUSAL_CODE)
+    if sent.get("queued"):
+        note = ("The original letter waits on the server; it will be attempted only after its delivery checks pass."
+                if sent["state"] != "uncertain" else
+                "An earlier attempt may have arrived. The server keeps that same letter ID for delivery.")
+        if detail := str(sent.get("message") or "").strip().rstrip("."):
+            note += f" {detail}."
+        note += f" Use retry_of={letter_id!r} with the same text to check it."
+        return delegate_result({"status": "queued", "reason": str(sent.get("code") or "delivery_pending"), **facts,
+                                **({"not_before": sent["not_before"]} if sent.get("not_before") else {}), "note": note})
+    if sent["state"] == "pending":
+        return delegate_result({"status": "delivery_pending", "ok": True, "code": sent["code"],
+                                "reason": sent["code"], **facts, "note": sent["message"] +
+                                f"; use retry_of={letter_id!r} with the same text to check the original letter"})
     if sent["state"] == "held":
         retry_fields = {"letter_id": retry_id, "retry_of": retry_id, "link_id": link_id} if retry_id else {}
         return _fail(MESSAGE_TOOL_NAME, sent["code"], sent["message"], place_id=place, **retry_fields,
                      **({"refusal_code": "link_unknown"} if sent["code"] == "link_unknown" else {}),
                      host_code=SUBSTRATE_REFUSAL_CODE)
     if sent["state"] == "unknown":
+        if sent["code"] == "delivery_outcome_unknown":
+            return _fail(MESSAGE_TOOL_NAME, sent["code"], sent["message"], **facts, host_code=SUBSTRATE_REFUSAL_CODE)
         if retry_id:
             return _fail(MESSAGE_TOOL_NAME, sent["code"],
                          f"{sent['message']}; keep retry_of={retry_id!r} and the exact same text once storage is readable",
@@ -705,7 +758,8 @@ def get_tools() -> List[ToolEntry]:
             "and carries no owner authority; the receiver chooses its own model, effort, access and workspace. "
             "Read it with delegate_wait, stop it with delegate_cancel; its question returns as waiting_on_user and "
             "delegate_answer sends the answer letter; its result arrives in the terminal payload. A refusal names "
-            "its refusal_code (link_paused, peer_may_not_start, no_budget, ...). If acceptance is unknown "
+            "its refusal_code (link_paused, peer_may_not_start, no_budget, ...). A disconnected channel refuses before "
+            "sending a first assignment (channel_unavailable, definitely unrun); it never queues it for later. If acceptance is unknown "
             "(unconfirmed), nothing is resent automatically: retry_of is lookup-first (binds an already-accepted "
             "letter without re-POSTing) and otherwise sends only that exact recorded letter (same bytes)."),
         "parameters": {"type": "object", "properties": {
@@ -727,12 +781,15 @@ def get_tools() -> List[ToolEntry]:
                 "marked mine) without starting a work assignment. Works even when may_start is false on the receiver. "
                 "The message is saved in the receiver's conversation room for this link; if the receiver's "
                 "Consciousness is Off it stays visible without waking a model turn or task, and if On it follows the "
-                "place's attention and permission rules. received means saved there, never read. After an unconfirmed, "
-                "retry or receipt_unrecorded outcome (which returns a letter_id), call again with retry_of=<letter_id> "
-                "and the exact same text so the original letter and reply address go again, never a second message; if "
-                "retrying an existing letter_id hits unreadable storage, keep the same retry_of once storage is "
-                "readable; omit retry_of to send a new message. In a focus turn woken by a linked Ouroboros, your "
-                "non-silent finish is already sent back as your reply to that link."),
+                "place's attention and permission rules. received means saved there, never read. An admitted letter "
+                "waiting on a channel, a local hold or a retry deadline returns status='queued' with its letter_id and reason. "
+                "status='delivery_pending' means the server durably holds the letter, but the bounded wait saw no outcome; "
+                "use retry_of with the same text to check that letter. "
+                "After an unconfirmed, retry or receipt_unrecorded outcome (which returns a letter_id), call again "
+                "with retry_of=<letter_id> and the exact same text so the original letter and reply address go again, "
+                "never a second message; if retrying an existing letter_id hits unreadable storage, keep the same "
+                "retry_of once storage is readable; omit retry_of to send a new message. In a focus turn woken by a "
+                "linked Ouroboros, your non-silent finish is already sent back as your reply to that link."),
             "parameters": {"type": "object", "properties": {
                 "place_id": {"type": "string", "description": "The linked Ouroboros's place id (configure_presence list)."},
                 "text": {"type": "string", "description": "The message or note to send (verbatim original text when retry_of is set)."},

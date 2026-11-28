@@ -384,15 +384,18 @@ HTTP_SHAPES: dict[str, Shape] = {
                                                   headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
                                                   note="the link's own Stop of the letter's root and its helpers (never "
                                                        "my human's); the Stop's owner decides what of a settled root runs"),
-    "POST /api/peer-links/invite": Shape("200:json 400,503:json",
-                                         note="owner door {own_url?, label?, own_label?, note?, may_start}: a one-time "
-                                              "invitation (15 minutes); its key leaves with it unless a link takes it"),
-    "POST /api/peer-links/accept": Shape("200:json 400,409,410,502,503:json",
-                                         note="owner door {invite, preview?, own_url?, label?, own_label?, note?, "
-                                              "may_start}: preview or accept; one acceptance per link at a time"),
+    "POST /api/peer-links/invite": Shape("200:json 400,501,503:json",
+                                         note="owner door {own_url?, label?, own_label?, note?, may_start, remote?}: "
+                                              "one-time v1 (same computer) or v2 (remote channel door_dir) invitation "
+                                              "(15 minutes); its key leaves with it unless a link takes it"),
+    "POST /api/peer-links/accept": Shape("200:json 400,409,410,501,502,503:json",
+                                         note="owner door {invite, preview?, own_url?, session?, label?, own_label?, "
+                                              "note?, may_start}: preview or accept (v2 requires 12-hex session and "
+                                              "derived opener socket); one acceptance per link at a time"),
     "POST /api/peer-links/introduce": Shape("200:json 400,401,403,503:json", headers="X-Ouroboros-Invite!",
-                                            note="the accepting side's call {link_id, install_id, url, key_sha256, "
-                                                 "label?, may_start?, protocol?} under the one-time invitation token"),
+                                            note="the accepting side's call {link_id, install_id, url | session, "
+                                                 "key_sha256, label?, may_start?, protocol?} under the one-time "
+                                                 "invitation token (main port for v1, letters door for v2)"),
     "GET /api/peer-links/{link_id}": Shape("200,403,503:json", note="owner only: link null or {link_id, place_id, peer_label, peer_install_id, code, code_check, revoked_at}"),
     "POST /api/peer-links/{link_id}/confirm": Shape("200:json 400,401,503:json",
                                                     note="owner door: the six digits match here; the link's place starts"),
@@ -785,3 +788,21 @@ EXTENSION_WS_NAMESPACE = (
     "ext_<n>_<token>_<message>: one prefix per skill (WidgetTab.ws_prefix); an inbound frame's handler "
     "result returns as <type>.reply {data}, a refused or failed one as a log frame; skills broadcast "
     "only inside their own prefix")
+
+# Routes served by the dedicated POSIX letters door (``ouroboros/peer_door.py``, ``door.sock``),
+# apart from the main-port ``HTTP_ENDPOINTS`` table.
+PEER_DOOR_ENDPOINTS: tuple[str, ...] = (
+    "POST /api/peer-links/introduce",
+    "POST /api/letters",
+    "POST /api/letters/channel",
+    "GET /api/letters/{letter_id}",
+    "GET /api/letters/{letter_id}/state",
+    "GET /api/letters/{letter_id}/result",
+    "POST /api/letters/{letter_id}/cancel",
+)
+PEER_DOOR_SHAPES: dict[str, Shape] = {
+    "POST /api/letters/channel": Shape(
+        "200:json 400,401,403,409,503:json",
+        headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+        note="letters door only (door.sock): announce 12-hex channel session {session} and resume owed/queued messages"),
+}

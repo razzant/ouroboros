@@ -53,13 +53,18 @@ def recover_dialogue(root: pathlib.Path, repo_dir: pathlib.Path) -> None:
 def resume_peer_replies(root: pathlib.Path) -> None:
     """Once boot recovery reconciled their producers (``server_maintenance._run_startup_task_recovery``, on either
     boot path): the replies a restart left owed to linked Ouroboroses, from their addressed records only
-    (``peer_replies.resume_owed``), never a scan of history."""
+    (``peer_replies.resume_owed``), never a scan of history, plus startup channel announcements (R6)."""
+    from ouroboros.peer_channel import announce_existing_channels_at_start
     from ouroboros.peer_replies import resume_owed
 
     try:
         resume_owed(root)
     except Exception:  # noqa: BLE001 - a boot step never fails over an owed reply; its record stays for a later start
         log.warning("owed peer replies were not resumed", exc_info=True)
+    try:
+        announce_existing_channels_at_start(root)
+    except Exception:  # noqa: BLE001
+        log.warning("peer channels were not announced at startup", exc_info=True)
 
 
 def remember_log_listings(root: pathlib.Path) -> threading.Thread:
@@ -206,6 +211,37 @@ async def serve_host_service(root: pathlib.Path, boot: Any) -> None:
     boot.host_service_task = asyncio.create_task(boot.host_service_server.serve(sockets=[host_socket]), name="host-service-api")
     boot.host_service_task.add_done_callback(lambda _task: boot.host_service_listener.close())
     log.info("Host Service API listening on %s:%d", DEFAULT_HOST_SERVICE_HOST, host_port)
+
+
+async def serve_peer_door(root: pathlib.Path, boot: Any, *, supervisor_ready_event: Any = None,
+                          repo_dir: Any = None) -> None:
+    """Start the dedicated peer letters door on the ASGI loop (POSIX only; failure logs and leaves main server up)."""
+    from ouroboros.peer_door import serve_peer_door as _serve_peer_door
+
+    await _serve_peer_door(root, boot, supervisor_ready_event=supervisor_ready_event, repo_dir=repo_dir)
+
+
+async def stop_embedded_services(boot: Any) -> None:
+    """Shut down embedded ASGI listeners (Host Service and peer letters door) and close their bound sockets."""
+    from contextlib import suppress
+
+    for prefix in ("peer_door", "host_service"):
+        server = getattr(boot, f"{prefix}_server", None)
+        task = getattr(boot, f"{prefix}_task", None)
+        listener = getattr(boot, f"{prefix}_listener", None)
+        if server is not None:
+            with suppress(Exception):
+                server.should_exit = True
+        if task is not None:
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(task, timeout=5)
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                    await asyncio.wait_for(task, timeout=2)
+        if listener is not None:
+            with suppress(Exception):
+                listener.close()
 
 
 def stop_extension_loop(timeout: float = 5.0) -> None:

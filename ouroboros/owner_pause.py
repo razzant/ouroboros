@@ -398,7 +398,7 @@ def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state:
     return dict(written)
 
 
-def release_fence(root_drive: Any, root_task_id: str, *, reason: str) -> Dict[str, Any]:
+def release_fence(root_drive: Any, root_task_id: str, *, reason: str, _wake: bool = True) -> Dict[str, Any]:
     """Reopen the root's fence for an explicit Resume (a no-op when already open).
 
     Called where the resumed ROOT actually starts: the worker consuming its
@@ -408,8 +408,13 @@ def release_fence(root_drive: Any, root_task_id: str, *, reason: str) -> Dict[st
     fence = read_fence(root_drive, root_task_id)
     if not fence_closed(fence):
         return fence
-    return set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
-                           state=FENCE_RELEASED, release_reason=str(reason or "owner_resume"))
+    released = set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
+                               state=FENCE_RELEASED, release_reason=str(reason or "owner_resume"))
+    if _wake:
+        from ouroboros.peer_channel_queue import wake_for_task_control
+
+        wake_for_task_control(root_drive, task_id=root_task_id)
+    return released
 
 
 def _keeps_newer_hold(current, fence_id):
@@ -441,6 +446,7 @@ def reopen_for_resume(root_drive: Any, root_task_id: str, task_id: str, *,
     if not fence_id:  # A grant minted under an open tree cannot release a later hold.
         return
     publication_gap = None
+    reopened = False
     with launch_lock(root_drive, root_task_id), acquisition_budget(0):
         current = read_fence(root_drive, root_task_id)
         if current.get("fence_id") != fence_id:
@@ -448,13 +454,19 @@ def reopen_for_resume(root_drive: Any, root_task_id: str, task_id: str, *,
                 raise ValueError("owner_pause_fence_changed")
         elif root_actor(root_drive, root_task_id, task_id):
             try:
-                release_fence(root_drive, root_task_id, reason="owner_resume_consumed")
+                release_fence(root_drive, root_task_id, reason="owner_resume_consumed", _wake=False)
+                reopened = True
             except StoreBusy as exc:
                 publication_gap = exc
         else:
-            select_member_resume(root_drive, root_task_id, task_id, fence_id=fence_id, grant_id=grant_id)
+            select_member_resume(root_drive, root_task_id, task_id, fence_id=fence_id, grant_id=grant_id, _wake=False)
+            reopened = True
     if publication_gap is not None:
         _finish_resume_publication(root_drive, root_task_id, task_id, fence_id, grant_id, publication_gap)
+    elif reopened:
+        from ouroboros.peer_channel_queue import wake_for_task_control
+
+        wake_for_task_control(root_drive, task_id=task_id)
 
 
 def _finish_resume_publication(root_drive: Any, root_task_id: str, task_id: str, fence_id: str, grant_id: str,
@@ -498,15 +510,18 @@ def _finish_resume_publication(root_drive: Any, root_task_id: str, task_id: str,
                         or row.get("status") == "cancelled"):
                     raise OwnerPauseRefused("cancelled")
                 needs_rollback = True
-                release_fence(root_drive, root_task_id, reason="owner_resume_consumed")
-                return
+                release_fence(root_drive, root_task_id, reason="owner_resume_consumed", _wake=False)
+            from ouroboros.peer_channel_queue import wake_for_task_control
+
+            wake_for_task_control(root_drive, task_id=task_id)
+            return
         except (StoreBusy, LaunchBusy) as exc:
             error = exc
 
 
 @acquisition_budget(0)
 def select_member_resume(root_drive: Any, root_task_id: str, task_id: str, *,
-                         fence_id: str, grant_id: str) -> None:
+                         fence_id: str, grant_id: str, _wake: bool = True) -> None:
     """Consume one child Resume under a terminal root; keep its siblings fenced.
 
     Caller holds ``launch_lock``. The consumed explicit grant, root terminality
@@ -536,6 +551,10 @@ def select_member_resume(root_drive: Any, root_task_id: str, task_id: str, *,
     selected[task_id] = {"grant_id": grant_id, "selected_at": utc_now_iso()}
     set_fence_state(root_drive, root_task_id, fence_id=fence_id, state=fence["state"],
                     selected_members=selected)
+    if _wake:
+        from ouroboros.peer_channel_queue import wake_for_task_control
+
+        wake_for_task_control(root_drive, task_id=task_id)
 
 
 def consumed_member_resume(root_drive: Any, root_task_id: str, task_id: str, *, attempt: int) -> Dict[str, str]:
@@ -624,13 +643,16 @@ def complete_consumed_member_resume(root_drive: Any, root_task_id: str, task_id:
                 return "snapshot_not_persisted"
             try:
                 select_member_resume(root_drive, root_task_id, task_id, fence_id=consumed["fence_id"],
-                                     grant_id=consumed["grant_id"])
+                                     grant_id=consumed["grant_id"], _wake=False)
             except Exception:
                 withdraw()
                 raise
     except Exception as exc:
         log.warning("Consumed Resume of %s was not completed; its fence stays closed", task_id, exc_info=True)
         return f"{type(exc).__name__}: {str(exc)[:200]}"
+    from ouroboros.peer_channel_queue import wake_for_task_control
+
+    wake_for_task_control(root_drive, task_id=task_id)
     return ""
 
 

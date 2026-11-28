@@ -420,15 +420,103 @@ def _peer_path() -> re.Pattern[str]:
 
 
 _PEER_PATH = _peer_path()
+_CHANNEL_PATH = "/api/letters/channel"
 _INVITE_PATH = "/api/peer-links/introduce"
-# This step links two installations of one computer: a link or invitation header counts only on a direct
-# connection from it, the raw-peer rule of the neighbour door (``recall_peer_admitted``); a proxy relays someone.
+# On the main HTTP port, a link or invitation header counts only on a direct connection from this computer,
+# the raw-peer rule of the neighbour door (``recall_peer_admitted``); cross-machine links use the POSIX letters door.
 _PEER_NOT_DIRECT = "letters and introductions are answered only over a direct connection from this computer"
+
+
+def is_peer_letter_route(method: str, path: str, *, door_only: bool = False) -> bool:
+    """Whether ``(method, path)`` is one of the link-authenticated peer letter routes.
+
+    ``POST /api/letters/channel`` is admitted only on the dedicated letters door (``door_only=True``),
+    never on the main port. ``GET``/``HEAD /api/letters/channel`` still address a letter whose id is ``channel``.
+    """
+    if path == _CHANNEL_PATH and method.upper() == "POST":
+        return door_only
+    return bool(_PEER_PATH.fullmatch(path))
 
 
 def _peer_refusal(code: str, status: int, detail: str = "") -> JSONResponse:
     return JSONResponse({"error": code, "refusal_code": code, **({"detail": detail} if detail else {})},
                         status_code=status, headers=_NO_STORE)
+
+
+async def authenticate_peer_scope(
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    *,
+    app: ASGIApp,
+    root: pathlib.Path,
+    require_direct: bool,
+    door_only: bool,
+) -> bool:
+    """Shared peer authentication gate for both the main port and the dedicated letters door.
+
+    When ``door_only`` is True (dedicated Unix-socket letters door), there is NO owner branch: every
+    request without a valid link key or invitation token, every WebSocket, and every non-letter path
+    is refused regardless of network password or owner cookies. When ``door_only`` is False (main port),
+    requests carrying neither peer header return False for the normal owner flow, and peer headers
+    require a direct local connection (``require_direct``).
+    """
+    import asyncio
+
+    from ouroboros import peer_links
+
+    headers = _headers_map(scope)
+    presented, invite = headers.get("x-ouroboros-link"), headers.get("x-ouroboros-invite")
+    path = (scope.get("path") or "/").rstrip("/") or "/"
+    method = str(scope.get("method") or "").upper()
+    if scope["type"] == "websocket":
+        if door_only or presented is not None or invite is not None:
+            await send({"type": "websocket.close", "code": 4403})
+            return True
+        return False
+    if presented is None and invite is None:
+        if not door_only:
+            return False
+        if path == _INVITE_PATH and method == "POST":
+            await _peer_refusal("invite_unknown", 401, "an invitation token is required")(scope, receive, send)
+        elif is_peer_letter_route(method, path, door_only=door_only):
+            await _peer_refusal("link_unknown", 401, "a link key is required")(scope, receive, send)
+        else:
+            await _peer_refusal("peer_route_forbidden", 403,
+                                "this door accepts only peer letters and introductions")(scope, receive, send)
+        return True
+    if require_direct and not recall_peer_admitted(scope):
+        await _peer_refusal("peer_route_forbidden", 403, _PEER_NOT_DIRECT)(scope, receive, send)
+        return True
+    if presented is None:
+        if path != _INVITE_PATH or method != "POST":
+            await _peer_refusal("peer_route_forbidden", 403)(scope, receive, send)
+            return True
+        scope["ouroboros_caller"] = {"kind": "invite", "door_only": bool(door_only)}
+        await app(scope, receive, send)
+        return True
+    try:
+        caller = await asyncio.to_thread(peer_links.authenticate, root, presented)
+    except peer_links.PeerLinkError as exc:
+        if method not in {"GET", "HEAD"}:
+            from ouroboros.peer_letters import audit
+
+            link_id = presented.strip().partition(".")[0][:64]
+            await asyncio.to_thread(audit, root, "peer_letter_refused", refusal_code=exc.code, link_id=link_id,
+                                    path=path)
+        await _peer_refusal(exc.code, exc.status)(scope, receive, send)
+        return True
+    if not is_peer_letter_route(method, path, door_only=door_only):
+        if method not in {"GET", "HEAD"}:  # a refused read leaves no row, as above
+            from ouroboros.peer_letters import audit
+
+            await asyncio.to_thread(audit, root, "peer_letter_refused", refusal_code="peer_route_forbidden",
+                                    link_id=caller["link_id"], place_id=caller["place_id"], path=path)
+        await _peer_refusal("peer_route_forbidden", 403)(scope, receive, send)
+        return True
+    scope["ouroboros_caller"] = caller
+    await app(scope, receive, send)
+    return True
 
 
 class NetworkAuthGate:
@@ -446,58 +534,11 @@ class NetworkAuthGate:
         return pathlib.Path(_cfg.DATA_DIR)
 
     async def classify_caller(self, scope: Scope, receive: Receive, send: Send) -> bool:
-        """A linked Ouroboros (``X-Ouroboros-Link``) or an introduction (``X-Ouroboros-Invite``), told apart before
-        every other branch: on a direct connection from this computer (``_PEER_NOT_DIRECT``) a valid link key is
-        that peer on its letter routes only (``peer_route_forbidden`` elsewhere), a missing, revoked or wrong one
-        is ``link_unknown``, an unreadable registry ``peer_links_unreadable`` (503); each of them, like a relayed
-        request, is answered here and never passed on. A refused write is audited; a refused read is not
-        (a sender polling a revoked link would add a row each time). True when this method answered or
-        forwarded the request; False leaves a request carrying neither header to the branches below."""
-        import asyncio
-
-        from ouroboros import peer_links
-
-        headers = _headers_map(scope)
-        presented, invite = headers.get("x-ouroboros-link"), headers.get("x-ouroboros-invite")
-        if presented is None and invite is None:
-            return False
-        path = (scope.get("path") or "/").rstrip("/") or "/"
-        if scope["type"] == "websocket":
-            await send({"type": "websocket.close", "code": 4403})
-            return True
-        if not recall_peer_admitted(scope):
-            await _peer_refusal("peer_route_forbidden", 403, _PEER_NOT_DIRECT)(scope, receive, send)
-            return True
-        if presented is None:
-            if path != _INVITE_PATH or scope.get("method") != "POST":
-                await _peer_refusal("peer_route_forbidden", 403)(scope, receive, send)
-                return True
-            scope["ouroboros_caller"] = {"kind": "invite"}
-            await self.app(scope, receive, send)
-            return True
-        root = self._drive_root()
-        try:
-            caller = await asyncio.to_thread(peer_links.authenticate, root, presented)
-        except peer_links.PeerLinkError as exc:
-            if scope.get("method") not in {"GET", "HEAD"}:
-                from ouroboros.peer_letters import audit
-
-                link_id = presented.strip().partition(".")[0][:64]
-                await asyncio.to_thread(audit, root, "peer_letter_refused", refusal_code=exc.code, link_id=link_id,
-                                        path=path)
-            await _peer_refusal(exc.code, exc.status)(scope, receive, send)
-            return True
-        if not _PEER_PATH.fullmatch(path):
-            if scope.get("method") not in {"GET", "HEAD"}:  # a refused read leaves no row, as above
-                from ouroboros.peer_letters import audit
-
-                await asyncio.to_thread(audit, root, "peer_letter_refused", refusal_code="peer_route_forbidden",
-                                        link_id=caller["link_id"], place_id=caller["place_id"], path=path)
-            await _peer_refusal("peer_route_forbidden", 403)(scope, receive, send)
-            return True
-        scope["ouroboros_caller"] = caller
-        await self.app(scope, receive, send)
-        return True
+        """Delegate peer-header requests to ``authenticate_peer_scope`` on a direct local connection."""
+        return await authenticate_peer_scope(
+            scope, receive, send, app=self.app, root=self._drive_root(),
+            require_direct=True, door_only=False,
+        )
 
     def __init__(self, app: ASGIApp, *, served_ui: ServedUI | None = None):
         from ouroboros.gateway.widget_assets import WidgetAssetLeases

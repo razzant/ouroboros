@@ -263,9 +263,12 @@ def retire_exited_process(root: Any, *, pid: int, process_birth: str, kernel_bir
         return
 
     def write():
+        from ouroboros.peer_channel_queue import wake_for_task_control
         from ouroboros.store import acquisition_budget
         from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
 
+        # This exact worker may have exited after persisting a letter but before signalling the server.
+        wake_for_task_control(root)
         with acquisition_budget(ACQUISITION_SLICE_SEC):  # a driver's attempt never waits a full store budget
             retire_process_custody(root, pid=int(pid), process_birth=str(process_birth),
                                    kernel_birth=str(kernel_birth))

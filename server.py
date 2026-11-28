@@ -1143,6 +1143,7 @@ async def lifespan(app):
         log.info("No supported provider or local routing configured. Supervisor not started.")
 
     boot = SimpleNamespace(host_service_task=None, host_service_server=None, host_service_listener=ExitStack(),
+                           peer_door_task=None, peer_door_server=None, peer_door_listener=ExitStack(),
                            extension_reconcile_task=None)
 
     def _dialogue() -> None:
@@ -1229,6 +1230,7 @@ async def lifespan(app):
         ("services", lambda: server_boot.start_background_services(
             settings, local_model=has_local, boot_managed_update=_boot_managed_update_tasks, warm_daemon=live)),
         ("host_service", lambda: server_boot.on_loop(_event_loop, server_boot.serve_host_service(lifespan_drive_root, boot))),
+        ("peer_door", lambda: live and server_boot.on_loop(_event_loop, server_boot.serve_peer_door(lifespan_drive_root, boot, supervisor_ready_event=_supervisor_ready, repo_dir=REPO_DIR))),
         ("review_jobs", lambda: live and server_boot.reconcile_review_jobs(lifespan_drive_root)),
         ("extensions", _extensions),
         ("ui_translation", lambda: live and _start_ui_translation(lifespan_drive_root, _supervisor_stop)),  # after the skills registered their tables
@@ -1303,20 +1305,7 @@ async def lifespan(app):
             extension_reconcile_task.cancel()
             with suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(extension_reconcile_task, timeout=30)
-        if boot.host_service_server is not None:
-            try:
-                boot.host_service_server.should_exit = True
-            except Exception:
-                pass
-        host_service_task = boot.host_service_task
-        if host_service_task is not None:
-            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(host_service_task, timeout=5)
-            if not host_service_task.done():
-                host_service_task.cancel()
-                with suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                    await asyncio.wait_for(host_service_task, timeout=2)
-        boot.host_service_listener.close()
+        await server_boot.stop_embedded_services(boot)
         ws_heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await ws_heartbeat_task

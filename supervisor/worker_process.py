@@ -437,6 +437,12 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
         bind_worker_bus(out_q)  # a carrier's title broadcasts travel as frames of this bus
     except Exception:
         pass
+    try:
+        from ouroboros.peer_channel_queue import bind_worker_event_queue
+
+        bind_worker_event_queue(out_q)  # peer link delivery wakes forward to the server coordinator
+    except Exception:
+        pass
     import sys as _sys
     import traceback as _tb
     import pathlib as _pathlib

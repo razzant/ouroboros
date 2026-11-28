@@ -15,6 +15,8 @@ import re
 from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+from ouroboros.utils import OUROBOROS_INVITE_PATTERN
+
 # Credentials the Settings API answers a GET with a PLACEHOLDER instead of the
 # stored value. The same set gates the read-side repair in
 # ``config.load_settings`` and the write-side merge in
@@ -386,8 +388,8 @@ SECRET_TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     # silently missed the exact secret it was written for (v6.70.0 fix).
     ("telegram_bot_token", re.compile(r"(?:(?<=bot)|\b)[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
-    # A linked-Ouroboros invitation (``peer_links.INVITE_PREFIX``) carries its one-time token in its body.
-    ("ouroboros_invite", re.compile(r"\bouroboros-invite:1:[A-Za-z0-9_\-]{16,}")),
+    # A linked-Ouroboros invitation (``peer_links.INVITE_PREFIX`` / ``INVITE_V2_PREFIX``) carries its one-time token in its body.
+    ("ouroboros_invite", re.compile(OUROBOROS_INVITE_PATTERN)),
     (
         "url_credentials",
         re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+):([^/@\s]+)@"),

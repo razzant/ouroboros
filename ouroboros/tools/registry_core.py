@@ -1444,45 +1444,45 @@ class ToolRegistry:
                 return block_result
 
         # LLM safety supervisor; only this first-party path carries a declaration.
+        from ouroboros.peer_letters import message_approval_scope
         from ouroboros.safety import check_safety
-        is_safe, safety_msg = check_safety(
-            name,
-            args,
-            messages=getattr(self._ctx, "messages", None),
-            ctx=self._ctx,
-            python_resolution=interpreter_resolution,
-            resolved_binding=resolved_binding,
-            declared_policy=entry.safety_policy,
-        )
-        if not is_safe:
-            return ToolResult(*safety_refusal(safety_msg), text=safety_msg)
-        light_repo_before = (
-            registry_guard_process._light_repo_snapshot(system_repo_dir_for(self._ctx))
-            if name in _PROCESS_COMMAND_TOOLS and _runtime_mode == "light" and targets_system_repo
-            else None
-        )
-        workspace_refs_before = (
-            registry_guard_process._git_ref_snapshot(active_repo_dir_for(self._ctx))
-            if name in _PROCESS_COMMAND_TOOLS and workspace_mode and acting_self_worktree
-            else None
-        )
-        worktree_before = self._worktree_status_snapshot() if entry.mutates_worktree else None
-        settings_before = registry_guard_process._owner_settings_snapshot() if name in _PROCESS_COMMAND_TOOLS else None
         from ouroboros.tools.process_facts import process_environment_scope
 
-        with process_environment_scope(self._ctx, name, args) as environment_error:
-            if environment_error is not None:
-                return environment_error
-            if interpreter_resolution is None:  # node: post-gates (A-F4)
-                from ouroboros.process_interpreters import resolve_node_postgates
-
-                args, interpreter_resolution = resolve_node_postgates(
-                    self._ctx, name, args, runtime_mode=_runtime_mode,
-                    effective_constraint=effective_constraint, resolved_binding=resolved_binding,
-                )
-            early_error, result = self._invoke_builtin_handler(
-                name, entry, args, resolved_binding, interpreter_resolution, worktree_before, handoff,
+        with message_approval_scope(self._ctx, name, args):
+            is_safe, safety_msg = check_safety(
+                name,
+                args,
+                messages=getattr(self._ctx, "messages", None),
+                ctx=self._ctx,
+                python_resolution=interpreter_resolution,
+                resolved_binding=resolved_binding,
+                declared_policy=entry.safety_policy,
             )
+            if not is_safe:
+                return ToolResult(*safety_refusal(safety_msg), text=safety_msg)
+            light_repo_before = (
+                registry_guard_process._light_repo_snapshot(system_repo_dir_for(self._ctx))
+                if name in _PROCESS_COMMAND_TOOLS and _runtime_mode == "light" and targets_system_repo else None
+            )
+            workspace_refs_before = (
+                registry_guard_process._git_ref_snapshot(active_repo_dir_for(self._ctx))
+                if name in _PROCESS_COMMAND_TOOLS and workspace_mode and acting_self_worktree else None
+            )
+            worktree_before = self._worktree_status_snapshot() if entry.mutates_worktree else None
+            settings_before = registry_guard_process._owner_settings_snapshot() if name in _PROCESS_COMMAND_TOOLS else None
+            with process_environment_scope(self._ctx, name, args) as environment_error:
+                if environment_error is not None:
+                    return environment_error
+                if interpreter_resolution is None:  # node: post-gates (A-F4)
+                    from ouroboros.process_interpreters import resolve_node_postgates
+
+                    args, interpreter_resolution = resolve_node_postgates(
+                        self._ctx, name, args, runtime_mode=_runtime_mode,
+                        effective_constraint=effective_constraint, resolved_binding=resolved_binding,
+                    )
+                early_error, result = self._invoke_builtin_handler(
+                    name, entry, args, resolved_binding, interpreter_resolution, worktree_before, handoff,
+                )
         if name in _PROCESS_COMMAND_TOOLS:
             # Tripwires run on the TOOL_ERROR path too: two early_error returns
             # fire AFTER the process already ran (#447 B2).

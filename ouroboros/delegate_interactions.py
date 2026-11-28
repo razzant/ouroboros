@@ -571,11 +571,13 @@ def _peer_answer_receipt(ctx: ToolContext, entry: Any, rid: str, iid: str, wire:
 
 def _peer_answer_post(ctx: ToolContext, entry: Any, gateway: Any, rid: str, iid: str, wire: list,
                       timeout_sec: float) -> Dict[str, Any]:
-    """One answer letter's physical POST: its bytes pinned first (``claim_peer_answer_pin``), the POST then through
-    this task's launch gate (``owner_pause.run_operation``), as a work letter and a message go: a Pause or Stop of
-    this task that landed during the reading or the address read keeps it from leaving (``answer_held``, nothing
-    sent or pinned). The receiver's own refusals and unknown outcomes keep their types."""
-    from ouroboros import owner_pause
+    """Pin answer bytes and POST through the same launch gate as a work letter (`owner_pause.run_operation`).
+
+    A Pause or Stop before submission returns typed `answer_held`: nothing was pinned or sent. A receiver
+    refusal, a disconnected channel before transmission and an unknown wire outcome keep their distinct types.
+    A validated answer receipt can wake delivery of other consented messages and replies to this link.
+    """
+    from ouroboros import delegate_custody as custody, owner_pause, peer_channel_queue
     from ouroboros.delegate_message_store import claim_peer_answer_pin
     from ouroboros.gateways.peer import _unavailable
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
@@ -584,11 +586,14 @@ def _peer_answer_post(ctx: ToolContext, entry: Any, gateway: Any, rid: str, iid:
         return gateway.answer_interaction(rid, iid, wire, timeout_sec=timeout_sec,
                                           before_send=lambda lid, raw: claim_peer_answer_pin(ctx, entry, iid, lid, raw))
     try:
-        return owner_pause.run_operation(ctx, post)
+        body = owner_pause.run_operation(ctx, post)
     except (owner_pause.OwnerPauseRefused, PhysicalDispatchInterrupted) as exc:
         code = getattr(exc, "code", "") or str(exc) or "owner_paused"
         raise _unavailable("answer_held", f"this task's own Pause or Stop holds the answer ({code}); nothing was "
                                           "sent; the same answer goes once this task runs again") from exc
+    if isinstance(body, dict) and body.get("accepted") is True:
+        peer_channel_queue.note_verified_exchange(custody.custody_root(ctx), str((entry.engine_ref or {}).get("link_id") or ""))
+    return body
 
 
 def _validate_answer_address_live(ctx: ToolContext, entry: Any, gateway: Any, address: dict,
@@ -634,6 +639,8 @@ def _validate_answer_address_live(ctx: ToolContext, entry: Any, gateway: Any, ad
             run_id=rid, host_code=AGENT_FAULT_CODE,
         )
     except (ValueError, ClaudexorUnavailable) as exc:
+        if peer and getattr(exc, "channel_connect_failed", False):
+            raise  # let delegate_answer return the same pre-send refusal as without reply_to
         if getattr(exc, "code", "") in {"answer_row_mismatch", "empty_answer", "invalid_letter"}:
             return None, delegate_result({
                 "status": "rejected", "ok": False, "host_code": AGENT_FAULT_CODE,
@@ -851,7 +858,7 @@ def _delegate_answer(
                     "note": "The receiving Ouroboros refused the answer: that letter's cost ceiling is spent there. "
                             "Nothing was delivered and the rows are not at fault; its human may resume the work."})
             from ouroboros.gateways.peer import NOTHING_SENT as _PEER_NOTHING_SENT
-            if peer_run and exc.code in _PEER_NOTHING_SENT:
+            if peer_run and (exc.code in _PEER_NOTHING_SENT or getattr(exc, "channel_connect_failed", False)):
                 hc = AGENT_FAULT_CODE if exc.code == "peer_answer_conflict" else SUBSTRATE_REFUSAL_CODE
                 return _fail("delegate_answer", exc.code, str(exc), run_id=rid, host_code=hc)
             if peer_run and refusal_code in _PEER_REMOTE_REFUSALS and status_code in (401, 403):

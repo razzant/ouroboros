@@ -818,7 +818,7 @@ class BodyRuntime:
             raise
 
     def _peer_link_signature(self, ref: dict):
-        from ouroboros import peer_links
+        from ouroboros import peer_channel, peer_links
 
         place_id = str(ref.get("place_id") or "")
         link_id = str(ref.get("link_id") or "")
@@ -828,7 +828,8 @@ class BodyRuntime:
             link = None
         if link is None or link.link_id != link_id:
             return ("unavailable", link_id)
-        return (link.link_id, str(link.peer_url or ""), str(getattr(link, "remote_unknown_at", "") or ""))
+        transport = peer_channel.TRANSPORT_CHANNEL if peer_channel.is_channel_link(link) else str(link.peer_url or "")
+        return (link.link_id, transport, str(getattr(link, "remote_unknown_at", "") or ""))
 
     def _observation_key(self, entry):
         from ouroboros.execution_domain import is_peer_ref
