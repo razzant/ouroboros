@@ -50,11 +50,13 @@ loss: the ledger is the record of money.
 from __future__ import annotations
 
 import collections
+import logging
 import threading
 import time
 from typing import Any, Callable, Deque, Dict, List, NamedTuple, Optional, Tuple
 
 from ouroboros.cost_projection import LIVE_ROOT_COSTS, DueRoot
+from ouroboros.process_logging import RecordHandoff
 from ouroboros.runtime_limits import BUDGET_PROJECTION_RETRY_SEC
 from ouroboros.server_process import DATA_DIR, log
 from ouroboros.utils import utc_now_iso
@@ -67,6 +69,10 @@ _WRITE_LOCK = threading.Lock()  # one writer of the queue at a time, from a row'
 _CLOSED = threading.Event()  # this lifespan's end took its last pass (``drain``): no pass starts until ``reopen``
 _END = threading.Lock()  # held by the drain that takes the last pass: a later drain waits for it, then reads
 _CONTEXT: Any = None  # the supervisor loop's event context (``bind``): the last pass takes its budget mark
+# The drain's own warnings are logged on a stop door's thread, which must never wait on a log sink (a write that
+# stalls server.log holds its handler): they leave it through one ordered, bounded handoff, which the door's
+# ``finish_record_handoffs`` waits for inside the same share (``server_control.finish_display_and_socket_lines``).
+_DRAIN_LOG = RecordHandoff(f"{DUTY_NAME}-drain-log")
 
 
 class ProjectionWork(NamedTuple):
@@ -262,8 +268,8 @@ def drain(deadline: Optional[float] = None) -> bool:
     later call waits for that first one to end, then only reads whether a pass still runs; Panic waits for nothing.
     Each caller waits until its ``deadline`` at most (monotonic: the share of the stop grace its door takes, half of
     what is left, ``server_control``; without a started grace no last pass runs), and no pass starts that there is no
-    time left to wait for. True when no pass is left running: one that is stays unjoined, its unwritten work the exit's
-    loss."""
+    time left to wait for; its warnings never wait on a log sink (``_DRAIN_LOG``). True when no pass is left running:
+    one that is stays unjoined, its unwritten work the exit's loss."""
     from ouroboros import update_generation_facts
     from ouroboros.server_control import panic_termination_requested
 
@@ -279,7 +285,8 @@ def drain(deadline: Optional[float] = None) -> bool:
         if not first or wait <= 0.0:
             return not LATCH.locked()  # a later call reads what the first left; without a grace no last pass runs
         if not LATCH.acquire(timeout=max(0.0, cutoff - time.monotonic())):
-            log.warning("The display projections' pass outlived its share of the stop grace; it stays unjoined")
+            _DRAIN_LOG.log(log, logging.WARNING,
+                           "The display projections' pass outlived its share of the stop grace; it stays unjoined")
             return False
         budget = _take_budget_mark(_CONTEXT) if _CONTEXT is not None else None
         while budget is not None or _rows_queued() or update_generation_facts.pending():
@@ -287,8 +294,8 @@ def drain(deadline: Optional[float] = None) -> bool:
                 return True
             budget = None
             if not LATCH.acquire(timeout=max(0.0, cutoff - time.monotonic())):
-                log.warning("The display projections' last pass outlived its share of the stop grace; "
-                            "its rest stays unwritten")
+                _DRAIN_LOG.log(log, logging.WARNING, "The display projections' last pass outlived its share of the "
+                               "stop grace; its rest stays unwritten")
                 return False
         LATCH.release()
         return True
@@ -305,10 +312,11 @@ def _start_last_pass(budget: Optional[Callable[[], None]], cutoff: float) -> boo
             threading.Thread(target=project, args=(ProjectionWork(None, (), budget), LATCH),
                              name=f"{DUTY_NAME}-drain", daemon=True).start()
             return True
-        log.warning("No time is left in the stop grace to wait for the display projections' last pass; "
-                    "its work stays unwritten")
+        _DRAIN_LOG.log(log, logging.WARNING, "No time is left in the stop grace to wait for the display projections' "
+                       "last pass; its work stays unwritten")
     except Exception:
-        log.warning("The display projections' last pass could not start; its work stays unwritten", exc_info=True)
+        _DRAIN_LOG.log(log, logging.WARNING, "The display projections' last pass could not start; its work stays "
+                       "unwritten", exc_info=True)
     LATCH.release()
     if budget is not None:
         _CONTEXT.budget_projection_dirty = True

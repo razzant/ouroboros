@@ -456,6 +456,100 @@ def test_the_last_pass_and_the_socket_lines_share_half_of_the_grace_left_and_the
     assert half(started) <= census <= half(ended)
 
 
+class _HeldLogSink(logging.Handler):
+    """A handler of the server log whose lock another thread holds (``hold``), as a write stalled on a full disk
+    holds it: a record handled on any other thread waits until ``free``."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.lines, self.holding, self.free = [], threading.Event(), threading.Event()
+
+    def emit(self, record) -> None:
+        self.lines.append(record.getMessage())
+
+    def hold(self) -> None:
+        with self.lock:
+            self.holding.set()
+            assert self.free.wait(10), "the test must free the held log sink"
+
+
+_DRAIN_WARNINGS = {
+    "pass-in-flight": "The display projections' pass outlived its share of the stop grace; it stays unjoined",
+    "last-pass": "The display projections' last pass outlived its share of the stop grace; its rest stays unwritten",
+    "no-time": ("No time is left in the stop grace to wait for the display projections' last pass; "
+                "its work stays unwritten"),
+    "no-thread": "The display projections' last pass could not start; its work stays unwritten",
+}
+
+
+@pytest.mark.parametrize("ending", list(_DRAIN_WARNINGS))
+def test_the_door_returns_within_its_share_with_the_server_log_held_and_the_drain_warning_follows(monkeypatch, ending):
+    """The drain warns on the door's thread when the pass in flight or its last pass outlives the share, when no time
+    is left to wait for a last pass, or when none can start. With the server log's handler held by another thread (a
+    write stalled on a full disk), the door (``finish_display_and_socket_lines``) still returns within its share,
+    ahead of the owned stop: the warning waits in the drain's record handoff, which the door's wait for the handoffs
+    leaves at the share's end, and reaches the handler once it is free, once. (Logged on the door's thread, it waited
+    for that handler past the whole grace: 1.40 s against a share of 0.6 s.)"""
+    from ouroboros import owned_shutdown, server_control
+
+    held, release, hold, _holding = _held_seam()
+    ctx = SimpleNamespace(budget_projection_dirty=True, update_budget_from_usage=lambda usage: hold() or True)
+    display_projections.bind(ctx)
+    in_flight, jump, returned = [], [0.0], []
+    if ending in ("pass-in-flight", "no-time"):  # a pass in flight stands in its budget write
+        work = display_projections.take(ctx)
+        assert display_projections.LATCH.acquire(blocking=False)
+        in_flight.append(threading.Thread(target=display_projections.project, args=(work, display_projections.LATCH)))
+        in_flight[0].start()
+        assert held.wait(10)
+        ctx.budget_projection_dirty = True  # the turn's newer mark, for a last pass
+    if ending == "no-time":  # the drain's own clock passes its cutoff as the pass in flight ends
+        monkeypatch.setattr(display_projections, "time",
+                            SimpleNamespace(monotonic=lambda: time.monotonic() + jump[0], time=time.time))
+    if ending == "no-thread":
+        def no_thread(*_args, **_kwargs):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(display_projections, "threading", SimpleNamespace(Thread=no_thread))
+
+    def end_at_the_cutoff():
+        jump[0] = 3600.0
+        release.set()
+
+    def teardown():
+        server_control.finish_display_and_socket_lines()
+        returned.append(time.monotonic())
+
+    sink = _HeldLogSink()
+    monkeypatch.setattr(display_projections.log, "disabled", False)
+    display_projections.log.addHandler(sink)
+    holder = threading.Thread(target=sink.hold, name="stalled-log-write")
+    door, ender = threading.Thread(target=teardown, name="lifespan-teardown"), threading.Timer(0.2, end_at_the_cutoff)
+    grace_end = time.monotonic() + 2.0
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: grace_end)
+    try:
+        holder.start()
+        assert sink.holding.wait(10)
+        share_end = time.monotonic() + (grace_end - time.monotonic()) / 2
+        door.start()
+        if ending == "no-time":
+            ender.start()
+        door.join(grace_end + 1.0 - time.monotonic())
+        assert returned and returned[0] < share_end + 0.5, "the door returned within its share, the server log held"
+        assert _DRAIN_WARNINGS[ending] not in sink.lines, "the warning waits for the held sink"
+    finally:
+        sink.free.set()
+        release.set()
+        ender.cancel()
+        for thread in (holder, door, ender, *in_flight):
+            if thread.ident is not None:
+                thread.join(10)
+        _pass_ended()
+        _wait_until(lambda: display_projections._DRAIN_LOG.thread is None)
+        display_projections.log.removeHandler(sink)
+    assert sink.lines.count(_DRAIN_WARNINGS[ending]) == 1, "the warning reached the freed sink, once"
+
+
 def test_a_look_that_raises_frees_the_latch_for_the_next_tick(monkeypatch, caplog):
     """``take`` reads memory only, yet a look that raised once kept the latch for the generation: no pass, no
     stall row (the watchdog had no entry), every later look skipped. The latch is free again and the next look

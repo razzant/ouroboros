@@ -30,8 +30,9 @@ whatever is written to descriptors 1 and 2 themselves (native code, ``sys.__stde
 wait for it, as before; so no write that holds the GIL ever waits for the relay's thread.
 
 A thread that must not wait on a log sink hands its records to a ``RecordHandoff``: one
-ordered, bounded writer thread per handoff (the ASGI loop's socket lifecycle lines use one), whose
-queue an ordinary exit lets it finish inside the stop's deadline (``finish_record_handoffs``).
+ordered, bounded writer thread per handoff (the ASGI loop's socket lifecycle lines use one, a stop
+door's display-projection warnings another), whose queue an ordinary exit lets it finish inside the
+stop's deadline (``finish_record_handoffs``).
 Every other record still reaches the handlers on its own thread.
 
 The hooks route an unhandled exception of a thread, or of the main thread, into
@@ -223,7 +224,8 @@ def _code_only_traceback(exc: BaseException) -> str:
 
 class RecordHandoff:
     """One ordered, bounded handoff of log records from a thread that must not wait on a log sink (the ASGI loop's
-    socket lifecycle lines, ``gateway/ws.py``) to one writer thread.
+    socket lifecycle lines, ``gateway/ws.py``; a stop door's display-projection warnings, ``display_projections``) to
+    one writer thread.
 
     ``log`` builds the record on the caller's thread, so its creation time and thread are the caller's, and keeps
     it as text: the message formatted there (a format that fails keeps its template, so marked) and an exception

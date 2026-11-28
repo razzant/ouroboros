@@ -384,10 +384,10 @@ exit_after_restart = exit_after_shutdown
 def finish_display_and_socket_lines() -> None:
     """An ordinary end of this image's serving, at each door that has one (the lifespan teardown right after its
     terminal custody, the exit, the direct re-exec): the display projections' last pass (``drain_display_projections``),
-    then the socket lifecycle lines still queued (``_finish_record_handoffs``), both inside ONE share of the stop grace
-    taken here once, half of what is left, so what follows the door keeps the larger part (the owned stop after the
-    teardown's call, the output relay's handover after the exit's). An accepted Panic owns the exit and waits for
-    neither; it never raises."""
+    then the lines the record handoffs still hold (the socket lifecycle lines, the drain's own warnings:
+    ``_finish_record_handoffs``), both inside ONE share of the stop grace taken here once, half of what is left, so
+    what follows the door keeps the larger part (the owned stop after the teardown's call, the output relay's handover
+    after the exit's). An accepted Panic owns the exit and waits for neither; it never raises."""
     if not _restart_stop_requested:
         try:
             share = _half_of_the_grace_left()
@@ -422,8 +422,9 @@ def _half_of_the_grace_left() -> float | None:
 
 
 def _finish_record_handoffs(deadline: float | None) -> None:
-    """What the record handoffs still hold (the socket lifecycle lines: ``process_logging.finish_record_handoffs``),
-    until ``deadline`` at most; it never stands between this image and its end."""
+    """What the record handoffs still hold (the socket lifecycle lines and the display projections' drain warnings:
+    ``process_logging.finish_record_handoffs``), until ``deadline`` at most; it never stands between this image and
+    its end."""
     try:
         from ouroboros.process_logging import finish_record_handoffs
 
