@@ -13,7 +13,8 @@ import time
 
 import pytest
 
-from ouroboros import dialogue_store, maintenance, maintenance_jobs, store, store_checkpoint, store_journal, usage_store
+from ouroboros import (dialogue_store, maintenance, maintenance_jobs, store, store_checkpoint, store_journal, store_timing,
+                       usage_store)
 from tests._store_journal_shared import use_journal
 from tests.test_store import publish
 
@@ -55,8 +56,9 @@ def _job(root):
 def test_a_backlog_past_sqlite_s_own_threshold_wakes_the_job_and_its_pass_copies_the_log(root):
     """The look is due once a log holds SQLite's own threshold of committed frames no pass saw. The pass copies
     them (``checkpointed`` reaches ``log``; the database file takes the pages), records SQLite's numbers and the log
-    it saw per store kind, and one supervisor row; the job then rests (its own row write is no backlog) until the
-    log grows by the threshold again, in the log the next writer reset."""
+    it saw per store kind, and one row of the store-timing journal, none in the supervisor journal whose tail every
+    context reads; the job then rests (its own row write is no backlog) until the log grows by the threshold again,
+    in the log the next writer reset."""
     path = store.store_path(root)
     assert store_checkpoint.inline_frames() == 1000  # SQLite's own default on this build
     assert not store_checkpoint.due(root, {}, {}, False), "building the stores left no backlog"
@@ -69,9 +71,12 @@ def test_a_backlog_past_sqlite_s_own_threshold_wakes_the_job_and_its_pass_copies
     assert current["busy"] == 0 and current["checkpointed"] == current["log"] == seen[1] >= 1000
     assert current["wal"] == seen and current["seconds"] >= 0 and current["at"]
     assert path.stat().st_size > size, "the pass moved the log's pages into the database file"
-    rows = [json.loads(line) for line in (root / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert store_timing.JOURNAL == "store_sites.jsonl"
+    rows = [json.loads(line) for line in (root / "logs" / store_timing.JOURNAL).read_text(encoding="utf-8").splitlines()]
     assert [row["stores"]["current"] for row in rows if row["type"] == store_checkpoint.NAME] == [
-        {key: current[key] for key in ("busy", "log", "checkpointed", "seconds")}]
+        {key: current[key] for key in ("busy", "log", "checkpointed", "seconds", "wal")}], "its history keeps the log"
+    supervisor = root / "logs" / "supervisor.jsonl"
+    assert not supervisor.exists() or store_checkpoint.NAME not in supervisor.read_text(encoding="utf-8")
     assert maintenance.run_job(root, store_checkpoint.NAME) is None
     assert store.log_identity(path)[0] != seen[0], "the job's own row write began a reset log"
     _backlog(root)
@@ -217,6 +222,54 @@ def test_the_dispatcher_s_look_opens_no_store_until_a_log_holds_the_threshold(tm
     finally:
         if held is not None:
             held.close()
+
+
+def test_each_look_notes_how_long_the_logs_were_for_the_minute_row_from_memory(root, monkeypatch):
+    """The lane's looks (the dispatcher's, on its own thread) note each store kind's committed frames; the
+    ``supervisor_load`` row of each busy minute drains the most one look saw (``wal_frames``), so a long COMMIT stands
+    beside how long its store's log was, whether or not the job was due. The drain runs on the supervisor loop: it
+    reads no file. A minute nobody looked says ``looks`` 0, never an empty log (the section's place in the row:
+    tests/test_supervisor_load_row.py)."""
+    store_checkpoint.drain_frames()
+    assert store_checkpoint.drain_frames() == {"looks": 0, "max": {}}
+    _backlog(root, 8, key="short")
+    assert maintenance.due(root, lane="checkpoint") == []
+    short = store.log_identity(store.store_path(root))[1]
+    _backlog(root)
+    assert maintenance.due(root, lane="checkpoint") == [store_checkpoint.NAME]
+    long = store.log_identity(store.store_path(root))[1]
+    opened = []
+    with monkeypatch.context() as patch:
+        for module, name in ((builtins, "open"), (io, "open"), (os, "open"), (os, "stat")):
+            real = getattr(module, name)
+            patch.setattr(module, name, lambda *args, real=real, **kw: opened.append(args[0]) or real(*args, **kw))
+        window = store_checkpoint.drain_frames()
+    assert opened == [] and short < 1000 <= long
+    assert window["looks"] == 2 and window["max"]["current"] == long, window
+    assert store_checkpoint.drain_frames() == {"looks": 0, "max": {}}
+
+
+def test_the_real_checkpoint_child_copies_the_log_and_the_lane_rests_without_a_supervisor_row(root):
+    """The lane's real child (``python -m ouroboros.maintenance --lane checkpoint``, the custodied spawn) over a
+    backlog: it copies the log and writes its pass row to the store-timing journal and its entry to the job row; the
+    lane looks again, finds the job at rest and returns after one spawn, and its clean run leaves no ``maintenance``
+    row in the supervisor journal."""
+    from tests.test_evidence_packs import REPO
+
+    _backlog(root)
+    (root / "logs").mkdir(exist_ok=True)
+    seen = store.log_identity(store.store_path(root))[:2]
+    unit = maintenance.MaintenanceChild("checkpoint")
+    assert unit.tick(root, REPO)
+    unit._thread.join(240)
+    assert not unit._thread.is_alive() and unit.live_children() == []
+    current = _job(root)["stores"]["current"]
+    assert current["wal"] == seen and current["checkpointed"] == current["log"] == seen[1], current
+    rows = [json.loads(line) for line in (root / "logs" / store_timing.JOURNAL).read_text(encoding="utf-8").splitlines()]
+    assert [row["stores"]["current"]["wal"] for row in rows if row["type"] == store_checkpoint.NAME] == [seen]
+    supervisor = root / "logs" / "supervisor.jsonl"
+    assert not supervisor.exists() or '"maintenance"' not in supervisor.read_text(encoding="utf-8")
+    assert not store_checkpoint.due(root, _job(root), {}, False)
 
 
 def test_a_rollback_journal_store_has_no_log_and_the_job_leaves_it_alone(tmp_path, monkeypatch):

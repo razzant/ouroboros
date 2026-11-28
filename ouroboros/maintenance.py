@@ -14,7 +14,8 @@ The trash lane retries unchanged holds on the reconcile cadence (``request(retry
 only at its own facts, and requests an ordinary look for retirement after its child runs. The
 checkpoint lane looks when the server's 20 s duty asks it by name (``request(lane="checkpoint")``) and
 again after each child that left its job done (``_look_again``); the look reads the WAL logs' headers
-before its job's row (``FACT_FIRST``, ``store_checkpoint``).
+before its job's row (``FACT_FIRST``, ``store_checkpoint``), and a clean child run of it writes no
+``maintenance`` row (``_unclean_only``): each pass is a row of the store-timing journal.
 Providerless boot uses the ordinary slot for dialogue alone, retrying contention until the job rests.
 The spawn is the existing custodied one (``startup_historical_audit.
 spawn_maintenance_job``: session custody, its own process group, a parent lifeline; ``stop`` and
@@ -590,6 +591,21 @@ def _look_again(lane: Optional[str], fields: Any) -> bool:
     return lane == "checkpoint" and (jobs.get(store_checkpoint.NAME) or {}).get("state") == "done"
 
 
+def _unclean_only(record: Callable[..., None]) -> Callable[..., None]:
+    """The checkpoint lane's child rows: a clean run (one to three a minute on a busy install) writes none, its pass
+    being a row of the store-timing journal (``store_checkpoint``); an unclean end (failed, unknown, stopped) writes
+    its one row, with the ``pid`` its ``started`` row would have carried."""
+    began: Dict[str, Any] = {}
+
+    def write(root: Any, phase: str, **facts: Any) -> None:
+        if phase == "started":
+            began.clear()
+            began.update(facts)
+        elif phase != "completed":
+            record(root, phase, **{**began, **facts})
+    return write
+
+
 class MaintenanceChild:
     """One lane's maintenance child of this server process (module docstring); no lane runs every job."""
 
@@ -705,6 +721,8 @@ class MaintenanceChild:
         select = {} if lane is None else {"lane": lane, "child": retry and lane == "trash"}  # no lane: the whole catalog
         record = _record if lane in (None, "ordinary") else (
             lambda root, phase, **facts: _record(root, phase, lane=lane, **facts))
+        if lane == "checkpoint":
+            record = _unclean_only(record)
         try:
             while True:  # one look; the checkpoint lane looks again after a pass that left its job done (_look_again)
                 try:

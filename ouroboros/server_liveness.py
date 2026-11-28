@@ -222,7 +222,6 @@ SUPERVISOR_LOAD_WINDOW_SEC = 60.0
 _LOAD_FAILURES_SEEN: set = set()
 
 
-STORE_SITES_LOG = "store_sites.jsonl"
 STORE_SITES_WINDOW_SEC = 600.0  # a publication's cadence (about the bytes of the row it explains), never a cut of what it holds
 _STORE_SITES_STARTED = [time.monotonic()]
 
@@ -232,13 +231,14 @@ def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
     (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead,
     ``conversation_lane`` the lane's carriers now, each with its last own RSS report, and ``machine``
     the machine's load averages and cores now)."""
-    from ouroboros import dialogue_retry, store_timing
+    from ouroboros import dialogue_retry, store_checkpoint, store_timing
     from ouroboros.gateway import history_attribution
     from supervisor import conversation_lane, loop_load, queue
 
     return {
         "queue_lock": lambda: queue._queue_lock.drain(),
         "store_locks": store_timing.drain,
+        "wal_frames": store_checkpoint.drain_frames,  # how long each store's log was at the checkpoint lane's looks
         "history_reads": history_attribution.drain,  # why and how fast the history route answered (GETs write nothing)
         "dialogue_retry": dialogue_retry.snapshot,
         "conversation_lane": conversation_lane.carrier_vitals,
@@ -250,7 +250,8 @@ def _publish_store_sites(drive_root: Any) -> Optional[dict]:
     """At most one row of the whole store-site table per window into its own journal, after a busy minute's row (an idle
     stretch folds in, ``window_sec`` says how long). In ``logs/supervisor.jsonl`` a table of 36 to 42 KB would leave the
     256 KB tail every context reads six minutes; a row a minute would write 58 MB a day of continuous work, nine times
-    the row it explains. Rotated here, the one place that grows it. Fail-soft and logged once per class, as that row is."""
+    the row it explains. Rotated here (the journal's other rows are the checkpoint child's passes, ``store_checkpoint``).
+    Fail-soft and logged once per class, as that row is."""
     from ouroboros import store_timing
     from supervisor.state import rotate_jsonl_log_if_needed
 
@@ -263,8 +264,8 @@ def _publish_store_sites(drive_root: Any) -> Optional[dict]:
         table = store_timing.drain_sites()
         row = {"ts": utc_now_iso(), "type": "store_sites", "window_sec": round(window_sec, 3), "store_locks": table}
         if table:
-            append_jsonl(drive_root / "logs" / STORE_SITES_LOG, row, lock_timeout_sec=0)
-            rotate_jsonl_log_if_needed(drive_root, STORE_SITES_LOG, "store_sites")
+            append_jsonl(drive_root / "logs" / store_timing.JOURNAL, row, lock_timeout_sec=0)
+            rotate_jsonl_log_if_needed(drive_root, store_timing.JOURNAL, "store_sites")
         return row if table else None
     except Exception as exc:
         if type(exc).__name__ not in _LOAD_FAILURES_SEEN:

@@ -31,11 +31,16 @@ the lane looks again after each pass that left the job done (``maintenance._look
 A store a pass finds held (contention) keeps its last entry and so stays due; the pass says ``pending``.
 
 A pass records, per store kind (``store_timing.KINDS``), SQLite's three numbers (``busy``; ``log``: frames in the
-log; ``checkpointed``: frames now in the database) and the checkpoint's wall ``seconds``, on the job's row and as
-one ``wal_checkpoint`` row of ``logs/supervisor.jsonl``. Beside the ``supervisor_load`` rows' commit times they show
-whether long COMMITs go on while the log stays short (an interactive COMMIT checkpoints only at the ceiling),
-whether a reader holds the log back (``checkpointed`` below ``log``), and whether the log is ever reset (``log``
-growing pass after pass though each pass copied it all: a reader was on the log whenever a writer began).
+log; ``checkpointed``: frames now in the database), the checkpoint's wall ``seconds`` and the ``wal`` it met
+(``[generation, last committed frame]``), on the job's row and as one ``wal_checkpoint`` row of the store-timing
+journal (``store_timing.JOURNAL``), not of ``logs/supervisor.jsonl``, whose tail every context reads (on a busy
+install the lane passes one to three times a minute), and the lane's clean child runs write no ``maintenance`` rows
+there either (``maintenance._unclean_only``). Each busy minute's ``supervisor_load`` row carries, beside its commit times, the
+most committed frames the minute's looks saw in each store kind's log (``drain_frames``). Together they show whether
+long COMMITs go on while the log stays short (an interactive COMMIT checkpoints inline only at the ceiling), whether
+a reader holds the log back (``checkpointed`` below ``log``), and whether the log is ever reset (``log`` growing pass
+after pass though each pass copied it all: a reader was on the log whenever a writer began). A log reset between two
+looks, or a slow sync with no checkpoint, leaves a long COMMIT's cause unknown.
 
 The worse worst case, disclosed: when the job is down, late, starved or held back by a reader, the log grows to the
 ceiling and the next interactive COMMIT copies its frames inline, about 64 MiB (more past a large transaction or a
@@ -49,8 +54,10 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import logging
 import pathlib
 import sqlite3
+import threading
 import time
 from typing import Any, Callable, Dict, Iterator, Tuple
 
@@ -59,6 +66,8 @@ from ouroboros import store_timing
 JOURNAL_SIZE_LIMIT = 64 << 20  # bytes a store keeps of an idle rollback journal, or of its WAL log after a reset
 _LOG_HEADER, _FRAME_HEADER = 32, 24  # the WAL log's header and each frame's header (sqlite.org/fileformat2.html §4)
 NAME = "wal_checkpoint"  # the maintenance job and its row (``maintenance_jobs``)
+_LOOKS: Dict[str, Any] = {"looks": 0, "max": {}}  # the looks since the last ``drain_frames`` and what they saw
+_LOOKS_LOCK = threading.Lock()
 
 
 def ceiling(page_size: int) -> int:
@@ -121,8 +130,26 @@ def unseen(log: list, seen: Any) -> int:
 
 def backlog(root: Any) -> bool:
     """A log of ROOT holds ``inline_frames`` committed frames, more than any pass may have left unseen: the look's
-    first step (``maintenance.FACT_FIRST``), from the logs' headers alone, before the job's row is read."""
-    return any(log[1] >= inline_frames() for _kind, _path, _tier, log in _logs(pathlib.Path(root)))
+    first step (``maintenance.FACT_FIRST``), from the logs' headers alone, before the job's row is read. Each look
+    notes the committed frames of every log it read, in memory (``drain_frames``)."""
+    frames = [(kind, log[1]) for kind, _path, _tier, log in _logs(pathlib.Path(root))]
+    with _LOOKS_LOCK:
+        _LOOKS["looks"] += 1
+        for kind, count in frames:
+            _LOOKS["max"][kind] = max(count, _LOOKS["max"].get(kind, 0))
+    return any(count >= inline_frames() for _kind, count in frames)
+
+
+def drain_frames() -> Dict[str, Any]:
+    """The looks since the last drain and the most committed frames one of them saw in each store kind's log, then an
+    empty window: the ``supervisor_load`` row's ``wal_frames`` (``server_liveness._load_sections``), so a busy minute's
+    commit times stand beside how long the logs were. Memory only: no file is read on the caller's thread, the loop's.
+    A kind whose log held no commit at any look is absent; ``looks`` 0 is a minute nobody looked (a stalled loop, a
+    long pass): unknown, never an empty log."""
+    with _LOOKS_LOCK:
+        window = {"looks": _LOOKS["looks"], "max": dict(_LOOKS["max"])}
+        _LOOKS["looks"], _LOOKS["max"] = 0, {}
+    return window
 
 
 def due(root: Any, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
@@ -139,7 +166,7 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
     tried again when its log moves on, never on a clock. A store found held (contention, as ``maintenance._contention``
     reads it) is no fault: it keeps the entry its last pass left, so it stays due, and the pass says ``pending``."""
     from ouroboros import maintenance_jobs, store
-    from ouroboros.utils import utc_now_iso
+    from ouroboros.utils import append_jsonl, utc_now_iso
 
     root = pathlib.Path(root)
     stores = dict((maintenance_jobs.job(root, NAME) or {}).get("stores") or {})  # the store's foreign-root check first
@@ -160,12 +187,15 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
             facts = {"error": type(exc).__name__}
             if isinstance(exc, store.StoreBusy) or (isinstance(exc, sqlite3.Error) and store.busy(exc)):
                 held.add(kind)
-        passed[kind] = facts
+        passed[kind] = {**facts, "wal": log}
         if kind not in held:
             stores[kind] = {**facts, "wal": log, "at": utc_now_iso()}
     state = "pending" if held else "done"
     if set(passed) - held:  # a held store alone changes no entry: nothing to write
         maintenance_jobs.record(root, NAME, state=state, stores=stores)
-    if passed:
-        store.supervisor_row(root, NAME, {"stores": passed})
+    if passed:  # the pass's own row, in the store-timing journal (module docstring)
+        try:
+            append_jsonl(root / "logs" / store_timing.JOURNAL, {"ts": utc_now_iso(), "type": NAME, "stores": passed})
+        except OSError:
+            logging.getLogger(__name__).warning("%s row not recorded", NAME, exc_info=True)
     return {"state": state, "items": len(passed)}

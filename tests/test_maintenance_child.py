@@ -870,17 +870,20 @@ def test_a_busy_ordinary_lane_never_holds_a_lane_of_its_own_and_each_lane_is_one
     assert sorted(spawns) == ["checkpoint", "ordinary", "trash"] and unit.live_children() == []
 
 
-@pytest.mark.parametrize("report,looks,spawned", [
-    ({"status": "completed", "jobs": {"wal_checkpoint": {"state": "done", "items": 1}}}, [True, True, False], 2),
-    ({"status": "completed", "jobs": {"wal_checkpoint": {"state": "pending", "items": 1}}}, [True, True], 1),
-    ({"status": "failed", "jobs": {"wal_checkpoint": {"state": "failed", "items": 0}}}, [True, True], 1),
-    (None, [True, True], 1),
+@pytest.mark.parametrize("report,looks,spawned,rows", [
+    ({"status": "completed", "jobs": {"wal_checkpoint": {"state": "done", "items": 1}}}, [True, True, False], 2, []),
+    ({"status": "completed", "jobs": {"wal_checkpoint": {"state": "pending", "items": 1}}}, [True, True], 1, []),
+    ({"status": "failed", "jobs": {"wal_checkpoint": {"state": "failed", "items": 0}}}, [True, True], 1, ["failed"]),
+    (None, [True, True], 1, ["unknown"]),
 ], ids=["done", "contended", "failed", "no-report"])
-def test_the_checkpoint_lane_looks_again_after_a_pass_that_left_its_job_done(data, monkeypatch, report, looks, spawned):
+def test_the_checkpoint_lane_looks_again_after_a_pass_that_left_its_job_done(data, monkeypatch, report, looks, spawned,
+                                                                              rows):
     """The lane's look rides the server's 20 s duty, which a stalled supervisor loop never asks for: after a child
     that left the job done the lane looks again at once and spawns while the job is still due (a busy install filled
     the log again while the child copied it), so a backlog keeps its passes coming without the loop. After contention
-    (``pending``), a failure or a child that reported nothing it waits for the next asked look: no spawn loop."""
+    (``pending``), a failure or a child that reported nothing it waits for the next asked look: no spawn loop. Its
+    child runs, one to three a minute on a busy install, keep out of the journal tail every context reads: a run that
+    ended cleanly writes no ``maintenance`` row (its pass is its own row), an unclean end one, with its pid."""
     from tests.test_evidence_packs import REPO, _FakeChild
 
     (data / "logs").mkdir(exist_ok=True)
@@ -895,6 +898,10 @@ def test_the_checkpoint_lane_looks_again_after_a_pass_that_left_its_job_done(dat
     assert not unit._thread.is_alive() and unit.live_children() == []
     assert spawns == [("--lane", "checkpoint")] * spawned, spawns
     assert asked == ([] if spawned == 2 else [True]), "a look happens only after a pass that left the job done"
+    journal = data / "logs" / "supervisor.jsonl"
+    written = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()] if journal.exists() else []
+    assert [(row["type"], row["phase"], row["lane"], row["pid"]) for row in written] == [
+        ("maintenance", phase, "checkpoint", 4242) for phase in rows], written
 
 
 def test_an_unchanged_hold_is_retried_only_on_the_reconcile_cadence_then_removed(data, monkeypatch):
