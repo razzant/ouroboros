@@ -255,8 +255,7 @@ def restart_current_process(
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
         if _restart_stop_requested:
             return  # the watcher parks in exit_after_shutdown; Panic keeps its thread and writes
-        drain_display_projections()  # the exec ends this image as an exit would: its last display pass,
-        _finish_record_handoffs()  # then the socket lines still queued, each bounded by the stop's deadline
+        finish_display_and_socket_lines()  # the exec ends this image as an exit would, each wait bounded
         if _restart_stop_requested:
             return  # a Panic accepted during those waits owns the exit as well
         try:
@@ -357,12 +356,11 @@ def exit_after_shutdown(exit_code: int) -> None:
     never waits for this caller. Ordinary imported main()/ASGI shutdown returns.
     Before the exit the display projections' last pass, the socket lifecycle lines still queued and then
     the output relay's handover to a reading launcher finish, each bounded inside the ordinary stop's own
-    deadline (``drain_display_projections``, ``_finish_record_handoffs``, ``finish_output_relay``); Panic and
-    the backstops never wait for any of them.
+    deadline (``finish_display_and_socket_lines``, ``finish_output_relay``); Panic and the backstops never
+    wait for any of them.
     """
     if not _restart_stop_requested:
-        drain_display_projections()
-        _finish_record_handoffs()
+        finish_display_and_socket_lines()
         try:
             from ouroboros.owned_shutdown import stop_deadline
             from ouroboros.process_logging import finish_output_relay
@@ -382,11 +380,22 @@ def exit_after_shutdown(exit_code: int) -> None:
 exit_after_restart = exit_after_shutdown
 
 
+def finish_display_and_socket_lines() -> None:
+    """An ordinary end of this image's serving, at each door that has one (the lifespan teardown right after its
+    terminal custody, the exit, the direct re-exec): the display projections' last pass (``drain_display_projections``),
+    then the socket lifecycle lines still queued (``_finish_record_handoffs``), each within half of the stop grace
+    left. An accepted Panic owns the exit and waits for neither; it never raises."""
+    if not _restart_stop_requested:
+        drain_display_projections()
+        _finish_record_handoffs()
+
+
 def drain_display_projections() -> bool:
-    """The display-projection duty's last pass before this process image ends (``display_projections.drain``: once,
-    at most half of the stop grace left): the restart census takes it before the store switch, else the exit or
-    the direct re-exec. True when no pass is left running; it never raises, and an error reads as a pass still
-    running, so the store switch refuses rather than run beside one."""
+    """The display-projection duty's last pass of this lifespan (``display_projections.drain``, at most half of the
+    stop grace left): its teardown takes it (``finish_display_and_socket_lines``); a later call, the restart census
+    before the store switch among them, waits for that pass and reads, and takes it only where no teardown did. True
+    when no pass is left running; it never raises, and an error reads as a pass still running, so the store switch
+    refuses rather than run beside one."""
     try:
         from ouroboros.display_projections import drain
         from ouroboros.owned_shutdown import stop_deadline

@@ -250,15 +250,18 @@ def test_a_turn_a_stop_or_restart_ends_leaves_its_marks_to_the_exits_last_pass(m
     assert writes == [last] and ctx.budget_projection_dirty is True, "nothing starts after the last pass"
 
 
+@pytest.mark.parametrize("first", ["census", "teardown"])
 @pytest.mark.parametrize("stands", [True, False], ids=["pass-stands", "pass-ends"])
-def test_the_restart_census_takes_the_last_pass_before_the_store_switch(tmp_path, monkeypatch, stands):
-    """The restart's census (``server._emergency_process_cleanup``) waits for the display pass in flight, then takes
-    the last pass with what is outstanding (here the turn's newer budget mark), inside half the stop grace left and
-    before ``store_switch.switch_at_restart``. A pass that still stands at that bound is in the census, so the switch
-    refuses rather than hand off stores that pass reads, or let it write ``state.json`` after the switch; a pass
-    that ended lets the switch run. No pass starts after the census either way."""
+def test_the_restart_census_takes_the_last_pass_before_the_store_switch(tmp_path, monkeypatch, stands, first):
+    """The restart's census (``server._emergency_process_cleanup``) comes after the lifespan teardown's last display
+    pass, or beside it while that teardown is still running (Uvicorn slow to exit: ``teardown``): it waits for that
+    drain, inside half the stop grace left, and reads whether a pass still runs. Where no teardown took the last pass
+    (``census``) it waits for the pass in flight and takes it with what is outstanding (here the turn's newer budget
+    mark). Either way before ``store_switch.switch_at_restart``: a pass that still stands at that bound is in the
+    census, so the switch refuses rather than hand off stores that pass reads, or let it write ``state.json`` after
+    the switch; a pass that ended lets the switch run. No pass starts after the census either way."""
     import server
-    from ouroboros import store_switch
+    from ouroboros import server_control, store_switch
 
     root = tmp_path / "data"
     root.mkdir()
@@ -287,11 +290,15 @@ def test_the_restart_census_takes_the_last_pass_before_the_store_switch(tmp_path
     assert held.wait(10)
     ctx.budget_projection_dirty = True
     releaser = threading.Timer(0.3, release.set)
+    teardown = threading.Thread(target=server_control.finish_display_and_socket_lines, name="lifespan-teardown")
     if not stands:
         releaser.start()
     try:
         started = time.monotonic()
         grace[0] = started + 3.0
+        if first == "teardown":  # the lifespan's end began the last pass first, on its own thread
+            teardown.start()
+            _wait_until(display_projections._CLOSED.is_set)
         cleanup = server._emergency_process_cleanup()
         waited = time.monotonic() - started
         assert cleanup["display_pass_alive"] is stands
@@ -312,6 +319,8 @@ def test_the_restart_census_takes_the_last_pass_before_the_store_switch(tmp_path
     finally:
         release.set()
         releaser.cancel()
+        if teardown.is_alive():
+            teardown.join(10)
         _pass_ended()
     duty, last = display_projections.DUTY_NAME, f"{display_projections.DUTY_NAME}-drain"
     assert writes == ([duty] if stands else [duty, last])
@@ -319,6 +328,93 @@ def test_the_restart_census_takes_the_last_pass_before_the_store_switch(tmp_path
     ctx.budget_projection_dirty = True
     server_maintenance.dispatch_display_projections(ctx)
     assert not display_projections.LATCH.locked() and len(writes) == (1 if stands else 2), "nothing after the census"
+
+
+class _GatedSink(logging.Handler):
+    """A log sink whose writes wait for ``gate``, as a stalled disk would; the handler's own lock is left alone."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.entered, self.gate, self.lines = threading.Event(), threading.Event(), []
+
+    def emit(self, record) -> None:
+        self.entered.set()
+        if self.gate.wait(10):
+            self.lines.append(record.getMessage())
+
+
+def test_each_lifespan_of_an_imported_host_takes_its_last_pass_and_hands_its_socket_lines_over(
+        tmp_path, monkeypatch, request):
+    """An imported ASGI host runs the app's lifespan and gets control back: no exit, no restart census follows. Each
+    lifespan's teardown, right after its supervisor stopped and its terminal custody was written, takes its own last
+    display pass (here the budget mark of a final turn its loop bound, which no look took) and hands the socket lines
+    still queued to their sink, which is held when the teardown begins, inside half of the stop grace left; only then
+    does the lifespan return. The next lifespan in the same interpreter finds the duty open with no context of the
+    last one: its looks start passes and its own end takes its own last pass (here inside what is left of the
+    process's one stop grace, ``owned_shutdown``)."""
+    from starlette.testclient import TestClient
+
+    import server as srv
+    from ouroboros import owned_shutdown, process_logging
+    from tests.test_extensions_api import _patch_lifespan_for_drive_root_test
+
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    monkeypatch.setattr(srv.app.app.state, "drive_root", drive_root)
+    monkeypatch.setattr(srv.app.app.state, "repo_dir", tmp_path / "repo")
+    _patch_lifespan_for_drive_root_test(monkeypatch, srv, {}, request)
+    monkeypatch.setattr(srv, "_boot_managed_update_tasks", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: "")
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_kw: None)
+    grace_end = time.monotonic() + 60
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: grace_end)
+    logger, sink = logging.getLogger("tests.lifespan_end.socket_lines"), _GatedSink()
+    logger.addHandler(sink)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    handoff = process_logging.RecordHandoff("test-lifespan-end-socket-lines")
+    real_finish = process_logging.finish_record_handoffs
+
+    def finish(deadline):  # the teardown's wait for the socket lines: the sink comes back while it waits
+        threading.Timer(0.3, sink.gate.set).start()
+        return real_finish(deadline)
+
+    monkeypatch.setattr(process_logging, "finish_record_handoffs", finish)
+    writes = []
+
+    def context():  # what a lifespan's supervisor binds before its loop
+        def write(_usage):
+            writes.append(threading.current_thread().name)
+            return True
+
+        ctx = SimpleNamespace(DRIVE_ROOT=drive_root, RUNNING={}, budget_projection_dirty=False,
+                              update_budget_from_usage=write)
+        display_projections.bind(ctx)
+        return ctx
+
+    duty, last = display_projections.DUTY_NAME, f"{display_projections.DUTY_NAME}-drain"
+    try:
+        with TestClient(srv.app):
+            first = context()
+            first.budget_projection_dirty = True  # its final turn's llm_usage; no look came after it
+            handoff.log(logger, logging.INFO, "first line")
+            handoff.log(logger, logging.INFO, "second line")
+            assert sink.entered.wait(5) and sink.lines == []
+        assert writes == [last] and first.budget_projection_dirty is False, "the teardown wrote the bound mark"
+        assert sink.lines == ["first line", "second line"], "the teardown waited for the queued lines"
+        assert handoff.thread is None and display_projections._CLOSED.is_set()
+        with TestClient(srv.app):
+            assert not display_projections._CLOSED.is_set() and display_projections._CONTEXT is None
+            second = context()
+            second.budget_projection_dirty = True
+            server_maintenance.dispatch_display_projections(second)  # a tick's look starts a pass again
+            _pass_ended()
+            assert writes == [last, duty] and second.budget_projection_dirty is False
+            second.budget_projection_dirty = True  # its final turn
+        assert writes == [last, duty, last] and second.budget_projection_dirty is False
+    finally:
+        sink.gate.set()
+        logger.removeHandler(sink)
 
 
 def test_a_look_that_raises_frees_the_latch_for_the_next_tick(monkeypatch, caplog):
@@ -433,21 +529,32 @@ def test_a_pass_that_cannot_start_leaves_its_work_due_and_the_snapshot_shares_no
 
 
 def test_the_exit_takes_one_last_pass_with_the_queued_rows_and_the_bound_mark_and_nothing_after_it(monkeypatch):
-    """The process's end (``drain``), once: the queued rows, in order, and the bound loop context's due budget
-    mark go in one last pass, off the caller's thread, inside half the stop grace left; with nothing outstanding
-    nothing starts. After it no look and no later drain starts a pass: what is marked or queued then stays."""
+    """The lifespan's end (``drain``), once: the queued rows, in order, and the bound loop context's due budget
+    mark go in one last pass, off the caller's thread, inside half the stop grace left, and again for a row queued
+    meanwhile (another duty's pass that ended during it); with nothing outstanding nothing starts. After it no look
+    and no later drain starts a pass: what is marked or queued then stays."""
     rows, writes = [], []
     monkeypatch.setattr("supervisor.state.append_jsonl", lambda _path, row: rows.append(row) or True)
     monkeypatch.setattr(update_generation_facts, "_duties", {})
     monkeypatch.setattr(update_generation_facts, "_publish_after", lambda: None)
-    ctx = SimpleNamespace(budget_projection_dirty=True,
-                          update_budget_from_usage=lambda usage: writes.append(threading.current_thread().name) or True)
+    running = {"name": "cold-custody", "ident": None, "since": time.time() - 700, "alerted": False}
+
+    def write(_usage):  # the last pass's budget write; meanwhile the overrunning cold-custody pass ends
+        writes.append(threading.current_thread().name)
+        display_projections.journal_duty_stall_end(running)
+        return True
+
+    ctx = SimpleNamespace(budget_projection_dirty=True, update_budget_from_usage=write)
     display_projections.bind(ctx)
     duty = {"name": "custody-maintenance", "ident": None, "since": time.time() - 700, "alerted": False}
     display_projections.journal_duty_stall(duty, 600.0, [], {})
     display_projections.journal_duty_stall_end(duty)
+    display_projections.journal_duty_stall(running, 600.0, [], {})
     assert display_projections.drain(time.monotonic() + 10) is True
-    assert [row["type"] for row in rows] == ["host_duty_stall", "host_duty_stall_end"]
+    kinds = ("host_duty_stall", "host_duty_stall_end")
+    assert [(row["type"], row["duty"]) for row in rows] == [
+        (kind, name) for name in ("custody-maintenance", "cold-custody") for kind in kinds
+    ], "the closing row queued during the last pass is written before the drain returns"
     assert writes == [f"{display_projections.DUTY_NAME}-drain"] and ctx.budget_projection_dirty is False
     later = {"name": "reconcile-maintenance", "ident": None, "since": time.time() - 400, "alerted": False}
     display_projections.journal_duty_stall(later, 300.0, [], {})
@@ -455,7 +562,7 @@ def test_the_exit_takes_one_last_pass_with_the_queued_rows_and_the_bound_mark_an
     display_projections.dispatch(ctx, lambda *_a: pytest.fail("a look started a pass after the last one"),
                                  lambda *_a: pytest.fail("the latch was free"))
     assert display_projections.drain(time.monotonic() + 10) is True
-    assert len(rows) == 2 and len(writes) == 1 and ctx.budget_projection_dirty is True
+    assert len(rows) == 4 and len(writes) == 1 and ctx.budget_projection_dirty is True
 
     monkeypatch.setattr(display_projections, "_CLOSED", threading.Event())  # another process's end
     monkeypatch.setattr(display_projections, "_ROWS", collections.deque())
@@ -483,7 +590,7 @@ def test_the_exit_leaves_a_pass_that_stands_past_half_the_grace_and_waits_for_no
         started = time.monotonic()
         assert display_projections.drain(started + 2.0) is False
         assert 0.9 <= time.monotonic() - started < 2.0, "at most half of the grace left"
-        assert display_projections.drain(started + 10) is False, "once: a later drain waits for nothing"
+        assert display_projections.drain(started + 10) is False, "once: a later drain only reads, the first ended"
         assert time.monotonic() - started < 2.0
         assert not hasattr(ctx, "budget_projection_retry_at"), "the stood write's outcome is not recorded"
     finally:
@@ -502,6 +609,51 @@ def test_the_exit_leaves_a_pass_that_stands_past_half_the_grace_and_waits_for_no
         started = time.monotonic()
         assert display_projections.drain(None if closing == "no grace" else started + 10) is True
         assert time.monotonic() - started < 1.0 and rows == [], closing
+
+
+def test_no_last_pass_starts_that_the_drain_has_no_time_left_to_wait_for(monkeypatch):
+    """The pass in flight ends exactly at the drain's share of the stop grace while the turn's newer mark waits: the
+    drain starts no last pass it could not wait for (one would read as a pass still running, and a restart's store
+    switch would refuse), leaves the mark owed and unwritten, and says no pass runs. With time left the same mark goes
+    in a last pass."""
+    clock = [1000.0]
+    monkeypatch.setattr(display_projections.time, "monotonic", lambda: clock[0])
+    held, release, hold, _holding = _held_seam()
+    writes = []
+
+    def write(_usage):
+        hold()
+        writes.append(threading.current_thread().name)
+        return True
+
+    def end_at_the_cutoff():  # the stood write returns as the drain's share of the grace runs out
+        clock[0] = 1005.0
+        release.set()
+
+    ctx = SimpleNamespace(budget_projection_dirty=True, update_budget_from_usage=write)
+    display_projections.bind(ctx)
+    work = display_projections.take(ctx)
+    assert display_projections.LATCH.acquire(blocking=False)
+    thread = threading.Thread(target=display_projections.project, args=(work, display_projections.LATCH),
+                              name="pass-in-flight")
+    thread.start()
+    ender = threading.Timer(0.2, end_at_the_cutoff)
+    try:
+        assert held.wait(10)
+        ctx.budget_projection_dirty = True  # the turn's newer mark
+        ender.start()
+        assert display_projections.drain(1010.0) is True  # half of the grace left: 5 s, to 1005
+        assert writes == ["pass-in-flight"] and ctx.budget_projection_dirty is True, "no last pass started"
+        assert not display_projections.LATCH.locked()
+    finally:
+        release.set()
+        ender.cancel()
+        thread.join(10)
+    display_projections.reopen()  # another lifespan's end, with time left
+    display_projections.bind(ctx)
+    assert display_projections.drain(clock[0] + 10) is True
+    assert writes == ["pass-in-flight", f"{display_projections.DUTY_NAME}-drain"]
+    assert ctx.budget_projection_dirty is False
 
 
 def test_a_backup_write_failure_is_typed_and_the_pair_converges_after_another_writer(tmp_path, monkeypatch, caplog):
@@ -563,6 +715,7 @@ def test_a_pass_that_ended_while_its_stall_was_read_leaves_no_onset_without_an_e
     display_projections.journal_duty_stall_end(running)
     assert [row["type"] for _line, row in display_projections._ROWS] == ["host_duty_stall", "host_duty_stall_end"]
     assert update_generation_facts._duties == {"custody-maintenance": 1}
+
 
 def test_the_last_pass_writes_the_closing_row_an_overrunning_display_pass_queued_before_letting_go(monkeypatch):
     """A display pass the watchdog alerted as overrunning ends just before the lifespan's end: it queues its own

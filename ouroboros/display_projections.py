@@ -32,12 +32,15 @@ and receipts keep their synchronous owners and read ``usage.sqlite``, never ``st
 §10.28). While this duty itself stands, the rows other duties' overruns queue wait for it in memory: two per
 overrunning pass.
 
-The process's end takes ONE last pass (``drain``), after the pass in flight and inside the stop grace: the
-loop's context (``bind``) gives it the budget mark of a turn a stop or a restart ended before its look,
-beside the queued rows and newer after-update facts. A restart takes it in its census, before the store
-switch, which refuses while a pass still runs; no pass starts after it. What stays unwritten (a pass that
-outlived its share of the grace, a mark inside a failed write's retry bound) is the exit's loss: the ledger
-is the record of money.
+Each lifespan's end takes ONE last pass (``drain``), in its teardown right after the supervisor stopped and
+the terminal custody was written, after the pass in flight and inside the stop grace: the loop's context
+(``bind``) gives it the budget mark of a turn a stop or a restart ended before its look, beside the queued
+rows and newer after-update facts. No pass starts after it. A later drain (the restart census before the
+store switch, the exit, the direct re-exec) waits for that one and reads whether a pass still runs, and the
+store switch refuses while one does; it takes the last pass itself only where no teardown did. A new
+lifespan in this interpreter opens the duty again (``reopen``). What stays unwritten (a pass that outlived
+its share of the grace, one no time was left to wait for, a mark inside a failed write's retry bound) is the
+exit's loss: the ledger is the record of money.
 """
 
 from __future__ import annotations
@@ -56,7 +59,8 @@ DUTY_NAME = "display-projections"
 LATCH = threading.Lock()  # single flight: the loop takes it before a pass starts, the pass releases it
 _ROWS: Deque[Tuple[Optional[tuple], Dict[str, Any]]] = collections.deque()  # (warning line, journal row)
 _ROWS_LOCK = threading.Lock()
-_CLOSED = threading.Event()  # the process's end took its last pass (``drain``): no pass starts after it
+_CLOSED = threading.Event()  # this lifespan's end took its last pass (``drain``): no pass starts until ``reopen``
+_END = threading.Lock()  # held by the drain that takes the last pass: a later drain waits for it, then reads
 _CONTEXT: Any = None  # the supervisor loop's event context (``bind``): the last pass takes its budget mark
 
 
@@ -73,6 +77,15 @@ def bind(ctx: Any) -> None:
     budget mark the last pass takes (``drain``) when no tick did, a turn a stop or a restart ended first."""
     global _CONTEXT
     _CONTEXT = ctx
+
+
+def reopen() -> None:
+    """A lifespan starts in this interpreter (``server.lifespan``): the duty an earlier lifespan's end closed opens
+    again, with no loop context until its supervisor binds one. A pass that end left unjoined keeps the latch until
+    it ends, so nothing runs beside it."""
+    global _CONTEXT
+    _CONTEXT = None
+    _CLOSED.clear()
 
 
 def take(ctx: Any) -> Optional[ProjectionWork]:
@@ -229,40 +242,62 @@ def _write_rows() -> None:
 
 
 def drain(deadline: Optional[float] = None) -> bool:
-    """The process's end, once (``server_control.drain_display_projections``: the restart census before the store
-    switch, else the exit or the direct re-exec); a later call and Panic wait for nothing. It closes the duty, so no
-    pass starts after it, waits for a pass in flight, then runs the last pass: the bound context's due budget mark
-    (``bind``), the queued rows and newer after-update facts, again while rows arrive meanwhile (another duty's
-    end row); root figures are heartbeat display and end with the process. Both waits share at most half of the stop
-    grace left (``deadline``, the bound ``server_process.end_task_runs`` keeps; without a started grace no last pass
-    runs). True when no pass is left running: one that is stays unjoined, its unwritten work the exit's loss."""
+    """A lifespan's end: its teardown, right after the supervisor stopped and the terminal custody was written
+    (``server_control.finish_display_and_socket_lines``), then the restart census before the store switch, the exit
+    and the direct re-exec (``server_control.drain_display_projections``). The first call closes the duty, so no pass
+    starts after it until a new lifespan (``reopen``), waits for a pass in flight, then runs the last pass: the bound
+    context's due budget mark (``bind``), the queued rows and newer after-update facts, again while rows arrive
+    meanwhile (another duty's end row); root figures are heartbeat display and end with the process. A later call
+    waits for that first one to end, then only reads whether a pass still runs; Panic waits for nothing. Each caller
+    waits at most half of the stop grace left (``deadline``, the bound ``server_process.end_task_runs`` keeps; without
+    a started grace no last pass runs), and no pass starts that there is no time left to wait for. True when no pass
+    is left running: one that is stays unjoined, its unwritten work the exit's loss."""
     from ouroboros import update_generation_facts
     from ouroboros.server_control import panic_termination_requested
 
-    if _CLOSED.is_set() or panic_termination_requested():
+    if panic_termination_requested():
         return not LATCH.locked()
-    _CLOSED.set()
     wait = max(0.0, (deadline - time.monotonic()) / 2) if deadline is not None else 0.0
     cutoff = time.monotonic() + wait
-    if wait <= 0.0:
-        return not LATCH.locked()
-    if not LATCH.acquire(timeout=wait):
-        log.warning("The display projections' pass outlived its share of the stop grace; it stays unjoined")
-        return False
-    budget = _take_budget_mark(_CONTEXT) if _CONTEXT is not None else None
-    while budget is not None or _rows_queued() or update_generation_facts.pending():
-        try:
+    if not _END.acquire(timeout=wait):
+        return False  # the drain taking the last pass outlived this caller's share: a pass may still run
+    try:
+        first = not _CLOSED.is_set()
+        _CLOSED.set()
+        if not first or wait <= 0.0:
+            return not LATCH.locked()  # a later call reads what the first left; without a grace no last pass runs
+        if not LATCH.acquire(timeout=max(0.0, cutoff - time.monotonic())):
+            log.warning("The display projections' pass outlived its share of the stop grace; it stays unjoined")
+            return False
+        budget = _take_budget_mark(_CONTEXT) if _CONTEXT is not None else None
+        while budget is not None or _rows_queued() or update_generation_facts.pending():
+            if not _start_last_pass(budget, cutoff):
+                return True
+            budget = None
+            if not LATCH.acquire(timeout=max(0.0, cutoff - time.monotonic())):
+                log.warning("The display projections' last pass outlived its share of the stop grace; "
+                            "its rest stays unwritten")
+                return False
+        LATCH.release()
+        return True
+    finally:
+        _END.release()
+
+
+def _start_last_pass(budget: Optional[Callable[[], None]], cutoff: float) -> bool:
+    """One last pass off the caller's thread, which releases the latch the caller holds when it ends. None starts when
+    no time is left to wait for it (``cutoff``) or no thread starts: the latch is released and a taken mark is owed
+    again, its work unwritten. False when none started."""
+    try:
+        if time.monotonic() < cutoff:
             threading.Thread(target=project, args=(ProjectionWork(None, (), budget), LATCH),
                              name=f"{DUTY_NAME}-drain", daemon=True).start()
-        except Exception:
-            LATCH.release()
-            if budget is not None:
-                _CONTEXT.budget_projection_dirty = True
-            log.warning("The display projections' last pass could not start; its work stays unwritten", exc_info=True)
             return True
-        budget = None
-        if not LATCH.acquire(timeout=max(0.0, cutoff - time.monotonic())):
-            log.warning("The display projections' last pass outlived its share of the stop grace; its rest stays unwritten")
-            return False
+        log.warning("No time is left in the stop grace to wait for the display projections' last pass; "
+                    "its work stays unwritten")
+    except Exception:
+        log.warning("The display projections' last pass could not start; its work stays unwritten", exc_info=True)
     LATCH.release()
-    return True
+    if budget is not None:
+        _CONTEXT.budget_projection_dirty = True
+    return False

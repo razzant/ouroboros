@@ -1804,7 +1804,9 @@ def test_terminal_custody_precedes_every_best_effort_wait_in_the_teardown():
     eat the launcher's force-exit budget before a single worker is terminalized.
     Nothing between the join and `kill_workers` may do I/O. The early cause is the
     door's lock-free entry write, made before the join, so a kill before the row
-    still leaves the cause."""
+    still leaves the cause. The generation's last display pass and its socket lines
+    follow the custody write and its row, ahead of the optional waits, while the
+    grace is fresh."""
     import inspect
     import server
 
@@ -1814,11 +1816,12 @@ def test_terminal_custody_precedes_every_best_effort_wait_in_the_teardown():
     join_idx = teardown.index("supervisor_thread.join(timeout=2)")
     kill_idx = teardown.index("kill_workers(")
     append_idx = teardown.index('"server_shutdown"')
+    display_idx = teardown.index("finish_display_and_socket_lines()")
     extension_idx = teardown.index("extension_reconcile_task.cancel()")
     host_idx = teardown.index("host_service_listener.close()")
     sweeps_idx = teardown.index("stop_owned_work(lifespan_drive_root)")
     assert stop_idx < entry_idx < join_idx < kill_idx < extension_idx < host_idx < sweeps_idx
-    assert kill_idx < append_idx < extension_idx
+    assert kill_idx < append_idx < display_idx < extension_idx
     assert teardown.count("begin_owned_stop(") == 1 and "shutdown_entry" not in teardown[join_idx:kill_idx]
 
 

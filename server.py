@@ -24,7 +24,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 import uvicorn
 from ouroboros.server_control import (PanicIngress, drain_display_projections, execute_panic_stop as _execute_panic_stop_impl,
-                                      exit_after_shutdown, panic_termination_requested,
+                                      exit_after_shutdown, finish_display_and_socket_lines, panic_termination_requested,
                                       restart_current_process as _restart_current_process_impl)  # noqa: F401 — restart lifecycle binding
 from ouroboros.owned_shutdown import (begin_owned_stop, finish_unconfirmed_stops, start_inherited_import,
                                        stop_owned_work)
@@ -831,7 +831,7 @@ def _run_supervisor(settings: dict) -> None:
             )
 
             if _restart_requested.is_set():
-                break  # this turn's drained llm_usage reaches state.json in the restart census's last display pass
+                break  # this turn's drained llm_usage reaches state.json in the generation's last display pass (drain)
 
             # WS3: intake new bridge messages EARLY — before the heavy steps
             # (enforce_task_timeouts / assign_tasks / evolution) — so a later
@@ -1094,6 +1094,7 @@ async def lifespan(app):
     BOOT.reset()
     _extensions_ready.clear()  # this generation's extensions have not registered yet
     _supervisor_ready.clear()  # readiness is this generation's: its recovery or its supervisor proves it
+    display_projections.reopen()  # an earlier lifespan's end closed the display duty: this generation's opens it again
     _dialogue_bridge = None
     lifespan_drive_root = pathlib.Path(getattr(getattr(app, "state", None), "drive_root", DATA_DIR))
     pytest_default_real_data_dir = unisolated_test_root(lifespan_drive_root)
@@ -1290,6 +1291,7 @@ async def lifespan(app):
                 log.debug("Failed to record server_shutdown event", exc_info=True)
         except Exception:
             pass
+        finish_display_and_socket_lines()  # the last display pass, then the socket lines, while the grace is fresh
         if _restart_requested.is_set():
             try:
                 _stop_owned_daemon_for_new_pin()
