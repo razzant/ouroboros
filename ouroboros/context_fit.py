@@ -187,16 +187,16 @@ class ContextFitPlan:
         is sized (voice; a work's first start is ``_build_context_fit_plan``).
         ``room_if_narrowed`` (Main's rebind): a view that must narrow for the window is written again anyway, so with
         its excess it asks a wall's slack (``REFUSAL_PASSES``), one eighth, which memory detail and ordinary host
-        forms pay; a whole-or-outline section pays the measured excess alone. ``telling_floor`` tries my tellings in
-        Max before the Low frame or deeper forms, against the measured saving including slack. A view that fits is never
+        forms pay; a whole-or-outline section pays the measured excess alone. ``telling_floor`` tries my tellings before
+        the Body Map's parts (from Max: the Low frame) or deeper forms, against the measured saving including slack, in every mode. A view that fits is never
         touched, at a restore and on a place that holds no copy of it too: nothing is taken on the guess that the
         work will reach its wall (owner, 30 Sep 2026). ``start_work`` is a first send's own room and Max decision (voice).
         ``books_rung``: a refusal's books rung, whose Low frame carries the Body Map at its parts and addresses (all
-        that rung has to give); any other selected Low leaves the Map to the window's own test. ``books_must_save``:
+        that rung has to give); any other selected Low leaves the Map to that frame's own test. ``books_must_save``:
         the measured rung, which also rejects a frame that does not shrink the same held view.
         ``low_tools`` and ``nano_tools`` are the caller's alternative schema sets, read lazily. A ``tool_frames``
         caller supplies each mode's fitted schemas and their notice rows together; only it adopts the selected pair.
-        ``unsent_start``: no request of this work was read yet (``loop_round_limits.start_unread``): a start's Map sparing.
+        ``unsent_start``: no request was read yet (``loop_round_limits.start_unread``): a required handbook may yield the Map.
         """
         ratio = 1.0 if self.window_basis == "estimator" else ratio
         reserve_args = ({"working_reserve_tokens": self.working_reserve_tokens}
@@ -371,8 +371,8 @@ class ContextCore:
     base_prompt: str
     bible_md: str
     # The resident Body Map as every mode and focus carries it (``reference_books.body_map``), and below
-    # ``body_map_parts``, what stands in its place when a physical window cannot hold it ("" when it has no
-    # shorter form). ``development_md`` is the composed handbook: sent only as this task's own requirement.
+    # ``body_map_parts``, what stands in its place before a frame's limit takes memory below a telling ("" when it
+    # has no shorter form). ``development_md`` is the composed handbook: sent only as this task's own requirement.
     body_map: str
     development_md: str
     semi_stable_text: str
@@ -946,7 +946,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     Required DEVELOPMENT joins the ordinary fit last; wire admission still charges it. ``retain`` overrides the
     host section capture. ``nano_base`` supplies a call's own standing tools; ``resident`` prices the tools given.
     ``admitted`` selects the running rather than start line of ``WindowRecord``. ``sized`` carries a start's priced
-    ``(rows, schemas, characters)`` for the same provider/effort shape. ``unsent_start``: a start's Body Map policy.
+    ``(rows, schemas, characters)`` for the same provider/effort shape. ``unsent_start``: a required handbook's yield.
     """
     from ouroboros import memory_floor as floor
     from ouroboros.held_notes import HeldNoteSection, can_replay_frame, frame_key
@@ -954,8 +954,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     shown_mode = start or preferred
     mode = select or shown_mode
-    running = (running_limit is not None and mode == preferred == "max" and not core.delegated_focus
-               and kept is not None and not start_work)
+    recount = running_limit is not None and kept is not None and not start_work  # a sent view's measured recount
+    running = recount and mode == preferred == "max"  # it began in my human's Max, a delegated focus's too
     whole_core, whole_governance = core, governance
     if core.development_required:
         core = replace(core, development_required=False)
@@ -1015,7 +1015,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return max(0, asked - (original_fixed - fixed) - credit(window, reserve))
 
     def running_goal(window, reserve):
-        return running_limit + credit(window, reserve) if running else None
+        return running_limit + credit(window, reserve) if recount else None
 
     def view(selected, sent, addressed, window, boundary, fixed=None, **walk):  # one frame's memory beside host forms
         fixed = measure(selected, sent, addressed) if fixed is None else fixed
@@ -1051,8 +1051,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     def telling_fits(selected, sent, window, boundary, reserve, forms, start_room=kept is None, budget=None):
         shown = view(selected, sent, forms, window, boundary, level=floor.telling_level(snapshot)) if snapshot else floor.NO_VIEW
         work = math.ceil(min(boundary or window, window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * levels if start_room else 0
-        price = measure(selected, sent, forms, shown.story_chars, shown.room_chars)
-        return math.ceil(price * ratio) + reserve + work <= window and (budget is None or price <= budget)
+        price = measure(selected, sent, forms, shown.story_chars, shown.room_chars)  # an unknown window bounds nothing
+        return (not known_window or math.ceil(price * ratio) + reserve + work <= window) and (budget is None or price <= budget)
 
     def frame(selected):
         nonlocal receipts
@@ -1103,9 +1103,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             budget_mode=selected if kept is None and target and target < window else None,
             window_bound=host_allowances["window"], retain=retain,  # the window's own start bound, whatever target frames the start
             optional_walk=(lambda forms: view(selected, sent, forms, window, boundary)) if snapshot else None,
-            # The Map yields to the window, and before Nano's own target takes my memory below a telling (BIBLE P1).
-            maps_told=(lambda forms: told(forms, (kept is None or start_work or unsent_start) and selected != preferred,
-                                          host_allowances["budget"] if selected == "nano" else None)) if known_window else None)
+            # The Map: whole while every memory item of this frame stands at a telling or better beside it (BIBLE P1).
+            maps_told=floor.map_test(told, selected, host_allowances["budget"], start=kept is None or start_work, walk=lambda forms: view(
+                selected, sent, forms, window, boundary, **sent_view, saving=owed(measure(selected, sent, forms), window, reserve)) if snapshot else floor.NO_VIEW))
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=fixed, target_tokens=target if kept is None else None,
@@ -1129,7 +1129,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                         and kept is not None and not start_work and held_heads and not telling_fits(
                             mode, sent, window, boundary, reserve, section_views(sections[mode], receipts), False))
     if (room_fact and floor.max_room_lost(room_fact)) or running_max_lost:
-        mode, low_maps = "low", map_parts(low_maps)  # Low for the window: the Map steps down before memory (BIBLE P1)
+        # Low for the window: a start's frame tests the Map itself; a sent view past my tellings takes its parts (BIBLE P1).
+        mode, low_maps = "low", map_parts(low_maps) if running_max_lost else low_maps
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
 
     running_shown = None
@@ -1140,7 +1141,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         price = measure(mode, sent, forms)
         return view(mode, sent, forms, window, boundary, saving=owed(price, window, reserve), fixed=price,
                     kept=None if kept is None else held, level=level,
-                    start_saving=start_saving, telling_floor=telling_floor, request_limit=running_goal(window, reserve))
+                    start_saving=start_saving, telling_floor=telling_floor, request_limit=running_goal(window, reserve) if running or telling_floor else None)
 
     def spare(fit, forms):
         return window - reserve - math.ceil(measure(mode, sent, forms, fit.story_chars, fit.room_chars) * ratio)
@@ -1161,32 +1162,32 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         forms = section_views(sections[mode], receipts)
         return overflows(fit) or measure(mode, sent, forms, fit.story_chars, fit.room_chars) > running_goal(window, reserve)
 
-    if running:
-        running_shown = render(telling_floor=True)
-        if misses_running_goal(running_shown):
-            if books_save(running_shown.level, window, boundary):
-                mode, low_maps = "low", map_parts(low_maps)
-                sent, fixed, reserve, window, boundary, allowances = timed("fit.frame_low", frame, mode)
-                # Walk Low from the held level, not from the discarded Max trial's tellings.
-                running_shown = render(telling_floor=True)
-            if misses_running_goal(running_shown):
-                # An unsent trial cannot pin cuts: the unrestricted walk may give some back after a later saving.
-                running_shown = render()
+    def recounted():  # in every mode and focus: my tellings first, then the Map's parts, then memory below a telling
+        nonlocal mode, low_maps, sent, fixed, reserve, window, boundary, allowances
+        tried = render(telling_floor=True)
+        if misses_running_goal(tried) and (books_save(tried.level, window, boundary) if mode == "max" else len(
+                map_parts(low_maps, retain=predicted_section)) > len(low_maps)):  # the Map can still step and save here
+            mode, low_maps = "low" if mode == "max" else mode, map_parts(low_maps)
+            sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
+            tried = render(telling_floor=True)  # from the held level, not from the discarded trial's tellings
+        # An unsent trial cannot pin cuts: the unrestricted walk may give some back after a later saving.
+        return render() if misses_running_goal(tried) else tried
 
+    shown_maps, running_shown = low_maps, recounted() if recount else None
     # Step down on the frame's own price, without drawing it whole. Nano is the last physical rescue, even mid-run.
     last = stays = None
     while True:
         # A held view stays where Nano can buy no room. Without heads this can be decided before drawing Nano (a cold Nano too).
         stays = (last is not None and not (held_heads or whole_core.development_required)
                  and window - reserve <= last[3] - last[2] and fixed >= last[1])
-        shown = floor.NO_VIEW if stays or (mode != "nano" or kept is None and not cold_resume and current_messages is None and not held_heads) and overflows() else running_shown or render()
+        shown = floor.NO_VIEW if stays or (mode != "nano" or kept is None and not cold_resume and current_messages is None and not held_heads) and overflows() else running_shown or (recounted() if recount else render())
         if mode == "nano" or not overflows(shown):
             break
         # A live trial still has to reselect tools and measure its chosen wire reserve.
         if (running or mode == "low") and kept is not None and admitted:
             prior_view = (running_shown or render()) if shown is floor.NO_VIEW else shown
             last = (sent, fixed, reserve, window, boundary, allowances, receipts, prior_view, wire_room(prior_view), mode)
-        mode, running_shown = ("low" if mode == "max" and not running else "nano"), None
+        mode, running_shown, low_maps = ("low" if mode == "max" and not running else "nano"), None, shown_maps  # that frame's own Map
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     if held_heads and mode == "nano" and overflows(shown):
         emergency_level = shown.level

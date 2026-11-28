@@ -318,11 +318,11 @@ def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_pa
 
 def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path, monkeypatch):
     """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks (Max prices its ordinary
-    memory and, for the gate's need it prints, its shortest telling); Nano walks once, then at each of its next three
-    host forms re-prices that level, misses the window (even its shortest view does not fit) and walks again. The
-    Body Map, which this window cannot hold beside my tellings, steps to its parts first, before any memory goes below
-    a telling (BIBLE P1), first among the host forms; the walks stay those three. Every host form still ends addressed,
-    the Map at its parts."""
+    memory and, for the gate's need it prints, its shortest telling; in Low the Map steps unpriced like every form
+    there); Nano walks once, then at each of its next host forms re-prices that level, misses the window (even its
+    shortest view does not fit) and walks again. The Body Map takes its own test in its place among them (BIBLE P1):
+    my tellings priced twice beside it, with the work's room and against the window alone; neither fits, so it steps
+    to its parts before the index outlines, without a walk of its own. Every host form still ends addressed."""
     render, probes = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
@@ -333,10 +333,11 @@ def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     plan = scale.build(tmp_path, monkeypatch)
     assert plan.initial_mode == 'nano'
-    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3, (
+    again = [('re-price', 'nano'), ('walk', 'nano')]
+    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + again * 3 + [('re-price', 'nano')] * 2 + again, (
         ' '.join(f"{a}:{m}" for a, m in probes))
     assert [row['section_id'] for row in plan.projection('nano').memory_facts['host_sections_addressed']] == [
-        'body_map', 'runtime', 'installed_skills', 'subagents', 'knowledge_index']
+        'runtime', 'installed_skills', 'subagents', 'body_map', 'knowledge_index']
 
 
 @pytest.mark.parametrize("step, target, outlined", [

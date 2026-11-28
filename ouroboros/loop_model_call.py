@@ -1553,8 +1553,8 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
     pass still owes (all when unknown). The floor lowers memory's granularity for the rest and the slack, which
     only memory detail and ordinary host forms pay, a whole-or-outline section (``memory_floor``) only a measured
     excess: granularity changes, coverage stays (BIBLE P1). Unknown, it asks a known window's deficit, else that
-    window's slack, else memory detail alone. A measured floor tries the Low frame if tellings miss; the second pass's
-    books rung (the Body Map at its parts) remains for an unmeasured first pass, and memory's rest can then ask everything.
+    window's slack, else memory detail alone. A measured floor takes the Body Map's parts if tellings miss (from Max:
+    the Low frame); the second pass's books rung remains for an unmeasured first pass, and memory's rest can then ask everything.
     """
     slack = _refusal_window(ctx, fit)[2] if slack is None else slack
     if step in ("host_copies", "bodies", "unseen_bodies"):

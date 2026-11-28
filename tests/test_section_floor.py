@@ -619,6 +619,12 @@ def test_a_delegated_focus_in_owner_max_carries_the_body_map_whole_or_runs_in_lo
     assert price == dict(_plan(root, held, "max").max_projection.memory_facts["max_room"]["parts"])["body map"]
     assert lowered.initial_mode == "low" and "body_map" in [row["section_id"] for row in _host_facts(lowered, "low")]
     assert MAP_PARTS in _text(lowered, "low") and "## Body map\n" not in _text(lowered, "low")
+    # Both sides of the boundary, and the cost of the whole Map inside Max: one token below it the child runs in Low
+    # (a Max that could carry the parts would still hold there); in that Low the parts keep every item of its memory
+    # at a telling, which the same start with a Map that cannot step does not.
+    assert held - lost == 1 and _below_a_telling(lowered, "low") == 0
+    unstepping = _plan(dataclasses.replace(child, body_map_parts=""), lost, "max")
+    assert unstepping.initial_mode == "low" and _below_a_telling(unstepping, "low") > 0
     for window, plan in probed.items():  # never Max with the Map addressed, in the start or its Max projection
         assert "body_map" not in [row["section_id"] for row in _host_facts(plan, "max")], window
 
@@ -633,37 +639,157 @@ def _below_a_telling(plan, mode):
                 for ident in idents if memory_forms.stage_of(snapshot, step, ident) not in memory_forms.TELLING_STAGES})
 
 
-def _mature_memory():
-    """A mature probe memory: 300 authored story pages, 2,400 replies, 100 other conversations."""
+def _mature_memory(pages=300, replies=2_400, conversations=100, role="integrator"):
+    """A mature probe memory: 300 authored story pages, 2,400 replies, 100 other conversations (or as many as asked)."""
     from ouroboros.chronicle_lead import LEAD_RULE_VERSION
 
     story = [dict(page, lead_rule=LEAD_RULE_VERSION,
                   text=(f"Room {i} " + "recorded understanding " * 38 + f"settled point {i}. ") + syn.prose(2_400))
-             for i, page in enumerate(syn.pages(300, 2_400))]
-    return syn.snapshot(role="integrator", story=story,
-                        room_facts=syn.room(lane1=[syn.spoken(i, "ouroboros", 400) for i in range(2_400)], lane2=2),
-                        conversations=[syn.conversation(i, engaged=False) for i in range(100)])
+             for i, page in enumerate(syn.pages(pages, 2_400))]
+    return syn.snapshot(role=role, story=story,
+                        room_facts=syn.room(lane1=[syn.spoken(i, "ouroboros", 400) for i in range(replies)], lane2=2),
+                        conversations=[syn.conversation(i, engaged=False) for i in range(conversations)])
 
 
-def test_the_owners_nano_target_steps_the_body_map_before_it_takes_memory_below_a_telling(tmp_path):
-    """Under the owner's own Nano, whose target takes a mature memory below a telling on any
-    window, the Map stands at its parts first, so fewer items go below a telling than with the Map held whole (a Map
-    with no parts form) and no fewer than with no Map at all; a small memory that fits the target keeps it whole. The
-    owner's own Low never takes memory below a telling by its target: on a window that holds both, the Map is whole."""
+def _map_form(plan, mode=None):
+    """``whole`` or ``parts``: the Body Map as this projection carries it, by its receipt and its text alike."""
+    mode = mode or plan.initial_mode
+    stepped, text = "body_map" in [row["section_id"] for row in _host_facts(plan, mode)], _text(plan, mode)
+    assert (MAP_PARTS in text) is stepped and ("## Body map\n" in text) is not stepped, mode
+    return "parts" if stepped else "whole"
+
+
+@pytest.mark.parametrize("window", [872_000, 64_000, 0], ids=["wide", "below-nano-target", "unmeasured"])
+def test_the_owners_nano_target_steps_the_body_map_before_it_takes_memory_below_a_telling(tmp_path, window):
+    """Under the owner's own Nano a mature memory goes below a telling on any route: by Nano's target on a wide
+    window and on a route that names no window, by the window itself where it is at or under that target. In each
+    the Map stands at its parts first (BIBLE P1), so fewer items go below a telling than with the Map held whole (a
+    Map with no parts form) and no fewer than with no Map at all, and its receipt names what took it: the owner's
+    Nano budget, or the window. A small memory that fits keeps the Map whole on the same route. The owner's own Low
+    never takes memory below a telling by its target: on a window that holds both, the Map is whole."""
     mature = _repository_map(_core(tmp_path / "mature", snapshot=_mature_memory()))
-    nano = _plan(mature, 872_000, "nano")
-    assert nano.initial_mode == "nano" and [row["section_id"] for row in _host_facts(nano, "nano")] == ["body_map"]
-    assert MAP_PARTS in _text(nano, "nano")
-    held_whole = _plan(dataclasses.replace(mature, body_map_parts=""), 872_000, "nano")
-    no_map = _plan(dataclasses.replace(mature, body_map="", body_map_parts=""), 872_000, "nano")
+    nano = _plan(mature, window, "nano")
+    [row] = _host_facts(nano, "nano")
+    assert nano.initial_mode == "nano" and row["section_id"] == "body_map" and _map_form(nano) == "parts"
+    by_budget = window != 64_000  # there the window is the tighter bound, and the step is the window's
+    assert row.get("start_room", False) == ("nano" if by_budget else False)
+    assert ("omitted for the owner's Nano mode budget, not for the physical window" in _text(nano, "nano")) is by_budget
+    held_whole = _plan(dataclasses.replace(mature, body_map_parts=""), window, "nano")
+    no_map = _plan(dataclasses.replace(mature, body_map="", body_map_parts=""), window, "nano")
     counts = [_below_a_telling(plan, "nano") for plan in (no_map, nano, held_whole)]
     assert counts[0] <= counts[1] < counts[2], counts
     small = _repository_map(_core(tmp_path / "small", snapshot=syn.snapshot(story=syn.pages(3, 2_000))))
-    roomy = _plan(small, 872_000, "nano")
-    assert not _host_facts(roomy, "nano") and "## Body map\n" in _text(roomy, "nano") and not _below_a_telling(roomy, "nano")
+    roomy = _plan(small, window, "nano")
+    assert not _host_facts(roomy, "nano") and _map_form(roomy) == "whole" and not _below_a_telling(roomy, "nano")
     low = _plan(mature, 872_000, "low")
     assert low.initial_mode == "low" and not _host_facts(low, "low") and "## Body map\n" in _text(low, "low")
     assert _below_a_telling(low, "low") == 0
+
+
+@pytest.mark.parametrize("preferred", ["max", "low", "nano"])
+def test_one_order_for_the_body_map_in_every_owner_mode_at_one_window(tmp_path, preferred):
+    """The approved order (BIBLE P1), the same in my human's Max, Low and Nano at one window and one memory. Where
+    the window holds my tellings and the work's room beside the whole Map, it is whole. One step narrower the Map
+    takes its parts first, and that keeps every memory item at a telling; the same start with a Map that cannot step
+    puts items below one. And a start whose memory has nothing a window could take below a telling keeps the Map
+    whole even where the work's room is short: nothing needs its room (the owner's "keep both maps whole")."""
+    core = booked(_core(tmp_path / "told", snapshot=_mature_memory(40, 60, 6)), tmp_path / "told", body="Its mechanism. " * 12)
+    unstepping, saving = dataclasses.replace(core, body_map_parts=""), map_saving(core)
+    assert saving > 2_000
+
+    def told(window):  # every memory item of this start stands at a telling or better beside the whole Map
+        try:
+            plan = _plan(unstepping, window, preferred)
+        except fit.MinimumViewUnfit:
+            return False
+        return _below_a_telling(plan, plan.initial_mode) == 0
+
+    short, holds = 12_000, 80_000  # under the owner's Nano target, so the window is what presses in all three modes
+    assert not told(short) and told(holds)
+    while holds - short > 1:
+        middle = (short + holds) // 2
+        short, holds = (short, middle) if told(middle) else (middle, holds)
+    whole, stepped = _plan(core, holds, preferred), _plan(core, holds - saving // 2, preferred)
+    assert _map_form(whole) == "whole" and _below_a_telling(whole, whole.initial_mode) == 0
+    assert _map_form(stepped) == "parts" and _below_a_telling(stepped, stepped.initial_mode) == 0
+    [row] = [row for row in _host_facts(stepped) if row["section_id"] == "body_map"]
+    assert "start_room" not in row  # the window's step: the work's room is the window's own bound
+    kept = _plan(unstepping, holds - saving // 2, preferred)
+    assert _below_a_telling(kept, kept.initial_mode) > 0  # what the Map's step spared
+
+    bare = booked(_core(tmp_path / "bare", snapshot=syn.snapshot()), tmp_path / "bare", body="Its mechanism. " * 12)
+    request = _plan(bare, 2_000_000, "low").low_projection.estimated_tokens
+    tight = _plan(bare, request + RESERVE + 862, preferred)  # the request fits; the work's room is short
+    assert tight.initial_mode != "max" or preferred != "max"
+    assert _map_form(tight) == "whole" and not _host_facts(tight)
+
+
+@pytest.mark.parametrize("preferred", ["max", "low"])
+def test_an_optional_excerpt_yields_before_the_body_map_and_the_map_only_when_that_is_not_enough(tmp_path, preferred):
+    """The Map's turn among the host forms comes after an optional excerpt (owner 23.11.2026, 1: optional maps, then
+    the Map). Where the excerpt's own map makes the room my tellings need, the Map stays whole; where it does not,
+    the Map takes its parts too, and in both no memory item goes below a telling."""
+    excerpt = HostSection("design_bible", "## Design bible\n\n" + "A rule of the room. " * 1_200, "## Design bible (map)")
+    core = booked(_core(tmp_path, head=[excerpt], snapshot=_mature_memory(30, 60, 6)), tmp_path, body="Its mechanism. " * 12)
+    unstepping = dataclasses.replace(core, body_map_parts="", dynamic_head_sections=capture_sections(
+        [excerpt.full_text], prefix="head"))
+    map_step = map_saving(core)
+    excerpt_step = memory_floor.view_tokens(excerpt.full_text) - memory_floor.view_tokens(excerpt.operative_view) - 100
+    assert map_step > 2_000 and excerpt_step > 2_000
+
+    def told(window):  # every memory item at a telling or better with the excerpt and the Map both whole
+        try:
+            plan = _plan(unstepping, window, preferred)
+        except fit.MinimumViewUnfit:
+            return False
+        return _below_a_telling(plan, plan.initial_mode) == 0
+
+    short, holds = 12_000, 200_000
+    assert not told(short) and told(holds)
+    while holds - short > 1:
+        middle = (short + holds) // 2
+        short, holds = (short, middle) if told(middle) else (middle, holds)
+    first, both = (_plan(core, holds - gap, preferred) for gap in (excerpt_step // 2, excerpt_step + map_step // 2))
+    assert [row["section_id"] for row in _host_facts(first)] == ["design_bible"] and _map_form(first) == "whole"
+    assert [row["section_id"] for row in _host_facts(both)] == ["design_bible", "body_map"] and _map_form(both) == "parts"
+    assert _below_a_telling(first, first.initial_mode) == _below_a_telling(both, both.initial_mode) == 0
+
+
+@pytest.mark.parametrize("focus", ["root-max", "child-max", "root-low", "child-low", "root-nano"])
+def test_a_measured_recount_takes_the_body_map_to_its_parts_before_memory_goes_below_a_telling(tmp_path, focus):
+    """A refusal or a re-count in the middle of a work, in every focus and mode (BIBLE P1): my tellings pay first and
+    the Map stays whole while they can. Where they cannot, the Map takes its parts before any item goes below a
+    telling (a delegated focus's Max runs in Low for the window there, as a root's does), and only what is still
+    owed after that takes memory below one. The call is the measured floor pass's own
+    (``loop_round_limits._coarsen_memory_view``)."""
+    role, preferred = focus.split("-")
+    memory = _mature_memory(30, 60, 6, role="child" if role == "child" else "integrator")
+    core = dataclasses.replace(booked(_core(tmp_path, snapshot=memory), tmp_path, body="Its mechanism. " * 12),
+                               delegated_focus=role == "child")
+    shown = _plan(core, 2_000_000, preferred)
+    assert shown.initial_mode == preferred and _map_form(shown) == "whole"
+    assert not any(shown.projection(preferred).memory_facts["floor"]["steps"].values())
+
+    def size(level):
+        return sum(memory_floor.tokens_of(chars(memory, level)) for chars in (memory_view.story_chars, memory_view.room_chars))
+
+    tellings = size(memory_view.FULL_VIEW) - size(memory_floor.telling_level(memory))  # what my tellings can pay
+    saving = map_saving(core)
+    assert tellings > 2_000 and saving > 2_000
+
+    def recount(refused):
+        return shown.reproject_for_route(window_tokens=2_000_000, known_window=True, ratio=1.0, output_reserve=RESERVE,
+            tool_schemas=[], start_mode=preferred, current_messages=shown.messages_for(preferred),
+            refused_tokens=refused, telling_floor=True, admitted=True)
+
+    paid = recount(tellings // 2)
+    assert paid.initial_mode == preferred and _map_form(paid) == "whole" and _below_a_telling(paid, preferred) == 0
+    assert any(paid.projection(preferred).memory_facts["floor"]["steps"].values())
+    lowered = "low" if preferred == "max" else preferred
+    stepped = recount(tellings + saving // 2)
+    assert stepped.initial_mode == lowered and _map_form(stepped) == "parts" and _below_a_telling(stepped, lowered) == 0
+    deeper = recount(tellings + saving + 1_000)
+    assert deeper.initial_mode == lowered and _map_form(deeper) == "parts" and _below_a_telling(deeper, lowered) > 0
 
 
 def test_a_low_start_the_window_cannot_hold_steps_the_body_map_to_its_parts(tmp_path):

@@ -755,12 +755,16 @@ def _ordered_world(world):
 def test_window_takes_the_body_map_to_its_parts_then_the_index_outline_then_heads_one_at_a_time_and_a_head_without_a_summary_stays(world, monkeypatch):
     _heavy_map(world)
     captured = _ordered_world(world)
-    # At 170k, summarizing two heads beside the whole Map could keep Max. The Map goes to its parts first.
+    # At 170k Max does not hold beside the work's room. This memory has nothing a window could take below a telling, so
+    # nothing needs the Map's room: its Low carries the Map whole and starts with less work room (BIBLE P1). Where the
+    # window cannot hold the request beside the whole Map (90k) the Map goes to its parts, before any outline.
     roomy, maps, band, outlined, one, two = (
         _plan(world, window, core=captured) for window in (200_000, 170_000, 90_000, 60_000, 44_000, 30_000))
     assert roomy.initial_mode == "max" and "Book text. Book text." in _blocks(roomy)[0]["text"]
     assert all(plan.initial_mode == "low" for plan in (maps, band, outlined, one, two))
-    assert "Book text. Book text." not in _blocks(maps)[0]["text"] and PARTS in _blocks(maps)[0]["text"]
+    assert "Book text. Book text." in _blocks(maps)[0]["text"] and PARTS not in _blocks(maps)[0]["text"]
+    assert not any(maps.low_projection.memory_facts["floor"]["steps"].values())
+    assert "Book text. Book text." not in _blocks(band)[0]["text"] and PARTS in _blocks(band)[0]["text"]
     assert maps.low_projection.memory_facts["floor"]["mode_switch"] == {"from": "max", "to": "low"}
     assert _index(roomy) == _index(maps) == "whole" and _cuts(roomy) == _cuts(maps) == []
     # The band. At 90k this start misses its own bound (the window less the reply reserve and the two eighths a root

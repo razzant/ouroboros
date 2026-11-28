@@ -314,9 +314,10 @@ def crowded_by_memory(fact: Optional[Mapping[str, Any]]) -> bool:
 REQUIRED_BOOK_WHOLE = " (this task's directly required handbook stays whole)"
 # An owner's Max that cannot hold the Body Map, my shortest tellings and the work's room runs in Low, temporarily, for
 # the window, and is named Low wherever its mode is shown, while my human's choice stays Max (owner 21.11.2026; the
-# books left that gate on 25.11.2026 and nothing else did). There the Map stands as its parts and addresses before
-# any of my memory goes below a telling, and only the window cuts my memory. Its rendered key is ``low`` and its
-# profile ``task_local_low``; the owner's own Low has ``preferred_mode`` low.
+# books left that gate on 25.11.2026 and nothing else did). There the Map is whole while that frame holds my tellings
+# beside it and takes its parts and addresses before any of my memory goes below a telling, and only the window cuts
+# my memory. Its rendered key is ``low`` and its profile ``task_local_low``; the owner's own Low has
+# ``preferred_mode`` low.
 TEMPORARY_LOW = "Low, temporarily, for the window"
 # What the owner's Low target may take (``render_view_for_mode``, owner 15.11.2026, 3A): other conversations and my
 # story down to my telling; this room and my human's words not at all. The rest only the window's own start bound takes.
@@ -1050,13 +1051,36 @@ def optional_excerpt_fits(bound, refused, before, measure, tellings):
     return (bound is None or price <= bound) and (refused <= 0 or measure(*before) - price >= refused)
 
 
-def untold_forms(snapshot, level):
+def untold_forms(snapshot, level, told=ORDINARY_STAGES):
     """The forms of a walk's ``level`` outside the ordinary stages, each of which keeps my telling in view: they cut what
     I have not told (the end of a reply of mine F2, a page to its opening F5). Only Nano's number, which governs all my
-    memory, takes them without the window."""
+    memory, takes them without the window. With ``TELLING_STAGES``: the forms below my shortest telling of the whole
+    horizon, the level the Max gate prices (an opening, an address, a range or a count)."""
     stages = _elements(snapshot).stages
-    return frozenset((step, ident) for step, ids in level.addressed for ident in ids
-                     if stages[step, ident] not in ORDINARY_STAGES)
+    return frozenset((step, ident) for step, ids in level.addressed for ident in ids if stages[step, ident] not in told)
+
+
+def map_test(told, mode, budget, *, start, walk):
+    """One frame's ``maps_told`` (``_host_steps``), the Body Map's one test (BIBLE P1). A view already sent keeps the
+    Map while the window holds my tellings beside it (a measured recount tries them against its goal first,
+    ``context_fit._view_projections``). A start keeps it while my tellings fit its bound with the work's room (and,
+    in the owner's own Nano, that target: ``budget``), or while the window holds them and its own ``walk`` beside the
+    whole Map takes no form below a telling (nothing in memory needs the room); else the answer names what would
+    take one first: False the window, ``mode`` that budget."""
+    budget = budget if mode == "nano" else None
+
+    def stays(forms):
+        if not start:
+            return told(forms, False)
+        if told(forms, True, budget):
+            return True
+        if told(forms, False):  # the window holds my tellings: does this start's own walk keep every item at one?
+            shown = walk(forms)
+            if shown.level is None or not untold_forms(shown.snapshot, shown.level, TELLING_STAGES):
+                return True
+        return bool(budget) and told(forms, True) and mode
+    return stays
+
 
 # Host forms only the window's own start bound takes: my WORLD map stays whole while that bound holds the request with
 # memory at its shortest forms, whatever soft frame the start has (memory audit 15.11.2026, F7); when the bound cannot
@@ -1068,12 +1092,12 @@ WINDOW_ONLY = ("world",)
 # readers, then the facts to their totals, before the Map or a telling would (owner 15.11.2026, 4A: steps 3 and 4).
 TELLING_SPARED = ("return_facts", "return_facts_words")
 # The resident Body Map where a frame may step it down to its parts and addresses (``context_layout.body_map_section``:
-# every frame but the owner's Max, which holds it whole). A start spares it like ``TELLING_SPARED``, against the window
-# alone (#3649, the owner's "keep both maps whole"; BIBLE P1): no owner target, desired work room or requested saving
-# shortens it, in any focus; a frame the window lowered from my human's Max carries it at its parts before any of my
-# memory goes below a telling (``lowered_maps``). A cold return keeps the parts list it held, retaining the current
-# full Map when a chapter changed (``replay_book_maps``). A directly required handbook's first request that cannot go
-# out takes it after the optional maps (owner 23.11.2026, 1; ``yield_for_book``).
+# every frame but the owner's Max, which holds it whole). One order in every frame below Max (BIBLE P1; ``map_test``):
+# whole wherever every memory item of that frame stands at a telling or better beside it, at its parts before the
+# frame's limit would put any item below one; never for a target, a desired work room or a requested saving that my
+# memory at its tellings can pay (#3649, the owner's "keep both maps whole"). A cold return keeps the parts list it
+# held, retaining the current full Map when a chapter changed (``replay_book_maps``). A directly required handbook's
+# first request that cannot go out takes it after the optional maps (owner 23.11.2026, 1; ``yield_for_book``).
 BOOK_MAPS = ("body_map",)
 
 
@@ -1153,8 +1177,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
     A ``TELLING_SPARED`` section steps only while the window cannot hold the request with memory at my shortest telling
     and the Body Map as the frame holds it (``told``: ``max_room_lost``'s own test), so before the Map or a telling.
-    Given ``maps_told`` (a start's own test of the window: with the work's room in a frame the window lowered, without
-    it in the mode the owner chose), ``BOOK_MAPS`` are spared so too, in every focus;
+    ``BOOK_MAPS`` answer to ``maps_told(addressed)``, the frame's one test of the Map in every focus (``map_test``):
+    True whole, False the window's step, a mode's name that mode's own budget's (the receipt's ``start_room``);
     ``listed``, the parts list a cold return's accepted view showed (``replay_book_maps``), stands as shown.
     Held heads yield last (``_held_note_steps``). A map frame that holds them passes ``held_least(addressed,
     physical)``, the request beside these host forms with memory at its shortest forms (``shortest``'s measure, for a
@@ -1202,11 +1226,12 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     if measure is None or not window or not rooted:
         if optional_fits is not None:  # the only reference forms reachable without a measured window or a reader
             addressed = section_views(sections, receipts)
-            for part in sections:
-                if part.section_id in OPTIONAL_STEPS and part.section_id not in addressed:
-                    if (whole := keeps(part, addressed)) is not True:
-                        saving = max(0, saving - _address_optional(part, receipts, addressed, root=root, task_id=task_id,
-                                                                   retain=retain, start_room=whole or False))
+            for part in sections:  # with no window fact the Map answers its test too: only the owner's target presses
+                mapped = part.section_id in BOOK_MAPS and maps_told and not window and (rooted or part.reader)
+                if part.section_id not in addressed and (part.section_id in OPTIONAL_STEPS or mapped) and (
+                        whole := maps_told(addressed) if mapped else keeps(part, addressed)) is not True:
+                    saving = max(0, saving - _address_optional(part, receipts, addressed, root=root, task_id=task_id,
+                                                               retain=retain, start_room=whole or False))
         if measure is None or not window:
             return finish(saving)
     addressed = section_views(sections, receipts)
@@ -1221,6 +1246,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
                                   for part in candidates}}) if bare else None
     if least is not None and least > physical:  # every price this walk could take exceeds the window
         measure = shortest = lambda _addressed, *_physical: least
+        maps_told = maps_told and (lambda _addressed: False)  # the Map steps for it unpriced too
     initial = current = measure(addressed)
     bound = allowance if allowance is not None else physical
     if (bound is None or current <= bound) and saving == 0:
@@ -1230,8 +1256,10 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     fits = None  # what this start can send, uncovered owner words whole: priced when a step needs it
     outline_left = False  # an index or the registry the physical window still holds whole: a head waits for it
     order = {name: i for i, name in enumerate((*HOST_STEPS, *WHOLE_OR_OUTLINE_STEPS))}
-    for part in sorted(candidates, key=lambda p: (p.section_id in WHOLE_OR_OUTLINE_STEPS,
-                                               order.get(p.section_id, len(HOST_STEPS)))):
+    # The Map's turn comes after every form that yields before a telling would (the words, the facts, an optional
+    # excerpt: owner 15.11.2026, 4A; 23.11.2026, 1) and before the outlines, which only the physical window takes.
+    for part in sorted(candidates, key=lambda p: (p.section_id in WHOLE_OR_OUTLINE_STEPS, p.section_id in BOOK_MAPS and (
+            maps_told is not None), order.get(p.section_id, len(HOST_STEPS)))):
         if part.section_id in addressed:
             continue
         if (bound is None or current <= bound) and initial - current >= saving:
@@ -1253,10 +1281,11 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         if part.section_id in WINDOW_ONLY and window_bound is not None and sent_least <= window_bound:
             continue  # the window's start bound holds it beside memory's shortest forms: no soft frame shortens it
         test = maps_told if mapped else told
-        if telling and (test(addressed) if test else window_bound is None or current <= window_bound):
-            continue  # the window holds it beside my shortest telling and the Body Map: neither yields to it
+        whole = telling and (test(addressed) if test else window_bound is None or current <= window_bound)
+        if whole is True:
+            continue  # the frame holds it beside my shortest telling (the Map: beside every item at one): it stays
         start_room = ((not spared and budget_mode or True) if soft and fits else False) \
-            if not telling else False  # spared: the window's own room; told: the window's fact
+            if not telling else whole  # spared: the window's own room; told: the window's fact, or the Map's budget
         if _address_optional(part, receipts, addressed, root=root, task_id=task_id, retain=retain, start_room=start_room):
             current, fits = measure(addressed), None
     return finish(max(0, saving - (initial - current)), outline_left)
@@ -1310,10 +1339,11 @@ def yield_for_book(sections, receipts, core, *, retain=None, maps=False):
 
 
 def lowered_maps(sections, core, receipts, *, retain=None):
-    """``receipts`` of a frame the window lowered from my human's Max, the Body Map at its parts and addresses beside
-    its retained full text: the step that comes before any of my memory goes below a telling (BIBLE P1), and all the
-    ``books`` rung of a refusal still has to give. Unchanged where the Map has no shorter form here or this actor has
-    neither a reader of a retained text nor the Map's own source reader; a failed capture keeps the Map whole."""
+    """``receipts`` with the Body Map at its parts and addresses beside its retained full text: the step a measured
+    recount takes before any of my memory goes below a telling (BIBLE P1), all the ``books`` rung of a refusal has to
+    give, a refused first send's lowered frame, and a required handbook's last yield. A start's own frame decides
+    by ``map_test``. Unchanged where the Map has no shorter form here or this actor has neither a reader of a
+    retained text nor the Map's own source reader; a failed capture keeps the Map whole."""
     root, task_id = core.section_root, core.section_task_id
     stepped, addressed = list(receipts), section_views(sections, receipts)
     for name in BOOK_MAPS:

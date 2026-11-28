@@ -225,6 +225,50 @@ def test_running_voice_wall_lowers_the_body_map_before_going_below_tellings(host
 
 
 @pytest.mark.parametrize('host_world', [('low', 1_000_000, 'estimator')], indirect=True)
+@pytest.mark.parametrize('excess,parts', [(1_000, False), (30_000, True)], ids=['tellings-pay', 'tellings-miss'])
+def test_a_running_call_in_the_owners_low_takes_the_body_map_before_memory_goes_below_a_telling(host_world, excess, parts):
+    """My human's own Low, a running call, the repository's own Body Map: a wall my tellings pay with its return room
+    leaves the Map whole; one they cannot pay takes the Map's parts first, and only what is still owed takes memory
+    below a telling (BIBLE P1). Here the window holds my tellings beside the whole Map either way: it is the wall's
+    return room that would take memory below one."""
+    from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv
+    from ouroboros.llm_attempt import main_context_fit_refusal
+    from ouroboros.memory_forms import stage_of
+    from tests._memory_view_synthetic import pages, room, said, snapshot
+
+    host = host_world.host
+    words = said(1, 'human', 'Keep the route and all my words exactly.', owner_side=True, immune=True)
+    story = [*({**page, 'lead_rule': True} for page in pages(7, 20_000)), pages(8, 12_000)[7]]  # seven tellings, one page without
+    memory = snapshot(story=story, room_facts=room(lane1=[words]))
+    core = replace(host.plan.core, memory_view_json=mv.snapshot_json(memory))
+    assert core.body_map_parts and core.section_root and core.section_task_id  # the Map can step to its parts here
+    books = {m: cf._governance_blocks(None, core, mode=m) for m in ('max', 'low')}
+    view, _ = cf._view_projections(core, books, host.plan.user_content_json, preferred='low', tool_schemas=host.schemas,
+        window_tokens=0, known_window=False, output_reserve=host.plan.output_reserve_tokens, ratio=1)
+    assert not any(view['low'][1]['floor']['steps'].values())  # the start shows this memory whole
+    host.plan = host.ctx.context_fit_plan = replace(host.plan, core=core, initial_mode='low', low_projection=replace(
+        host.plan.projection('low'), system_content_json=json.dumps(view['low'][0]), memory_facts=view['low'][1]))
+    host.messages[:] = host.plan.messages_for('low')
+    host.messages.append({'role': 'user', 'content': 'Exact transcript tail for the resumed conversation.'})
+    host._session_opened = True
+    options = LiveOptions(instructions='Additional feature instructions. ' * 200)
+    factory = host_world.provider['session']
+    _, request, _, _ = measure_session_wire(host, host.plan, host.messages, host.schemas, factory, options)
+    window = request.prompt_tokens_estimate + 10_000 - excess
+    host.model = replace(host.model, facts=replace(host.model.facts, conversation_window_tokens=window))
+    _, request, evidence = session_candidate(host, factory, options)
+
+    assert main_context_fit_refusal(request) is None and host.plan.initial_mode == 'low'
+    facts = host.plan.projection('low').memory_facts
+    level = mf.kept_level(memory, facts)
+    below = [ident for step, ids in level.addressed for ident in ids if stage_of(memory, step, ident) not in mf.TELLING_STAGES]
+    print(f'owner-low call: {excess=} {window=} steps={dict(level.steps)} below={len(below)} '
+          f'host={[row["section_id"] for row in facts.get("host_sections_addressed", ())]} recovery={evidence["recovery"]}')
+    assert ('body_map' in [row['section_id'] for row in facts.get('host_sections_addressed', ())]) is parts
+    assert bool(below) is parts and sum(dict(level.steps).values()) > 0
+
+
+@pytest.mark.parametrize('host_world', [('low', 1_000_000, 'estimator')], indirect=True)
 @pytest.mark.parametrize('route', ['grok', 'gemini'])
 def test_a_running_nano_trial_prices_its_own_reserve_not_lows_reply(host_world, route):
     """Low's selected reply is not Nano's working floor: the engine admits every page Nano holds beside its own reply.

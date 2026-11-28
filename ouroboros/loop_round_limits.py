@@ -1431,8 +1431,8 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     deficit, else at least one element) from the level it shows (no target or working margin
     reapplied, nothing addressed unfolds). ``slack`` asks the return-after-fold room beyond it, which only
     memory detail and ordinary host forms pay (``ContextFitPlan.reproject_for_route``): a zero ``saving``
-    beside it is no excess, so no whole-or-outline section pays. A measured first pass tries my tellings in Max
-    before the Low frame (the Body Map at its parts); a further or unmeasured refusal keeps its own order."""
+    beside it is no excess, so no whole-or-outline section pays. A measured first pass tries my tellings, then the
+    Body Map's parts (from Max: the Low frame), in every mode and focus; a further or unmeasured refusal keeps its order."""
     plan = ctx.context_fit_plan
     measurement = fit.measurement
     if plan is None or getattr(plan, "core", None) is None:

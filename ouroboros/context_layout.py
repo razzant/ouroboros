@@ -387,8 +387,8 @@ def body_map_section(body_map: str, parts: str = "", *, steppable: bool) -> str:
 
     The owner's Max holds it whole: there it is a plain part with nothing shorter to take. A frame the window
     lowered, and the owner's own Low or Nano, carry the same bytes as a host section whose operative view is the
-    Map's parts and addresses, which only a physical window takes (``memory_floor.BOOK_MAPS``): never a mode's
-    target, a start's desired room or a requested saving. Without ``parts`` (a legacy single-file revision)
+    Map's parts and addresses, taken before any memory item of that frame would go below a telling
+    (``memory_floor.BOOK_MAPS``) and never while none would. Without ``parts`` (a legacy single-file revision)
     there is no shorter form. A Map that names its reader carries its own source too (the Architecture
     entrypoint, from which it is rendered): where an actor cannot read a retained text back, the parts point there.
     """

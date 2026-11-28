@@ -631,8 +631,9 @@ def session_candidate(host, factory, options, *, observation_fp=None):
                         known_window=known, ratio=ratio, output_reserve=physical_window.reserve if running else plan.output_reserve_tokens,
                         tool_schemas=schemas, start_mode=plan.initial_mode,
                         current_messages=[*(sent_rows if running else current), *extra], refused_tokens=goal - room,
-                        slack_tokens=room, measured_input_tokens=raw, start_work=False, telling_floor=bool(ordered),
-                        unsent_start=start_work,  # an unsent call start still spares its whole Body Map (#3649)
+                        slack_tokens=room, measured_input_tokens=raw, start_work=False,
+                        telling_floor=bool(ordered or running and plan.initial_mode != "max"),  # below Max too (BIBLE P1)
+                        unsent_start=start_work,  # an unsent call start: a required handbook's own yield may reach the Map
                         select_mode="low" if not ordered and plan.initial_mode == "max" else None, **trial_catalogs)
                     if running:
                         rebound = replace(rebound, output_reserve_tokens=plan.output_reserve_tokens,
