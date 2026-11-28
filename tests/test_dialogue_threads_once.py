@@ -338,6 +338,7 @@ _CONVERSATION_READERS = {
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
     "ouroboros/return_facts.py::_sort": "stored row, scalar full name/name/title only, for a place's label",
     "ouroboros/place_guard.py::_reply_touches": "validated reply_targets: literal conversation ids, never stored rows",
+    "ouroboros/place_guard.py::_owner_dm_target": "the task document's presence event: private-chat and address scalars only",
     "ouroboros/presence_events.py::parse_event_wire": "the connector's request payload, every live door",
     "ouroboros/presence_events.py::reply_targets": "the connector's message.reply_targets: literal address ids",
     "ouroboros/presence_history.py::_event": "the history import's request payload",

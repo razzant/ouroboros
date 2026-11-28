@@ -270,6 +270,7 @@ def _write_private_bytes(path: pathlib.Path, data: bytes) -> None:
 
 def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
     callback = getattr(ctx, "call_ref", "")
+    owner_dm = getattr(ctx, "owner_dm_condition", None)
     return {
         "task_id": str(ctx.task_id or ""),
         "current_chat_id": ctx.current_chat_id,
@@ -284,6 +285,7 @@ def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
         # A managed task's call whose row cannot be read has unknown Stop; a standalone call has no task.
         "task_lifecycle_bound": getattr(ctx, "task_lifecycle_bound", False) is True,
         **({"call_ref": callback} if callback else {}),
+        **({"owner_dm_condition": owner_dm} if owner_dm is not None else {}),
         "task_metadata": _json_safe(dict(ctx.task_metadata or {})),
         "task_contract": _json_safe(dict(getattr(ctx, "task_contract", {}) or {})),
     }
@@ -291,6 +293,11 @@ def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
 
 def _apply_tool_context_payload(ctx: ToolContext, payload: Dict[str, Any]) -> ToolContext:
     ctx._child_call_ref = str(payload.get("call_ref") or "")
+    if "owner_dm_condition" in payload:
+        condition = payload["owner_dm_condition"]
+        if not isinstance(condition, dict) or not condition:
+            raise ExtensionProcessError("Invalid owner DM condition in the tool invocation")
+        ctx._child_owner_dm_condition = json.dumps(condition, separators=(",", ":"), sort_keys=True)
     ctx.task_id = str(payload.get("task_id") or "") or None
     raw_chat_id = payload.get("current_chat_id")
     ctx.current_chat_id = raw_chat_id if isinstance(raw_chat_id, int) else None
@@ -1137,6 +1144,8 @@ async def _call_tool(surface: str, args: Dict[str, Any], ctx: ToolContext) -> An
     _wants = tool.get("wants_ctx")
     if _wants is None:
         _wants = _handler_wants_ctx(inspect.unwrap(handler))
+    if ctx.owner_dm_condition is not None and _wants is not True:
+        raise ExtensionProcessError("The bound owner DM condition requires a context-aware handler")
     result = (
         handler(ctx, **dict(args or {}))
         if _wants
