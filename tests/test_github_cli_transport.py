@@ -72,6 +72,50 @@ def test_launch_failure_names_what_is_missing(monkeypatch, tmp_path, filename, f
     assert fragment in result.text
 
 
+@pytest.mark.skipif(os.name == "nt", reason="an extensionless POSIX gh and its mode bits are the OS witness here")
+@pytest.mark.parametrize("case", ["exec_denied", "cwd_vanished"])
+def test_a_gh_the_os_will_not_start_is_typed_not_launched(monkeypatch, tmp_path, case):
+    """Real OS refusals before gh runs, never a mock of subprocess: a PATH whose only gh is not executable, or a working
+    directory that no longer exists. ``not_launched`` is a fact beside the failure word, which stays ``exception``."""
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    (folder / "gh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (folder / "gh").chmod(0o644 if case == "exec_denied" else 0o755)
+    monkeypatch.setattr(transport, "common_tool_directories", lambda _path: [])  # no installed gh is ever reached
+    monkeypatch.setenv("PATH", str(folder))
+    cwd = tmp_path if case == "exec_denied" else tmp_path / "vanished"
+    result = transport._gh_run(["--version"], types.SimpleNamespace(repo_dir=cwd))
+    assert (result.ok, result.failure, result.not_launched) == (False, "exception", True), result
+    assert ("Permission denied" if case == "exec_denied" else "vanished") in result.text
+
+
+@pytest.mark.parametrize("filename", ["gh", "cwd"])
+def test_a_launch_refusal_subprocess_names_is_not_launched_on_every_platform(monkeypatch, tmp_path, filename):
+    """The text semantics without an OS witness: subprocess raises a refused exec naming the executable and a refused
+    working directory naming that directory, and nothing else does."""
+    def run(cmd, **kwargs):
+        raise PermissionError(13, "Permission denied", cmd[0] if filename == "gh" else kwargs["cwd"])
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = transport._gh_run(["--version"], types.SimpleNamespace(repo_dir=tmp_path))
+    assert (result.ok, result.failure, result.not_launched) == (False, "exception", True), result
+
+
+@pytest.mark.parametrize("raised", [
+    RuntimeError("boom"),
+    OSError(5, "Input/output error"),
+    OSError(13, "Permission denied", "/some/other/file"),
+    subprocess.TimeoutExpired(["gh"], 30),
+])
+def test_other_transport_failures_never_claim_gh_did_not_start(monkeypatch, tmp_path, raised):
+    def run(cmd, **_kwargs):
+        raise raised
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = transport._gh_run(["api", "/user"], types.SimpleNamespace(repo_dir=tmp_path))
+    assert result.ok is False and result.not_launched is False and result.failure in ("exception", "timeout")
+
+
 @pytest.mark.parametrize("failure", ["cli_missing", "timeout", "exception"])
 def test_transport_never_publishes_a_sidecar(monkeypatch, tmp_path, failure):
     sentinel = object()

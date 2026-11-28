@@ -10,6 +10,7 @@ every unrelated byte of the body survives.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from types import SimpleNamespace
 
@@ -54,12 +55,18 @@ class FakeGh:
         self.intent_seen_at_merge = None
         self.merge_inputs, self.merge_payloads = [], []  # each request's commit_message, and its whole body
 
-    def __call__(self, args, ctx, timeout=30, input_data=None, *, repo=github._GENERIC_TRANSPORT):
+    def __call__(self, args, ctx, timeout=30, input_data=None, *, repo=github._GENERIC_TRANSPORT, diagnostic_only=False):
         self.calls.append(list(args))
+        if (args[:2] in (["pr", "view"], ["api", "graphql"]) and self.fail_view_after_merge
+                and any(sent(c) for c in self.calls)):
+            return github.GhResult(False, "⚠️ GH_ERROR: boom", 1, 502, "exit")
         if args[:2] == ["pr", "view"]:
-            if self.fail_view_after_merge and any(sent(c) for c in self.calls):
-                return github.GhResult(False, "⚠️ GH_ERROR: boom", 1, 502, "exit")
-            return github.GhResult(True, json.dumps(self.pr), 0, None, "")
+            fields = args[args.index("--json") + 1].split(",")
+            return github.GhResult(True, json.dumps({k: self.pr[k] for k in fields if k in self.pr}), 0, None, "")
+        if args[:2] == ["api", "graphql"]:
+            fields = set(re.findall(r"\b[A-Za-z_]\w*\b", json.loads(input_data)["query"]))
+            snapshot = {key: value for key, value in self.pr.items() if key in fields}
+            return github.GhResult(True, json.dumps({"data": {"repository": {"pullRequest": snapshot}}}), 0, None, "")
         if sent(args):
             payload = json.loads(input_data)
             self.merge_payloads.append(payload)
@@ -196,6 +203,15 @@ def test_queued_is_not_merged(world, merge, outcome):
 
 
 QUEUED_CLOSED = "queued earlier; PR now CLOSED, auto-merge off; effect unconfirmed"
+# What the tool says while a receipt of the PR is observed and of an owed projection, and the read it names for
+# status: no answer promises what a later pr_merge call will do, since another call's readback can end any hold.
+LOOKUP = "github_read(method='get', kind='pr', target=7, repo='github.com/octo/demo') reads the PR without merging."
+# Beside a readback that shows auto-merge on, the read names the fields that show the queue (the concise PR omits it).
+QUEUE_LOOKUP = LOOKUP.replace("')", "', detail='full', fields=['state', 'merged_at', 'auto_merge'])")
+ONLY_TO_MERGE = ("pr_merge reads back only as long as a receipt of this PR is still observed, then may send a new merge "
+                 "request: call it only to merge.")
+RETRY = ("a later pr_merge call retries it only if it still reads this receipt back, and is otherwise a new merge "
+         "request: call it only to merge.")
 
 
 def _merges(world):
@@ -328,6 +344,8 @@ def test_an_unreadable_pr_leaves_a_queued_receipt_untouched(world, monkeypatch):
     monkeypatch.setattr(github, "_gh_run", unreadable)
     out = _merge(world)
     assert "pr_unreadable" in out and f"(receipt_id={before['receipt_id']}, outcome queued)" in out
+    # Its last readback showed the queue, so the read the refusal names shows the queue too.
+    assert QUEUE_LOOKUP.removesuffix(" reads the PR without merging.") + " reads it without merging" in out
     assert _receipts(world) == [before] and _merges(world) == 1
 
 
@@ -338,7 +356,10 @@ def test_an_unknown_outcome_is_read_back_by_plain_repeats_and_continued_only_by_
     first = _merge(world)
     (unknown,) = _receipts(world)
     assert "PR_MERGE_UNKNOWN" in first and _merges(world) == 1
-    assert f"call pr_merge with continue_receipt_id='{unknown['receipt_id']}'" in first
+    # The answer names the decision and the read that cannot merge, and promises nothing of a later plain call.
+    assert (f"{ONLY_TO_MERGE} To decide one new request for the same head and method, "
+            f"call pr_merge with continue_receipt_id='{unknown['receipt_id']}'. {LOOKUP}") in first
+    assert "calls only read" not in first
     world.gh.merge = "ok"
     out = _merge(world)
     assert "sent no new merge request" in out and _merges(world) == 1 and len(_receipts(world)) == 1
@@ -427,7 +448,7 @@ def test_an_unreadable_pr_keeps_the_earlier_request_in_view_by_its_real_status(w
         return original(args, *a, **kw)
 
     monkeypatch.setattr(github, "_gh_run", unreadable)
-    assert "could not be read; nothing was merged" in _merge(world)  # no earlier request: unchanged
+    assert "could not be read (⚠️ GH_ERROR: HTTP 502); nothing was merged" in _merge(world)
     monkeypatch.setattr(github, "_gh_run", original)
     world.gh.merge = "timeout_open"
     _merge(world)
@@ -435,6 +456,7 @@ def test_an_unreadable_pr_keeps_the_earlier_request_in_view_by_its_real_status(w
     monkeypatch.setattr(github, "_gh_run", unreadable)
     out = _merge(world)
     assert "pr_unreadable" in out and "nothing was merged" not in out and "sent no new merge request" in out
+    assert "GH_ERROR: HTTP 502" in out
     assert (f"the earlier merge request for {URL} is still unresolved "
             f"(receipt_id={earlier['receipt_id']}, outcome unknown)") in out
     assert _receipts(world) == [earlier]
@@ -448,6 +470,1159 @@ def test_an_unreadable_pr_keeps_the_earlier_request_in_view_by_its_real_status(w
     assert f"a merge of {URL} was already confirmed (receipt_id={earlier['receipt_id']})" in out
     assert "nothing was merged" not in out and "still unresolved" not in out
     assert sum(sent(c) for c in original.calls) == 1
+
+
+def test_snapshot_refusal_scopes_receipts_by_resolved_url(world, monkeypatch):
+    gh = world.gh
+    other_url = "https://github.com/other/demo/pull/7"
+    gh.merge = "timeout_open"
+    assert "PR_MERGE_UNKNOWN" in _merge(world)
+    (first,) = _receipts(world)
+    gh.pr["url"] = other_url
+
+    def unreadable(args, *a, **kw):
+        if args[:2] == ["api", "graphql"]:
+            return github.GhResult(False, "snapshot unavailable", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", unreadable)
+    refused = _merge(world)
+    assert "pr_unreadable" in refused and other_url in refused
+    assert URL not in refused and first["receipt_id"] not in refused
+    assert _receipts(world) == [first] and _merges(world) == 1
+
+    monkeypatch.setattr(github, "_gh_run", gh)
+    assert "PR_MERGE_UNKNOWN" in _merge(world)  # B's healthy read can authorize its own independent request
+    first, second = _receipts(world)
+
+    def no_target(args, *a, **kw):
+        if args[:2] == ["pr", "view"]:
+            return github.GhResult(False, "target unavailable", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", no_target)
+    refused = _merge(world)
+    for receipt in (first, second):
+        assert (f"the earlier merge request for {receipt['repo']['url']} is still unresolved "
+                f"(receipt_id={receipt['receipt_id']}, outcome unknown)") in refused
+    # Reading is offered through github_read, which cannot merge; pr_merge is not called a readback tool.
+    reads = [f"github_read(method='get', kind='pr', target=7, repo='github.com/{slug}')" for slug in ("octo/demo", "other/demo")]
+    assert f"{reads[0]} or {reads[1]} reads it without merging" in refused
+    assert "then may send a new merge request" in refused and "continue_receipt_id" not in refused
+    assert _receipts(world) == [first, second] and _merges(world) == 2
+
+
+def _fail_snapshot(world, monkeypatch):
+    gh = world.gh
+
+    def incomplete(args, *a, **kw):
+        if args[:2] == ["api", "graphql"]:
+            gh.calls.append(args)
+            return github.GhResult(False, "snapshot unavailable", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", incomplete)
+
+
+@pytest.mark.parametrize("mode,status", [("ok", "merged"), ("queued", "queued"), ("timeout_open", "unknown")])
+def test_unchanged_partial_readback_keeps_receipt_and_projections(world, monkeypatch, mode, status):
+    world.gh.merge = mode
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (first,) = _receipts(world)
+    assert first["outcome"]["status"] == status and first["observed_after"]["base_sha"] == BASE
+    before = len(world.gh.calls), world.gh.pr["body"], list(world.ctx.pending_events)
+
+    _fail_snapshot(world, monkeypatch)
+    out = _merge(world)
+    assert "sent no new merge request" in out and "snapshot unavailable" in out and "retained receipt" in out
+    assert _receipts(world) == [first]
+    assert all("PATCH" not in args and not sent(args) for args in world.gh.calls[before[0]:])
+    assert (world.gh.pr["body"], world.ctx.pending_events) == before[1:]
+
+
+def test_partial_retarget_does_not_infer_a_fresh_base_but_later_merge_is_visible(world, monkeypatch):
+    world.gh.merge = "timeout_open"
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (first,) = _receipts(world)
+    _fail_snapshot(world, monkeypatch)
+    new_base = "e" * 40
+    world.gh.pr.update(baseRefName="other-base", baseRefOid=new_base)
+    assert "does not establish the current PR base SHA" in _merge(world)
+    (retargeted,) = _receipts(world)
+    assert (retargeted["observed_after"]["base_ref"], retargeted["observed_after"]["base_sha"]) == ("other-base", "")
+    assert retargeted["observed_before"] == first["observed_before"]
+    assert "base_unavailable" in retargeted["coverage"]["gaps"]
+
+    world.gh.pr.update(state="MERGED", mergeCommit={"oid": MERGE})
+    assert "merge: merged" in _merge(world)
+    (merged,) = _receipts(world)
+    assert merged["receipt_id"] == first["receipt_id"] and merged["outcome"]["merge_sha"] == MERGE
+    assert merged["publication"]["body"] == {"status": "published"}
+    assert merged["observed_after"]["base_sha"] == ""
+    monkeypatch.setattr(github, "_gh_run", world.gh)
+    assert "merge: merged" in _merge(world)
+    assert _receipts(world)[0]["observed_after"]["base_sha"] == new_base and _merges(world) == 1
+
+
+def test_partial_retry_repairs_only_the_owed_projection(world, monkeypatch):
+    world.gh.fail_edit = True
+    _merge(world)
+    (first,) = _receipts(world)
+    assert first["publication"]["body"]["status"] == "gap"
+    before = list(world.ctx.pending_events)
+    world.gh.fail_edit = False
+    _fail_snapshot(world, monkeypatch)
+    assert "sent no new merge request" in _merge(world)
+    (again,) = _receipts(world)
+    assert again["publication"]["body"] == {"status": "published", "seq": 1}  # the result recorded after the gap
+    assert again["publication"]["card"] == first["publication"]["card"] and world.ctx.pending_events == before
+    assert all(again[key] == first[key] for key in ("revision", "observed_after", "coverage")) and _merges(world) == 1
+
+
+@pytest.mark.parametrize("partial", [True, False], ids=["gh-view", "full-snapshot"])
+def test_a_read_from_before_a_concurrent_settlement_never_rewrites_it(world, monkeypatch, partial):
+    """A delayed call keeps the queued receipt a concurrent call recorded after the delayed
+    call's own reads, gh's view when its snapshot fails or a full snapshot read before that call; neither older read
+    settles it as refused while auto-merge is on."""
+    gh, concurrent = world.gh, {}
+    gh.merge = "refused"  # GitHub refuses the concurrent request; another actor's auto-merge shows on its readback
+
+    def enable_auto_merge(args, *a, **kw):
+        result = gh(args, *a, **kw)
+        if sent(args):
+            gh.pr["autoMergeRequest"] = {"enabledAt": "now"}
+        return result
+
+    def late_snapshot(args, *a, **kw):
+        if args[:2] == ["api", "graphql"] and not concurrent:
+            concurrent["snapshot"] = gh(args, *a, **kw)  # read before the concurrent call
+            monkeypatch.setattr(github, "_gh_run", enable_auto_merge)
+            concurrent["out"] = _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+            (concurrent["receipt"],) = _receipts(world)
+            concurrent["body"], concurrent["events"] = gh.pr["body"], list(world.ctx.pending_events)
+            monkeypatch.setattr(github, "_gh_run", late_snapshot)
+            return github.GhResult(False, "snapshot unavailable", 1, 502, "exit") if partial else concurrent["snapshot"]
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", late_snapshot)
+    out = _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    assert "merge: queued" in concurrent["out"] and "merge: queued" in out and ("retained receipt" in out) is partial
+    assert concurrent["receipt"]["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+    assert _receipts(world) == [concurrent["receipt"]]
+    assert (gh.pr["body"], world.ctx.pending_events) == (concurrent["body"], concurrent["events"])
+    assert "Outcome: **queued**" in gh.pr["body"] and _merges(world) == 1
+
+
+@pytest.mark.parametrize("partial", [True, False], ids=["gh-view", "full-snapshot"])
+def test_a_readback_recorded_during_this_calls_reads_keeps_the_receipt_observed(world, monkeypatch, partial):
+    """GitHub refused the request and the PR was closed. A delayed call reads it reopened without a queue;
+    while it reads, another call reads back another actor's auto-merge and records the queue. The delayed call's read
+    follows the revision it read before GitHub, not the one it rereads afterwards, so it never releases the receipt."""
+    gh, concurrent = world.gh, {}
+    gh.merge = "refused"
+
+    def closed_after_the_request(args, *a, **kw):
+        result = gh(args, *a, **kw)
+        if sent(args):
+            gh.pr["state"] = "CLOSED"
+        return result
+
+    monkeypatch.setattr(github, "_gh_run", closed_after_the_request)
+    _merge(world)
+    assert _receipts(world)[0]["outcome"] == {"status": "unknown", "reason": "pr_state_closed"}
+    gh.pr["state"] = "OPEN"
+
+    def late_snapshot(args, *a, **kw):
+        if args[:2] == ["api", "graphql"] and not concurrent:
+            concurrent["snapshot"] = gh(args, *a, **kw)  # read before the other call's readback
+            gh.pr["autoMergeRequest"] = {"enabledAt": "by another actor"}
+            monkeypatch.setattr(github, "_gh_run", gh)
+            concurrent["out"] = _merge(world)
+            (concurrent["receipt"],) = _receipts(world)
+            concurrent["body"], concurrent["events"] = gh.pr["body"], list(world.ctx.pending_events)
+            monkeypatch.setattr(github, "_gh_run", late_snapshot)
+            return github.GhResult(False, "snapshot unavailable", 1, 502, "exit") if partial else concurrent["snapshot"]
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", late_snapshot)
+    out = _merge(world)
+    assert concurrent["receipt"]["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+    assert "merge: queued" in out and "A new pr_merge call" not in out
+    assert _receipts(world) == [concurrent["receipt"]]
+    assert (gh.pr["body"], world.ctx.pending_events) == (concurrent["body"], concurrent["events"]) and _merges(world) == 1
+
+
+@pytest.mark.parametrize("partial", [True, False], ids=["gh-view", "full-snapshot"])
+def test_a_settlement_recorded_after_the_reread_outranks_this_calls_older_read(world, monkeypatch, partial):
+    """Freshness is decided under the receipt lock, not at the reread. Another call settles the receipt queued
+    after this call reread it and before this call writes; this call's older read (an OPEN PR without auto-merge,
+    from gh's view or a full snapshot) never returns it to refused, and adds no write, edit or card event."""
+    gh = world.gh
+    gh.merge, gh.fail_view_after_merge = "refused", True  # GitHub refuses; the sender's own readback fails
+    _merge(world)
+    (first,) = _receipts(world)
+    assert first["outcome"] == {"status": "unknown", "reason": "readback_failed"}
+    gh.fail_view_after_merge = False
+    if partial:
+        _fail_snapshot(world, monkeypatch)
+    write, fresher = merge_receipts.write_receipt, {}
+
+    def settled_first(drive_root, task_id, receipt, **kw):
+        if not fresher and (receipt.get("outcome") or {}).get("status") == "refused":
+            fresher["writing"] = True  # this call's older read is about to be written
+            gh.pr["autoMergeRequest"] = {"enabledAt": "now"}
+            monkeypatch.setattr(github, "_gh_run", gh)
+            fresher["out"] = _merge(world)
+            (fresher["receipt"],) = _receipts(world)
+            fresher["body"], fresher["events"] = gh.pr["body"], list(world.ctx.pending_events)
+        return write(drive_root, task_id, receipt, **kw)
+
+    monkeypatch.setattr(merge_receipts, "write_receipt", settled_first)
+    out = _merge(world)
+    assert "merge: queued" in fresher["out"] and "merge: queued" in out
+    assert fresher["receipt"]["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+    assert _receipts(world) == [fresher["receipt"]]
+    assert (gh.pr["body"], world.ctx.pending_events) == (fresher["body"], fresher["events"])
+    assert _merges(world) == 1
+
+
+def test_after_a_refusal_settled_from_gh_view_reading_never_points_at_pr_merge(world, monkeypatch):
+    """Once gh's view settles a request GitHub refused, the next plain pr_merge may send, and the
+    tool says so; a read that cannot merge is named instead of a pr_merge readback."""
+    world.gh.merge, world.gh.fail_view_after_merge = "refused", True
+    _merge(world)
+    assert _receipts(world)[0]["outcome"] == {"status": "unknown", "reason": "readback_failed"}
+    world.gh.fail_view_after_merge = False
+    _fail_snapshot(world, monkeypatch)
+    out = _merge(world)
+    assert _receipts(world)[0]["outcome"] == {"status": "refused"}
+    assert "A new pr_merge call for the PR's current head may send one." in out
+    assert "github_read(method='get', kind='pr', target=7, repo='github.com/octo/demo') reads the PR without merging" in out
+    assert "calls only read it back" not in out and "Read the recorded repository back" not in out
+    monkeypatch.setattr(github, "_gh_run", world.gh)
+    world.gh.merge = "ok"
+    assert "merge: merged" in _merge(world) and _merges(world) == 2  # the request the tool said may follow
+
+
+def test_gh_view_completes_a_merged_receipt_and_fetches_only_missing_commit_facts(world, monkeypatch):
+    """Without GitHub's snapshot a confirmed merge still gains the merge SHA and commit facts it lacked,
+    keeping the full snapshot's base and the attribution; commit facts already known are not fetched again."""
+    gh = world.gh
+
+    def lagging_merge_commit(args, *a, **kw):
+        result = gh(args, *a, **kw)
+        if args[:2] == ["api", "graphql"] and any(sent(c) for c in gh.calls):
+            envelope = json.loads(result.text)  # the readback right after the merge names no merge commit yet
+            envelope["data"]["repository"]["pullRequest"]["mergeCommit"] = None
+            return github.GhResult(True, json.dumps(envelope), 0, None, "")
+        return result
+
+    monkeypatch.setattr(github, "_gh_run", lagging_merge_commit)
+    _merge(world)
+    (first,) = _receipts(world)
+    assert first["outcome"]["status"] == "merged" and first["outcome"]["merge_sha"] == ""
+    assert first["outcome"]["attribution"] == "this_call" and "merge_tree" not in first["outcome"]
+    assert first["observed_after"]["base_sha"] == BASE
+
+    _fail_snapshot(world, monkeypatch)
+    calls = len(gh.calls)
+    assert "merge: merged" in _merge(world)
+    (merged,) = _receipts(world)
+    assert (merged["outcome"]["merge_sha"], merged["outcome"]["merge_tree"]) == (MERGE, TREE)
+    assert merged["outcome"]["merge_parents"] == [BASE, HEAD] and merged["outcome"]["attribution"] == "this_call"
+    assert merged["observed_after"] == first["observed_after"]  # the full snapshot's base stays
+    assert f"merge commit `{MERGE}`" in gh.pr["body"] and f"base `{BASE}`" in gh.pr["body"]
+    assert any(c[:1] == ["api"] and c[1].endswith(f"/commits/{MERGE}") for c in gh.calls[calls:])
+    calls, events = len(gh.calls), list(world.ctx.pending_events)
+    assert "merge: merged" in _merge(world)
+    assert not any(c[:1] == ["api"] and ("/commits/" in c[1] or "PATCH" in c) for c in gh.calls[calls:])
+    assert _receipts(world) == [merged] and world.ctx.pending_events == events and _merges(world) == 1
+
+
+@pytest.mark.parametrize("partial", [True, False], ids=["gh-view", "full-snapshot"])
+def test_a_readback_that_cannot_reread_tree_or_body_keeps_the_confirmed_merge(world, monkeypatch, partial):
+    """A merged head's tree never changes and a projection confirmed for this revision stays
+    confirmed, so a readback (gh's view alone, or GitHub's full snapshot) that cannot reread the head's tree or the
+    PR body keeps the confirmed coverage and publication: nothing is written, edited or sent as a new card event."""
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (first,) = _receipts(world)
+    assert first["outcome"]["status"] == "merged" and first["coverage"]["reviewed_head_tree"] == TREE
+    assert "tree_comparison_unavailable" not in first["coverage"]["gaps"]
+    assert first["publication"]["body"] == {"status": "published"}
+    gh, calls, body, events = world.gh, len(world.gh.calls), world.gh.pr["body"], list(world.ctx.pending_events)
+
+    def only_the_technical_view(args, *a, **kw):
+        if ((partial and args[:2] == ["api", "graphql"]) or (args[:1] == ["api"] and "/commits/" in args[1])
+                or (args[:2] == ["pr", "view"] and "body" in args[args.index("--json") + 1].split(","))):
+            gh.calls.append(list(args))
+            return github.GhResult(False, "⚠️ GH_ERROR: unavailable (HTTP 502)", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", only_the_technical_view)
+    out = _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    assert "merge: merged" in out and ("retained receipt" in out) is partial and "sent no new merge request" in out
+    assert _receipts(world) == [first]
+    assert (world.gh.pr["body"], world.ctx.pending_events) == (body, events)
+    assert not any("/commits/" in c[1] or "PATCH" in c for c in gh.calls[calls:] if c[:1] == ["api"])
+
+
+@pytest.mark.parametrize("mode", ["queued", "ok"])
+def test_a_senders_partial_readback_keeps_a_concurrent_full_snapshot(world, monkeypatch, mode):
+    """The sender's view after its one request (no base SHA) never erases the base, coverage, PR
+    block or card that a concurrent plain call recorded from GitHub's full snapshot of the same facts, and the
+    sender keeps its own effect and the attribution its merge answer proves."""
+    gh, seen = world.gh, {}
+    gh.merge = mode
+
+    def observer_during_readback(args, *a, **kw):
+        if args[:2] == ["api", "graphql"] and any(sent(c) for c in gh.calls) and not seen:
+            monkeypatch.setattr(github, "_gh_run", gh)
+            seen["out"] = _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+            (seen["receipt"],) = _receipts(world)
+            seen["body"], seen["events"] = gh.pr["body"], list(world.ctx.pending_events)
+            monkeypatch.setattr(github, "_gh_run", observer_during_readback)
+            return github.GhResult(False, "snapshot unavailable", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", observer_during_readback)
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (stored,) = _receipts(world)
+    observed = seen["receipt"]
+    assert "sent no new merge request" in seen["out"] and _merges(world) == 1
+    assert observed["observed_after"]["base_sha"] == BASE and stored["observed_after"] == observed["observed_after"]
+    assert stored["effect"] == observed["effect"] and "base_unavailable" not in stored["coverage"]["gaps"]
+    if mode == "queued":  # the same facts: nothing is written, edited or sent as a new card event
+        assert stored["effect"]["failure"] == "timeout" and _receipts(world) == [observed]
+        assert (gh.pr["body"], world.ctx.pending_events) == (seen["body"], seen["events"])
+    else:  # the sender proves its own merge: one new revision, its base still the full snapshot's
+        assert stored["effect"]["ok"] and stored["effect"]["merge_sha"] == MERGE
+        assert (stored["outcome"]["attribution"], observed["outcome"]["attribution"]) == ("this_call", "unproven")
+        assert stored["revision"] == observed["revision"] + 1
+        assert world.ctx.pending_events[:-1] == seen["events"] and len(world.ctx.pending_events) == len(seen["events"]) + 1
+        assert f"base `{BASE}`" in gh.pr["body"] and "base `unavailable`" not in gh.pr["body"]
+
+
+def test_the_senders_readback_after_its_effect_outranks_an_observation_from_before_it(world, monkeypatch):
+    """The freshness rule never ranks the sender's own readback, read after its effect row, below an observation
+    recorded before that row. Another call saw another actor's auto-merge while the request was in flight; GitHub
+    refused the request, and the sender's readback shows that auto-merge off again."""
+    gh, during = world.gh, {}
+    gh.merge = "refused"
+
+    def queue_seen_during_the_send(args, *a, **kw):
+        if sent(args) and not during:
+            gh.pr["autoMergeRequest"] = {"enabledAt": "now"}
+            monkeypatch.setattr(github, "_gh_run", gh)
+            during["out"] = _merge(world)
+            (during["receipt"],) = _receipts(world)
+            monkeypatch.setattr(github, "_gh_run", queue_seen_during_the_send)
+            gh.pr["autoMergeRequest"] = None
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", queue_seen_during_the_send)
+    out = _merge(world)
+    assert during["receipt"]["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+    (stored,) = _receipts(world)
+    assert stored["outcome"] == {"status": "refused"} and stored["effect"]["failure"] == "server_refused"
+    assert stored["observed_after"]["auto_merge"] is False and "PR_MERGE_REFUSED" in out and _merges(world) == 1
+
+
+def test_a_view_older_than_the_senders_answer_row_settles_nothing(world, monkeypatch):
+    """A view gh read before the sender recorded GitHub's merge answer settles nothing on that receipt; the
+    sender's own readback will. Its in-flight row stays exactly as the sender wrote it."""
+    intent = {"schema": 1, "receipt_id": "in-flight", "state": "intent_recorded", "number": 7, "repo": {"url": URL},
+              "launch_operation_ids": [], "requested": {"method": "squash", "expected_head_sha": HEAD},
+              "observed_before": {}, "review": {}, "coverage": {}}
+    merge_receipts.write_receipt(world.root, "merge-task", intent)
+    gh, answered = world.gh, {}
+
+    def answer_recorded_during_the_snapshot(args, *a, **kw):
+        if args[:2] == ["api", "graphql"] and not answered:
+            (answered["row"],) = [merge_receipts.write_receipt(world.root, "merge-task", {
+                **intent, "state": "effect_attempted", "effect": {"ok": True, "exit_code": 0, "http_status": None,
+                                                                  "failure": "", "output": MERGED, "merge_sha": MERGE}})]
+            return github.GhResult(False, "snapshot unavailable", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", answer_recorded_during_the_snapshot)
+    out = _merge(world)
+    assert "no recorded outcome yet" in out and "retained receipt" in out
+    assert _receipts(world) == [answered["row"]] and "outcome" not in answered["row"] and _merges(world) == 0
+
+
+# --- one rule for which readback is current; commit facts and publications join by their own -----------------
+
+
+@pytest.mark.parametrize("observer", ["read-during-the-send", "claim-loser"])
+def test_a_read_from_before_the_effect_row_never_settles_over_the_senders_readback(world, monkeypatch, observer):
+    """Another call's GitHub reads predate the sender's effect row, and it writes after that row but
+    before the sender's own readback. It read back no request: the receipt stays unsettled, and the sender's readback
+    stands (refused once another actor's queue is gone; queued while one shows)."""
+    from threading import Event, Thread, current_thread
+
+    gh, write, loser = world.gh, merge_receipts.write_receipt, observer == "claim-loser"
+    gh.merge = "refused"
+    read, effect_recorded, done, said = Event(), Event(), Event(), {}
+
+    def other_call():
+        try:
+            said["text"] = _merge(world)
+        finally:
+            done.set()
+
+    other = Thread(target=other_call, name="observer")
+
+    def transport(args, *a, **kw):
+        if sent(args):  # only the sender gets this far
+            if not loser:
+                gh.pr["autoMergeRequest"] = {"enabledAt": "by another actor"}  # what the other call reads meanwhile
+                other.start()
+                assert read.wait(5)
+                gh.pr["autoMergeRequest"] = None
+            result = gh(args, *a, **kw)
+            if loser:
+                gh.pr["autoMergeRequest"] = {"enabledAt": "by another actor"}  # what the sender reads back
+            return result
+        result = gh(args, *a, **kw)
+        if current_thread() is other and not loser and args[:2] == ["api", "graphql"]:
+            read.set()
+            assert effect_recorded.wait(5)
+        return result
+
+    def ordered(drive_root, task_id, receipt, **kw):
+        if current_thread() is other and loser and kw.get("claim"):
+            read.set()  # it read the PR open and decided to claim before the sender did
+            assert effect_recorded.wait(5)
+        stored = write(drive_root, task_id, receipt, **kw)
+        if current_thread() is not other and receipt.get("state") == "effect_attempted":
+            effect_recorded.set()
+            assert done.wait(5)  # the other call writes now, before the sender reads back
+        return stored
+
+    monkeypatch.setattr(github, "_gh_run", transport)
+    monkeypatch.setattr(merge_receipts, "write_receipt", ordered)
+    if loser:
+        other.start()
+        assert read.wait(5)
+    text = _merge(world)
+    other.join(5)
+    (stored,) = _receipts(world)
+    assert "no recorded outcome yet" in said["text"] and "sent no new merge request" in said["text"]
+    assert stored["effect"]["failure"] == "server_refused" and stored["state"] == "settled" and _merges(world) == 1
+    if loser:
+        assert stored["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+        assert stored["observed_after"]["auto_merge"] is True and "Outcome: **queued**" in gh.pr["body"]
+    else:
+        assert stored["outcome"] == {"status": "refused"} and stored["observed_after"]["auto_merge"] is False
+        assert "PR_MERGE_REFUSED" in text and "merge-receipt" not in gh.pr["body"]
+
+
+@pytest.mark.parametrize("found", ["gh-view", "full-snapshot", "lost-the-claim"])
+def test_reads_from_before_a_request_existed_are_no_readback_of_it(world, monkeypatch, found):
+    """A call began with no receipt in view and read the PR; another call then recorded its intent, and its request
+    timed out. The first call meets that receipt after its reads (rereading the rows, or losing the claim), so they
+    predate the request: it joins the receipt and reports it, settling nothing while the request is in flight. Where
+    it had read auto-merge on (GitHub's snapshot, or gh's view when the snapshot fails) and the queue was switched
+    off before the intent, both of the sender's own reads show no queue: the outcome stays unknown, nothing shows a
+    queue, and the explicit continuation the answer names is not barred."""
+    from threading import Event, Thread, current_thread
+
+    gh, write, loser = world.gh, merge_receipts.write_receipt, found == "lost-the-claim"
+    gh.merge = "timeout_open"
+    if not loser:
+        gh.pr["autoMergeRequest"] = {"enabledAt": "by another actor"}
+    read, intent, done, said = Event(), Event(), Event(), {}
+
+    def earlier_call():
+        try:
+            said["text"] = _merge(world)
+        finally:
+            done.set()
+
+    earlier = Thread(target=earlier_call, name="earlier-reader")
+
+    def transport(args, *a, **kw):
+        result = gh(args, *a, **kw)
+        if not loser and current_thread() is earlier and args[:2] == ["api", "graphql"] and not read.is_set():
+            read.set()  # it has read the queue; the sender's intent is recorded before it looks at the receipts again
+            assert intent.wait(5)
+            if found == "gh-view":
+                return github.GhResult(False, "snapshot unavailable", 1, 502, "exit")
+        return result
+
+    def ordered(drive_root, task_id, receipt, **kw):
+        if loser and current_thread() is earlier and kw.get("claim"):
+            read.set()  # it read the PR open without a queue; the sender claims before it does
+            assert intent.wait(5)
+        stored = write(drive_root, task_id, receipt, **kw)
+        if current_thread() is not earlier and kw.get("claim"):
+            intent.set()
+            assert done.wait(5)  # the earlier call finishes while the request is in flight
+            (said["in_flight"],) = _receipts(world)
+        return stored
+
+    monkeypatch.setattr(github, "_gh_run", transport)
+    monkeypatch.setattr(merge_receipts, "write_receipt", ordered)
+    earlier.start()
+    assert read.wait(5)
+    gh.pr["autoMergeRequest"] = None
+    out = _merge(world)
+    earlier.join(5)
+    (stored,) = _receipts(world)
+    assert said["in_flight"]["state"] == "intent_recorded" and "outcome" not in said["in_flight"]
+    assert "no recorded outcome yet" in said["text"] and "sent no new merge request" in said["text"]
+    assert "continue_receipt_id=" not in said["text"]  # its request may still be sent: no new decision is offered
+    assert stored["outcome"] == {"status": "unknown", "reason": "pr_state_open_after_unconfirmed_effect"}
+    assert stored["observed_after"]["auto_merge"] is False and stored["effect"]["failure"] == "timeout"
+    assert "merge-receipt" not in gh.pr["body"] and world.ctx.pending_events == []
+    assert f"continue_receipt_id='{stored['receipt_id']}'" in out and _merges(world) == 1
+    monkeypatch.setattr(merge_receipts, "write_receipt", write)
+    gh.merge = "ok"
+    assert "merge: merged" in _merge(world, continue_receipt_id=stored["receipt_id"]) and _merges(world) == 2
+
+
+@pytest.mark.parametrize("change", [{"state": "CLOSED", "autoMergeRequest": None}, {"autoMergeRequest": None}],
+                         ids=["closed", "open-without-queue"])
+def test_gh_view_of_the_same_facts_keeps_the_readback_beside_an_earlier_queue(world, monkeypatch, change):
+    """A full readback no longer shows the queue, which stays the outcome, worded as earlier.
+    gh's view of those same facts (no base SHA) keeps that readback's base, its coverage, the revision and both
+    projections: nothing is written, edited or sent as a card event."""
+    world.gh.merge = "queued"
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    world.gh.pr.update(change)
+    assert "queued earlier" in _merge(world)
+    (first,) = _receipts(world)
+    assert first["outcome"]["status"] == "queued" and first["observed_after"]["base_sha"] == BASE
+    assert "base_unavailable" not in first["coverage"]["gaps"]
+    calls, body, events = len(world.gh.calls), world.gh.pr["body"], list(world.ctx.pending_events)
+    _fail_snapshot(world, monkeypatch)
+    out = _merge(world)
+    assert "queued earlier" in out and "retained receipt" in out and _receipts(world) == [first]
+    assert (world.gh.pr["body"], world.ctx.pending_events) == (body, events)
+    assert not any("PATCH" in c or sent(c) for c in world.gh.calls[calls:])
+
+
+@pytest.mark.parametrize("observed", ["during-the-send", "during-the-readback"])
+def test_a_failed_readback_never_replaces_a_complete_one_another_call_recorded(world, monkeypatch, observed):
+    """Another call records GitHub's full snapshot while the request is in flight or while the
+    sender reads back; both of the sender's own reads then fail. A failed read is no readback: the recorded
+    observation and its coverage stay beside the sender's effect."""
+    gh, seen = world.gh, {}
+    gh.merge = "timeout_open"
+
+    def observe():
+        seen["started"] = True
+        monkeypatch.setattr(github, "_gh_run", gh)
+        _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+        (seen["receipt"],) = _receipts(world)
+        monkeypatch.setattr(github, "_gh_run", then_unreadable)
+        gh.fail_view_after_merge = True  # GitHub answers neither the snapshot nor gh's view once the request is sent
+
+    def then_unreadable(args, *a, **kw):
+        if not seen and (sent(args) if observed == "during-the-send" else
+                         args[:2] == ["api", "graphql"] and any(sent(c) for c in gh.calls)):
+            observe()
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", then_unreadable)
+    out = _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (stored,) = _receipts(world)
+    recorded = seen["receipt"]
+    assert recorded["outcome"] == {"status": "unknown", "reason": "pr_state_open_after_unconfirmed_effect"}
+    assert recorded["observed_after"]["base_sha"] == BASE and "base_unavailable" not in recorded["coverage"]["gaps"]
+    assert all(stored[key] == recorded[key] for key in ("outcome", "observed_after", "coverage", "revision"))
+    assert stored["effect"]["failure"] == "timeout" and "PR_MERGE_UNKNOWN" in out and _merges(world) == 1
+
+
+def test_an_older_open_read_never_releases_a_receipt_another_call_read_closed(world, monkeypatch):
+    """A release (refused) needs the current readback. GitHub refused the request and the readback failed; a call then
+    reads the PR open without a queue, but before it writes another call records the PR closed. The older read
+    releases nothing: the receipt stays observed beside the CLOSED readback, and the tool still says so."""
+    gh, write, newer = world.gh, merge_receipts.write_receipt, {}
+    gh.merge, gh.fail_view_after_merge = "refused", True
+    _merge(world)
+    gh.fail_view_after_merge = False
+
+    def closed_first(drive_root, task_id, receipt, **kw):
+        if not newer and (receipt.get("outcome") or {}).get("status") == "refused":
+            newer["started"] = True  # this call's older read is about to be written
+            gh.pr["state"] = "CLOSED"
+            _merge(world)
+            (newer["receipt"],) = _receipts(world)
+        return write(drive_root, task_id, receipt, **kw)
+
+    monkeypatch.setattr(merge_receipts, "write_receipt", closed_first)
+    out = _merge(world)
+    assert newer["receipt"]["outcome"] == {"status": "unknown", "reason": "pr_state_closed"}
+    assert _receipts(world) == [newer["receipt"]]
+    assert ONLY_TO_MERGE in out and "A new pr_merge call" not in out and _merges(world) == 1
+
+
+def test_a_failed_read_outranks_no_readback_in_either_order(world):
+    """A failed read records no readback. A call that read the effect row before the sender's failed readback was
+    settled still records what GitHub showed it, here the release of a refused request; written the other way round,
+    the failed read changes nothing."""
+    observed = {"state": "OPEN", "head_sha": HEAD, "base_ref": "main", "base_sha": BASE, "merge_state": "CLEAN",
+                "is_draft": False, "auto_merge": False}
+    unread = {"state": "settled", "observed_after": {}, "outcome": {"status": "unknown", "reason": "readback_failed"}}
+    seen = merge_receipts.write_receipt(world.root, "merge-task", {
+        "schema": 1, "receipt_id": "r", "state": "effect_attempted", "number": 7, "repo": {"url": URL},
+        "launch_operation_ids": [], "requested": {"method": "squash", "expected_head_sha": HEAD},
+        "observed_before": {}, "review": {}, "coverage": {},
+        "effect": {"ok": False, "exit_code": 1, "http_status": 405, "failure": "server_refused", "output": NOT_MERGEABLE}})
+    failed = merge_receipts.write_receipt(world.root, "merge-task", {**seen, **unread})
+    assert failed["outcome"] == unread["outcome"] and failed["revision"] == seen["revision"] + 1
+    stored = merge_receipts.write_receipt(world.root, "merge-task", {
+        **seen, "state": "settled", "observed_after": observed, "outcome": {"status": "refused"}})
+    assert (stored["outcome"], stored["observed_after"]) == ({"status": "refused"}, observed)
+    assert merge_receipts.write_receipt(world.root, "merge-task", {**stored, **unread}) == stored
+    assert _receipts(world) == [stored]
+
+
+def test_an_older_queue_read_never_replaces_a_newer_closed_readback(world, monkeypatch):
+    """A call read the PR open with auto-merge on; before it wrote, another call recorded the PR closed.
+    The queue seen stays the outcome, worded as earlier, beside the newer CLOSED readback and its coverage; the
+    receipt never shows a live queue on the closed PR."""
+    gh, write, newer = world.gh, merge_receipts.write_receipt, {}
+    gh.merge = "timeout_open"
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    gh.pr["autoMergeRequest"] = {"enabledAt": "now"}
+
+    def closed_first(drive_root, task_id, receipt, **kw):
+        if not newer and (receipt.get("outcome") or {}).get("status") == "queued":
+            newer["started"] = True  # this call's older read is about to be written
+            gh.pr.update(state="CLOSED", autoMergeRequest=None)
+            newer["out"] = _merge(world)
+            (newer["receipt"],) = _receipts(world)
+        return write(drive_root, task_id, receipt, **kw)
+
+    monkeypatch.setattr(merge_receipts, "write_receipt", closed_first)
+    out = _merge(world)
+    (stored,) = _receipts(world)
+    closed = newer["receipt"]
+    assert closed["outcome"] == {"status": "unknown", "reason": "pr_state_closed_after_unconfirmed_effect"}
+    assert stored["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+    assert stored["observed_after"] == closed["observed_after"] and stored["observed_after"]["state"] == "CLOSED"
+    assert stored["coverage"] == closed["coverage"] and stored["revision"] == closed["revision"] + 1
+    assert out.startswith(f"⚠️ PR #7 merge: {QUEUED_CLOSED};")
+    assert f"- Outcome: **queued** {QUEUED_CLOSED.removeprefix('queued ')}\n" in gh.pr["body"] and _merges(world) == 1
+
+
+@pytest.mark.parametrize("answer", ["ok", "timeout_merged"], ids=["answered", "answer-lost"])
+def test_a_senders_readback_through_a_commit_outage_keeps_the_merged_commit_facts(world, monkeypatch, answer):
+    """Another call recorded the merge with its commit facts; the sender's own readback then has neither
+    GitHub's snapshot nor the commit endpoint. The merge commit's tree and parents, the reviewed head's tree and the
+    coverage derived from them stay. An answered request adds the attribution it proves, in one new revision; a
+    request whose answer was lost adds nothing, so nothing is written or published again."""
+    gh, seen, proven = world.gh, {}, answer == "ok"
+    gh.merge = answer
+
+    def outage_after_the_observer(args, *a, **kw):
+        if args[:2] == ["api", "graphql"] and any(sent(c) for c in gh.calls) and not seen:
+            seen["started"] = True
+            monkeypatch.setattr(github, "_gh_run", gh)
+            _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+            (seen["receipt"],) = _receipts(world)
+            seen["events"] = len(world.ctx.pending_events)
+            monkeypatch.setattr(github, "_gh_run", outage_after_the_observer)
+        if seen and (args[:2] == ["api", "graphql"] or (args[:1] == ["api"] and "/commits/" in args[1])):
+            return github.GhResult(False, "⚠️ GH_ERROR: unavailable (HTTP 502)", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", outage_after_the_observer)
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    (stored,) = _receipts(world)
+    recorded = seen["receipt"]
+    assert recorded["coverage"]["reviewed_head_tree"] == TREE and recorded["outcome"]["merge_tree"] == TREE
+    assert "tree_comparison_unavailable" not in recorded["coverage"]["gaps"]
+    assert stored["coverage"] == recorded["coverage"] and stored["observed_after"] == recorded["observed_after"]
+    assert stored["outcome"] == {**recorded["outcome"], "attribution": "this_call" if proven else "unproven"}
+    assert (stored == recorded) is not proven and stored["revision"] == recorded["revision"] + proven
+    assert len(world.ctx.pending_events) == seen["events"] + proven
+    assert "tree_comparison_unavailable" not in gh.pr["body"] and _merges(world) == 1
+
+
+@pytest.mark.parametrize("partial", [True, False], ids=["gh-view", "full-snapshot"])
+def test_a_delayed_readback_never_erases_a_head_tree_another_call_recovered(world, monkeypatch, partial):
+    """The merged head's tree was unreadable at first. A delayed call, still without it, writes after
+    another call read it: the verified tree and the coverage it settles stay, with no new revision or publication."""
+    gh, write, recovered = world.gh, merge_receipts.write_receipt, {}
+
+    def no_head_tree(args, *a, **kw):
+        if (args[:1] == ["api"] and args[1].endswith(f"/commits/{HEAD}")) or (partial and args[:2] == ["api", "graphql"]
+                                                                              and any(sent(c) for c in gh.calls)):
+            return github.GhResult(False, "⚠️ GH_ERROR: unavailable (HTTP 502)", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    def recovered_first(drive_root, task_id, receipt, **kw):
+        if recovered.get("armed") and "publication" not in kw:
+            recovered["armed"] = False  # the delayed call computed its coverage without the tree and is about to write
+            monkeypatch.setattr(github, "_gh_run", gh)
+            _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+            (recovered["receipt"],) = _receipts(world)
+            recovered["body"], recovered["events"] = gh.pr["body"], list(world.ctx.pending_events)
+            monkeypatch.setattr(github, "_gh_run", no_head_tree)
+        return write(drive_root, task_id, receipt, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", no_head_tree)
+    monkeypatch.setattr(merge_receipts, "write_receipt", recovered_first)
+    _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    assert "tree_comparison_unavailable" in _receipts(world)[0]["coverage"]["gaps"]
+    recovered["armed"] = True
+    assert "merge: merged" in _merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE)
+    read = recovered["receipt"]
+    assert read["coverage"]["reviewed_head_tree"] == TREE and "tree_comparison_unavailable" not in read["coverage"]["gaps"]
+    assert _receipts(world) == [read]
+    assert (gh.pr["body"], world.ctx.pending_events) == (recovered["body"], recovered["events"]) and _merges(world) == 1
+
+
+def test_a_delayed_failed_publication_never_unconfirms_a_block_another_call_confirmed(world, monkeypatch):
+    """Two calls retry the same body gap. One writes and confirms the block; the other's own edit and
+    reads then fail. The confirmation stays recorded: a publication is written only over the one its publisher read."""
+    gh, confirmed = world.gh, {}
+    gh.fail_edit = True
+    assert "not confirmed" in _merge(world)
+    (owed,) = _receipts(world)
+    assert owed["publication"]["body"]["status"] == "gap"
+    gh.fail_edit = False
+
+    def another_call_confirms_first(args, *a, **kw):
+        if args[:1] == ["api"] and "PATCH" in args and not confirmed:
+            confirmed["started"] = True
+            monkeypatch.setattr(github, "_gh_run", gh)
+            _merge(world)
+            (confirmed["receipt"],) = _receipts(world)
+            confirmed["body"], confirmed["events"] = gh.pr["body"], list(world.ctx.pending_events)
+            monkeypatch.setattr(github, "_gh_run", another_call_confirms_first)
+            return github.GhResult(False, "⚠️ GH_ERROR: forbidden", 1, 403, "exit")
+        if confirmed and args[:2] == ["pr", "view"] and "body" in args[args.index("--json") + 1].split(","):
+            return github.GhResult(False, "⚠️ GH_ERROR: unavailable (HTTP 502)", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", another_call_confirms_first)
+    out = _merge(world)
+    assert confirmed["receipt"]["publication"]["body"] == {"status": "published", "seq": 1}
+    assert _receipts(world) == [confirmed["receipt"]] and "not confirmed" not in out
+    assert merge_receipts.public_block(owed) in gh.pr["body"] == confirmed["body"]
+    assert world.ctx.pending_events == confirmed["events"] and _merges(world) == 1
+
+
+def test_a_card_delivered_meanwhile_never_costs_the_block_this_call_read_back(world, monkeypatch):
+    """One call writes the owed PR block and reads it back while another records only that the card was delivered.
+    The body and the card are confirmed separately: the block stays recorded as published beside the delivery
+    without another read of the body, which GitHub no longer answers."""
+    from supervisor import terminal_delivery as td
+
+    gh, newer = world.gh, {"body_reads": 0}
+    gh.fail_edit = True
+    _merge(world)
+    (owed,) = _receipts(world)
+    assert (owed["publication"]["body"]["status"], owed["publication"]["card"]["status"]) == ("gap", "owed")
+
+    def delivered_meanwhile(args, *a, **kw):
+        if args[:1] == ["api"] and "PATCH" in args and "receipt" not in newer:
+            td.register_delivery(world.root, owed["publication"]["card"]["delivery_id"])  # the supervisor sent the card
+            monkeypatch.setattr(github, "_gh_run", gh)
+            _merge(world)  # another call, whose own edit still fails, records the delivery
+            monkeypatch.setattr(github, "_gh_run", delivered_meanwhile)
+            (newer["receipt"],) = _receipts(world)
+            gh.fail_edit = False
+        elif "receipt" in newer and args[:2] == ["pr", "view"] and "body" in args[args.index("--json") + 1].split(","):
+            newer["body_reads"] += 1
+            if newer["body_reads"] > 1:  # GitHub answers this call's readback of its own edit, then no body read
+                return github.GhResult(False, "⚠️ GH_ERROR: unavailable (HTTP 502)", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", delivered_meanwhile)
+    out = _merge(world)
+    (stored,) = _receipts(world)
+    delivered = {**owed["publication"]["card"], "status": "delivered"}
+    assert newer["receipt"]["publication"] == {"body": owed["publication"]["body"], "card": delivered}
+    assert stored["publication"] == {"body": {"status": "published", "seq": 1}, "card": delivered}
+    assert "not confirmed" not in out and newer["body_reads"] == 1 and stored["revision"] == owed["revision"]
+    assert merge_receipts.public_block(owed) in gh.pr["body"] and _merges(world) == 1
+
+
+@pytest.mark.parametrize("failed_again", [False, True], ids=["restored", "failed-again-then-restored"])
+@pytest.mark.parametrize("readable", [True, False], ids=["body-readable", "body-unreadable"])
+def test_a_delayed_failed_repair_never_unconfirms_a_block_another_call_restored(world, monkeypatch, readable,
+                                                                                failed_again):
+    """An edit removed the confirmed block and one call's repair failed. Before it records that, another call restores
+    the block and reads it back (after a third call's repair failed too and was recorded, in the second case). The
+    restored block is a later recorded confirmation than the one the failed call read, although both say published:
+    the delayed failure is not recorded over it, and no fact revision or card event is added."""
+    gh, write, restored = world.gh, merge_receipts.write_receipt, {}
+    _merge(world)
+    (first,) = _receipts(world)
+    assert first["publication"]["body"] == {"status": "published"}
+    gh.pr["body"], gh.fail_edit = "Rewritten by the owner.", True
+
+    def unreadable_body(args, *a, **kw):
+        if args[:2] == ["pr", "view"] and "body" in args[args.index("--json") + 1].split(","):
+            return github.GhResult(False, "⚠️ GH_ERROR: unavailable (HTTP 502)", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    def restored_first(drive_root, task_id, receipt, **kw):
+        if not restored and ((kw.get("publication") or {}).get("body") or {}).get("status") == "gap":
+            restored["started"] = True  # this call's failed repair is about to be recorded
+            if failed_again:
+                assert "not confirmed" in _merge(world)
+            gh.fail_edit = False
+            assert "not confirmed" not in _merge(world)
+            (restored["receipt"],) = _receipts(world)
+            restored["body"], restored["events"] = gh.pr["body"], list(world.ctx.pending_events)
+            if not readable:
+                monkeypatch.setattr(github, "_gh_run", unreadable_body)
+        return write(drive_root, task_id, receipt, **kw)
+
+    monkeypatch.setattr(merge_receipts, "write_receipt", restored_first)
+    out = _merge(world)
+    assert _receipts(world) == [restored["receipt"]] and "not confirmed" not in out
+    confirmed = restored["receipt"]["publication"]["body"]
+    assert confirmed["status"] == "published" and confirmed != first["publication"]["body"]
+    assert restored["receipt"]["revision"] == first["revision"]
+    assert merge_receipts.public_block(first) in gh.pr["body"] == restored["body"]
+    assert world.ctx.pending_events == restored["events"] and _merges(world) == 1
+
+
+def _body_read(args):
+    return args[:2] == ["pr", "view"] and "body" in args[args.index("--json") + 1].split(",")
+
+
+UNREADABLE = github.GhResult(False, "⚠️ GH_ERROR: unavailable (HTTP 502)", 1, 502, "exit")
+
+
+@pytest.mark.parametrize("failed_read", [False, True], ids=["failed-repair", "then-a-failed-read"])
+def test_a_restored_block_saved_after_a_failed_repair_stays_confirmed_through_a_read_outage(world, monkeypatch,
+                                                                                         failed_read):
+    """The reverse order of the case above: both calls read the row that confirmed the block, and the failed repair is
+    saved before the restored block (after a third call's body read failed too, in the second case). The restoring call
+    read its block back, so its confirmation is recorded over those gaps without another read, which GitHub no longer
+    answers; the fact revision, the card and its events stay as they were."""
+    gh, state = world.gh, {}
+    _merge(world)
+    (first,) = _receipts(world)
+    events = list(world.ctx.pending_events)
+    gh.pr["body"] = "Rewritten by the owner."
+
+    def unreadable_body(args, *a, **kw):
+        return UNREADABLE if _body_read(args) else gh(args, *a, **kw)
+
+    def failed_repair_saved_first(args, *a, **kw):
+        if args[:1] == ["api"] and "PATCH" in args and not state:
+            state["reads"], gh.fail_edit = 0, True  # this call's own repair is about to land
+            monkeypatch.setattr(github, "_gh_run", gh)
+            assert "not confirmed" in _merge(world)
+            if failed_read:
+                monkeypatch.setattr(github, "_gh_run", unreadable_body)
+                assert "not confirmed" in _merge(world)
+            (state["gap"],) = _receipts(world)
+            monkeypatch.setattr(github, "_gh_run", failed_repair_saved_first)
+            gh.fail_edit = False
+        elif state and _body_read(args):
+            state["reads"] += 1
+            if state["reads"] > 1:  # GitHub answers this call's readback of its own edit, then no body read
+                return UNREADABLE
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", failed_repair_saved_first)
+    out = _merge(world)
+    assert "not confirmed" not in out
+    assert state["gap"]["publication"]["body"] == {"status": "gap", "reason": "edit_failed" if failed_read else "exit",
+                                                   "seq": 1}
+    (stored,) = _receipts(world)  # saved after the gap, the confirmation is numbered after it
+    assert stored["publication"] == {**first["publication"], "body": {"status": "published", "seq": 2}}
+    assert stored["revision"] == first["revision"] and world.ctx.pending_events == events
+    assert merge_receipts.public_block(first) in gh.pr["body"] and _merges(world) == 1
+
+
+def test_the_receipt_writer_orders_body_results_by_what_they_confirmed(world):
+    """At the writer, a publication made from an older row: a confirmation is saved over a gap of its own number, an
+    older failure never over a confirmation, and a gap found after a confirmation saved since keeps its place."""
+    _merge(world)
+    (first,) = _receipts(world)
+
+    def save(read, body):
+        return merge_receipts.write_receipt(world.root, "merge-task", read,
+                                            publication={**read["publication"], "body": body})["publication"]["body"]
+
+    gap = merge_receipts.write_receipt(world.root, "merge-task", first, publication={
+        **first["publication"], "body": {"status": "gap", "reason": "exit", "seq": 1}})
+    assert save(first, {"status": "published", "seq": 1}) == {"status": "published", "seq": 2}
+    assert save(first, {"status": "gap", "reason": "timeout", "seq": 1}) == {"status": "published", "seq": 2}
+    restored = _receipts(world)[0]["publication"]["body"]  # a gap found from it takes the next number, as published
+    found = save(_receipts(world)[0], {"status": "gap", "reason": "exit", "seq": restored["seq"] + 1})
+    assert save(gap, {"status": "published", "seq": 2}) == found
+    assert _receipts(world)[0]["revision"] == first["revision"]
+
+
+def test_a_gap_found_after_a_newer_confirmation_outranks_a_delayed_older_one(world, monkeypatch):
+    """A genuinely later loss of the block stays recorded. One call restores and reads its block back, but before it
+    saves that, an edit removes the block, another call restores and saves it, a further edit removes it, and a third
+    call finds the gap and saves it. That gap follows a newer confirmation than the delayed one, so the delayed
+    confirmation is not recorded over it, and its caller's next read fails: the receipt keeps the gap."""
+    gh, write, state = world.gh, merge_receipts.write_receipt, {}
+    _merge(world)
+    gh.pr["body"] = "Rewritten by the owner."
+
+    def unreadable_body(args, *a, **kw):
+        return UNREADABLE if _body_read(args) else gh(args, *a, **kw)
+
+    def newer_events_first(drive_root, task_id, receipt, **kw):
+        if not state and ((kw.get("publication") or {}).get("body") or {}).get("status") == "published":
+            state["started"] = True  # this call read its own restored block back and is about to save it
+            gh.pr["body"] = "Rewritten again."
+            assert "not confirmed" not in _merge(world)
+            (state["newer"],) = _receipts(world)
+            gh.pr["body"], gh.fail_edit = "Rewritten a third time.", True
+            assert "not confirmed" in _merge(world)
+            (state["gap"],) = _receipts(world)
+            monkeypatch.setattr(github, "_gh_run", unreadable_body)
+        return write(drive_root, task_id, receipt, **kw)
+
+    monkeypatch.setattr(merge_receipts, "write_receipt", newer_events_first)
+    out = _merge(world)
+    assert state["newer"]["publication"]["body"] == {"status": "published", "seq": 1}
+    assert state["gap"]["publication"]["body"] == {"status": "gap", "reason": "exit", "seq": 2}
+    (stored,) = _receipts(world)
+    assert stored["publication"]["body"]["status"] == "gap" and "not confirmed" in out
+    assert "merge-receipt" not in gh.pr["body"] and _merges(world) == 1
+
+
+def test_a_block_an_edit_removed_is_owed_until_a_call_restores_it(world):
+    """A confirmed block stays confirmed through a failed re-read, but a body read without it is a verified gap.
+    The repair is tried at once; a failed one is recorded as owed in the same revision, and the next call restores
+    the block beside the edited text."""
+    _merge(world)
+    (first,) = _receipts(world)
+    world.gh.pr["body"] = "Rewritten by the owner."
+    world.gh.fail_edit = True
+    assert f"The PR-body receipt block was not confirmed; {RETRY}" in _merge(world)
+    (owed,) = _receipts(world)
+    assert owed["publication"]["body"] == {"status": "gap", "reason": "exit", "seq": 1}
+    assert owed["revision"] == first["revision"]
+    world.gh.fail_edit = False
+    assert "not confirmed" not in _merge(world)
+    (restored,) = _receipts(world)
+    assert restored["publication"] == {**first["publication"], "body": {"status": "published", "seq": 2}}
+    assert restored["revision"] == first["revision"]
+    assert world.gh.pr["body"] == "Rewritten by the owner.\n\n" + merge_receipts.public_block(first) + "\n"
+    assert _merges(world) == 1
+
+
+def test_status_guidance_names_the_read_that_cannot_merge_and_when_a_plain_call_sends(world):
+    """GitHub refused the request (405) and its readback failed, so the receipt is observed only until a
+    readback shows the PR open without a queue. Another call's readback ends that hold and the next plain call sends,
+    which the first answer says instead of promising a read-only repeat."""
+    gh = world.gh
+    gh.merge, gh.fail_view_after_merge = "refused", True
+    first = _merge(world)
+    (unknown,) = _receipts(world)
+    # No snapshot followed the refusal: the view before the request names no continuation.
+    assert f"{ONLY_TO_MERGE} No new request can be decided for it now: this call read no current GitHub snapshot " \
+           f"of the pull request. {LOOKUP}" in first and "continue_receipt_id=" not in first
+    assert "only read it back" not in first and "calls only read" not in first
+    gh.fail_view_after_merge = False
+    settled = _merge(world)  # another call reads GitHub back: the hold ends
+    assert "A new pr_merge call for the PR's current head may send one." in settled and _merges(world) == 1
+    gh.merge = "ok"
+    assert "merge: merged" in _merge(world) and _merges(world) == 2  # the send the first answer disclosed
+    description = next(e.schema for e in github.get_tools() if e.name == "pr_merge")["description"]
+    assert ("Call it only to merge, never to check status: github_read(method='get', kind='pr', target=NUMBER, "
+            "repo='[HOST/]OWNER/REPO') reads a PR without merging.") in description
+    assert "only if that receipt is still observed when the call runs; otherwise it sends" in description
+    assert "only reads GitHub back" not in description
+
+
+@pytest.mark.parametrize("case", ["refused-beside-a-queue", "unconfirmed-beside-a-queue", "merged",
+                                  "refused-beside-another-merge"])
+def test_an_owed_publication_promises_no_publication_only_repeat(world, monkeypatch, case):
+    """A retry of an owed projection is a pr_merge call like any other. Only one that still reads this
+    receipt back retries the publication, so the tool promises nothing of a later call and calls none
+    publication-only, whatever the outcome; short of a merge it names github_read for status."""
+    gh = world.gh
+    gh.fail_edit = True
+    gh.merge = {"unconfirmed-beside-a-queue": "queued", "merged": "ok"}.get(case, "refused")
+
+    def another_actor(args, *a, **kw):
+        result = gh(args, *a, **kw)
+        if sent(args) and case == "refused-beside-a-queue":
+            gh.pr["autoMergeRequest"] = {"enabledAt": "by another actor"}
+        if sent(args) and case == "refused-beside-another-merge":
+            gh.pr.update(state="MERGED", mergeCommit={"oid": MERGE}, mergedAt="2026-09-26T00:00:00Z")
+        return result
+
+    monkeypatch.setattr(github, "_gh_run", another_actor)
+    out = _merge(world)
+    (receipt,) = _receipts(world)
+    merged = "merge" in case
+    assert receipt["outcome"]["status"] == ("merged" if merged else "queued")
+    assert receipt["publication"]["body"]["status"] == "gap"
+    assert f"⚠️ The PR-body receipt block was not confirmed; {RETRY}" in out
+    assert "publication only" not in out and "calls only read" not in out
+    assert (f"{ONLY_TO_MERGE} {QUEUE_LOOKUP}" in out) is not merged and LOOKUP not in out
+
+
+def test_a_chains_hold_is_never_promised_to_last(world, monkeypatch):
+    """Both requests of a chain were refused by GitHub. A plain call settles the first as refused while its successor
+    is being sent; the successor's readback shows another actor's queue and its PR block is not confirmed. No hold
+    here lasts: once that queue is gone one plain call releases the successor too and the next one sends. So the
+    successor's answer names github_read for status and calls no later pr_merge read-only or publication-only."""
+    gh, write, pending = world.gh, merge_receipts.write_receipt, {}
+    gh.merge, gh.fail_view_after_merge = "refused", True
+    _merge(world)
+    (first,) = _receipts(world)
+    gh.fail_view_after_merge, gh.fail_edit = False, True
+
+    def successor_in_flight(args, *a, **kw):
+        if sent(args) and "write" in pending:
+            pending["stored"] = write(*pending.pop("write"), **pending.pop("kw"))  # the first settles as refused now
+            result = gh(args, *a, **kw)
+            gh.pr["autoMergeRequest"] = {"enabledAt": "by another actor"}
+            return result
+        return gh(args, *a, **kw)
+
+    def settles_during_the_send(drive_root, task_id, receipt, **kw):
+        if not pending and "publication" not in kw and (receipt.get("outcome") or {}).get("status") == "refused":
+            pending.update(write=(drive_root, task_id, receipt), kw=kw)  # this plain call read the PR open, no queue
+            pending["out"] = _merge(world, continue_receipt_id=first["receipt_id"])
+            return pending["stored"]
+        return write(drive_root, task_id, receipt, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", successor_in_flight)
+    monkeypatch.setattr(merge_receipts, "write_receipt", settles_during_the_send)
+    _merge(world)
+    out = pending["out"]
+    earlier, successor = sorted(_receipts(world), key=lambda r: r["receipt_id"] != first["receipt_id"])
+    assert earlier["outcome"] == {"status": "refused"} and successor["continues"] == first["receipt_id"]
+    assert successor["outcome"] == {"status": "queued", "reason": "auto_merge_pending"}
+    assert successor["effect"]["failure"] == "server_refused" and successor["publication"]["body"]["status"] == "gap"
+    assert f"{ONLY_TO_MERGE} {QUEUE_LOOKUP}" in out and f"The PR-body receipt block was not confirmed; {RETRY}" in out
+    assert "publication only" not in out and "calls only read" not in out and _merges(world) == 2
+    monkeypatch.setattr(merge_receipts, "write_receipt", write)
+    gh.pr["autoMergeRequest"], gh.fail_edit, gh.merge = None, False, "ok"
+    assert "A new pr_merge call for the PR's current head may send one." in _merge(world) and _merges(world) == 2
+    assert not any(merge_receipts._must_observe(r) for r in _receipts(world))  # both receipts are released
+    assert "merge: merged" in _merge(world) and _merges(world) == 3  # a plain call, which no answer called read-only
+
+
+@pytest.mark.parametrize("held", [True, False], ids=["earlier-request-unresolved", "released"])
+def test_a_refused_requests_owed_projection_is_repaired_while_its_receipt_is_read_back(world, monkeypatch, held):
+    """GitHub refused a request beside another actor's queue, so the PR body and card show it queued. Once the queue is
+    gone a plain call settles it as refused, but the refreshed block cannot be written. Where the request continued an
+    earlier one that is still unresolved, the chain stays observed: the answer promises no send, the next plain call
+    sends nothing and repairs the block. Where nothing holds the PR any more, the answer says a new call may send."""
+    gh = world.gh
+    if held:
+        gh.merge = "timeout_open"
+        _merge(world)
+    earlier = [r["receipt_id"] for r in _receipts(world)]
+    gh.merge = "refused"
+
+    def another_actors_queue(args, *a, **kw):
+        result = gh(args, *a, **kw)
+        if sent(args):
+            gh.pr["autoMergeRequest"] = {"enabledAt": "by another actor"}
+        return result
+
+    monkeypatch.setattr(github, "_gh_run", another_actors_queue)
+    _merge(world, **({"continue_receipt_id": earlier[0]} if held else {}))
+    monkeypatch.setattr(github, "_gh_run", gh)
+    refused = next(r for r in _receipts(world) if r["receipt_id"] not in earlier)
+    assert refused["outcome"]["status"] == "queued" and "Outcome: **queued**" in gh.pr["body"]
+    sends = _merges(world)
+    gh.pr["autoMergeRequest"], gh.fail_edit = None, True
+    out = _merge(world)
+    settled = _by_id(world)[refused["receipt_id"]]
+    assert settled["outcome"] == {"status": "refused"} and settled["publication"]["body"]["status"] == "gap"
+    assert "Outcome: **queued**" in gh.pr["body"] and _merges(world) == sends
+    if not held:
+        assert ("⚠️ The PR-body receipt block was not confirmed; it may still show the earlier outcome, and a new "
+                "pr_merge call may send a new merge request.") in out
+        assert "would send" not in out and RETRY not in out
+        return
+    assert f"⚠️ The PR-body receipt block was not confirmed; {RETRY}" in out
+    assert "would send" not in out and "may send a new merge request." not in out and ONLY_TO_MERGE in out
+    gh.fail_edit = False
+    again = _merge(world)
+    repaired = _by_id(world)[refused["receipt_id"]]
+    assert repaired["publication"]["body"]["status"] == "published" and repaired["revision"] == settled["revision"]
+    assert "Outcome: **refused** (by GitHub)" in gh.pr["body"] and "Outcome: **queued**" not in gh.pr["body"]
+    assert "not confirmed" not in again and "sent no new merge request" in again and _merges(world) == sends
+
+
+def test_a_delayed_edit_of_an_earlier_attempt_never_stays_over_its_successors_block(world, monkeypatch):
+    """A plain call refreshes a refused request's block. While its edit is in flight a decided successor merges and
+    publishes its own block; the delayed edit then lands over it. The earlier attempt no longer owns the PR body, so
+    the call that wrote over the successor restores the successor's block before it returns."""
+    gh, raced = world.gh, {}
+    gh.merge = "refused"
+
+    def another_actors_queue(args, *a, **kw):
+        result = gh(args, *a, **kw)
+        if sent(args):
+            gh.pr["autoMergeRequest"] = {"enabledAt": "by another actor"}
+        return result
+
+    monkeypatch.setattr(github, "_gh_run", another_actors_queue)
+    _merge(world)
+    (refused,) = _receipts(world)
+    assert refused["outcome"]["status"] == "queued" and "Outcome: **queued**" in gh.pr["body"]
+    gh.pr["autoMergeRequest"], gh.merge = None, "ok"
+
+    def successor_publishes_first(args, *a, **kw):
+        if args[:1] == ["api"] and "PATCH" in args and not raced:
+            raced["started"] = True  # the refreshed block is on its way: the body it was made from is already stale
+            monkeypatch.setattr(github, "_gh_run", gh)
+            raced["out"] = _merge(world, continue_receipt_id=refused["receipt_id"])
+            raced["body"] = gh.pr["body"]
+            monkeypatch.setattr(github, "_gh_run", successor_publishes_first)
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", successor_publishes_first)
+    _merge(world)
+    earlier, successor = sorted(_receipts(world), key=lambda r: r["receipt_id"] != refused["receipt_id"])
+    assert "merge: merged" in raced["out"] and successor["continues"] == earlier["receipt_id"]
+    assert merge_receipts.public_block(successor) in raced["body"] and earlier["outcome"] == {"status": "refused"}
+    assert merge_receipts.public_block(successor) in gh.pr["body"] and "Outcome: **refused**" not in gh.pr["body"]
+    assert successor["publication"]["body"]["status"] == "published" and _merges(world) == 2
+
+
+@pytest.mark.parametrize("comments_ok", [True, False], ids=["comments", "comments-unreadable"])
+@pytest.mark.parametrize("held", ["settles-meanwhile", "other-repository"])
+def test_comment_evidence_is_read_once_this_call_decides_a_new_request(world, monkeypatch, held, comments_ok):
+    """An attempt in view when the call starts (one that settles meanwhile, or another repository's
+    PR of the same number) defers the comment walk until this call decides a new request; an unreadable walk then
+    refuses with gh's words before any request."""
+    gh, walks = world.gh, []
+    in_flight = {"schema": 1, "receipt_id": "in-flight", "state": "effect_attempted", "number": 7,
+                 "repo": {"url": URL if held == "settles-meanwhile" else "https://github.com/other/demo/pull/7"},
+                 "launch_operation_ids": [], "requested": {"method": "squash", "expected_head_sha": HEAD},
+                 "observed_before": {}, "review": {}, "coverage": {},
+                 "effect": {"ok": False, "exit_code": 1, "http_status": 405, "failure": "server_refused", "output": ""}}
+    merge_receipts.write_receipt(world.root, "merge-task", in_flight)
+
+    def transport(args, *a, **kw):
+        if args[:2] == ["api", "graphql"] and held == "settles-meanwhile":  # GitHub's refusal is read back meanwhile
+            merge_receipts.write_receipt(world.root, "merge-task", {**in_flight, "state": "settled",
+                                                                    "outcome": {"status": "refused"}})
+        fields = args[args.index("--json") + 1].split(",") if args[:2] == ["pr", "view"] else []
+        if "comments" in fields:
+            walks.append(fields)
+            if not comments_ok:
+                return github.GhResult(False, "⚠️ GH_ERROR: gh: comments page unavailable (HTTP 502)", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", transport)
+    out = _merge(world)
+    assert walks == [["url", "comments"]]  # not with the first view: an attempt of PR #7 was in view then
+    if comments_ok:
+        assert "merge: merged" in out and _merges(world) == 1
+        assert next(r for r in _receipts(world) if r["receipt_id"] != "in-flight")["review"]["contributor_evidence"] == "absent"
+    else:
+        assert f"pr_unreadable — the pull request {URL} could not be read" in out and "comments page unavailable" in out
+        assert "nothing was merged" in out and _merges(world) == 0
+        assert [r["receipt_id"] for r in _receipts(world)] == ["in-flight"]
 
 
 def test_an_intent_without_any_outcome_is_only_read_back(world, monkeypatch):
@@ -468,6 +1643,10 @@ def test_an_intent_without_any_outcome_is_only_read_back(world, monkeypatch):
     assert "holds its merge intent with no recorded outcome yet" in out and "sent no new merge request" in out
     assert "had no confirmed outcome" not in out
     assert not any(sent(c) for c in original.calls)
+    # The tool names the read that cannot merge and promises nothing of a later plain call.
+    assert ONLY_TO_MERGE in out and LOOKUP in out and "calls only read" not in out
+    (settled,) = _receipts(world)
+    assert settled["state"] == "settled" and "effect" not in settled  # a readback that followed no effect records none
 
 
 def test_an_unwritable_intent_refuses_before_any_effect(world, monkeypatch):
@@ -518,7 +1697,7 @@ def test_successful_body_patch_needs_readback_and_recovers_without_second_merge(
     monkeypatch.setattr(github, "_gh_run", original)
     assert "sent no new merge request" in _merge(world)
     (after,) = _receipts(world)
-    assert after["publication"]["body"] == {"status": "published"}
+    assert after["publication"]["body"] == {"status": "published", "seq": 1}
     assert all(after[key] == before[key] for key in ("receipt_id", "revision", "outcome", "effect"))
     assert after["publication"]["card"] == before["publication"]["card"]
     assert world.gh.pr["body"] == description + "\n\n" + merge_receipts.public_block(after) + "\n"
@@ -770,6 +1949,37 @@ def test_card_outbox_survives_worker_exit_and_confirms_delivery_separately(world
     assert td.pending_deliveries(world.root) == []
 
 
+def test_a_card_the_outbox_gave_up_is_said_and_sent_again_until_it_is_delivered(world):
+    """While the outbox owes the card a repeat sends no second event. Once newer owed messages took every slot the
+    outbox retired it undelivered: the receipt no longer calls it owed, the tool says so, and each call that reads the
+    receipt back sends the same card again until a delivery is recorded."""
+    from supervisor import terminal_delivery as td
+
+    _merge(world)
+    (first,) = _receipts(world)
+    card = first["publication"]["card"]
+    (event,) = world.ctx.pending_events
+    assert card == {"status": "owed", "delivery_id": event["delivery_id"]}
+    assert "not confirmed" not in _merge(world) and _receipts(world) == [first] and world.ctx.pending_events == [event]
+    for index in range(td._PENDING_CAP):
+        assert td.register_pending_delivery(world.root, {"type": "send_message", "delivery_id": f"newer:{index}",
+                                                         "task_id": "merge-task", "chat_id": 7, "text": "newer"})
+    registry = td._read_registry(world.root)
+    assert card["delivery_id"] in registry["exhausted"] and card["delivery_id"] not in registry["pending"]
+    for _ in range(2):  # every call that reads the receipt back retries it
+        out = _merge(world)
+        (retired,) = _receipts(world)
+        assert retired["publication"]["card"] == {**card, "status": "gap", "reason": "outbox_exhausted"}
+        assert f"⚠️ The task-card receipt is not confirmed: outbox_exhausted; {RETRY}" in out
+        assert retired["revision"] == first["revision"]
+        assert retired["publication"]["body"] == first["publication"]["body"]
+    again = world.ctx.pending_events[1:]
+    assert len(again) == 2 and again == [{**event, "ts": resent["ts"]} for resent in again]
+    td.register_delivery(world.root, card["delivery_id"])  # the supervisor's post-send seam: one reached the chat
+    assert "not confirmed" not in _merge(world) and len(world.ctx.pending_events) == 3
+    assert _receipts(world)[0]["publication"]["card"] == {**card, "status": "delivered"} and _merges(world) == 1
+
+
 def test_body_uses_fresh_publication_view_and_confirms_a_lost_edit_reply(world, monkeypatch):
     original = world.gh
     concurrent_note = "\n\nNote added while merge was running.  \n"
@@ -788,6 +1998,29 @@ def test_body_uses_fresh_publication_view_and_confirms_a_lost_edit_reply(world, 
     assert _receipts(world)[0]["publication"]["body"]["status"] == "published"
     _merge(world)
     assert sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls) == 1
+
+
+@pytest.mark.parametrize("edit", ["removed", "older"])
+def test_a_full_repeat_restores_the_block_a_later_edit_dropped_without_a_new_card(world, edit):
+    """A later edit of the description dropped the confirmed block or left an older one: a full plain repeat restores
+    this receipt's block beside the edited text and records it as a later confirmation of the same revision; it sends
+    no second merge and registers no new card."""
+    _merge(world)
+    (first,) = _receipts(world)
+    assert first["publication"]["body"] == {"status": "published"}
+    events, patches = list(world.ctx.pending_events), sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls)
+    world.gh.pr["body"] = "Rewritten by the owner." + (
+        "" if edit == "removed" else "\n\n<!-- ouroboros:merge-receipt ab -->\nolder\n<!-- /ouroboros:merge-receipt -->\n\nFooter.")
+    assert "sent no new merge request" in _merge(world)
+    body = world.gh.pr["body"]
+    assert merge_receipts.public_block(first) in body and "older" not in body
+    assert body.startswith("Rewritten by the owner.\n\n<!-- ouroboros:merge-receipt ") and (
+        edit == "removed" or body.endswith("<!-- /ouroboros:merge-receipt -->\n\nFooter."))
+    assert sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls) == patches + 1
+    (restored,) = _receipts(world)
+    assert restored["publication"] == {**first["publication"], "body": {"status": "published", "seq": 1}}
+    assert {**restored, "publication": first["publication"], "updated_at": first["updated_at"]} == first
+    assert world.ctx.pending_events == events and _merges(world) == 1
 
 
 @pytest.mark.parametrize(("body_size", "method"), [(80, "merge"), (80, "rebase"), (65536, "squash")])
@@ -845,6 +2078,7 @@ def test_decisions_chain_forward_and_repeats_rejoin_without_resend_or_stale_publ
     assert refused.startswith("⚠️ PR_MERGE_REFUSED: ⚠️ PR #7 merge: refused (by GitHub)") and _merges(world) == 2
     # A plain call would only read back while A stays unconfirmed, so the next decision must name B.
     assert f"continue_receipt_id='{b['receipt_id']}'" in refused and f"continue_receipt_id='{a['receipt_id']}'" not in refused
+    assert ONLY_TO_MERGE in refused and "calls only read" not in refused  # no promise that A keeps holding
     again = _merge(world, continue_receipt_id=a["receipt_id"])
     assert "This decision already sent its request" in again and f"receipt_id={b['receipt_id']}" in again
     assert f"continue_receipt_id='{b['receipt_id']}'" in again and _merges(world) == 2
@@ -896,7 +2130,64 @@ def test_concurrent_deliveries_of_one_decision_send_once(world, monkeypatch):
         outputs = list(pool.map(lambda _: _merge(world, continue_receipt_id=a["receipt_id"]), range(2)))
     assert _merges(world) == 2  # the unknown request and exactly one decided successor
     assert len([r for r in _receipts(world) if r.get("continues") == a["receipt_id"]]) == 1
-    assert sum("This decision already sent its request" in out for out in outputs) == 1
+    assert sum("This decision already" in out for out in outputs) == 1  # its words follow the effect recorded by then
+
+
+@pytest.mark.parametrize("snapshot_ok", [True, False], ids=["complete", "unavailable"])
+def test_duplicate_decision_rejoins_successor_settled_during_snapshot(world, monkeypatch, snapshot_ok):
+    world.gh.merge = "timeout_open"
+    _merge(world)
+    (first,) = _receipts(world)
+    args = {"continue_receipt_id": first["receipt_id"]}
+    world.gh.merge = "ok"
+    gh, winner = world.gh, []
+
+    def snapshot_race(argv, *a, **kw):
+        if argv[:2] == ["api", "graphql"] and not winner:
+            winner.append(None)
+            winner[0] = _merge(world, **args)
+            if not snapshot_ok:
+                return github.GhResult(False, "snapshot unavailable", 1, 502, "exit")
+        return gh(argv, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", snapshot_race)
+    replay = _merge(world, **args)
+    assert "merge: merged" in winner[0] and "merge: merged" in replay
+    assert "This decision already sent its request" in replay and "sent no new merge request" in replay
+    # The winner confirmed the PR-body block; the replay joined its stored row and read no body itself.
+    assert ("⚠️ The PR-body receipt block was last confirmed by an earlier read; this call made no confirmation read "
+            "of it, so this call does not confirm it is still there.") in replay and "last confirmed" not in winner[0]
+    assert _merges(world) == len(_receipts(world)) == 2
+
+
+def test_a_repeated_decision_before_its_request_is_sent_claims_no_send(world, monkeypatch):
+    """A repeat of an explicit decision rejoins its successor while that holds only its intent: the decided call has
+    not sent its request yet. The repeat says the decision has this receipt, whose request is not recorded as sent,
+    and names no new decision of it; once the request's effect is recorded, a repeat says it was sent."""
+    world.gh.merge = "timeout_open"
+    _merge(world)
+    (a,) = _receipts(world)
+    world.gh.merge, gh, repeat = "ok", world.gh, {}
+
+    def repeated_before_the_send(args, *a_, **kw):
+        if sent(args) and not repeat:
+            monkeypatch.setattr(github, "_gh_run", gh)
+            repeat["text"] = _merge(world, continue_receipt_id=a["receipt_id"])
+            repeat["row"] = next(r for r in _receipts(world) if r.get("continues") == a["receipt_id"])
+            repeat["sends"] = _merges(world)
+            monkeypatch.setattr(github, "_gh_run", repeated_before_the_send)
+        return gh(args, *a_, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", repeated_before_the_send)
+    assert "merge: merged" in _merge(world, continue_receipt_id=a["receipt_id"])
+    said, successor = repeat["text"], repeat["row"]
+    assert "effect" not in successor and repeat["sends"] == 1 and _merges(world) == 2
+    assert f"receipt_id={successor['receipt_id']}" in said
+    assert ("This decision already has this receipt, whose merge request is not recorded as sent, so this call only "
+            "read GitHub back and sent no new merge request." in said)
+    assert "already sent" not in said and "continue_receipt_id=" not in said and "reads the PR without merging" in said
+    again = _merge(world, continue_receipt_id=a["receipt_id"])
+    assert "This decision already sent its request as this receipt" in again and _merges(world) == 2
 
 
 def test_continuation_links_survive_the_disposable_receipt_cap(world):
@@ -1047,7 +2338,12 @@ def answer(body, code=0, err=""):
     sys.stderr.write(err)
     sys.exit(code)
 if args[:2] == ["pr", "view"]:
-    answer(state["pr"])
+    answer({k: state["pr"][k] for k in args[args.index("--json")+1].split(",") if k in state["pr"]})
+if args[:2] == ["api", "graphql"]:
+    envelope = json.loads(sys.stdin.read())
+    assert envelope["variables"] == {"owner": "octo", "name": "demo", "number": 7}
+    snapshot = {k: v for k, v in state["pr"].items() if k != "comments"}
+    answer({"data": {"repository": {"pullRequest": snapshot}}})
 if args[:1] == ["api"] and "PUT" in args:
     request = json.loads(sys.stdin.read())
     with open(log_path, "a") as log:
@@ -1141,3 +2437,234 @@ def test_the_owners_card_names_a_failed_review_of_earlier_code_and_a_pass_stays_
     assert "FAIL" not in merge_receipts.coverage_reading(receipt("PASS", coverage))[0]
     label, _sentence = merge_receipts.coverage_reading(receipt("FAIL", {"status": "covers_head"}))
     assert label == merge_receipts._REJECTED
+
+
+# --- 28 Nov (owner: «Исправить сообщения, узко перепроверить и влить»): each answer says only what it knows ---------
+
+
+def _unlaunchable_gh(tmp_path, monkeypatch):
+    """A PATH whose only ``gh`` the OS refuses to execute (mode 0644): a real exec denial, nothing reaches a network."""
+    folder = tmp_path / "denied-bin"
+    folder.mkdir()
+    (folder / "gh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (folder / "gh").chmod(0o644)
+    monkeypatch.setattr(github, "common_tool_directories", lambda _path: [])
+    monkeypatch.setenv("PATH", str(folder))
+
+
+@pytest.mark.parametrize("witness", [
+    "typed",  # the transport's answer as every platform types it
+    pytest.param("os", marks=pytest.mark.skipif(__import__("os").name == "nt",
+                                                reason="an extensionless POSIX gh and its mode bits are the witness")),
+])
+def test_a_merge_request_gh_could_not_start_never_reads_as_sent_and_keeps_its_custody(world, monkeypatch, tmp_path,
+                                                                                       witness):
+    """The decided request's own gh is refused by the OS: the answers and a rejoined repeat say it was not sent, while
+    the receipt keeps the unknown effect, custody and plain-repeat read-back it had (a wording fact only)."""
+    world.gh.merge = "timeout_open"
+    _merge(world)
+    (a,) = _receipts(world)
+    world.gh.merge, gh, denied = "ok", world.gh, []
+
+    def exec_denied(args, ctx, timeout=30, input_data=None, **kw):
+        if sent(args):  # the decided PUT never starts gh: the OS refuses it, or the transport says so
+            denied.append(list(args))
+            if witness == "typed":
+                return github.GhResult(False, "⚠️ GH_ERROR: [Errno 13] Permission denied: 'gh'", None, None,
+                                       "exception", not_launched=True)
+            return REAL_GH_RUN(args, ctx, timeout=timeout, input_data=input_data, diagnostic_only=True)
+        return gh(args, ctx, timeout=timeout, input_data=input_data, **kw)
+
+    if witness == "os":
+        _unlaunchable_gh(tmp_path, monkeypatch)
+    monkeypatch.setattr(github, "_gh_run", exec_denied)
+    decided = _merge(world, continue_receipt_id=a["receipt_id"])
+    successor = next(r for r in _receipts(world) if r.get("continues") == a["receipt_id"])
+    assert successor["effect"]["failure"] == "exception" and successor["effect"]["not_launched"] is True
+    assert "Permission denied" in successor["effect"]["output"] and len(denied) == 1 and _merges(world) == 1
+    assert "failure=exception, gh could not be started, so it was not sent: " in decided
+    assert merge_receipts._must_observe(successor) and not merge_receipts.effect_is_definite(successor)
+    assert not merge_receipts.no_effect_request(successor)  # custody and every NO_EFFECT reading are unchanged
+    again = _merge(world, continue_receipt_id=a["receipt_id"])
+    assert ("This decision already has this receipt, whose merge request was not sent because gh could not be "
+            "started, so this call only read GitHub back and sent no new merge request.") in again
+    assert "already sent its request" not in again and len(denied) == 1 and _merges(world) == 1
+    plain = _merge(world)
+    assert "sent no new merge request" in plain and len(denied) == 1 and _merges(world) == 1
+
+
+def test_a_repeated_decision_says_a_timed_out_request_was_not_confirmed_as_sent(world):
+    """A timeout leaves the submission unconfirmed; only GitHub's answer (merged or refused) says it was sent."""
+    world.gh.merge = "timeout_open"
+    _merge(world)
+    (a,) = _receipts(world)
+    _merge(world, continue_receipt_id=a["receipt_id"])  # the decided request times out too
+    again = _merge(world, continue_receipt_id=a["receipt_id"])
+    assert ("This decision already has this receipt, whose merge attempt is recorded but not confirmed as submitted "
+            "to GitHub, so this call only read GitHub back and sent no new merge request.") in again
+    assert "already sent" not in again and _merges(world) == 2
+    world.gh.merge = "refused"
+    b = next(r for r in _receipts(world) if r.get("continues") == a["receipt_id"])
+    _merge(world, continue_receipt_id=b["receipt_id"])
+    refused = _merge(world, continue_receipt_id=b["receipt_id"])
+    assert refused.startswith("⚠️ PR_MERGE_REFUSED: ⚠️ PR #7 merge: refused (by GitHub)")
+    assert "This decision already sent its request as this receipt, and GitHub refused it, so" in refused
+    assert _merges(world) == 3
+
+
+def test_a_continuation_a_running_call_refuses_is_never_suggested(world):
+    """The earlier call of the attempt still holds its claim: a plain repeat names the read that cannot merge and why
+    no decision can follow now, never a continue_receipt_id the very next call would refuse."""
+    write_task_result(world.root, "merge-task", STATUS_RUNNING, root_task_id="merge-task", delegation_role="root",
+                      launch_handoffs={"op-live": {"tool": "pr_merge", "task_id": "merge-task", "claimed_at": "t",
+                                                   "root_task_id": "merge-task", "state": "claimed",
+                                                   "local_owner": {}, "owner_proof": {}}})
+    world.gh.merge = "timeout_open"
+    _merge(world)
+    (a,) = _receipts(world)
+    merge_receipts.write_receipt(world.root, "merge-task", {**a, "launch_operation_ids": ["op-live"]})
+    world.gh.merge = "ok"
+    out = _merge(world)
+    assert "continue_receipt_id=" not in out and _merges(world) == 1
+    assert (f"{ONLY_TO_MERGE} No new request can be decided for it now: its call may still be running. {LOOKUP}"
+            in out)
+    refused = _merge(world, continue_receipt_id=a["receipt_id"])
+    assert "continuation_refused" in refused and _merges(world) == 1
+
+
+@pytest.mark.parametrize("now,why,refusal", [
+    ({"headRefOid": "f" * 40}, f"current head is {'f' * 40}, not {HEAD} (head_moved)", "head_moved"),
+    ({"state": "CLOSED"}, "the pull request is CLOSED (pr_not_open)", "pr_not_open"),
+    ({"baseRefName": "release"}, "the pull request now targets release, not main (base_moved)", "base_moved"),
+    ({"mergeStateStatus": "BLOCKED"},
+     "GitHub reports the pull request BLOCKED: the base branch policy prohibits the merge (not_mergeable)",
+     "not_mergeable"),
+    ("no_snapshot", "this call read no current GitHub snapshot of the pull request", "pr_unreadable"),
+])
+def test_a_duplicate_names_no_continuation_the_current_pr_would_refuse(world, monkeypatch, now, why, refusal):
+    """A plain duplicate after an unknown request reads the PR as it is now; the advice follows the very rule a
+    continuation's send obeys, so it never names a continue_receipt_id that call would refuse, and sends nothing."""
+    world.gh.merge = "timeout_open"
+    _merge(world)
+    (a,) = _receipts(world)
+    gh = world.gh
+    if now == "no_snapshot":
+        def snapshotless(args, *a_, **kw):
+            if args[:2] == ["api", "graphql"]:
+                gh.calls.append(list(args))
+                return github.GhResult(False, "⚠️ GH_ERROR: gh: Bad Gateway (HTTP 502)", 1, 502, "exit")
+            return gh(args, *a_, **kw)
+        monkeypatch.setattr(github, "_gh_run", snapshotless)
+    else:
+        gh.pr.update(now)
+    out = _merge(world)
+    assert "continue_receipt_id=" not in out and _merges(world) == 1
+    assert f"{ONLY_TO_MERGE} No new request can be decided for it now: {why}. {LOOKUP}" in out
+    gh.merge = "ok"
+    decided = _merge(world, continue_receipt_id=a["receipt_id"])
+    assert decided.startswith(f"⚠️ PR_MERGE_REFUSED: {refusal}") and _merges(world) == 1
+
+
+@pytest.mark.parametrize("view_after", ["closed", "unreadable"])
+def test_the_sender_names_no_continuation_without_a_snapshot_after_its_request(world, monkeypatch, view_after):
+    """The sender's request ended unknown and no GitHub snapshot followed it: the snapshot before the request, or gh's
+    view without the base SHA (here CLOSED, or no read at all), never supports naming a continue_receipt_id."""
+    world.gh.merge = "timeout_open"
+    gh = world.gh
+
+    def snapshotless_after_send(args, *a, **kw):
+        if args[:2] == ["api", "graphql"] and any(sent(c) for c in gh.calls):
+            gh.calls.append(list(args))
+            return github.GhResult(False, "⚠️ GH_ERROR: gh: Bad Gateway (HTTP 502)", 1, 502, "exit")
+        if sent(args) and view_after == "closed":
+            gh.pr.update(state="CLOSED")
+        gh.fail_view_after_merge = view_after == "unreadable"
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", snapshotless_after_send)
+    out = _merge(world)
+    assert "PR_MERGE_UNKNOWN" in out and "continue_receipt_id=" not in out and _merges(world) == 1
+    assert (f"{ONLY_TO_MERGE} No new request can be decided for it now: this call read no current GitHub snapshot "
+            f"of the pull request. {LOOKUP}") in out
+
+
+def test_continuation_eligibility_excludes_only_this_calls_own_claim(tmp_path):
+    write_task_result(tmp_path, "t", STATUS_RUNNING, root_task_id="t", delegation_role="root", launch_handoffs={
+        op: {"tool": "pr_merge", "task_id": "t", "claimed_at": "t", "root_task_id": "t", "state": "claimed",
+             "local_owner": {}, "owner_proof": {}} for op in ("op-me", "op-other")})
+    now = {"state": "OPEN", "head_sha": HEAD, "base_ref": "main", "base_sha": BASE, "merge_state": "CLEAN",
+           "is_draft": False, "auto_merge": False}
+    receipt = {"receipt_id": "r", "state": "settled", "outcome": {"status": "unknown"}, "repo": {"url": URL},
+               "number": 7, "requested": {"method": "squash", "expected_head_sha": HEAD}, "observed_before": now,
+               "effect": {"ok": False, "failure": "timeout"}, "launch_operation_ids": ["op-me"]}
+
+    def why(result, own):
+        return merge_receipts._repeat(result, [], tmp_path, "t", own, now)["continue_refused"]
+
+    assert why(receipt, "op-me") == ""
+    assert why(receipt, "") == "its call may still be running"
+    assert why(dict(receipt, launch_operation_ids=["op-me", "op-other"]), "op-me") == "its call may still be running"
+    # The reported result predates op-other's claim on the same receipt; the recorded row of the same read decides.
+    merge_receipts.write_receipt(tmp_path, "t", dict(receipt, launch_operation_ids=["op-me", "op-other"]))
+    assert why(receipt, "op-me") == "its call may still be running"
+
+
+def test_whose_merge_github_shows_is_said_alike_in_every_answer(world):
+    """The sender's proof, a request proven to have changed nothing, or neither: one phrase per case, so a later
+    plain readback never contradicts the decision's repeat."""
+    first = _merge(world)
+    assert "GitHub shows the PR merged by this receipt's request." in first
+    again = _merge(world)
+    assert ("This PR's merge is already recorded in this receipt, so this call only read GitHub back and sent no new "
+            "merge request. GitHub shows the PR merged by this receipt's request.") in again
+
+
+def test_a_merge_no_evidence_attributes_is_not_called_another_requests(world):
+    """A decided request merged, but a successor's own merge is never proven (the request it continues may have landed):
+    every later answer says the merge is shown and its request unproven, never that another request made it."""
+    world.gh.merge = "timeout_open"
+    _merge(world)
+    (a,) = _receipts(world)
+    world.gh.merge = "ok"
+    _merge(world, continue_receipt_id=a["receipt_id"])
+    successor = next(r for r in _receipts(world) if r.get("continues") == a["receipt_id"])
+    assert successor["outcome"]["attribution"] == "unproven" and "effect" in successor
+    unproven = "GitHub shows the PR merged; which request merged it is not proven."
+    again = _merge(world, continue_receipt_id=a["receipt_id"])
+    assert "This decision already sent its request as this receipt" in again and unproven in again
+    plain = _merge(world)
+    assert unproven in plain and "already recorded in this receipt" in plain
+    for text in (again, plain):
+        assert "by another request" not in text and "by this receipt's request" not in text
+        assert text.count(unproven) == 1 and "not attributed" not in text
+    assert _merges(world) == 2
+
+
+def test_a_body_block_this_call_could_not_read_is_reported_as_last_confirmed(world, monkeypatch):
+    """The block was confirmed, then a person removed it and GitHub cannot be read: the stored ``published`` stays the
+    past observation it is, this answer says so, and no body edit or merge request is sent."""
+    _merge(world)
+    (merged,) = _receipts(world)
+    assert merged["publication"]["body"]["status"] == "published"
+    world.gh.pr["body"] = "Owner rewrote the description."
+    gh = world.gh
+    edits = sum("PATCH" in c for c in gh.calls)
+
+    def body_unreadable(args, *a, **kw):
+        if args[:2] == ["pr", "view"] and args[args.index("--json") + 1] == "url,body":
+            gh.calls.append(list(args))
+            return github.GhResult(False, "⚠️ GH_ERROR: gh: Bad Gateway (HTTP 502)", 1, 502, "exit")
+        return gh(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", body_unreadable)
+    out = _merge(world)
+    # This call's snapshot did read the body (without the block); only the block's own confirmation read failed.
+    assert any(c[:2] == ["api", "graphql"] for c in gh.calls[-4:]) and "url,body" in gh.calls[-1]
+    assert ("⚠️ The PR-body receipt block was last confirmed by an earlier read; this call's confirmation read of it "
+            "failed (⚠️ GH_ERROR: gh: Bad Gateway (HTTP 502)), so this call does not confirm it is still there.") in out
+    (stored,) = _receipts(world)
+    assert stored["publication"] == merged["publication"] and "body_read" not in stored
+    assert sum("PATCH" in c for c in gh.calls) == edits and _merges(world) == 1
+    monkeypatch.setattr(github, "_gh_run", gh)
+    restored = _merge(world)  # a body read again restores the block and says nothing of an earlier read
+    assert "last confirmed" not in restored and "### Ouroboros merge receipt" in gh.pr["body"] and _merges(world) == 1

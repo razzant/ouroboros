@@ -22,12 +22,13 @@ from ouroboros.task_results import load_task_result
 from ouroboros.tools import github
 from ouroboros.tools.registry import ToolContext
 from tests.test_batch4_producer_custody import _consumers
-from tests.test_pr_merge_receipts import HEAD, MERGE, ROUTE, URL, FakeGh, sent
+from tests.test_pr_merge_receipts import HEAD, LOOKUP, MERGE, ONLY_TO_MERGE, ROUTE, URL, FakeGh, sent
 
 
 REPAIRED = "e" * 40
 SEND = ["api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
 ENDED = "request refused by GitHub"
+REAL_GH_ENV = github._gh_env
 
 
 def answer(status, message):
@@ -151,7 +152,7 @@ def chain(tmp_path, monkeypatch):
                 answered = answered[1:]
             rc, stdout, stderr = answered
             return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
-        if args[:2] == ["pr", "view"] and state.merges and state.observe:
+        if args[:2] == ["api", "graphql"] and state.merges and state.observe:
             state.observed.append(state.observe())  # a parallel reader while the handler still reads back
         result = fake(args, registry._ctx, input_data=kw.get("input"))
         return SimpleNamespace(returncode=0 if result.ok else 1, stdout=result.text if result.ok else "",
@@ -170,6 +171,128 @@ def _merge(chain, head, method="squash", **kw):
 
 def _receipts(chain):
     return (load_task_result(chain.root, "root") or {}).get("merge_receipts") or []
+
+
+@pytest.mark.parametrize("old", [True, False], ids=["old-cli", "current-cli"])
+def test_gh_reads_the_pr_base_and_keeps_late_comment_evidence(chain, monkeypatch, old):
+    from tests.test_pr_merge_receipts import BASE, CHECKLIST
+
+    chain.fake.pr["comments"] = [{"body": "note"}] * 100 + [{"body": CHECKLIST}]
+    real = github.subprocess.run
+    reads, comment_walks = [], []
+
+    def cli(argv, **kw):
+        if argv[:3] == ["gh", "pr", "view"]:
+            fields = argv[argv.index("--json") + 1].split(",")
+            if old and "baseRefOid" in fields:
+                return subprocess.CompletedProcess(argv, 1, "", 'Unknown JSON field: "baseRefOid"\nAvailable fields:\n')
+            if "comments" in fields:
+                comment_walks.append(len(chain.merges))
+                if chain.merges:
+                    return subprocess.CompletedProcess(argv, 1, "", "gh: second comments page unavailable (HTTP 502)")
+        if argv[:3] == ["gh", "api", "graphql"]:
+            reads.append((argv, json.loads(kw["input"])))
+        return real(argv, **kw)
+
+    monkeypatch.setattr(github.subprocess, "run", cli)
+    chain.answers[:] = ["merged"]
+    result = _merge(chain, HEAD)
+    assert "merge: merged" in result.text, result.text
+    (receipt,) = _receipts(chain)
+    assert receipt["observed_before"]["base_sha"] == BASE
+    assert receipt["review"]["contributor_evidence"] == "present_validated"
+    assert receipt["observed_after"]["base_sha"] == BASE
+    assert "sent no new merge request" in _merge(chain, HEAD).text
+    assert comment_walks == [0]
+    assert len(chain.merges) == 1 and chain.payloads[0]["sha"] == HEAD
+    assert reads and all(argv[argv.index("--hostname") + 1] == "github.com" and
+                         payload["variables"] == {"owner": "octo", "name": "demo", "number": 7}
+                         for argv, payload in reads)
+
+
+@pytest.mark.parametrize("leg", ["view", "snapshot", "merge"])
+def test_pr_merge_diagnostics_keep_debug_off_and_credentials_redacted(chain, monkeypatch, leg):
+    public, enterprise, success_payload = "fixture-public-secret", "fixture-enterprise-secret", "private PR body"
+    monkeypatch.setenv("GH_DEBUG", "api")
+    monkeypatch.setenv("DEBUG", "1")
+    monkeypatch.setenv("GH_ENTERPRISE_TOKEN", enterprise)
+    monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: public)
+    monkeypatch.setattr(github, "_gh_env", REAL_GH_ENV)
+    real = github.subprocess.run
+    if leg == "merge":
+        chain.answers.append((1, success_payload, f"gh: denied {public} {enterprise} (HTTP 403)"))
+
+    def failed_read(argv, **kw):
+        if argv[0] == "gh":
+            assert not {"DEBUG", "GH_DEBUG"}.intersection(kw["env"])
+            assert (kw["env"]["GH_TOKEN"], kw["env"]["GH_ENTERPRISE_TOKEN"]) == (public, enterprise)
+        prefix = {"view": ["gh", "pr", "view"], "snapshot": ["gh", "api", "graphql"]}.get(leg)
+        if argv[:3] == prefix:
+            return subprocess.CompletedProcess(argv, 1, success_payload, f"gh: denied {public} {enterprise} (HTTP 403)")
+        return real(argv, **kw)
+
+    monkeypatch.setattr(github.subprocess, "run", failed_read)
+    result = _merge(chain, HEAD)
+    assert "gh: denied *** *** (HTTP 403)" in result.text
+    assert not any(value in result.text for value in (public, enterprise, success_payload))
+    if leg == "merge":
+        assert "PR_MERGE_UNKNOWN" in result.text and len(chain.merges) == len(_receipts(chain)) == 1
+    else:
+        assert result.meta.get("operation_outcome") == "completed_no_effect"
+        assert "pr_unreadable" in result.text and not chain.merges and not _receipts(chain)
+
+
+@pytest.mark.parametrize("fault", ["partial", "wrong-target", "missing-base", "query-no-base", "head-moved", "auto-merge"])
+def test_the_snapshot_controls_the_new_send(chain, monkeypatch, fault):
+    from ouroboros import merge_receipts
+
+    if fault == "query-no-base":
+        monkeypatch.setattr(merge_receipts, "_PR_SNAPSHOT_QUERY", merge_receipts._PR_SNAPSHOT_QUERY.replace("baseRefOid", ""))
+    real = github.subprocess.run
+
+    def change_snapshot(argv, **kw):
+        result = real(argv, **kw)
+        if argv[:3] != ["gh", "api", "graphql"]:
+            return result
+        envelope = json.loads(result.stdout)
+        snapshot = envelope["data"]["repository"]["pullRequest"]
+        if fault == "partial":
+            envelope["errors"] = [{"message": "partial PR snapshot"}]
+        elif fault == "wrong-target":
+            snapshot["url"] = "https://github.com/other/demo/pull/7"
+        elif fault == "missing-base":
+            snapshot.pop("baseRefOid")
+        elif fault == "head-moved":
+            snapshot["headRefOid"] = REPAIRED
+        elif fault == "auto-merge":
+            snapshot["autoMergeRequest"] = {"enabledAt": "now"}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(envelope), "")
+
+    monkeypatch.setattr(github.subprocess, "run", change_snapshot)
+    result = _merge(chain, HEAD)
+    reason = {"head-moved": "head_moved", "auto-merge": "auto_merge_pending"}.get(fault, "pr_unreadable")
+    assert f"PR_MERGE_REFUSED: {reason}" in result.text
+    assert result.meta.get("operation_outcome") == "completed_no_effect"
+    assert not chain.merges and not _receipts(chain)
+
+
+def test_a_failed_snapshot_after_send_can_still_observe_and_publish_the_merge(chain, monkeypatch):
+    real = github.subprocess.run
+
+    def failed_snapshot(argv, **kw):
+        if argv[:3] == ["gh", "api", "graphql"] and chain.merges:
+            return subprocess.CompletedProcess(argv, 1, "", "gh: snapshot unavailable (HTTP 502)")
+        return real(argv, **kw)
+
+    monkeypatch.setattr(github.subprocess, "run", failed_snapshot)
+    chain.answers[:] = ["merged"]
+    assert "merge: merged" in _merge(chain, HEAD).text
+    assert "merge: merged" in _merge(chain, HEAD).text  # read-back-only, despite the failed optional enrichment
+    (receipt,) = _receipts(chain)
+    assert receipt["outcome"]["merge_sha"] == MERGE
+    assert receipt["publication"]["body"] == {"status": "published"}
+    assert "snapshot unavailable" not in chain.fake.pr["body"]
+    assert len(chain.merges) == 1
 
 
 def _held(chain):
@@ -215,7 +338,9 @@ def test_another_actors_queue_then_close_stays_observed_while_our_refused_reques
     assert current["effect"] == receipt["effect"] and current["outcome"] == receipt["outcome"]
     assert output.meta["operation_outcome"] == "completed_no_effect"
     assert "changed nothing, so it holds no task custody" in output.text
-    assert "Until GitHub shows the PR open without a queue, repeat calls only read it back." in output.text
+    # The tool promises nothing of a later call: it names the read that cannot merge.
+    assert f"{ONLY_TO_MERGE} {LOOKUP}" in output.text
+    assert "calls only read it back" not in output.text and "continue_receipt_id" not in output.text
     assert _held(chain) is False
     _merge(chain, HEAD)
     assert len(chain.merges) == 1
@@ -296,6 +421,10 @@ def test_a_pr_already_set_to_auto_merge_waits_and_this_tool_sends_nothing(chain)
     chain.fake.pr.update(autoMergeRequest={"enabledAt": "by another actor"}, mergeStateStatus="CLEAN")
     waiting = _merge(chain, HEAD)
     assert waiting.text.startswith("⚠️ PR_MERGE_REFUSED: auto_merge_pending — GitHub shows auto-merge enabled")
+    # The read it names shows the queue itself, which github_read's concise PR omits.
+    assert ("github_read(method='get', kind='pr', target=7, repo='github.com/octo/demo', detail='full', "
+            "fields=['state', 'merged_at', 'auto_merge']) reads the PR without merging") in waiting.text
+    assert "may send the merge request" in waiting.text
     assert waiting.meta["operation_outcome"] == "completed_no_effect"
     assert not chain.merges and not _receipts(chain) and _held(chain) is False
     chain.fake.pr.update(autoMergeRequest=None)
