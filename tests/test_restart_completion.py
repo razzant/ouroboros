@@ -589,10 +589,10 @@ def test_posix_transfer_observes_panic_accepted_during_its_last_log(monkeypatch,
 
 @pytest.mark.parametrize("panic_during_wait", [False, True], ids=["transfer", "panic-during-wait"])
 def test_posix_transfer_checks_panic_again_after_its_exit_waits(monkeypatch, tmp_path, panic_during_wait):
-    """Exec ends this image as an exit would: first the display projections' last pass, bounded inside the stop's
-    deadline. A Panic accepted during that wait owns the exit (its thread and writes would die with an exec), so
-    nothing is exec'd and no fallback spawns; without one, one exec."""
-    from ouroboros import config, display_projections, process_custody, server_control
+    """Exec ends this image as an exit would: first the display projections' last pass, then the socket lines still
+    queued, each bounded inside the stop's deadline. A Panic accepted during those waits owns the exit (its thread
+    and writes would die with an exec), so nothing is exec'd and no fallback spawns; without one, one exec."""
+    from ouroboros import config, display_projections, process_custody, process_logging, server_control
 
     execs, waits = [], []
     monkeypatch.setattr(server_control, "_restart_stop_requested", False)
@@ -609,9 +609,10 @@ def test_posix_transfer_checks_panic_again_after_its_exit_waits(monkeypatch, tmp
         return True
 
     monkeypatch.setattr(display_projections, "drain", drain)
+    monkeypatch.setattr(process_logging, "finish_record_handoffs", lambda _deadline: waits.append("socket lines"))
     log = SimpleNamespace(info=lambda *a: None, exception=lambda *a: pytest.fail("the transfer did not fail"))
     server_control.restart_current_process("127.0.0.1", 9123, repo_dir=tmp_path, log=log)
-    assert waits == ["display projections"]
+    assert waits == ["display projections", "socket lines"]
     assert execs == ([] if panic_during_wait else [["python", "server.py"]])
 
 

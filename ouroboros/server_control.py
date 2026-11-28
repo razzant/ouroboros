@@ -255,9 +255,10 @@ def restart_current_process(
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
         if _restart_stop_requested:
             return  # the watcher parks in exit_after_shutdown; Panic keeps its thread and writes
-        drain_display_projections()  # the exec ends this image as an exit would: its last display pass first
+        drain_display_projections()  # the exec ends this image as an exit would: its last display pass,
+        _finish_record_handoffs()  # then the socket lines still queued, each bounded by the stop's deadline
         if _restart_stop_requested:
-            return  # a Panic accepted during that wait owns the exit as well
+            return  # a Panic accepted during those waits owns the exit as well
         try:
             os.execvpe(sys.executable, argv, env)
             return  # exec does not return; only a test double of it reaches this line
@@ -354,12 +355,14 @@ def exit_after_shutdown(exit_code: int) -> None:
     interrupted capture stays owed to the next generation. An accepted Panic
     parks the caller until its own flag/control writes and exit finish; Panic
     never waits for this caller. Ordinary imported main()/ASGI shutdown returns.
-    Before the exit the display projections' last pass and then the output relay's handover to a
-    reading launcher finish, each bounded inside the ordinary stop's own deadline (``drain_display_projections``,
-    ``finish_output_relay``); Panic and the backstops never wait for either.
+    Before the exit the display projections' last pass, the socket lifecycle lines still queued and then
+    the output relay's handover to a reading launcher finish, each bounded inside the ordinary stop's own
+    deadline (``drain_display_projections``, ``_finish_record_handoffs``, ``finish_output_relay``); Panic and
+    the backstops never wait for any of them.
     """
     if not _restart_stop_requested:
         drain_display_projections()
+        _finish_record_handoffs()
         try:
             from ouroboros.owned_shutdown import stop_deadline
             from ouroboros.process_logging import finish_output_relay
@@ -391,6 +394,18 @@ def drain_display_projections() -> bool:
         return drain(stop_deadline())
     except Exception:
         return False
+
+
+def _finish_record_handoffs() -> None:
+    """What the record handoffs still hold (the socket lifecycle lines: ``process_logging.finish_record_handoffs``),
+    bounded inside the ordinary stop's own deadline; it never stands between this image and its end."""
+    try:
+        from ouroboros.owned_shutdown import stop_deadline
+        from ouroboros.process_logging import finish_record_handoffs
+
+        finish_record_handoffs(stop_deadline())
+    except Exception:
+        pass
 
 
 def execute_panic_stop(

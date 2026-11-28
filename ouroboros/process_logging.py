@@ -30,7 +30,8 @@ whatever is written to descriptors 1 and 2 themselves (native code, ``sys.__stde
 wait for it, as before; so no write that holds the GIL ever waits for the relay's thread.
 
 A thread that must not wait on a log sink hands its records to a ``RecordHandoff``: one
-ordered, bounded writer thread per handoff (the ASGI loop's socket lifecycle lines use one).
+ordered, bounded writer thread per handoff (the ASGI loop's socket lifecycle lines use one), whose
+queue an ordinary exit lets it finish inside the stop's deadline (``finish_record_handoffs``).
 Every other record still reaches the handlers on its own thread.
 
 The hooks route an unhandled exception of a thread, or of the main thread, into
@@ -58,6 +59,7 @@ import stat
 import sys
 import threading
 import time
+import weakref
 from logging.handlers import RotatingFileHandler
 from typing import Any, Iterator
 
@@ -179,6 +181,8 @@ def _log_uncaught(message: str, exc_info: Any) -> bool:
     return True
 
 
+_HANDOFFS: "weakref.WeakSet[RecordHandoff]" = weakref.WeakSet()  # every handoff of this process, for the exit
+
 _CHAIN_LINKS = ("The above exception was the direct cause of the following exception:",
                 "During handling of the above exception, another exception occurred:")
 
@@ -230,9 +234,10 @@ class RecordHandoff:
     on the message (an exception's text is not redacted, as everywhere). Text beyond ``max_bytes`` (message and
     exception text; the output relay's budget for a reader that is not reading) is dropped and counted, and the
     count reaches the log as one line at that place in the order once the writer gets there. A record whose writer
-    cannot start is handled on the caller's thread, as before. What the writer has not handled when the process
-    ends (an exit, a kill, Panic) is lost: a bounded tail of these lines only, where a handler for the whole
-    process would lose every thread's (``configure_process_logging`` keeps the synchronous handlers).
+    cannot start is handled on the caller's thread, as before. An ordinary exit and the direct re-exec wait for
+    the queue inside the stop's deadline (``finish``); what the writer has not handled by then, or at a kill or
+    Panic, is lost: a bounded tail of these lines only, where a handler for the whole process would lose every
+    thread's (``configure_process_logging`` keeps the synchronous handlers).
     """
 
     def __init__(self, name: str, max_bytes: int = OUTPUT_RELAY_MAX_BYTES) -> None:
@@ -241,6 +246,7 @@ class RecordHandoff:
         self.queue: collections.deque = collections.deque()  # (logger, record, bytes), and [logger, dropped] gaps
         self.held = 0  # message bytes of the records queued
         self.thread: threading.Thread | None = None
+        _HANDOFFS.add(self)
 
     def log(self, logger: logging.Logger, level: int, msg: str, *args: Any, exc_info: Any = None) -> None:
         if not logger.isEnabledFor(level):
@@ -294,6 +300,33 @@ class RecordHandoff:
                                     item[1], self.name)
             except Exception:  # a handler reports its own failure (Handler.handleError); the next record goes on
                 pass
+
+    def finish(self, deadline: float) -> bool:
+        """Wait until ``deadline`` (monotonic) for the writer to hand what is queued to the handlers, a writer the
+        records queued meanwhile started included. True when none is left running; never waits under the lock."""
+        while True:
+            with self.lock:
+                thread = self.thread
+            if thread is None:
+                return True
+            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive() or self.thread is thread:  # the deadline passed, or a writer died holding the queue
+                return False
+
+
+def finish_record_handoffs(stop_deadline: float | None) -> None:
+    """Before an ordinary exit or the direct re-exec (``server_control``, ahead of ``finish_output_relay``): each
+    handoff's writer gets at most half of the time left before ``stop_deadline`` (monotonic; the bound
+    ``server_process.end_task_runs`` keeps, so the relay's handover keeps the rest) to hand its queue to the
+    handlers. Without a started grace nothing waits; never raises. Panic and the backstops never call it."""
+    if stop_deadline is None:
+        return
+    deadline = time.monotonic() + max(0.0, (stop_deadline - time.monotonic()) / 2)
+    for handoff in list(_HANDOFFS):
+        try:
+            handoff.finish(deadline)
+        except Exception:
+            pass
 
 
 def copy_capped_output(stream: Any, path: pathlib.Path, *, report: logging.Logger,

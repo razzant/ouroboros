@@ -28,7 +28,8 @@ from ouroboros.utils import json_dumps_utf8, utc_now_iso
 log = logging.getLogger(__name__)
 # The socket lifecycle lines this module logs on the ASGI loop (connect, disconnect, send failure, receive
 # errors) leave it through ONE ordered, bounded handoff: a slow log sink never holds a heartbeat, a receive
-# or Panic. Lines keep their creation time; a kill loses the few the writer has not reached.
+# or Panic. Lines keep their creation time; an ordinary exit waits for them inside the stop's deadline,
+# a kill or Panic loses the few the writer has not reached.
 _LIFECYCLE_LOG = RecordHandoff("ws-lifecycle-log")
 
 # The close code of the browser's silence watchdog (``web/modules/ws.js``): an application code

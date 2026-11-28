@@ -554,3 +554,50 @@ def test_a_queued_record_holds_text_never_the_exception_its_traceback_or_its_arg
     assert text.count(", in failing_send") == 2 and f'File "{__file__}", line ' in text, text
     assert 'raise RuntimeError("closed")' not in text, "no source line is read for the record"
     assert sink.lines[3] == "INFO broken %d format (log arguments not formatted: TypeError)"
+
+
+def test_an_exit_waits_for_the_queued_lines_inside_half_the_time_left_and_no_longer():
+    """``finish_record_handoffs`` (an ordinary exit's and the direct re-exec's, before the relay's handover): what a
+    handoff still holds, a line queued after an earlier wait included, reaches the sink before it returns; a sink
+    that stands is waited for at most half of the time left before the stop's deadline; without a started grace
+    nothing waits."""
+    process_logging, logger, sink = _held_logger("tests.record_handoff.exit")
+    handoff = process_logging.RecordHandoff("test-record-handoff-exit")
+    release = threading.Timer(0.3, sink.release.set)
+    try:
+        handoff.log(logger, logging.INFO, "first")
+        handoff.log(logger, logging.INFO, "second")
+        assert sink.entered.wait(5)
+        started = time.monotonic()
+        process_logging.finish_record_handoffs(started + 2.0)
+        assert 0.9 <= time.monotonic() - started < 2.0 and sink.records == [], "half of the time left, no more"
+        started = time.monotonic()
+        process_logging.finish_record_handoffs(None)
+        assert time.monotonic() - started < 0.5 and sink.records == [], "no grace: no wait"
+        handoff.log(logger, logging.INFO, "third")
+        release.start()
+        process_logging.finish_record_handoffs(time.monotonic() + 20)
+        assert [record.getMessage() for record in sink.records] == ["first", "second", "third"]
+        assert handoff.thread is None
+    finally:
+        sink.release.set()
+        release.cancel()
+        logger.removeHandler(sink)
+
+
+@pytest.mark.parametrize("panic", [False, True], ids=["exit", "panic"])
+def test_the_exit_hands_the_socket_lines_over_after_the_last_display_pass_and_before_the_relay(monkeypatch, panic):
+    """``exit_after_shutdown``: the display projections' last pass, the socket lines a handoff still holds, then the
+    output relay's handover, then the exit; an accepted Panic owns the exit and none of them is waited for."""
+    from ouroboros import display_projections, process_logging, server_control
+
+    calls = []
+    monkeypatch.setattr(display_projections, "drain", lambda _deadline: calls.append("display projections") or True)
+    monkeypatch.setattr(process_logging, "finish_record_handoffs", lambda _deadline: calls.append("socket lines"))
+    monkeypatch.setattr(process_logging, "finish_output_relay", lambda _deadline=None: calls.append("relay"))
+    monkeypatch.setattr(server_control, "os", SimpleNamespace(_exit=lambda code: calls.append(("exit", code))))
+    monkeypatch.setattr(server_control, "_restart_stop_requested", panic)
+    with monkeypatch.context() as patch:
+        patch.setattr(threading, "Event", lambda: SimpleNamespace(wait=lambda: calls.append("parked")))
+        server_control.exit_after_shutdown(7)
+    assert calls == (["parked"] if panic else ["display projections", "socket lines", "relay", ("exit", 7)])
