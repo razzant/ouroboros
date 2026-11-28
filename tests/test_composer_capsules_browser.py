@@ -167,7 +167,9 @@ FRAMES = """async ({ sel, frames }) => {
 SETTLED = """sel => {
     const el = document.querySelector(sel);
     const value = el.querySelector('.chat-capsule-value');
-    return { width: el.getBoundingClientRect().width, clipped: value.scrollWidth > value.clientWidth + 1,
+    // A capsule the row folded to its glyph draws no value by design (style.css: kept in the button as its name).
+    const folded = el.closest('.chat-toolbar-row')?.dataset.ownerGlyphs === 'true';
+    return { width: el.getBoundingClientRect().width, clipped: value.scrollWidth > value.clientWidth + 1, folded,
              held: el.style.getPropertyValue('--capsule-value-width') + el.style.getPropertyValue('--capsule-body-width') };
 }"""
 # A translated install (the house idiom: the gateway's /api/ui/i18n answer, stubbed): the overlay
@@ -566,7 +568,7 @@ def test_opening_and_closing_never_wrap_the_row_on_any_frame(direct_server_with_
                 ends = (run["closed"]["width"], run["opening"][-1]["width"])
                 peak = max(frame["width"] for frame in run["opening"] + run["closing"])
                 assert peak <= max(ends) + 1, (key, peak, ends)
-                assert run["open"] == "false" and not run["settled"]["clipped"] and run["settled"]["held"] == "", (key, run["settled"])
+                assert run["open"] == "false" and (run["settled"]["folded"] or not run["settled"]["clipped"]) and run["settled"]["held"] == "", (key, run["settled"])
                 assert abs(run["settled"]["width"] - run["closed"]["width"]) <= 0.5, (key, run["settled"], run["closed"])
                 if run["fit"] == "inline":  # it still animates: frames between the two widths, both ways
                     assert _between(run["opening"], ends) >= 3 and _between(run["closing"], ends) >= 3, key
