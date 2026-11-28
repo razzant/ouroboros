@@ -406,14 +406,11 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
     ``expected_grant_id`` means "no grant", ``None`` skips that comparison.
     """
     from ouroboros.task_results import (
-        _TRULY_TERMINAL_STATUSES, require_writable_task_result_schema,
-        stamp_task_result_schema,
+        _TRULY_TERMINAL_STATUSES, require_writable_task_result_schema, stamp_task_result_schema,
     )
-
-    expected_states = (
-        None if expected_state is None
-        else ({expected_state} if isinstance(expected_state, str) else set(expected_state))
-    )
+    expected_states = None
+    if expected_state is not None:
+        expected_states = {expected_state} if isinstance(expected_state, str) else set(expected_state)
 
     def update(current: dict) -> dict:
         require_writable_task_result_schema(current)
@@ -442,6 +439,9 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
 
     from ouroboros.task_store import patch_document
     patch_document(root, task_id, update)
+    if row.get("state") == STATE_RESUMED:
+        from ouroboros.peer_channel_queue import wake_for_task_control
+        wake_for_task_control(root, task_id=task_id)
     return dict(row)
 
 

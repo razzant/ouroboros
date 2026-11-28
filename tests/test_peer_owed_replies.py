@@ -1034,7 +1034,9 @@ def test_resume_owed_does_not_head_of_line_block_healthy_peer_behind_unreachable
     order: list[str] = []
 
     monkeypatch.setattr(replies, "_FOLLOW_UP_SEC", (60.0, 120.0))
-    monkeypatch.setattr(peer_links, "owed_refs", lambda root, lid="": [("link-slow", "turn-a"), ("link-fast", "turn-b")])
+    refs = [("link-slow", "turn-a"), ("link-fast", "turn-b")]
+    monkeypatch.setattr(peer_links, "owed_refs", lambda root, lid="": [row for row in refs if not lid or row[0] == lid])
+    monkeypatch.setattr("ouroboros.peer_channel_queue._has_pending_files_for_link", lambda *a: True)
     monkeypatch.setattr(peer_links, "sending_records", lambda root: [])
     monkeypatch.setattr(peer_links, "owed_version", lambda root, lid, ref: (lid, ref))
     monkeypatch.setattr("ouroboros.place_projection.switch_state", lambda root: "on")
@@ -1221,6 +1223,10 @@ def test_automatic_output_repeat_freezes_original_empty_or_addressed_reply_to_an
     monkeypatch.setattr(replies, "_said_held", lambda *a: False)
     monkeypatch.setattr(replies, "_tool_sent", lambda *a: False)
     monkeypatch.setattr(replies, "_RETRY_PAUSE_SEC", 0.0)
+    monkeypatch.setattr(replies, "_FOLLOW_UP_SEC", ())
+    monkeypatch.setattr(peer_links, "read_registry", lambda *a: {"links": {link.link_id: {
+        "peer_install_id": link.peer_install_id, "place_id": link.place_id,
+    }}})
     monkeypatch.setattr(peer_links, "owed_record", lambda *a: {
         "work_ref": "turn-1",
         "approved": {__import__("hashlib").sha256(b"Early output.").hexdigest(): "basis-1"},

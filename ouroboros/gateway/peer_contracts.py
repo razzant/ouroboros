@@ -33,6 +33,9 @@ REFUSAL_STATUS = {
     "question_closed": 409, "question_not_found": 404, "unexpected_fields": 400, "attachments_unsupported": 400,
     "invalid_letter": 400, "chain_too_long": 400, "letter_not_found": 404,
     "peer_links_unreadable": 503, "store_unavailable": 503,
+    "invite_unknown": 401, "invite_transport_mismatch": 400,
+    "channel_session_stale": 409, "invalid_session": 400, "peer_channel_refused": 400, "channel_end_missing": 400,
+    "peer_door_unsupported": 501, "peer_door_not_running": 503, "peer_door_dir_invalid": 503,
 }
 
 # What GET reads of an accepted letter; a refused one was never recorded, so its refusal is the POST's answer.

@@ -901,7 +901,7 @@ def observe_bound_state(root, entry, state):
 
 def _recovered_peer_binding(gateway, entry, ref, *, for_stop=False):
     """Verify a recovered peer letter against its genuine PeerGateway, exact link binding and run id."""
-    from ouroboros import peer_links
+    from ouroboros import peer_channel, peer_links
     from ouroboros.execution_domain import same_engine
     from ouroboros.gateways.peer import PeerGateway
 
@@ -922,9 +922,8 @@ def _recovered_peer_binding(gateway, entry, ref, *, for_stop=False):
     if now is None and for_stop:
         now = peer_links.stopping_link(link.place_id, drive_root=link.drive_root)
     return (now is not None
-            and (now.link_id, now.place_id, now.peer_url, now.peer_install_id)
-            == (link.link_id, link.place_id, link.peer_url, link.peer_install_id)
-            and peer_links.loopback_url(now.peer_url))
+            and peer_channel.link_identity(now) == peer_channel.link_identity(link)
+            and peer_channel.link_target_valid(now)[0])
 
 
 def stop_read_run(gateway, run_id):

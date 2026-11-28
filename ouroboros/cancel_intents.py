@@ -682,16 +682,15 @@ def request_cancel(
         _forensic(drive_root, {
             "event": "stop_policy_hardened",
             "task_id": str(resolved.get("task_id") or tid),
-            **(
-                {"requested_task_id": tid}
-                if str(resolved.get("task_id") or tid) != tid else {}
-            ),
+            **({"requested_task_id": tid} if str(resolved.get("task_id") or tid) != tid else {}),
             "request_id": minted.get("request_id"), "stop_policy": STOP_POLICY_IMMEDIATE,
         })
     minted.setdefault("already_settled", False)
     result = dict(minted)
     if str(resolved.get("task_id") or tid) != tid:
         result["requested_task_id"] = tid
+    from ouroboros.peer_channel_queue import wake_for_task_control
+    wake_for_task_control(drive_root, task_id=str(resolved.get("task_id") or tid))
     return result
 
 

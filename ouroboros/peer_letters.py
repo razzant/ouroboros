@@ -21,6 +21,8 @@ letter began keeps its link and agent author in what it starts (``CARRIED``), sp
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import pathlib
@@ -958,3 +960,40 @@ def takes_no_live_input(run: Any) -> str:
     from ouroboros.execution_domain import is_peer_ref, recorded_ref
 
     return _NO_LIVE_INPUT if is_peer_ref(recorded_ref(run)) else ""
+
+
+_PEER_MESSAGE_APPROVAL: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "peer_message_approval", default=None,
+)
+
+
+def current_message_approval(ctx: Any) -> dict[str, Any] | None:
+    """Return this invocation's Safety approval snapshot bound to ``ctx``, if any."""
+    snap = _PEER_MESSAGE_APPROVAL.get()
+    return snap if isinstance(snap, dict) and snap.get("ctx_id") == id(ctx) else None
+
+
+@contextlib.contextmanager
+def message_approval_scope(ctx: Any, name: str, args: Mapping[str, Any]):
+    """Snapshot the conversation's ``speech_basis`` before Safety reviews ``message_ouroboros``,
+    bind it strictly to this invocation via ``ContextVar``, and reset it on exit."""
+    if name != "message_ouroboros" or ctx is None or not isinstance(args, Mapping):
+        yield
+        return
+    from ouroboros.safety_config import coverage_kind
+
+    place_id = str(args.get("place_id") or "").strip()
+    cov_kind = coverage_kind(getattr(ctx, "task_metadata", None) or {})
+    basis = speech_basis(_root(ctx), place_id, kind=cov_kind) if place_id else ""
+    token = _PEER_MESSAGE_APPROVAL.set({
+        "ctx_id": id(ctx),
+        "place_id": place_id,
+        "text": str(args.get("text") or ""),
+        "retry_of": str(args.get("retry_of") or "").strip(),
+        "basis": basis,
+        "coverage_kind": cov_kind,
+    })
+    try:
+        yield
+    finally:
+        _PEER_MESSAGE_APPROVAL.reset(token)

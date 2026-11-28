@@ -875,6 +875,7 @@ def _accept_message(request: Request, caller: dict, letter: dict, sha: str,
 
 
 def _letter(request: Request, caller: dict, body: Any) -> JSONResponse | _PendingIntake:
+    from ouroboros import peer_channel_queue
     from ouroboros.peer_letters import content_sha256
     from ouroboros.peer_links import PeerLinkError
 
@@ -886,6 +887,7 @@ def _letter(request: Request, caller: dict, body: Any) -> JSONResponse | _Pendin
         refusal = _link_refusal(request, caller)
         if refusal is not None:
             return _refuse(root, *refusal, **facts)
+        peer_channel_queue.note_verified_exchange(root, caller["link_id"])
         if letter.get("kind") == "message":
             if letter.get("reply_to"):
                 facts["reply_to"] = letter["reply_to"]
@@ -970,6 +972,7 @@ def _cancel_letter(request: Request, caller: dict, letter_id: str) -> JSONRespon
     """The sender's cancel of its own letter: the existing Stop of that root and its helpers, asked of the Stop's
     owner (``_record_stop``), which alone decides whether anything of a settled root still runs. It is recorded as
     the link's (``PEER_CANCEL_SOURCE``, the link in ``request_origin``), never as my human's."""
+    from ouroboros import peer_channel_queue
     from ouroboros.gateway.tasks import _drive_stop, _record_stop
     from ouroboros.peer_letters import audit
     from ouroboros.peer_links import PeerLinkError
@@ -980,6 +983,7 @@ def _cancel_letter(request: Request, caller: dict, letter_id: str) -> JSONRespon
         refusal = _link_refusal(request, caller)
         if refusal is not None:
             return _refuse(root, *refusal, **facts)
+        peer_channel_queue.note_verified_exchange(root, caller["link_id"])
         found = _letter_row(root, caller, letter_id) if LETTER_ID_PATTERN.fullmatch(letter_id) else None
         if found is None:
             return _not_found(letter_id)
@@ -1041,26 +1045,57 @@ def _own_url(request: Request, body: dict) -> str:
     return str(body.get("own_url") or str(request.base_url)).rstrip("/")
 
 
+def _announce_channel(request: Request, caller: dict, body: Any) -> JSONResponse:
+    from ouroboros import peer_channel, peer_channel_queue
+    from ouroboros.peer_links import PeerLinkError
+
+    root = request_drive_root(request)
+    facts = {"link_id": caller["link_id"], "place_id": caller["place_id"]}
+    try:
+        refusal = _link_refusal(request, caller)
+        if refusal is not None:
+            return _refuse(root, *refusal, **facts)
+        if not isinstance(body, dict) or set(body) != {"session"}:
+            return _refuse(root, "unexpected_fields", "channel announce takes exactly {session}", **facts)
+        result = peer_channel.set_channel_session(root, caller["link_id"], body["session"])
+    except (LetterRefused, PeerLinkError) as exc:
+        return _refuse(root, exc.code, str(exc), **facts)
+    peer_channel_queue.trigger_link_flush(root, caller["link_id"])
+    return JSONResponse(result, headers=_NO_STORE)
+
+
+async def api_letters_channel(request: Request) -> JSONResponse:
+    """Dedicated letters-door route ``POST /api/letters/channel`` (R6): never mounted on the main port."""
+    caller = _peer(request)
+    if caller is None:
+        return await asyncio.to_thread(_refuse, request_drive_root(request), "link_unknown", "a link key is required")
+    body = await request_json_or(request, None)
+    return await run_sync_to_completion(_announce_channel, request, caller, body)
+
+
 def _invite(request: Request, body: dict) -> dict:
     from ouroboros.peer_links import PeerLinkError, create_invite
 
-    if set(body) - {"own_url", "label", "own_label", "note", "may_start"}:
-        raise PeerLinkError("unexpected_fields", "invite takes own_url, label, own_label, note and may_start")
-    return create_invite(request_drive_root(request), own_url=_own_url(request, body), label=body.get("label") or "",
+    if set(body) - {"own_url", "label", "own_label", "note", "may_start", "remote"}:
+        raise PeerLinkError("unexpected_fields", "invite takes own_url, label, own_label, note, may_start and remote")
+    remote = body.get("remote", False)
+    own_url = "" if remote is True else _own_url(request, body)
+    return create_invite(request_drive_root(request), own_url=own_url, label=body.get("label") or "",
                          own_label=body.get("own_label") or "", note=body.get("note") or "",
-                         may_start=body.get("may_start"))
+                         may_start=body.get("may_start"), remote=remote)
 
 
 def _accept(request: Request, body: dict) -> dict:
     from ouroboros.peer_links import PeerLinkError, accept_invite, preview_invite
 
-    if set(body) - {"invite", "preview", "own_url", "label", "own_label", "note", "may_start"}:
+    if set(body) - {"invite", "preview", "own_url", "label", "own_label", "note", "may_start", "session"}:
         raise PeerLinkError("unexpected_fields",
-                            "accept takes invite, preview, own_url, label, own_label, note and may_start")
+                            "accept takes invite, preview, own_url, label, own_label, note, may_start and session")
     if body.get("preview") is True:
         return preview_invite(body.get("invite"))
+    session = body["session"] if "session" in body else ""
     return accept_invite(request_drive_root(request), body.get("invite"), own_url=_own_url(request, body),
-                         label=body.get("label") or "", own_label=body.get("own_label") or "",
+                         session=session, label=body.get("label") or "", own_label=body.get("own_label") or "",
                          note=body.get("note") or "", may_start=body.get("may_start"))
 
 
@@ -1108,8 +1143,13 @@ async def api_peer_link_introduce(request: Request) -> JSONResponse:
 
     root = request_drive_root(request)
     body = await request_json_or(request, None)
+    caller = request.scope.get("ouroboros_caller")
+    expected_remote = bool(caller.get("door_only")) if isinstance(caller, dict) and "door_only" in caller else None
     try:
-        answer = await run_sync_to_completion(introduce, root, request.headers.get("x-ouroboros-invite", ""), body)
+        answer = await run_sync_to_completion(
+            introduce, root, request.headers.get("x-ouroboros-invite", ""), body,
+            expected_remote=expected_remote,
+        )
     except PeerLinkError as exc:
         return await asyncio.to_thread(_refuse, root, exc.code, str(exc))
     except PlaceError as exc:  # place store failure during introduction
@@ -1118,15 +1158,32 @@ async def api_peer_link_introduce(request: Request) -> JSONResponse:
     return JSONResponse(answer, headers=_NO_STORE)
 
 
+def peer_door_letter_routes() -> list[Route]:
+    """Routes served by the dedicated POSIX letters door (peer-authenticated letters, channel announce, introduce)."""
+    return [Route("/api/peer-links/introduce", api_peer_link_introduce, methods=["POST"]),
+            Route("/api/letters", api_letters_create, methods=["POST"]),
+            Route("/api/letters/channel", api_letters_channel, methods=["POST"]),
+            Route("/api/letters/{letter_id}", api_letter_status, methods=["GET"]),
+            Route("/api/letters/{letter_id}/state", api_letter_state, methods=["GET"]),
+            Route("/api/letters/{letter_id}/result", api_letter_result, methods=["GET"]),
+            Route("/api/letters/{letter_id}/cancel", api_letter_cancel, methods=["POST"])]
+
+
+def peer_owner_routes() -> list[Route]:
+    """Owner-only link management routes mounted exclusively on the main server."""
+    return [Route("/api/peer-links/invite", api_peer_link_invite, methods=["POST"]),
+            Route("/api/peer-links/accept", api_peer_link_accept, methods=["POST"]),
+            Route("/api/peer-links/{link_id}", api_peer_link_read, methods=["GET"]),
+            Route("/api/peer-links/{link_id}/confirm", api_peer_link_confirm, methods=["POST"]),
+            Route("/api/peer-links/{link_id}/revoke", api_peer_link_revoke, methods=["POST"])]
+
+
 def peer_letter_routes() -> list[Route]:
+    """Main-port peer routes: same-computer letters/introduce plus owner link doors (excludes ``/api/letters/channel``)."""
     return [Route("/api/letters", api_letters_create, methods=["POST"]),
             Route("/api/letters/{letter_id}", api_letter_status, methods=["GET"]),
             Route("/api/letters/{letter_id}/state", api_letter_state, methods=["GET"]),
             Route("/api/letters/{letter_id}/result", api_letter_result, methods=["GET"]),
             Route("/api/letters/{letter_id}/cancel", api_letter_cancel, methods=["POST"]),
-            Route("/api/peer-links/invite", api_peer_link_invite, methods=["POST"]),
-            Route("/api/peer-links/accept", api_peer_link_accept, methods=["POST"]),
             Route("/api/peer-links/introduce", api_peer_link_introduce, methods=["POST"]),
-            Route("/api/peer-links/{link_id}", api_peer_link_read, methods=["GET"]),
-            Route("/api/peer-links/{link_id}/confirm", api_peer_link_confirm, methods=["POST"]),
-            Route("/api/peer-links/{link_id}/revoke", api_peer_link_revoke, methods=["POST"])]
+            *peer_owner_routes()]

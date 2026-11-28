@@ -1818,7 +1818,7 @@ def test_terminal_custody_precedes_every_best_effort_wait_in_the_teardown():
     append_idx = teardown.index('"server_shutdown"')
     display_idx = teardown.index("finish_display_and_socket_lines()")
     extension_idx = teardown.index("extension_reconcile_task.cancel()")
-    host_idx = teardown.index("host_service_listener.close()")
+    host_idx = teardown.index("stop_embedded_services(boot)")
     sweeps_idx = teardown.index("stop_owned_work(lifespan_drive_root)")
     assert stop_idx < entry_idx < join_idx < kill_idx < extension_idx < host_idx < sweeps_idx
     assert kill_idx < append_idx < display_idx < extension_idx

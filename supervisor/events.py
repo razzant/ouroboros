@@ -373,12 +373,27 @@ def handle_presence_turn_settled(evt: Dict[str, Any], ctx: Any) -> None:
 
     handler(evt, ctx)
 
+def _handle_peer_link_wake(evt: Dict[str, Any], ctx: Any) -> None:
+    """Wake the server's per-link peer delivery coordinator after a worker enqueue, exchange, or task control."""
+    from ouroboros import peer_channel_queue
+
+    root = str(evt.get("drive_root") or getattr(ctx, "DRIVE_ROOT", "") or "")
+    if not root:
+        return
+    lid = str(evt.get("link_id") or "")
+    if lid:
+        peer_channel_queue.trigger_link_flush(root, lid, external=True)
+    else:
+        peer_channel_queue.wake_for_task_control(root)
+
+
 from supervisor.events_mind_controls import handle_mind_task_control
 
 EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
     "owner_wait": handle_owner_wait,
     "worker_quiescent": handle_worker_quiescent,
+    "peer_link_wake": _handle_peer_link_wake,
     # A conversation carrier's frames: its start phases for the census, its coined title.
     "direct_turn_phase": handle_direct_turn_phase,
     "direct_turn_bound": handle_direct_turn_bound,

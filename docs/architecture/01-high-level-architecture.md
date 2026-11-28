@@ -78,7 +78,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   ├── state/
 │   │   ├── state.json ← runtime state and cost projection (not monetary authority)
 │   │   ├── queue_snapshot.json ← PENDING/RUNNING projection, `worker_pool_disabled_reason` (§5)
-│   │   ├── peer_links.json ← links to my other Ouroboros (keys: peer_links/<link_id>/token.json)
+│   │   ├── peer_links.json ← peer links (peer_links/<id>/, peer/door.sock)
 │   │   ├── current.sqlite ← current-facts authority (`.exported-<UTC>` retired)
 │   │   ├── usage.sqlite ← monetary authority (docs/USAGE_STORE.md)
 │   │   ├── usage_attempts.jsonl ← imported journal/downgrade export

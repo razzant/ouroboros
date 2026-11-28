@@ -1414,31 +1414,31 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
     """Cancel once and verify terminality or absence in the owning store."""
     from ouroboros.delegate_resume import prepare_recovered_cancel, recovered_cancel_detail, stop_read_run
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.gateways.peer import peer_cancel_proven_unsent
+    from ouroboros.peer_channel_queue import accept_verified_cancel
     from ouroboros.transport_custody import is_pre_dispatch_transport_failure
 
     recovered = getattr(custody, "resume_start_state", None) is not None
-    if recovered and not custody.settled:
-        if (observed := prepare_recovered_cancel(drive_root, gateway, custody, reason, owner_stop)) is not None:
-            return observed
-    accepted, control_status, control_error, unsent = False, "", "", False
+    if (recovered and not custody.settled
+            and (observed := prepare_recovered_cancel(drive_root, gateway, custody, reason, owner_stop)) is not None):
+        return observed
+    receipt, accepted, control_error, unsent = None, False, "", False
 
     def outcome(kind: str, state: str = "", **extra: Any) -> Dict[str, Any]:
         return _cancel_result(drive_root, custody, kind, accepted=accepted,
-                              control_status=control_status, state=state, **extra)
+                              control_status=str((receipt or {}).get("status") or ""), state=state, **extra)
 
     if custody.settled:
         return outcome(CANCEL_CONFIRMED, "settled")
     try:
         receipt = gateway.cancel_run(custody.run_id, reason=str(reason or ""))
-        accepted = bool((receipt or {}).get("accepted"))
-        control_status = str((receipt or {}).get("status") or "")
-        if recovered and not isinstance((receipt or {}).get("accepted"), bool):
-            accepted, control_error = False, "The engine returned no cancellation verdict."
+        accepted, control_error = accept_verified_cancel(drive_root, getattr(custody, "engine_ref", None), receipt,
+                                                        require_verdict=recovered)
     except ClaudexorUnavailable as exc:
-        # A refused control is not a verdict on the RUN, and the control route's 404 names no
-        # store: the read below decides both absence and whether anything is still mutating.
+        # A refused control is no verdict on the run. Only the read-back decides whether it left the store.
         control_error = f"{exc.code}: {exc}"
-        unsent = recovered and not exc.status_code and is_pre_dispatch_transport_failure(exc)
+        unsent = recovered and not exc.status_code and (
+            is_pre_dispatch_transport_failure(exc) or peer_cancel_proven_unsent(custody.engine_ref, exc))
     try:
         detail = stop_read_run(gateway, custody.run_id)
     except ClaudexorUnavailable as exc:

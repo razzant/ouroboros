@@ -16,7 +16,8 @@ from ouroboros.gateway.schema import contract_typed_dict
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DOC = (REPO / "docs" / "CLIENT_CONTRACT.md").read_text(encoding="utf-8")
-TOKENS = [token for token in (*HTTP_ENDPOINTS, *endpoint_index.AUTH_ENDPOINTS) if not token.startswith("WS ")]
+TOKENS = [token for token in (*HTTP_ENDPOINTS, *endpoint_index.AUTH_ENDPOINTS, *endpoint_index.PEER_DOOR_ENDPOINTS)
+          if not token.startswith("WS ")]
 
 
 def _segments(path: str) -> list:

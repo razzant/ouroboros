@@ -41,10 +41,13 @@ def sleep_woke(ctx, outcome):
         return
     chosen = (getattr(ctx, "_swarm_sleep_selection", None) or getattr(ctx, "_model_sleep", None)
               or (getattr(ctx, "owner_wait_resume", None) or {}).get("sleep") or {})
-    _write(getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None),
-           str(getattr(ctx, "task_id", "") or ""), chosen.get("sleep_id"),
-           {"woke_at": utc_now_iso(), "woke_by": str(outcome)})
+    root = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    _write(root, task_id, chosen.get("sleep_id"), {"woke_at": utc_now_iso(), "woke_by": str(outcome)})
     ctx._swarm_sleep_selection = None
+    if root:
+        from ouroboros.peer_channel_queue import wake_for_task_control
+        wake_for_task_control(root, task_id=task_id)
 
 
 def review_started(binding):

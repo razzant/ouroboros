@@ -888,3 +888,15 @@ def test_owed_record_distinguishes_absent_from_unreadable_and_sending_confirm_ro
             text="Same", reply_to="", origin={"kind": "automatic", "task_id": "t-1"},
         )
     assert mismatch_acc.value.code == "sending_identity_mismatch"
+
+
+def test_p5_sanitize_tool_result_for_log_masks_v2_invite_when_projection_fails(monkeypatch):
+    """P5: first pass of sanitize_tool_result_for_log masks both v1 and v2 invitations even if
+    observability.redact_projection raises."""
+    from ouroboros import observability, utils
+
+    monkeypatch.setattr(observability, "redact_projection", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+    v2 = "ouroboros-invite:2:ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+    masked = utils.sanitize_tool_result_for_log(f"created invitation {v2} for peer")
+    assert v2 not in masked and "ABCDEFGHIJKLMNOPQRSTUVWXYZ" not in masked, masked
+    assert "***REDACTED***" in masked, masked
