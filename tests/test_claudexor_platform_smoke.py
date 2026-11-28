@@ -119,14 +119,15 @@ def test_operator_fixture_observes_receipt_and_always_cleans_up(tmp_path, monkey
     events = run_dir / "events.jsonl"
     events.parent.mkdir(parents=True)
     events.write_text('{"seq":6,"type":"harness.event","payload":{"harness_id":"fake-hang","type":"thinking"}}\n{"partial":')
-    cleanup, cancelled, calls = [], [], []
+    cleanup, cancelled, calls, asked = [], [], [], []
     old = SimpleNamespace(wait=lambda **_kw: 0)
     proc = SimpleNamespace(pid=42, poll=lambda: None if not cleanup else 0, wait=lambda **_kw: 0)
     owner = SimpleNamespace(_proc=old, stop=lambda: cleanup.append(True))
     gateway = SimpleNamespace(
         engine_version="3.10.1", handshake=lambda: {"engine": {"sha": "a" * 40}},
         register_project=lambda _r: "project", start_run=lambda *_a, **_kw: {"runId": "run"},
-        get_run=lambda *_a, **_kw: {"summary": {"state": "running", "runDir": str(run_dir)}},
+        get_run=lambda _run, *, timeout_sec: asked.append(timeout_sec) or {
+            "summary": {"state": "running", "runDir": str(run_dir)}},
         cancel_run=lambda *_a, **_kw: cancelled.append(True), close=lambda: None,
     )
     def start():
@@ -165,6 +166,10 @@ def test_operator_fixture_observes_receipt_and_always_cleans_up(tmp_path, monkey
             smoke.verify_operator_stop_fixture(tmp_path, facts)
     assert cleanup == [True] and bool(cancelled) is not passes
     assert calls == [["node", "claudexor.bundle.cjs", "daemon", "stop", "--json"]]
+    # The fake-hang poll bounds itself like every product poller: what its 30 s window has
+    # left, never under the gateway's floor (a fixed 2 s ask failed a healthy macOS daemon).
+    from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
+    assert asked and all(SHORT_POLL_TIMEOUT_SEC <= bound <= 30 for bound in asked), asked
 
 
 # -- the path-shape guard ------------------------------------------------------

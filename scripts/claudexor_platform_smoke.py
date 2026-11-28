@@ -518,6 +518,7 @@ def verify_operator_stop_fixture(root: pathlib.Path, facts: Dict[str, Any]) -> N
     """Real operator CLI + writer lease, on the smoke's own fresh generation only."""
     from unittest.mock import patch
     from ouroboros import claudexor_daemon as daemon, claudexor_runtime, config, process_custody as custody
+    from ouroboros.delegate_progress import poll_bound
     from ouroboros.platform_layer import pid_is_alive
     from ouroboros.utils import atomic_write_json
 
@@ -571,7 +572,10 @@ def verify_operator_stop_fixture(root: pathlib.Path, facts: Dict[str, Any]) -> N
         proof["run_id"] = run_id
         deadline = time.monotonic() + 30
         while True:
-            summary = gateway.get_run(run_id, timeout_sec=2).get("summary") or {}
+            # Bounded like every product poller (what the window has left, floored at the
+            # gateway's SHORT_POLL_TIMEOUT_SEC): the engine serves control reads in process,
+            # so a busy event loop answers slowly rather than refusing.
+            summary = gateway.get_run(run_id, timeout_sec=poll_bound(deadline - time.monotonic())).get("summary") or {}
             run_dir = pathlib.Path(summary["runDir"]) if summary.get("runDir") else None
             entered = False
             for path in run_dir.glob("events.jsonl") if run_dir else []:
