@@ -53,6 +53,13 @@ def _job(root):
     return maintenance_jobs.job(root, store_checkpoint.NAME) or {}
 
 
+def _passes(root):
+    """The passes' rows of the store-timing journal."""
+    journal = root / "logs" / store_timing.JOURNAL
+    lines = journal.read_text(encoding="utf-8").splitlines() if journal.exists() else []
+    return [row for row in map(json.loads, lines) if row["type"] == store_checkpoint.NAME]
+
+
 def test_a_backlog_past_sqlite_s_own_threshold_wakes_the_job_and_its_pass_copies_the_log(root):
     """The look is due once a log holds SQLite's own threshold of committed frames no pass saw. The pass copies
     them (``checkpointed`` reaches ``log``; the database file takes the pages), records SQLite's numbers and the log
@@ -249,26 +256,38 @@ def test_each_look_notes_how_long_the_logs_were_for_the_minute_row_from_memory(r
     assert store_checkpoint.drain_frames() == {"looks": 0, "max": {}}
 
 
-def test_the_real_checkpoint_child_copies_the_log_and_the_lane_rests_without_a_supervisor_row(root):
+def test_the_real_checkpoint_child_copies_the_log_and_the_lane_rests_without_a_supervisor_row(tmp_path, monkeypatch):
     """The lane's real child (``python -m ouroboros.maintenance --lane checkpoint``, the custodied spawn) over a
     backlog: it copies the log and writes its pass row to the store-timing journal and its entry to the job row; the
     lane looks again, finds the job at rest and returns after one spawn, and its clean run leaves no ``maintenance``
-    row in the supervisor journal."""
+    row in the supervisor journal. The child is another process of this interpreter, which no monkeypatch reaches: a
+    SQLite that must not share WAL (CI's journal-persist leg) has it refuse a WAL store (``store._kept_journal``), so
+    the root is built in the interpreter's own choice. There the stores keep a rollback journal and no log: the lane
+    rests without a spawn, and nothing is recorded."""
     from tests.test_evidence_packs import REPO
 
+    own = store._journal_mode(tmp_path, store.TIER_ENFORCED)  # the child's choice, read before any monkeypatch
+    root = _root(tmp_path, monkeypatch, own)
+    real_spawn, spawns = maintenance.spawn_maintenance_job, []
+    monkeypatch.setattr(maintenance, "spawn_maintenance_job",
+                        lambda *args, **kw: spawns.append(kw.get("args")) or real_spawn(*args, **kw))
     _backlog(root)
     (root / "logs").mkdir(exist_ok=True)
-    seen = store.log_identity(store.store_path(root))[:2]
+    seen = store.log_identity(store.store_path(root))
     unit = maintenance.MaintenanceChild("checkpoint")
     assert unit.tick(root, REPO)
     unit._thread.join(240)
     assert not unit._thread.is_alive() and unit.live_children() == []
-    current = _job(root)["stores"]["current"]
-    assert current["wal"] == seen and current["checkpointed"] == current["log"] == seen[1], current
-    rows = [json.loads(line) for line in (root / "logs" / store_timing.JOURNAL).read_text(encoding="utf-8").splitlines()]
-    assert [row["stores"]["current"]["wal"] for row in rows if row["type"] == store_checkpoint.NAME] == [seen]
     supervisor = root / "logs" / "supervisor.jsonl"
     assert not supervisor.exists() or '"maintenance"' not in supervisor.read_text(encoding="utf-8")
+    if own != "WAL":
+        assert seen is None and spawns == [] and _job(root) == {} and _passes(root) == []
+        return
+    seen = seen[:2]
+    assert spawns == [("--lane", "checkpoint")], "one pass, then a look that found the job at rest"
+    current = _job(root)["stores"]["current"]
+    assert current["wal"] == seen and current["checkpointed"] == current["log"] == seen[1], current
+    assert [row["stores"]["current"]["wal"] for row in _passes(root)] == [seen]
     assert not store_checkpoint.due(root, _job(root), {}, False)
 
 
