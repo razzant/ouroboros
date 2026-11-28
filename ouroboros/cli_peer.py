@@ -17,7 +17,8 @@ import sys
 import urllib.parse
 from typing import Any
 
-from ouroboros.cli import CLIError, ConnectionCLIError, StreamInterruptedCLIError, _client, _print_json
+from ouroboros import cli
+from ouroboros.cli import CLIError, ConnectionCLIError, StreamInterruptedCLIError
 
 
 def _emit_error(args: argparse.Namespace, *, code: str, detail: str, status: int = 0,
@@ -31,7 +32,7 @@ def _emit_error(args: argparse.Namespace, *, code: str, detail: str, status: int
         if status:
             body["status"] = status
         body["ok"] = False
-        _print_json(body)
+        cli._print_json(body)
     else:
         suffix = f": {detail}" if detail and detail != code else ""
         print(f"error: {code}{suffix}", file=sys.stderr)
@@ -41,7 +42,7 @@ def _emit_error(args: argparse.Namespace, *, code: str, detail: str, status: int
 def _call_json(args: argparse.Namespace, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[Any, int]:
     sent_request = False
     try:
-        client = _client(args)
+        client = cli._client(args)
         sent_request = True
         return client.request(method, path, body), 0
     except StreamInterruptedCLIError as exc:
@@ -78,7 +79,7 @@ def _link_invite_command(args: argparse.Namespace) -> int:
     if err:
         return err
     if args.json:
-        _print_json(data)
+        cli._print_json(data)
     else:
         print(f"link_id={data.get('link_id', '')}")
         if data.get("door_dir"):
@@ -94,7 +95,7 @@ def _link_confirm_command(args: argparse.Namespace) -> int:
     if err:
         return err
     if args.json:
-        _print_json(data)
+        cli._print_json(data)
     else:
         print(f"link_id={data.get('link_id', '')} code={data.get('code', '')} "
               f"code_check={data.get('code_check', '')} state={data.get('state', '')}")
@@ -107,7 +108,7 @@ def _link_revoke_command(args: argparse.Namespace) -> int:
     if err:
         return err
     if args.json:
-        _print_json(data)
+        cli._print_json(data)
     else:
         print(f"link_id={data.get('link_id', '')} state={data.get('state', '')} "
               f"revoked_at={data.get('revoked_at', '')}")
@@ -164,7 +165,7 @@ def _link_show_command(args: argparse.Namespace) -> int:
                                   "code_check": merged.get("code_check") or candidate.get("code_check") or ""}
                         break
         if args.json:
-            _print_json({"link": merged})
+            cli._print_json({"link": merged})
         else:
             print(f"link_id={merged.get('link_id', '')} label={merged.get('peer_label', '')} "
                   f"code={merged.get('code', '')} code_check={merged.get('code_check', '')} "
@@ -188,7 +189,7 @@ def _link_show_command(args: argparse.Namespace) -> int:
         )
     links = [entry for place in raw_places if (entry := _place_link_entry(place)) is not None]
     if args.json:
-        _print_json({"links": links})
+        cli._print_json({"links": links})
     else:
         if not links:
             print("(no linked Ouroboros)")

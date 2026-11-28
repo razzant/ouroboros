@@ -201,7 +201,6 @@ def test_t7_cli_typed_refusals_when_door_stopped_or_on_windows(tmp_path, monkeyp
 def test_t7_cli_link_show_secondary_places_failure_returns_single_error_json(monkeypatch, capsys):
     """C13: When /api/places fails after /api/peer-links/{id} succeeds, link show <id> --json
     emits exactly one valid JSON error object and returns a non-zero exit code."""
-    from ouroboros import cli_peer
     from ouroboros.cli import CLIError
 
     link_id = "a" * 32
@@ -217,7 +216,7 @@ def test_t7_cli_link_show_secondary_places_failure_returns_single_error_json(mon
                 raise err
             raise AssertionError(f"unexpected call: {method} {path}")
 
-    monkeypatch.setattr(cli_peer, "_client", lambda _args: _FakeClient())
+    monkeypatch.setattr(cli, "_client", lambda _args: _FakeClient())
     rc, out, _ = _run_cli(capsys, ["--url", "http://127.0.0.1:9", "link", "show", link_id, "--json"])
     assert rc != 0, (rc, out)
     payload = json.loads(out)  # fails with JSONDecodeError if two JSON documents were emitted
@@ -235,7 +234,6 @@ def test_t7_cli_has_no_accept_or_channel_subcommands():
 def test_p1_cli_link_show_excludes_unlinked_places_and_reports_unreadable_registry(monkeypatch, capsys):
     """P1: link show lists only real link records (never substituting conversation_id for an unlinked
     residual place) and preserves a typed error when peer_links.json is unreadable."""
-    from ouroboros import cli_peer
 
     unlinked_place = {
         "place_id": "place-residual", "connector": "ouroboros", "label": "RefusedPeer",
@@ -264,7 +262,7 @@ def test_p1_cli_link_show_excludes_unlinked_places_and_reports_unreadable_regist
             assert method == "GET" and path == "/api/places"
             return {"places": [unlinked_place, real_place]}
 
-    monkeypatch.setattr(cli_peer, "_client", lambda _args: _ClientList())
+    monkeypatch.setattr(cli, "_client", lambda _args: _ClientList())
     rc, out, _ = _run_cli(capsys, ["--url", "http://127.0.0.1:9", "link", "show", "--json"])
     assert rc == 0, out
     links = json.loads(out)["links"]
@@ -275,7 +273,7 @@ def test_p1_cli_link_show_excludes_unlinked_places_and_reports_unreadable_regist
         def request(self, method, path, body=None):
             return {"places": [unreadable_place]}
 
-    monkeypatch.setattr(cli_peer, "_client", lambda _args: _ClientUnreadable())
+    monkeypatch.setattr(cli, "_client", lambda _args: _ClientUnreadable())
     rc2, out2, _ = _run_cli(capsys, ["--url", "http://127.0.0.1:9", "link", "show", "--json"])
     assert rc2 != 0, (rc2, out2)
     payload2 = json.loads(out2)
