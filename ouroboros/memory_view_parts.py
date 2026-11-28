@@ -1,4 +1,5 @@
-"""What the memory view's renderers share without importing one another (``memory_view``, ``memory_view_marks``)."""
+"""The memory view's line sink and mapping read: a renderer's default ``part`` returns the lines it is given, and a
+captured fact that is not a mapping reads as an empty one."""
 from __future__ import annotations
 
 from typing import Any, Mapping

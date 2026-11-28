@@ -953,7 +953,10 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     def softly(level):
         return dict(asked_at.steps) if asked_at is not None and level.steps != asked_at.steps else None
     called = (id(snapshot), named, mode, target, lowered_from, owner_mode, repr(max_room))
-    def once(key, price):  # a pure price of this snapshot and level, from this fit's memo when it keeps one
+    # A pure price of this snapshot and level, from this fit's memo when it keeps one. The memo also holds the owner
+    # probe's NormalizedLevels, which keeps state: right only because its answer never depends on the levels it saw
+    # before, and the memo belongs to one fit, on one thread, over one element table.
+    def once(key, price):
         if prices is None:
             return price()
         if key not in prices:
