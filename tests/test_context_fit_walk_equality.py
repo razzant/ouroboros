@@ -77,14 +77,53 @@ def counting(counts):
 
 
 @contextlib.contextmanager
-def whole():
-    """The fit without step two's incremental path: a level's room is drawn whole to price it, and its form counts and
-    holding prices count and price every source from its text."""
+def whole(calls=None):
+    """The fit without step two's incremental path: a level's room is drawn whole to price it, its form counts and
+    holding prices count and price every source from its text, and the owner probe's level is ``level_with``'s. Its
+    snapshot is parsed anew (the parse cache is cleared on entry and on exit), so no number an earlier fit stored on
+    the shared parsed snapshot answers it, and none it stores reaches a later one. ``calls[name]`` counts how often each
+    from-scratch maker ran: ``room`` (whole room draws), ``kept`` (per-source numbers made), ``owners``."""
+    calls = calls if calls is not None else collections.Counter()
+
+    def drawn(snapshot, gone):
+        calls["room"] += 1
+        return mv.json_chars(mv._room_text(snapshot.room, gone))
+
+    def made(_snapshot, _key, make):
+        calls["kept"] += 1
+        return make()
+
+    def scratch(_incremental, level_with):
+        calls["owners"] += 1
+        return level_with()
+    mv._parsed_view.cache_clear()
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(mv, "room_block_chars", drawn)
+            patch.setattr(ff, "_kept", made)
+            _owner_levels(patch, scratch)
+            yield calls
+    finally:
+        mv._parsed_view.cache_clear()
+
+
+@contextlib.contextmanager
+def _scratch():
+    """A reference count or holding price made from every source's text (``memory_form_facts._kept`` keeps nothing)."""
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(mv, "room_block_chars", lambda snapshot, gone: mv.json_chars(mv._room_text(snapshot.room, gone)))
         patch.setattr(ff, "_kept", lambda _snapshot, _key, make: make())
-        _owner_levels(patch, lambda _incremental, scratch: scratch())
         yield
+
+
+def _scratch_counts(snapshot, level):
+    with _scratch():
+        fresh = replace(snapshot)
+        return ff._count_forms(fresh, level), fresh.__dict__["_telling_emergency"][level.addressed]
+
+
+def _scratch_holding(snapshot, level):
+    with _scratch():
+        return ff._holding_room(replace(snapshot), level)
 
 
 def _owner_levels(patch, choose):
@@ -118,7 +157,7 @@ def _ordered(value):
 @contextlib.contextmanager
 def oracle(checked):
     """Every number the floor prices, recomputed from scratch on a fresh copy of its snapshot (``replace``: none of the
-    snapshot's stored prices) and asserted equal: a level's room against its whole drawn text, floor note included;
+    snapshot's stored prices; ``_scratch``: no per-source number kept within the recount either) and asserted equal: a level's room against its whole drawn text, floor note included;
     its form counts (key order included) and holding room against their whole recount. ``checked[name]`` counts the
     distinct values compared."""
     room_chars, seen = mv.room_chars, set()
@@ -128,10 +167,9 @@ def oracle(checked):
         got = counts(snapshot, level)
         if ("counts", id(snapshot), level) not in seen:
             seen.add(("counts", id(snapshot), level))
-            fresh = replace(snapshot)
-            assert _ordered(got) == _ordered(ff._count_forms(fresh, level)), level
-            assert (snapshot.__dict__["_telling_emergency"][level.addressed]
-                    == fresh.__dict__["_telling_emergency"][level.addressed])
+            counts_now, emergency = _scratch_counts(snapshot, level)
+            assert _ordered(got) == _ordered(counts_now), level
+            assert snapshot.__dict__["_telling_emergency"][level.addressed] == emergency
             checked["counts"] += 1
         return got
 
@@ -145,7 +183,7 @@ def oracle(checked):
         got = holding(snapshot, level)
         if ("holding", id(snapshot), level) not in seen:
             seen.add(("holding", id(snapshot), level))
-            assert _ordered(got) == _ordered(ff._holding_room(replace(snapshot), level)), level
+            assert _ordered(got) == _ordered(_scratch_holding(snapshot, level)), level
             checked["holding"] += 1
         return got
 
@@ -256,9 +294,46 @@ def test_the_fit_reads_alike_with_and_without_the_memo(installs, shape, route, m
     checked = collections.Counter()
     with oracle(checked):  # every number the walk prices equals its from-scratch value
         assert outcome(fit) == now
-    with whole():  # the same fit without step two's incremental path
+    with whole() as calls:  # the same fit without step two's incremental path, on its own parse
         assert outcome(fit) == now
     assert checked["room"] > 0 and checked["counts"] > 0 and checked["holding"] > 0
+    assert calls["room"] > 0 and calls["kept"] > 0, calls  # the from-scratch makers really ran
+
+
+def _heavy_snapshot():
+    """Step one's heavy shape (1,500 rows, 1,000 pages, 158 marks) with every reply of mine in a work of three with a
+    gist, as the owner's room holds finished works (the shape of the call-fit K14 measurements)."""
+    snap = _snapshot(rows=1_500, pages=1_000, marks=158)
+    room = dict(snap.room)
+    lane1, lane2 = [dict(row) for row in room["lane1"]], [dict(task) for task in room["lane2"]]
+    for n, row in enumerate(row for row in lane1 if row["kind"] == "ouroboros"):
+        key = lane2[n // 3]["task"] if n // 3 < len(lane2) else f"w{n // 3:04d}"
+        row.update(work_id=key, task_id=key, gist={"summary": f"Work {n // 3} done: " + "the floor walk prices levels. " * 3,
+                                                   "ts": row["ts"], "room_id": "1", "address": row["address"]})
+        if n // 3 < len(lane2):
+            lane2[n // 3]["gist"] = row["gist"]
+    room.update(lane1=lane1, lane2=lane2)
+    return replace(snap, room=room)
+
+
+@pytest.mark.parametrize("window, connections", [pytest.param(290_666, 780_000, id="call:max-low-nano"),
+                                                 pytest.param(150_000, 2_000, id="call:low")])
+def test_the_heavy_install_reads_alike_priced_from_scratch(tmp_path, window, connections):
+    """The heavy shape where every mechanism of step two runs (a call whose Max start walks Low and leaves it for Nano,
+    and one that keeps Low): the shipped fit equals the fit without the step-one memo, the oracle at every priced level
+    and the fit priced from scratch on its own parse, whose makers ran (rooms drawn whole, numbers made, owner levels by
+    ``level_with``)."""
+    core = _core(tmp_path, connections=connections, snap=_heavy_snapshot())
+    fit = fit_on(_env(core), core, window=window, mode="max")
+    now, then, shipped, _before = both(fit)
+    assert now == then and now[0] == "plan" and shipped["low"] > 0
+    checked = collections.Counter()
+    with oracle(checked):
+        assert outcome(fit) == now
+    with whole() as calls:
+        assert outcome(fit) == now
+    assert min(checked["room"], checked["counts"], checked["holding"], checked["owners"]) > 0, checked
+    assert min(calls["room"], calls["kept"], calls["owners"]) > 0, calls
 
 
 def _snapshot(rows=158, pages=113, marks=40):
@@ -435,13 +510,15 @@ def _changing_room(seed):
         if rng.random() < 0.5:
             rows.append(syn.said(n, "human", syn.prose(rng.randint(30, 300), "owner"), owner_side=False))
             n += 1
-    room = syn.room("1", legacy=rng.randint(0, 3), legacy_chars=400, under=rng.randint(0, 3), origins=rng.randint(0, 2),
+    room = syn.room("1", legacy=rng.randint(0, 3), legacy_chars=400, under=rng.randint(0, 3), origins=rng.randint(1, 3),
                     lane1=rows, lane2=rng.randint(2, 9), notes=rng.randint(0, 5))
     for i, task in enumerate(room["lane2"]):
         if i % 2 == 0:
             task.update(task=f"t{i:03d}", gist={"summary": f"Task {i} told. " + syn.prose(120), "ts": task["ts"],
                                                "room_id": "1" if i % 4 else "7", "address": task["first"]})
             task["line"] += f" — summary: «Task {i} told.»"
+    for i, origin in enumerate(room["origins"]):  # each its own words and length
+        origin["text"] = f"Start part {i} of this work. " + syn.prose(rng.randint(40, 1_500), "owner")
     if room["legacy"]:
         room["legacy"][-1].update(transfer=True, of="written by another install; transferred")
     if room["under_parts"]:
@@ -524,11 +601,10 @@ def test_form_counts_and_the_holding_room_from_their_sources_equal_the_whole_rec
     levels = _random_levels(snapshot, random.Random(seed))
     assert {"F3", "F5", "F5a", "F8", "F7a"} & {step for level in levels for step, _ids in level.addressed}
     for level in levels + levels[::-3]:
-        fresh = replace(snapshot)
-        assert _ordered(ff._count_forms(snapshot, level)) == _ordered(ff._count_forms(fresh, level)), level
-        assert (snapshot.__dict__["_telling_emergency"][level.addressed]
-                == fresh.__dict__["_telling_emergency"][level.addressed])
-        assert _ordered(ff._holding_room(snapshot, level)) == _ordered(ff._holding_room(replace(snapshot), level)), level
+        counts_now, emergency = _scratch_counts(snapshot, level)
+        assert _ordered(ff._count_forms(snapshot, level)) == _ordered(counts_now), level
+        assert snapshot.__dict__["_telling_emergency"][level.addressed] == emergency
+        assert _ordered(ff._holding_room(snapshot, level)) == _ordered(_scratch_holding(snapshot, level)), level
 
 
 def test_a_row_range_priced_again_reads_its_new_members():
@@ -539,7 +615,7 @@ def test_a_row_range_priced_again_reads_its_new_members():
     rows = [row["address"] for row in snapshot.room["lane1"] if not row.get("immune")]
     for k in (3, 150, 3):
         level = mv.FloorLevel((("F2", tuple(rows[:k])), ("F7a", ("1",))))
-        assert _ordered(ff._holding_room(snapshot, level)) == _ordered(ff._holding_room(replace(snapshot), level)), k
+        assert _ordered(ff._holding_room(snapshot, level)) == _ordered(_scratch_holding(snapshot, level)), k
         gone = dict(level.addressed)
         assert mv.room_block_chars(snapshot, gone) == mv.json_chars(mv._room_text(snapshot.room, gone)), k
 
@@ -629,10 +705,9 @@ def _room_digests(snap, level):
     from ouroboros.memory_view_work import model_room
 
     system, data = model_room(snap, level)
-    fresh = replace(snap)  # the receipts' counts and holding prices, recounted on a snapshot with no stored number
     return [hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-            for text in (mv.render_room(snap, level), system + "\0" + data, _ordered(ff.form_counts(fresh, level)),
-                         _ordered(ff.holding_room(fresh, level)))]
+            for text in (mv.render_room(snap, level), system + "\0" + data, _ordered(ff.form_counts(snap, level)),
+                         _ordered(ff.holding_room(snap, level)))]
 
 
 # The room bytes of ``_pinned_cases`` as the development renderer drew them (origin/ouroboros 2e75e2575, before the room
@@ -642,28 +717,28 @@ def _room_digests(snap, level):
 # before the change, and says so in its commit.
 PINNED_ROOMS = {
     'room-0': [
-        ["ef87fc82e874975b", "f217b1ba4d43bfc4", "a8962d74f576d549", "a63f73789022a514"],
-        ["5d14dcf740177850", "662221174ca9121c", "4d476a7cfdd8f3d9", "02b224222d9a103d"],
-        ["121e26fafea80e0d", "5b00d5440a2107ce", "17dc549f4e5195f8", "77f733dd6a64177c"],
-        ["a6ef0d65153a80b6", "25e3b220f2f10168", "01ac267ab13dd2a8", "13525532b692d42b"],
-        ["4c559a2b08c98b0c", "77e7aa96f288ad44", "b99f37b017ce560d", "1d8948dc8607cd03"],
-        ["8571b7a395ab3d30", "fcf4c3e437ec18b0", "0e7001c7d4fdf992", "a9b01ee56c47dbf1"],
+        ["83cdb2f6d3a3e5ad", "51f6bf9a99012b51", "a8962d74f576d549", "ea8acf6b187e5a5d"],
+        ["34702b993f895cc9", "2a4d8604918f1778", "4d476a7cfdd8f3d9", "71d8254423561b52"],
+        ["54793f001afebc78", "d441448fd454396f", "0951b0c98756b99f", "cf5f441da0d0e699"],
+        ["847ce3c231ee5504", "7cc2704cafa6b5b0", "41c99f5d1c67b856", "52f5bc5e25ee9a2d"],
+        ["dd663ece13ba8e19", "89e39c89bb934ca5", "cd13c1a1b0ef0141", "faeebec4dccc40c7"],
+        ["8496a3b27b209135", "0882a7b587546625", "ee10ec2e50bd31f8", "296a4901ea822d0d"],
     ],
     'room-1': [
-        ["5f8c6faa072ddd56", "46017f3296b04fda", "a8962d74f576d549", "98884c7bf4d9c0ac"],
-        ["f877bf87d210cc6b", "02bda49e333fc482", "66eaf3d55ab27c5f", "3d1998df609cb1e6"],
-        ["a08ceb072dfe9355", "6db2a74c0ada6003", "d2e973ea64b7010d", "f2dc3d264a3abe4b"],
-        ["afeeb4184faa9d92", "f0b80dd6d18f8fee", "19f89c689cb11edb", "80fbb591df1ff2c9"],
-        ["d70a2af1ea390c8c", "7177a13c4377b690", "1a3be76f809103c4", "fb3cccf5b136782d"],
-        ["e9b9814f6c2aa193", "2fec359f1c661871", "19c45c187213cc04", "d85076641adb0192"],
+        ["ebdf9c6e00d1a5bb", "66c3cbf0721a5927", "a8962d74f576d549", "dab182e0a93ae5b1"],
+        ["7c662155e1685f8e", "6c499223cd827205", "1188db0b0bf900c6", "73722660c4a1feb6"],
+        ["7881f7044a5e332c", "d298319cf6d47321", "d2e973ea64b7010d", "8096bf61155c0b57"],
+        ["d9d7d9cb13761ce6", "676fceddc7efe0e6", "1c18ed9329800745", "71f9ff8578e9ce35"],
+        ["67d8277af03eb2b9", "2934fe43133e99f5", "498d7d94589f6d0c", "69cb039f9d2ac477"],
+        ["01f8121ca5df32e5", "adfe710609e632f9", "ca5ca8509152151c", "6db1cdd9efd8a6da"],
     ],
     'room-3': [
-        ["feba5eeea4110511", "f165aa3c4d829b00", "a8962d74f576d549", "3b0aa7891358cf8a"],
-        ["63eff04089b6948b", "54ba087436e1283c", "eee0b93057125ed4", "978b66bf6f127ae1"],
-        ["b142882afdf82e08", "8ae14c17e835b02d", "db754fa722165fd6", "851c5e46174fc774"],
-        ["fb53571f57d1ef48", "4eda56d2fca7ac04", "221adbe18780fad7", "3ace0543d6cb5fc1"],
-        ["35b4160be7784b44", "2bc64cc562be7793", "bdd91e16f79ca669", "2a7a46460cc74342"],
-        ["866037586f743a62", "dafe4fa25fdbb3f4", "de23857f89c09687", "8571ff7a61f763aa"],
+        ["faaee8f70939d169", "053425768f6af4ed", "a8962d74f576d549", "553f001e1bda83a6"],
+        ["1f8ff50b96afd92d", "4efcff4aca654216", "eee0b93057125ed4", "a759c48c3536990e"],
+        ["2a85b0fc15373dcd", "00e6b5b23955e51d", "e1eb16c37a20e79b", "271985509b8d5526"],
+        ["90235b886471335d", "d94c3d8b55c61033", "1b93c06f619f1bc3", "48ca31aff8abc3c9"],
+        ["88c2b575bacf61c6", "d5aa9ce2c250c3bd", "111b11ffe9611d64", "ee4cff45ceb393e9"],
+        ["0e9fbe28eceb1652", "af798ef810291413", "f595be5017e5f83c", "120cf80440ee9d44"],
     ],
     'colliding-works': [
         ["3abba7f0cc978467", "8a0397bb70210444", "a8962d74f576d549", "f2ec029436850e0a"],
