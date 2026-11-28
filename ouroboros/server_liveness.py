@@ -617,7 +617,8 @@ def _start_supervisor_liveness_watchdog(
     a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (the
     Fault door included, which never sets the global restart flag), it is set so
     this watchdog stops watching a now-stale liveness list (no false post-revival alert);
-    it is asked before each sleep and again on waking, so a pass never runs for an ended generation."""
+    it, the lifespan stop and the restart flag are asked before each sleep and again on waking,
+    so no pass runs for an ended generation or behind a teardown, whose own work holds the loop."""
     from ouroboros.config import get_supervisor_liveness_deadline_sec
 
     deadline = get_supervisor_liveness_deadline_sec()
@@ -628,6 +629,7 @@ def _start_supervisor_liveness_watchdog(
     def _watch() -> None:
         from ouroboros.asgi_beat import AsgiLateWatch
         from ouroboros.gateway.ws import has_ws_clients
+        from ouroboros.server_process import _supervisor_stop  # the lifespan stop, read as AsgiLateWatch.tick reads it
         from supervisor.state import append_jsonl
         interval = min(15, max(1, deadline // 3))
         loop_alerted = False
@@ -637,13 +639,14 @@ def _start_supervisor_liveness_watchdog(
         turn_phases = _TurnPhaseWatch(interval)
         asgi_beat = AsgiLateWatch(_loop_thread_stack, has_ws_clients)
 
-        def stopped() -> bool:  # this generation ended (its own token) or the process restarts
-            return _restart_requested.is_set() or (stop_event is not None and stop_event.is_set())
+        def stopped() -> bool:  # this generation ended (its own token), its lifespan stops or the process restarts
+            return (_restart_requested.is_set() or _supervisor_stop.is_set()
+                    or (stop_event is not None and stop_event.is_set()))
 
         while not stopped():
             slept_since = time.monotonic()
             time.sleep(interval)
-            if stopped():  # asked again on waking: a generation that ended during the sleep reports nothing
+            if stopped():  # asked again on waking: an ended generation or a begun teardown reports nothing
                 break
             # ONE clock: both halves measure an ELAPSED GAP against stamps taken on
             # the monotonic clock (the loop-liveness tick here, and the chat-turn

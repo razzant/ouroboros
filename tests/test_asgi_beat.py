@@ -3,10 +3,11 @@
 The heartbeat coroutine stamps how late the serving event loop runs, on that loop; the supervisor's liveness
 watchdog, on its own thread, journals one ``asgi_loop_late`` row with the loop thread's stack per episode in
 which a beat falls a whole interval behind while browser sockets are open: never for a loop that beats on
-time, never without an open socket, never twice for one episode, never while the server stops or for a
-generation that ended while its watchdog slept. The watchdog looks at the beat before it writes any row of its
-pass, and the row carries the watchdog's own lateness (a blocked loop or a process that stood still). Every
-case runs the real heartbeat on a real event loop thread, or the real watchdog thread on a hand-moved clock.
+time, never without an open socket, never twice for one episode, never while the server stops; a watchdog
+whose generation ended, whose lifespan stopped or whose process restarts while it slept writes no row at all.
+The watchdog looks at the beat before it writes any row of its pass, and the row carries the watchdog's own
+lateness (a blocked loop or a process that stood still). Every case runs the real heartbeat on a real event
+loop thread, or the real watchdog thread on a hand-moved clock.
 """
 from __future__ import annotations
 
@@ -183,11 +184,14 @@ def _watch_a_late_beat(monkeypatch, clock: _HandClock, stop: threading.Event, *,
     return rows
 
 
+def _watchdog_threads() -> list:
+    return [thread for thread in threading.enumerate() if thread.name == "supervisor-liveness-watchdog"]
+
+
 def _end_watchdog(stop: threading.Event) -> None:
     stop.set()
-    for thread in threading.enumerate():
-        if thread.name == "supervisor-liveness-watchdog":
-            thread.join(5)
+    for thread in _watchdog_threads():
+        thread.join(5)
 
 
 def test_the_liveness_watchdog_journals_a_late_asgi_beat_once(monkeypatch):
@@ -218,21 +222,41 @@ def test_a_process_that_stood_still_shows_in_the_watchdogs_own_lateness(monkeypa
     assert late["watchdog_late_sec"] == 40.0 and late["overdue_sec"] == 126.0, late
 
 
-def test_a_watchdog_whose_generation_ended_during_its_sleep_writes_nothing(monkeypatch):
-    """The generation's stop token is set while its watchdog sleeps (a failed init, an exit, a revival on the way):
-    the watchdog asks again on waking and ends without a look, however late the beat it would have seen."""
+@pytest.mark.parametrize("ending", ["generation", "_supervisor_stop", "_restart_requested"])
+def test_a_watchdog_whose_generation_ended_during_its_sleep_writes_nothing(monkeypatch, ending):
+    """The generation's stop token (a failed init, an exit, a revival on the way), the lifespan stop (a teardown
+    whose own work holds the loop) or the restart flag is set while its watchdog sleeps: the watchdog asks again on
+    waking and ends without a look, however long the supervisor loop has stood and however late the beat it would
+    have seen. With nothing set, the same look rows both."""
+    from ouroboros import server_process
+
     clock, stop = _HandClock(time.monotonic() + 1000.0), threading.Event()
-    clock.on_sleep = stop.set  # the generation ends during the watchdog's first sleep
-    rows = _watch_a_late_beat(monkeypatch, clock, stop)
-    _end_watchdog(stop)  # joins the watchdog, which ends by itself on waking
-    assert rows == [], rows
+    ended = stop if ending == "generation" else getattr(server_process, ending)
+    clock.on_sleep = ended.set  # it ends during the watchdog's first sleep
+    try:
+        rows = _watch_a_late_beat(monkeypatch, clock, stop, supervisor_age=100.0)
+        for thread in _watchdog_threads():
+            thread.join(5)  # it ends by itself on waking: nothing else sets its token
+        alive = bool(_watchdog_threads())
+    finally:
+        _end_watchdog(stop)
+        ended.clear()
+    assert rows == [] and not alive, rows
+    clock.on_sleep, stop = None, threading.Event()
+    rows = _watch_a_late_beat(monkeypatch, clock, stop, supervisor_age=100.0)
+    try:
+        _until(lambda: len(rows) >= 2)
+    finally:
+        _end_watchdog(stop)
+    assert [row["type"] for _path, row in rows] == ["supervisor_loop_stall", "asgi_loop_late"], rows
 
 
 def test_a_beat_that_resumes_while_the_supervisor_stall_is_written_still_rows(monkeypatch):
     """Both loops are late when the watchdog wakes, as on 27.11: the serving loop beats again while the supervisor
     stall row is being written (a sink waiting on the disk). The ASGI episode was observed before that write, so
-    its row is journaled with the stack taken while the loop still stood."""
-    clock = _HandClock(time.monotonic() + 1000.0)
+    its row is journaled with the stack taken while the loop still stood, stamped with the time it was observed."""
+    clock, stamps = _HandClock(time.monotonic() + 1000.0), iter(range(1000))
+    monkeypatch.setattr(server_liveness, "utc_now_iso", lambda: f"2026-11-28T00:00:00.{next(stamps):06d}+00:00")
 
     def resume_during_the_stall_row(row: dict) -> None:
         if row["type"] == "supervisor_loop_stall":
@@ -246,5 +270,6 @@ def test_a_beat_that_resumes_while_the_supervisor_stall_is_written_still_rows(mo
     finally:
         _end_watchdog(stop)
     assert [row["type"] for _path, row in rows] == ["supervisor_loop_stall", "asgi_loop_late"], rows
-    late = rows[1][1]
+    stall, late = rows[0][1], rows[1][1]
     assert late["overdue_sec"] == 85.0 and late["resumed"] is False and late["stack"], late
+    assert late["ts"] < stall["ts"], "its time is the observation's, taken before the stall row was written"
