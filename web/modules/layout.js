@@ -96,7 +96,13 @@ export function measurePinnedBars(sidebar, { Observer = globalThis.ResizeObserve
         const row = sidebar.querySelector('.nav-project-row')?.getBoundingClientRect().height || 48;
         const clearance = px(sideStyle?.getPropertyValue?.('--space-4'));
         const room = Number(sidebar.clientHeight) || 0;
-        sidebar.toggleAttribute?.('data-bars-crowd', room > 0 && headH + row + 2 * clearance > room);
+        const later = view?.requestAnimationFrame ? (fn) => view.requestAnimationFrame(fn) : (fn) => fn();
+        // The crowd marks move the head's and the rail's own boxes (they unpin): written a frame later and only when
+        // they change, so this observation's change is never part of its own layout pass (WebKit reports a loop).
+        const mark = (name, on) => {
+            if (sidebar.hasAttribute?.(name) !== on) later(() => sidebar.toggleAttribute?.(name, on));
+        };
+        mark('data-bars-crowd', room > 0 && headH + row + 2 * clearance > room);
         if (rail) {
             const railStyle = view?.getComputedStyle?.(rail);
             const railRoom = room - px(sideStyle?.paddingTop) - px(sideStyle?.paddingBottom);
@@ -111,7 +117,7 @@ export function measurePinnedBars(sidebar, { Observer = globalThis.ResizeObserve
                 visible += 1;
             }
             if (visible > 1) railNeed += (px(railStyle?.rowGap) || px(railStyle?.gap)) * (visible - 1);
-            sidebar.toggleAttribute?.('data-rail-crowd', railRoom > 0 && railNeed > railRoom);
+            mark('data-rail-crowd', railRoom > 0 && railNeed > railRoom);
         }
     };
     const observer = new Observer(write);
