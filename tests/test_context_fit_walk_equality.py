@@ -41,8 +41,9 @@ def cold():
 
 @contextlib.contextmanager
 def counting(counts):
-    """Count the memory renders of each mode (``counts[mode]``) and the floor notes priced (``counts['notes']``)."""
-    render, note = mf.render_view_for_mode, mf.floor_note
+    """Count the memory renders of each mode (``counts[mode]``), the floor notes priced (``counts['notes']``) and the
+    owner-word levels the start-room line weighs (``counts['owners']``)."""
+    render, note, owners = mf.render_view_for_mode, mf.floor_note, mf.level_with
 
     def rendered(*a, **kw):
         counts[kw["mode"]] += 1
@@ -51,9 +52,14 @@ def counting(counts):
     def noted(*a, **kw):
         counts["notes"] += 1
         return note(*a, **kw)
+
+    def weighed(*a, **kw):
+        counts["owners"] += 1
+        return owners(*a, **kw)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(mf, "render_view_for_mode", rendered)
         patch.setattr(mf, "floor_note", noted)
+        patch.setattr(mf, "level_with", weighed)
         yield
 
 
@@ -222,6 +228,21 @@ def test_generated_shapes_read_alike_with_and_without_the_skip_and_the_memo(tmp_
         fired += shipped["low"] < before["low"]
         walked += shipped["low"] == before["low"] > 0
     assert fired and walked, (fired, walked)
+
+
+def test_one_fit_prices_a_level_once_and_its_prices_never_reach_another_fit(tmp_path):
+    """The memo prices a level's floor note and the owner-word level its start-room line weighs once per fit (fewer of
+    each priced, the same plan), and a second fit of a changed snapshot in the same process reads exactly as a cold fit
+    of that snapshot: nothing priced for the first snapshot answers for the second."""
+    first = _core(tmp_path / "first", connections=2_000)
+    now, then, shipped, before = both(fit_on(_env(first), first, window=150_000, mode="max"))
+    assert now == then and 0 < shipped["notes"] < before["notes"] and 0 < shipped["owners"] < before["owners"], (
+        shipped, before)
+    changed = _core(tmp_path / "second", connections=2_000, snap=_snapshot(60, 40, 12))
+    again = outcome(fit_on(_env(changed), changed, window=150_000, mode="max"))
+    with cold():
+        fresh = outcome(fit_on(_env(changed), changed, window=150_000, mode="max"))
+    assert again == fresh and again != now
 
 
 def test_the_level_free_room_pieces_hold_at_every_level_of_the_walk(tmp_path):

@@ -1037,9 +1037,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             stated_window_tokens=stated.get(selected),  # the note names the window as stated, never the admitted frame
             boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed,
-            report_nano_miss=held_heads)
+            report_nano_miss=held_heads, prices=prices)
 
     stated: Dict[str, Optional[int]] = {}  # each walked mode's window in the start's frame (``frame`` fills it)
+    prices: Dict[Any, Any] = {}  # this fit's memo of what its walks price per level (``render_view_for_mode``)
 
     def books_save(level, window, boundary):
         # Only the frame changes. A new memory/host concession may not disguise a book switch that costs tokens.
