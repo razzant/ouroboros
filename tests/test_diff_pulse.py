@@ -64,7 +64,8 @@ def test_the_pulse_counts_every_wave_since_the_contribution_base(tmp_path):
     # What the last wave alone shows hides the module wave 1 created.
     assert "custody.py" not in _git(repo, "diff", "--name-only", "HEAD")
 
-    fact, shape, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
+    fact, shape, directory, question = diff_pulse(repo, ["ouroboros/core.py"]).split("\n")
+    assert directory.startswith("New runtime modules: ouroboros/custody.py, ouroboros/fresh.py; ")  # both waves' modules
     assert fact.startswith(f"Diff pulse since canonical/ouroboros merge-base {base[:12]}: ")
     assert "files 3, lines +295/-0 (net +295)" in fact
     assert "new files: ouroboros/custody.py, ouroboros/fresh.py;" in fact
@@ -378,7 +379,7 @@ def test_a_changed_python_source_adds_its_code_shape_and_an_unparsed_one_is_unkn
                                           '    monkeypatch.setattr("ouroboros.core.x", 2)\n'
                                           '    subprocess.run(["git", "init", "-q"], cwd=tmp_path)\n')
 
-    fact, shape, question = diff_pulse(repo).split("\n")
+    fact, shape, _directory, question = diff_pulse(repo).split("\n")  # a new leaf: the directory fact stands third
     assert shape == ("Code shape: module handles +1/-0, calls through them +3/-0, re-exported names +0/-1; "
                      "tests: patched product-module names +1/-0, git init call sites +1/-0.")
     assert "⚠" not in shape and question == DIFF_PULSE_QUESTION
@@ -429,7 +430,7 @@ def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns
     test_src, product_src = "def test_ok():\n    pass\n", "X = 1\n"
     _write(repo, "tests/test_sample.py", 1, test_src)
     _write(repo, "ouroboros/sample.py", 1, product_src)
-    known_fact, known_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+    known_fact, known_shape, *_ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
     assert "tests: items +1/-0," in known_fact and "unreadable" not in known_fact
     assert known_shape == (
         "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-0; "
@@ -447,7 +448,7 @@ def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns
 
     with monkeypatch.context() as scoped:
         scoped.setattr(ast, "parse", fail_parse)
-        unknown_fact, unknown_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+        unknown_fact, unknown_shape, *_ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
     assert "tests: items +0/-0 (1 unreadable)," in unknown_fact
     assert unknown_shape == (
         "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: "
@@ -607,6 +608,28 @@ def test_the_pulse_names_each_touched_files_owning_manuals_and_whether_the_chang
     assert "- ouroboros/core.py: docs/architecture/01-core.md (not in this change)" in staged and "09-other" not in staged
     # A tree with no manifest (any other repository) says nothing about owners.
     assert "Owning manuals" not in diff_pulse(_touched(_body(tmp_path / "plain")))
+
+
+def test_a_change_that_adds_a_runtime_module_says_whether_the_module_directory_is_in_it(tmp_path):
+    """The hand-kept module directory beside a new module: the pulse says whether the directory file is in the
+    change, as a literal fact about the diff (no veto), names every added module, and says nothing when the change
+    adds none: a new test, a new document or an edit of an existing module is no new runtime module."""
+    directory = "docs/architecture/01-module-directory.md"
+    repo = _owned_body(tmp_path / "body", {directory: "# 1.1 Module Directory\n\nRows.\n"})
+    line = "New runtime modules: {}; the hand-kept module directory `" + directory + "` is {}."
+    _write(repo, "ouroboros/core.py", 11)
+    _write(repo, "tests/test_new.py", 1)
+    _write(repo, "docs/new.md", 1, "notes\n")
+    assert "New runtime modules" not in diff_pulse(repo) and directory not in diff_pulse(repo)  # nothing added
+    _write(repo, "ouroboros/fresh.py", 1)
+    _write(repo, "supervisor/also.py", 1)
+    assert line.format("ouroboros/fresh.py, supervisor/also.py", "not in this change") in diff_pulse(repo)
+    _write(repo, directory, 1, "# 1.1 Module Directory\n\nRows.\n- fresh.py: a new row.\n")
+    assert line.format("ouroboros/fresh.py, supervisor/also.py", "in this change") in diff_pulse(repo)
+    # Staged, the fact is the index's: only what the commit would add, and the directory only if staged with it.
+    _git(repo, "add", "ouroboros/fresh.py")
+    staged = diff_pulse(repo, ["ouroboros/fresh.py"], staged=True)
+    assert line.format("ouroboros/fresh.py", "not in this change") in staged
 
 
 def _touched(repo: Path) -> Path:

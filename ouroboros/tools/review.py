@@ -189,7 +189,7 @@ def _preflight_check(commit_message: str, staged_files: str,
 
     # A new runtime module owes what makes it a row of the live map: its `[modules]` entry in the manifest of this
     # same subject, and a docstring lead (`module_map` reads both). Whether the hand-kept directory (§1.1) and its
-    # owning manual say enough is the reviewer's judgment: the diff pulse names the manuals and whether the change touches them, and
+    # owning manual say enough is the reviewer's judgment: the diff pulse says whether the change touches them, and
     # no manual edit is demanded here, since a mandatory touch buys an edit that documents nothing (BIBLE P3:
     # review coverage is diagnostic, never a veto). ``repo_dir``'s index is the subject, a frozen base..head
     # review's isolated checkout included; an index that cannot be read is unavailable evidence, never a pass.

@@ -470,6 +470,21 @@ def ownership_note(shown: Iterable[str], changed: Iterable[str], manifest: Optio
     return "\n".join([*head, *rows])
 
 
+MODULE_DIRECTORY = "docs/architecture/01-module-directory.md"
+RUNTIME_PACKAGES = ("ouroboros/", "supervisor/")  # where a new ``.py`` file is a runtime module (the preflight's rule)
+
+
+def directory_note(added: Iterable[str], changed: Iterable[str]) -> str:
+    """For a change that adds a runtime module (a ``.py`` file under ``RUNTIME_PACKAGES``): whether the hand-kept
+    module directory is in the change. A literal fact about the diff for the mind and the reviewer, never a gate
+    (BIBLE P3) and nothing when no module is added."""
+    modules = sorted(path for path in added if path.startswith(RUNTIME_PACKAGES) and path.endswith(".py"))
+    if not modules:
+        return ""
+    state = "in this change" if MODULE_DIRECTORY in set(changed) else "not in this change"
+    return f"New runtime modules: {', '.join(modules)}; the hand-kept module directory `{MODULE_DIRECTORY}` is {state}."
+
+
 def removed_prose_note(documents: Iterable[str], at_base: Mapping[str, Optional[str]],
                        current: Mapping[str, Optional[str]], *, locator: str, unread: Iterable[str] = (),
                        limit: int = 12, width: int = 240) -> str:

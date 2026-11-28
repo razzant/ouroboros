@@ -1418,8 +1418,9 @@ def diff_pulse(
     ``serial`` marks, recorded test-seconds, its lines); a shown Python source adds the code-shape line
     (``code_shape_facts``: module handles and the calls through them, re-exported names, a test's patched
     product-module names and ``git init`` call sites). A fact for the mind, never a gate: one shape and
-    one question for any size; the list bounds are presentation only, counting the rest, and every
-    shown file's owning manuals are named.
+    one question for any size; the list bounds are presentation only, counting the rest, every
+    shown file's owning manuals are named, and a change that adds a runtime module says whether the
+    hand-kept module directory is in it (``code_shape_facts.directory_note``).
     """
     from ouroboros.reference_books import _git_bytes, book_balance_note, contribution_base
     from ouroboros.tools.governance_context import BODY_INVARIANTS_CHAPTER as INVARIANTS
@@ -1515,8 +1516,8 @@ def diff_pulse(
                                    base_manifest=at_base[shapes.MANIFEST_PATH], removed=gone)
     prose = shapes.removed_prose_note(governed, at_base, current, unread=unread_prose, locator=(
         f"git diff {'--cached ' if staged else ''}{base[:12]} -- {' '.join(governed)}")) if set(governed) & set(shown) else ""
-    return "\n".join(part for part in (fact, shape, owners, prose, book_balance_note(root, shown, staged=staged),
-                                       DIFF_PULSE_QUESTION) if part)
+    return "\n".join(part for part in (fact, shape, owners, shapes.directory_note(created, changed), prose,
+                                       book_balance_note(root, shown, staged=staged), DIFF_PULSE_QUESTION) if part)
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:
