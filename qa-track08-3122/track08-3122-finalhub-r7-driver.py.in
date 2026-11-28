@@ -1,0 +1,308 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+from zipfile import ZipFile
+
+CORE_BASE = "9f6fad44a369a1eaf079129a6d4a69539f25dd86"
+CORE_TREE = "4f28bd37241a2854c35143140d71a111802d37ed"
+HUB_TREE = "28a719618a348f1e579fec25c5583aa6d2a04002"
+PAIR_SHA = "83f21024b21d806e63eb335b83447e0f36ebe0bbacf9cd9ff3ae9ce5a406aa0a"
+ZIP_SHA = "9651ff6ea6310cfe0df73b360336f78af37eb996ac4c7af86be60dea57b76872"
+PLUGIN_SHA = "ebfbb7a22a22409bd845b9ca62400e292716eee6e88bd790fa8eac8652841159"
+RELEASE_DIGEST = "01de635a5c7aa95f72207a42a1b0b437e72a883319b356de4bc70f0ef7a68ac9"
+SKILL = "telegram-bot"
+STEMS = {
+    "fixture": "fixture-source-preview",
+    "boot": "bootstrap-preview",
+    "ordinary": "ordinary-send-and-rotation-preview",
+    "setup": "owner-fixture-setup",
+    "auto": "auto-reply-witness-preview",
+    "checks": "positive-record-checks",
+}
+
+
+def need(ok, why):
+    if not ok:
+        raise RuntimeError(why)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def pinned(path, expected):
+    data = path.read_bytes()
+    need(sha(data) == expected, f"SOURCE_BYTES_MISMATCH: {path.name}")
+    return data
+
+
+def git(root, *args):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0")
+    return subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=root, env=env,
+                          capture_output=True, check=True, timeout=120).stdout
+
+
+def blob(data):
+    # These two pinned Git repositories use SHA-1 Git object names; package pins
+    # also check an independent raw SHA-256 for every file.
+    return hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+
+
+def regular(root, rel, mode):
+    path = root / rel
+    info = path.lstat()
+    need(path.resolve() == path and stat.S_ISREG(info.st_mode), f"SOURCE_NOT_REGULAR: {rel}")
+    need(mode in {"100644", "100755"}
+         and bool(info.st_mode & stat.S_IXUSR) == (mode == "100755"), f"SOURCE_MODE_MISMATCH: {rel}")
+    return path.read_bytes()
+
+
+def verify_core(root, head):
+    need(re.fullmatch(r"[0-9a-f]{40}", head) is not None, "SOURCE_NEEDS_EXACT_COMMIT")
+    need(Path(os.fsdecode(git(root, "rev-parse", "--show-toplevel").rstrip(b"\n"))) == root,
+         "SOURCE_NOT_REPOSITORY_ROOT")
+    parents = git(root, "rev-list", "--parents", "-n1", "HEAD").decode("ascii").split()
+    need(parents == [head, CORE_BASE], "CORE_HEAD_OR_BASE_MISMATCH")
+    need(git(root, "rev-parse", "HEAD^{tree}").decode("ascii").strip() == CORE_TREE,
+         "CORE_TREE_MISMATCH")
+    need(not git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all"), "CORE_SOURCE_DIRTY")
+    for entry in git(root, "ls-tree", "-rz", "HEAD").split(b"\0"):
+        if entry:
+            meta, name = entry.split(b"\t", 1)
+            mode, kind, oid = meta.decode("ascii").split()
+            rel = os.fsdecode(name)
+            need(kind == "blob", "CORE_NON_BLOB")
+            actual = regular(root, rel, mode)
+            if blob(actual) != oid:
+                # .gitattributes deliberately checks out Windows batch files as CRLF.
+                # Accept only that exact projection, never altered source content.
+                attrs = git(root, "check-attr", "--cached", "-z", "text", "eol",
+                            "working-tree-encoding", "filter", "--", rel)
+                attrs_expected = b"".join(os.fsencode(rel) + b"\0" + key + b"\0" + value + b"\0"
+                                           for key, value in ((b"text", b"set"), (b"eol", b"crlf"),
+                                                              (b"working-tree-encoding", b"unspecified"),
+                                                              (b"filter", b"unspecified")))
+                need(rel.endswith(".cmd") and attrs == attrs_expected, "CORE_CHECKOUT_UNEXPECTED_BYTES")
+                source = git(root, "cat-file", "blob", oid)
+                need(blob(source) == oid and actual == re.sub(rb"(?<!\r)\n", b"\r\n", source),
+                     "CORE_CRLF_PROJECTION_MISMATCH")
+
+
+def verify_package(root, inventory):
+    need(len(inventory) == 56, "HUB_INVENTORY_MISMATCH")
+    files = set()
+    for path in root.rglob("*"):
+        mode = path.lstat().st_mode
+        need(path.resolve() == path and (stat.S_ISDIR(mode) or stat.S_ISREG(mode)), "HUB_NON_REGULAR_ENTRY")
+        if stat.S_ISREG(mode):
+            files.add(path.relative_to(root).as_posix())
+    need(files == set(inventory), "HUB_PATHS_MISMATCH")
+    for rel, expected in inventory.items():
+        data = regular(root, rel, expected["mode"])
+        need((len(data), sha(data), blob(data)) == (expected["bytes"], expected["sha256"], expected["blob"]),
+             f"HUB_BLOB_MISMATCH: {rel}")
+    need(inventory["plugin.py"]["sha256"] == PLUGIN_SHA, "HUB_PLUGIN_MISMATCH")
+
+
+def one_edit(raw, old, new):
+    before = old.encode("utf-8")
+    need(raw.count(before) == 1, "FIXTURE_SOURCE_ANCHOR_CHANGED")
+    return raw.replace(before, new.encode("utf-8"), 1)
+
+
+OLD_BOOT = '''                if (observed.get("confirmed_account") == str(fixture.BOTS["A"]["id"])
+                        and observed.get("confirmed_reason") == ""
+                        and any(c["bot"] == "A" and c["method"] == "getMe" for c in provider.calls())):
+                    return {"confirmed_account": observed["confirmed_account"], "get_me_observed": True}'''
+NEW_BOOT = '''                sender = ((observed.get("identity") or {}).get("sends_as") or {})
+                expected = str(fixture.BOTS["A"]["id"])
+                if (sender.get("id") == expected and sender.get("kind") == "bot"
+                        and isinstance(observed.get("connect"), list)
+                        and observed.get("bot_unconfirmed") is False and observed.get("poll_result") == "ok"
+                        and any(c["bot"] == "A" and c["method"] == "getMe" for c in provider.calls())):
+                    return {"confirmed_account": expected, "get_me_observed": True}'''
+OLD_SWITCH = '''        return (observed.get("confirmed_account") == expected_account and observed.get("confirmed_reason") == "" and seen)'''
+NEW_SWITCH = '''        sender = ((observed.get("identity") or {}).get("sends_as") or {})
+        return (seen and sender.get("id") == expected_account and sender.get("kind") == "bot"
+                and isinstance(observed.get("connect"), list)
+                and observed.get("bot_unconfirmed") is False and observed.get("poll_result") == "ok")'''
+
+
+def read_fragments(zip_path, fixture_pair):
+    pinned(zip_path, ZIP_SHA)
+    names = {key: f"track08-3122-{stem}.py.in" for key, stem in STEMS.items()}
+    with ZipFile(zip_path) as z:
+        need(sorted(z.namelist()) == sorted(["manifest.json", *names.values()]), "FIXTURE_ARCHIVE_INVENTORY")
+        manifest = json.loads(z.read("manifest.json"))
+        need(manifest["private_pair_sha256"] == PAIR_SHA
+             and manifest["core"] == fixture_pair["core"]
+             and manifest["hub"] == {k: v for k, v in fixture_pair["hub"].items() if k != "package_files"}
+             and manifest["hub"]["package_tree"] == HUB_TREE and manifest["hub"]["version"] == "0.14.1"
+             and manifest["package_file_count"] == 56 and manifest["plugin_sha256"] == PLUGIN_SHA,
+             "FIXTURE_MANIFEST_MISMATCH")
+        need(set(manifest["fragments"]) == set(names.values()), "FIXTURE_MANIFEST_INVENTORY")
+        raw = {key: z.read(name) for key, name in names.items()}
+    for key, data in raw.items():
+        expected = manifest["fragments"][names[key]]
+        need(len(data) == expected["bytes"] and sha(data) == expected["sha256"], "FIXTURE_MEMBER_MISMATCH")
+    raw["fixture"] = one_edit(raw["fixture"], 'TOKEN_A = "1111111:', 'TOKEN_A = "9000000001:')
+    raw["fixture"] = one_edit(raw["fixture"], 'TOKEN_B = "2222222:', 'TOKEN_B = "9000000002:')
+    raw["boot"] = one_edit(raw["boot"], OLD_BOOT, NEW_BOOT)
+    raw["ordinary"] = one_edit(raw["ordinary"], OLD_SWITCH, NEW_SWITCH)
+    return raw
+
+
+def materialize(root, fragments):
+    modules = {}
+    for key, data in fragments.items():
+        name = f"track08_3122_{key}"
+        path = root / f"{name}.py"
+        with path.open("xb") as out:
+            out.write(data)
+        spec = importlib.util.spec_from_file_location(name, path)
+        need(spec is not None and spec.loader is not None, "FIXTURE_MODULE_UNAVAILABLE")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        modules[key] = module
+    return modules
+
+
+def main(a, completed):
+    need(sys.platform == "linux" and __debug__ and sys.dont_write_bytecode
+         and not os.environ.get("OBO_ALLOW_EVOLVED_VOLUME"), "FIXTURE_REQUIRES_LINUX_ASSERTS_NO_ATTESTATION_OVERRIDE")
+    core, hub, scratch = (getattr(a, key).resolve() for key in ("core", "hub", "scratch"))
+    need(all(left != right and left not in right.parents and right not in left.parents
+             for left, right in ((core, hub), (core, scratch), (hub, scratch))), "FIXTURE_ROOTS_OVERLAP")
+    pair = json.loads(pinned(a.pair, PAIR_SHA))
+    need(pair["hub"]["package_tree"] == HUB_TREE and pair["hub"]["version"] == "0.14.1"
+         and pair["hub"]["computed_release_digest"] == RELEASE_DIGEST, "FIXTURE_SOURCE_PACKAGE_MISMATCH")
+    package = hub / "skills" / SKILL
+    verify_core(core, a.core_head)  # before importing Core or taking the origin-proof overlay
+    verify_package(package, pair["hub"]["package_files"])
+    fragments = read_fragments(a.witness, pair)
+
+    sys.path.insert(0, str(core))
+    from ouroboros.install_identity import acting_as, recorded_id
+    from ouroboros.skill_source_catalog import read_manifest, tree_release_digest
+    from tests.candidate_checkout import candidate_checkout, require_candidate_interpreter
+    from tests.system_e2e.harness import ScriptedStubModel
+
+    manifest = read_manifest(package)
+    need(manifest is not None and manifest.version == "0.14.1", "HUB_MANIFEST_VERSION_MISMATCH")
+
+    def digest(path):
+        return tree_release_digest(path, bucket="external")
+
+    need(digest(package) == RELEASE_DIGEST, "HUB_RELEASE_DIGEST_MISMATCH")
+    require_candidate_interpreter(sys.executable, checkout=core)
+    scratch.mkdir()  # caller must reserve a fresh nonexistent directory, not reuse a prior run
+    mods = materialize(scratch, fragments)
+    fixture, boot, checks = (mods[key] for key in ("fixture", "boot", "checks"))
+    need(all(getattr(fixture, f"TOKEN_{label}").partition(":")[0] == str(fixture.BOTS[label]["id"])
+             for label in ("A", "B")), "FIXTURE_POLLER_IDENTITY_MISMATCH")
+    pins = {"core_head": a.core_head, "digest_fn": digest, "release_digest": RELEASE_DIGEST,
+            "package_file_count": 56, "plugin_sha256": PLUGIN_SHA, "launcher_sha256": sha(fragments["fixture"])}
+    result = {"core_head": a.core_head, "core_tree_before_origin_proof": CORE_TREE,
+              "hub_package_tree": HUB_TREE, "hub_release_digest": RELEASE_DIGEST,
+              "materialized_fragments": {key: sha(data) for key, data in fragments.items()}, "cases": {}}
+    for case in ("ordinary_send", "confirmed_auto_reply"):
+        root = scratch / case
+        root.mkdir()
+        # LauncherCore insists the launcher and candidate both live below THIS case root.
+        old_file = fixture.__file__
+        launcher = root / "telegram_fixture_launcher.py"
+        with launcher.open("xb") as out:
+            out.write(fragments["fixture"])
+        fixture.__file__ = str(launcher)
+        try:
+            with candidate_checkout(core, root / "candidate", origin_proof=True) as candidate:
+                with ScriptedStubModel([]) as stub:
+                    with boot.hosted_core(fixture, candidate, root, stub, hub, pins) as (server, provider, facts):
+                        att = facts["core"]["attestation"]
+                        need(att.get("ok") is True and att.get("override_set") is False
+                             and att.get("overridden") is False and att.get("repo_head") == a.core_head
+                             and att.get("runtime_version") == att.get("repo_version") == candidate.version_text,
+                             "FIXTURE_BOOT_ATTESTATION_MISMATCH")
+                        # This test launched the attested, fresh install itself. Its result
+                        # observer uses that install's identity, without minting a record.
+                        owned_data = Path(server.data_root).resolve(strict=True)
+                        need(owned_data == root / "data" and bool(recorded_id(owned_data)),
+                             "OWNED_FIXTURE_INSTALL_IDENTITY_NOT_ESTABLISHED")
+                        if case == "ordinary_send":
+                            place = mods["setup"].confirmed_fixture_place(fixture, server, provider, facts)
+                            with acting_as(owned_data):
+                                observed = mods["ordinary"].ordinary_send_witness(fixture, server, provider, facts, stub, checks)
+                            proof = {key: observed[key] for key in ("request_id", "send_task", "send_call",
+                                                                  "receipt_task", "receipt_call", "message_id")}
+                            proof["place_id"] = place
+                        elif case == "confirmed_auto_reply":
+                            place = mods["setup"].confirmed_fixture_place(fixture, server, provider, facts)
+                            with acting_as(owned_data):
+                                proof = mods["auto"].owner_dm_auto_reply_witness(fixture, server, provider, facts, stub,
+                                                                                checks, place_id=place)
+                        provider.assert_clean()
+                        result["cases"][case] = {"runtime_version": att["runtime_version"], "proof": proof}
+        finally:
+            fixture.__file__ = old_file
+        completed.append(case)
+    result.update(core_base=CORE_BASE, fixture_source_core_head=pair["core"]["commit"], completed_cases=list(completed))
+    print(json.dumps(result, sort_keys=True))  # after completed teardown
+
+
+def _record_failure(path, error, scratch, completed):
+    own = Path(__file__).resolve()
+    root = scratch.resolve()
+    witness_files = {root / f"track08_3122_{key}.py": f"witness_{key}" for key in STEMS}
+    phase, line = "unknown", 0
+    frame = error.__traceback__
+    while frame is not None:
+        code = frame.tb_frame.f_code
+        where = Path(code.co_filename).resolve()
+        if code.co_name not in {"<module>", "need"}:
+            if where == own:
+                phase, line = code.co_name, frame.tb_lineno
+            elif where in witness_files:
+                phase, line = witness_files[where], frame.tb_lineno
+        frame = frame.tb_next
+    error_class = type(error).__name__
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_class) is None:
+        error_class = "OtherError"
+    operation = getattr(error, "operation", None)
+    if operation in {"server_start", "admit_review", "admit_grants", "admit_toggle", "admit_extensions", "bot_status"}:
+        phase = operation
+    status = getattr(error, "http_status", getattr(error, "code", None))
+    if type(status) is not int or not 400 <= status <= 599:
+        status = 0
+    with path.open("x", encoding="ascii") as out:
+        json.dump({"phase": phase, "error_class": error_class, "line": line, "http_status": status,
+                   "completed_cases": completed}, out, sort_keys=True)
+        out.write("\n")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    for option in ("core", "hub", "pair", "witness", "scratch"):
+        parser.add_argument(f"--{option}", required=True, type=Path)
+    parser.add_argument("--core-head", required=True)
+    parser.add_argument("--diagnostics", required=True, type=Path)
+    a = parser.parse_args()
+    completed = []
+    try:
+        main(a, completed)
+    except Exception as error:
+        try:
+            _record_failure(a.diagnostics, error, a.scratch, completed)
+        except OSError:
+            pass  # Keep the original failure if the diagnostic cannot be saved.
+        raise

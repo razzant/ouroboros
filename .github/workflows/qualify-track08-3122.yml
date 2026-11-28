@@ -1,0 +1,292 @@
+name: '#3122 exact composed qualification'
+run-name: '#3122 exact composed qualification at ${{ github.sha }}'
+on:
+  push:
+    branches: ['qa/track08-3122-finalhub-b971afb7']
+permissions:
+  contents: read
+
+jobs:
+  ordinary-3122:
+    if: github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/track08-3122-finalhub-b971afb7' && github.event.deleted == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CORE_HEAD: '41bf465b65fcf725d9e5cb65b8a284cc93d49ee8'
+      CORE_BASE: '9f6fad44a369a1eaf079129a6d4a69539f25dd86'
+      CORE_TREE: '4f28bd37241a2854c35143140d71a111802d37ed'
+      HUB_HEAD: 'b971afb79d0ee9dd0f2d042cfdaa0ba703ef3435'
+      HUB_TREE: '28a719618a348f1e579fec25c5583aa6d2a04002'
+      HUB_RELEASE_DIGEST: '01de635a5c7aa95f72207a42a1b0b437e72a883319b356de4bc70f0ef7a68ac9'
+      FIXTURE_PINS_SHA256: 'e294080d5b26a4e27bd2bfd11a7ef4b3ba1642310e3f4948c3ec7d9e07ea4195'
+      QA_DIR: qa-track08-3122
+      PINS: 'track08-3122-finalhub-ordinary-pins.json'
+      PAIR: 'track08-3122-finalhub-pair.json'
+      DRIVER_R7: 'track08-3122-finalhub-r7-driver.py.in'
+      WITNESS_R7: 'track08-3122-finalhub-r7-witness.zip'
+      DRIVER_R8: 'track08-3122-finalhub-r8-driver.py.in'
+      WITNESS_R8: 'track08-3122-finalhub-r8-witness.zip'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind the temporary carrier to the reviewed Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { printf '::error::#3122 %s\n' "$1" >&2; exit 1; }
+          for sha in "$CORE_HEAD" "$HUB_HEAD"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail 'EXACT_PRODUCT_COMMITS_REQUIRED'
+          done
+          [[ "$FIXTURE_PINS_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail 'EXACT_FIXTURE_MANIFEST_DIGEST_REQUIRED'
+          [[ "$(git rev-list --parents -n1 HEAD)" == "$GITHUB_SHA $CORE_HEAD" &&
+             "$(git rev-list --parents -n1 "$CORE_HEAD")" == "$CORE_HEAD $CORE_BASE" &&
+             "$(git rev-parse "${CORE_HEAD}^{tree}")" == "$CORE_TREE" ]] || fail 'CARRIER_OR_CORE_BINDING_MISMATCH'
+          expected=$(printf '%s\n' .github/workflows/qualify-track08-3122.yml \
+            "$QA_DIR/$PINS" "$QA_DIR/$PAIR" "$QA_DIR/$DRIVER_R7" "$QA_DIR/$WITNESS_R7" "$QA_DIR/$DRIVER_R8" "$QA_DIR/$WITNESS_R8" | LC_ALL=C sort)
+          [[ "$(git diff --name-only --no-renames "$CORE_HEAD" HEAD | LC_ALL=C sort)" == "$expected" ]] \
+            || fail 'CARRIER_HAS_NON_QA_CHANGES_OR_MISSING_FILES'
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.CORE_HEAD }}
+          path: core
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: razzant/OuroborosHub
+          ref: ${{ env.HUB_HEAD }}
+          path: hub
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Observe ordinary fictional send and admitted reply
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '::error::#3122 %s\n' "$1" >&2; exit 1; }
+          sha256() { sha256sum < "$1" | cut -d ' ' -f 1; }
+          DRIVER="$DRIVER_R7"; WITNESS="$WITNESS_R7"
+          ws="$GITHUB_WORKSPACE"
+          core="$ws/core"; hub="$ws/hub"; qa="$ws/$QA_DIR"; scratch="$ws/scratch-r7"
+          [[ "$(git -C "$core" rev-parse HEAD)" == "$CORE_HEAD" &&
+             "$(git -C "$hub" rev-parse HEAD)" == "$HUB_HEAD" &&
+             "$(git -C "$hub" rev-parse 'HEAD:skills/telegram-bot')" == "$HUB_TREE" ]] \
+            || fail 'PRODUCT_CHECKOUT_MISMATCH'
+          [[ -d "$qa" && ! -L "$qa" && -f "$qa/$PINS" && ! -L "$qa/$PINS" &&
+             "$(sha256 "$qa/$PINS")" == "$FIXTURE_PINS_SHA256" ]] || fail 'FIXTURE_MANIFEST_BYTES_MISMATCH'
+          all_inputs=$(printf '%s\n' "$DRIVER_R7" "$WITNESS_R7" "$DRIVER_R8" "$WITNESS_R8" "$PAIR" | jq -Rsc 'split("\n") | map(select(length>0)) | sort')
+          jq -e --arg cb "$CORE_BASE" --arg ch "$CORE_HEAD" --arg ct "$CORE_TREE" --arg hh "$HUB_HEAD" \
+            --arg ht "$HUB_TREE" --arg hd "$HUB_RELEASE_DIGEST" --argjson inputs "$all_inputs" '
+              [.core_base,.core_head,.core_tree,.hub_head,.hub_tree,.hub_release_digest] == [$cb,$ch,$ct,$hh,$ht,$hd]
+              and (.files | keys) == $inputs' "$qa/$PINS" >/dev/null 2>&1 || fail 'FIXTURE_MANIFEST_BINDING_MISMATCH'
+          for name in "$DRIVER_R7" "$WITNESS_R7" "$DRIVER_R8" "$WITNESS_R8" "$PAIR"; do
+            f="$qa/$name"
+            [[ -f "$f" && ! -L "$f" ]] || fail 'FIXTURE_INPUT_NOT_REGULAR'
+            jq -e --arg k "$name" --arg s "$(sha256 "$f")" --argjson n "$(wc -c < "$f")" \
+              '.files[$k] == {sha256:$s, bytes:$n}' "$qa/$PINS" >/dev/null 2>&1 \
+              || fail 'FIXTURE_INPUT_BYTES_MISMATCH'
+          done
+          python="${VIRTUAL_ENV:-}/bin/python"
+          [[ -n "${VIRTUAL_ENV:-}" && -x "$python" && -x "${OUROBOROS_CI_INTERPRETER:-}" ]] \
+            || fail 'SHIPPED_DEPENDENCY_ENV_UNAVAILABLE'
+          [[ ! -e "$scratch" && ! -L "$scratch" ]] || fail 'SCRATCH_MUST_NOT_EXIST'
+          (( EUID > 0 )) || fail 'ISOLATION_UNAVAILABLE: expected an ordinary runner user'
+          outer_ns=$(readlink /proc/self/ns/net) || fail 'ISOLATION_UNAVAILABLE: no namespace identity'
+          tmp=$(mktemp -d "$RUNNER_TEMP/tg3122.XXXXXXXX")
+          mkdir -m 700 "$tmp/home" "$tmp/tmp"
+          capture="$tmp/stdout"
+          diag="$tmp/diagnostics.json"
+          trap 'rm -f -- "$capture"' EXIT
+
+          set +e
+          sudo -n -- /usr/bin/unshare --net -- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            /bin/bash -s -- "$outer_ns" "$EUID" "$(id -g)" "$tmp" \
+            "$python" -B "$qa/$DRIVER" --core "$core" --hub "$hub" --core-head "$CORE_HEAD" \
+            --pair "$qa/$PAIR" --witness "$qa/$WITNESS" --scratch "$scratch" --diagnostics "$diag" \
+            2>/dev/null <<'ISOLATED' | /usr/bin/head -c 32769 > "$capture"
+          set -euo pipefail
+          outer_ns=$1; uid=$2; gid=$3; tmp=$4; shift 4
+          ns=$(readlink /proc/self/ns/net)
+          [[ -n "$ns" && "$ns" != "$outer_ns" ]] || exit 70
+          ip link set dev lo up
+          [[ "$(ip -o link show | awk -F': ' '{print $2}')" == lo &&
+             "$(ip -o link show up | awk -F': ' '{print $2}')" == lo ]] || exit 70
+          exec /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+            /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$tmp/home" TMPDIR="$tmp/tmp" \
+            PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+            /bin/bash -c '(( EUID > 0 )) || exit 70; "$@" </dev/null || exit 80' isolated-driver "$@"
+          ISOLATED
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          [[ "${statuses[1]}" == 0 ]] || fail 'EVIDENCE_CAPTURE_FAILED'
+          [[ "$(wc -c < "$capture")" -le 32768 ]] || fail 'EVIDENCE_EXCEEDS_32_KIB'
+          case "${statuses[0]}" in
+            0) ;;
+            80)
+              if [[ -f "$diag" && ! -L "$diag" && "$(wc -c < "$diag")" -le 512 ]]; then
+                detail=$(jq -ce '
+                  select((.phase | type == "string" and test("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))
+                    and (.error_class | type == "string" and test("^[A-Za-z][A-Za-z0-9_]{0,63}$"))
+                    and (.line | type == "number" and . >= 0 and . <= 1000 and floor == .)
+                    and (.http_status | type == "number" and floor == . and (. == 0 or (. >= 400 and . <= 599)))
+                    and (.completed_cases as $x | ($x | type == "array")
+                         and ($x == (["ordinary_send","confirmed_auto_reply"][:($x | length)]))))
+                  | {phase, error_class, line, http_status, completed_cases}
+                ' "$diag" 2>/dev/null) && printf 'PINNED_DRIVER_DIAGNOSTIC %s\n' "$detail"
+              fi
+              fail 'PINNED_DRIVER_FAILED: ordinary send and reply proof not established' ;;
+            *) fail 'ISOLATION_UNAVAILABLE: namespace or privilege drop failed; no fallback' ;;
+          esac
+
+          proof=$(jq -ces --arg carrier "$GITHUB_SHA" --arg ch "$CORE_HEAD" --arg ct "$CORE_TREE" \
+            --arg hh "$HUB_HEAD" --arg ht "$HUB_TREE" --arg hd "$HUB_RELEASE_DIGEST" --arg p "$FIXTURE_PINS_SHA256" --arg cb "$CORE_BASE" \
+            --argjson inputs "$(jq -c --arg d "$DRIVER" --arg p "$PAIR" --arg w "$WITNESS" '.files | with_entries(select(.key == $d or .key == $p or .key == $w)) | map_values(.sha256)' "$qa/$PINS")" '
+            if length == 1 then .[0] else error("expected one JSON result") end
+            | if .core_head == $ch and .core_tree_before_origin_proof == $ct
+                 and .fixture_source_core_head == "a02300e5de3583c1d56ab40e30aab776a5a77016"
+                 and .core_base == $cb and .completed_cases == ["ordinary_send","confirmed_auto_reply"]
+                 and .hub_package_tree == $ht and .hub_release_digest == $hd
+                 and (.materialized_fragments | keys) == ["auto","boot","checks","fixture","ordinary","setup"]
+                 and (.materialized_fragments | all(.[]; type == "string" and test("^[0-9a-f]{64}$")))
+                 and (.cases | keys) == ["confirmed_auto_reply","ordinary_send"]
+                 and (.cases | all(.[]; (.runtime_version | type == "string" and length > 0)
+                                       and (.proof | type == "object" and length > 0)))
+                 and .cases.ordinary_send.proof.message_id != null
+                 and .cases.confirmed_auto_reply.proof.message_id != null
+                 and .cases.confirmed_auto_reply.proof.owner_only_attested == false
+                 and .cases.confirmed_auto_reply.proof.owner_dm_recheck_count == 0
+              then {carrier_head:$carrier, core_head, core_base, completed_cases, fixture_source_core_head, core_tree_before_origin_proof, hub_head:$hh,
+                    hub_package_tree, hub_release_digest, fixture_pins_sha256:$p, input_sha256:$inputs,
+                    materialized_fragments, cases:(.cases | keys),
+                    owner_only_attested:.cases.confirmed_auto_reply.proof.owner_only_attested,
+                    owner_dm_recheck_count:.cases.confirmed_auto_reply.proof.owner_dm_recheck_count,
+                    auto_reply_message_id:.cases.confirmed_auto_reply.proof.message_id,
+                    auto_reply_subject:"ordinary_direct_chat_without_owner_only_attestation",
+                    auto_reply_proof:"ordinary_send_and_receipt_only"}
+              else error("source binding or ordinary case missing") end
+            ' "$capture" 2>/dev/null) || fail 'SEND_AND_REPLY_PROOF_MISSING_OR_MALFORMED'
+          printf '%s\n' "$proof"
+      - name: Observe ordinary settled fictional bot rotation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          fail() { printf '::error::#3122 %s\n' "$1" >&2; exit 1; }
+          sha256() { sha256sum < "$1" | cut -d ' ' -f 1; }
+          DRIVER="$DRIVER_R8"; WITNESS="$WITNESS_R8"
+          ws="$GITHUB_WORKSPACE"
+          core="$ws/core"; hub="$ws/hub"; qa="$ws/$QA_DIR"; scratch="$ws/scratch-r8"
+          [[ "$(git -C "$core" rev-parse HEAD)" == "$CORE_HEAD" &&
+             "$(git -C "$hub" rev-parse HEAD)" == "$HUB_HEAD" &&
+             "$(git -C "$hub" rev-parse 'HEAD:skills/telegram-bot')" == "$HUB_TREE" ]] \
+            || fail 'PRODUCT_CHECKOUT_MISMATCH'
+          [[ -d "$qa" && ! -L "$qa" && -f "$qa/$PINS" && ! -L "$qa/$PINS" &&
+             "$(sha256 "$qa/$PINS")" == "$FIXTURE_PINS_SHA256" ]] || fail 'FIXTURE_MANIFEST_BYTES_MISMATCH'
+          all_inputs=$(printf '%s\n' "$DRIVER_R7" "$WITNESS_R7" "$DRIVER_R8" "$WITNESS_R8" "$PAIR" | jq -Rsc 'split("\n") | map(select(length>0)) | sort')
+          jq -e --arg cb "$CORE_BASE" --arg ch "$CORE_HEAD" --arg ct "$CORE_TREE" --arg hh "$HUB_HEAD" \
+            --arg ht "$HUB_TREE" --arg hd "$HUB_RELEASE_DIGEST" --argjson inputs "$all_inputs" '
+              [.core_base,.core_head,.core_tree,.hub_head,.hub_tree,.hub_release_digest] == [$cb,$ch,$ct,$hh,$ht,$hd]
+              and (.files | keys) == $inputs' "$qa/$PINS" >/dev/null 2>&1 || fail 'FIXTURE_MANIFEST_BINDING_MISMATCH'
+          for name in "$DRIVER_R7" "$WITNESS_R7" "$DRIVER_R8" "$WITNESS_R8" "$PAIR"; do
+            f="$qa/$name"
+            [[ -f "$f" && ! -L "$f" ]] || fail 'FIXTURE_INPUT_NOT_REGULAR'
+            jq -e --arg k "$name" --arg s "$(sha256 "$f")" --argjson n "$(wc -c < "$f")" \
+              '.files[$k] == {sha256:$s, bytes:$n}' "$qa/$PINS" >/dev/null 2>&1 \
+              || fail 'FIXTURE_INPUT_BYTES_MISMATCH'
+          done
+          python="${VIRTUAL_ENV:-}/bin/python"
+          [[ -n "${VIRTUAL_ENV:-}" && -x "$python" && -x "${OUROBOROS_CI_INTERPRETER:-}" ]] \
+            || fail 'SHIPPED_DEPENDENCY_ENV_UNAVAILABLE'
+          [[ ! -e "$scratch" && ! -L "$scratch" ]] || fail 'SCRATCH_MUST_NOT_EXIST'
+          (( EUID > 0 )) || fail 'ISOLATION_UNAVAILABLE: expected an ordinary runner user'
+          outer_ns=$(readlink /proc/self/ns/net) || fail 'ISOLATION_UNAVAILABLE: no namespace identity'
+          tmp=$(mktemp -d "$RUNNER_TEMP/tg3122.XXXXXXXX")
+          mkdir -m 700 "$tmp/home" "$tmp/tmp"
+          capture="$tmp/stdout"
+          diag="$tmp/diagnostics.json"
+          trap 'rm -f -- "$capture"' EXIT
+
+          set +e
+          sudo -n -- /usr/bin/unshare --net -- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            /bin/bash -s -- "$outer_ns" "$EUID" "$(id -g)" "$tmp" \
+            "$python" -B "$qa/$DRIVER" --core "$core" --hub "$hub" --core-head "$CORE_HEAD" \
+            --pair "$qa/$PAIR" --witness "$qa/$WITNESS" --scratch "$scratch" --diagnostics "$diag" \
+            2>/dev/null <<'ISOLATED' | /usr/bin/head -c 32769 > "$capture"
+          set -euo pipefail
+          outer_ns=$1; uid=$2; gid=$3; tmp=$4; shift 4
+          ns=$(readlink /proc/self/ns/net)
+          [[ -n "$ns" && "$ns" != "$outer_ns" ]] || exit 70
+          ip link set dev lo up
+          [[ "$(ip -o link show | awk -F': ' '{print $2}')" == lo &&
+             "$(ip -o link show up | awk -F': ' '{print $2}')" == lo ]] || exit 70
+          exec /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+            /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$tmp/home" TMPDIR="$tmp/tmp" \
+            PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+            /bin/bash -c '(( EUID > 0 )) || exit 70; "$@" </dev/null || exit 80' isolated-driver "$@"
+          ISOLATED
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          [[ "${statuses[1]}" == 0 ]] || fail 'EVIDENCE_CAPTURE_FAILED'
+          [[ "$(wc -c < "$capture")" -le 32768 ]] || fail 'EVIDENCE_EXCEEDS_32_KIB'
+          case "${statuses[0]}" in
+            0) ;;
+            80)
+              if [[ -f "$diag" && ! -L "$diag" && "$(wc -c < "$diag")" -le 512 ]]; then
+                detail=$(jq -ce '
+                  select((.phase | type == "string" and test("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))
+                    and (.error_class | type == "string" and test("^[A-Za-z][A-Za-z0-9_]{0,63}$"))
+                    and (.line | type == "number" and . >= 0 and . <= 1000 and floor == .)
+                    and (.http_status | type == "number" and floor == . and (. == 0 or (. >= 400 and . <= 599)))
+                    and (.completed_cases as $x | ($x | type == "array")
+                         and ($x == [] or $x == ["settled_rotation"]))
+                    and (.write_reason as $r | ([null,"main_binding_invalid","settings_locked","settings_busy",
+                        "settings_precondition_failed","settings_changed_elsewhere","settings_publication_refused",
+                        "managed_by_deployment","pinned_settings","unclassified"] | index($r)) != null)
+                    and (.write_saved == null or (.write_saved | type == "boolean")))
+                  | {phase, error_class, line, http_status, completed_cases, write_reason, write_saved}
+                ' "$diag" 2>/dev/null) && printf 'PINNED_DRIVER_DIAGNOSTIC %s\n' "$detail"
+              fi
+              fail 'PINNED_DRIVER_FAILED: settled rotation proof not established' ;;
+            *) fail 'ISOLATION_UNAVAILABLE: namespace or privilege drop failed; no fallback' ;;
+          esac
+
+          proof=$(jq -ces --arg carrier "$GITHUB_SHA" --arg ch "$CORE_HEAD" --arg ct "$CORE_TREE" \
+            --arg hh "$HUB_HEAD" --arg ht "$HUB_TREE" --arg hd "$HUB_RELEASE_DIGEST" --arg p "$FIXTURE_PINS_SHA256" --arg cb "$CORE_BASE" \
+            --argjson inputs "$(jq -c --arg d "$DRIVER" --arg p "$PAIR" --arg w "$WITNESS" '.files | with_entries(select(.key == $d or .key == $p or .key == $w)) | map_values(.sha256)' "$qa/$PINS")" '
+            if length == 1 then .[0] else error("expected one JSON result") end
+            | if .core_head == $ch and .core_tree_before_origin_proof == $ct
+                 and .fixture_source_core_head == "a02300e5de3583c1d56ab40e30aab776a5a77016"
+                 and .core_base == $cb and .completed_cases == ["settled_rotation"]
+                 and .hub_package_tree == $ht and .hub_release_digest == $hd
+                 and (.materialized_fragments | keys) == ["auto","boot","checks","fixture","ordinary","setup"]
+                 and (.materialized_fragments | all(.[]; type == "string" and test("^[0-9a-f]{64}$")))
+                 and (.cases | keys) == ["settled_rotation"]
+                 and (.cases.settled_rotation.runtime_version | type == "string" and length > 0)
+                 and .cases.settled_rotation.proof.coverage == "settled_rotation_only"
+                 and (.cases.settled_rotation.proof.phases | map(.bot_observation.get_me_observed)) == [true,true,true]
+                 and (.cases.settled_rotation.proof.phases | map(.bot_observation.confirmed_account)) == ["9000000001","9000000002","9000000001"]
+                 and (.cases.settled_rotation.proof.phases | map(.settings_write))
+                     == [null,{"status":"saved","changed_keys":["TELEGRAM_PUBLIC_BOT_TOKEN"]},
+                              {"status":"saved","changed_keys":["TELEGRAM_PUBLIC_BOT_TOKEN"]}]
+                 and (.cases.settled_rotation.proof.phases | length == 3
+                      and all(.[]; .message_id != null and .receipt_call != null and .receipt_task != null
+                                   and .send_task != null and .send_call != null and .place_id != null))
+              then {carrier_head:$carrier, core_head, core_base, completed_cases, fixture_source_core_head, core_tree_before_origin_proof, hub_head:$hh,
+                    hub_package_tree, hub_release_digest, fixture_pins_sha256:$p, input_sha256:$inputs,
+                    materialized_fragments, cases:(.cases | keys),
+                    rotation_coverage:.cases.settled_rotation.proof.coverage,
+                    rotation_phases:(.cases.settled_rotation.proof.phases | length)}
+              else error("source binding or settled rotation case missing") end
+            ' "$capture" 2>/dev/null) || fail 'ROTATION_PROOF_MISSING_OR_MALFORMED'
+          printf '%s\n' "$proof"
