@@ -6,6 +6,7 @@ import { tr } from './i18n.js';
 import { isRestoringFocus, measureEdges, revealPastFade, syncFoldTabIndex } from './scroll_fade.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
 import { writeUnselected } from './selection_lifecycle.js';
+import { measure } from './layout_batch.js';
 
 const CHART_TYPES = new Set([
     'bar', 'line', 'pie', 'doughnut', 'polarArea', 'radar', 'scatter', 'bubble',
@@ -485,10 +486,13 @@ function highlightCodeIn(root, state, onDomWrite) {
     const api = globalThis.hljs;
     const codeNodes = api && root.querySelectorAll?.('.md-code-block pre > code');
     if (!codeNodes?.length) return;
-    const selection = root.ownerDocument?.getSelection?.();
-    const ranges = !selection?.isCollapsed && selection?.rangeCount
-        ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i)) : [];
-    codeNodes.forEach((code) => {
+    // The selection read lays the document out in Chromium: inside a viewport batch (a page of history) it joins the
+    // batch's one read phase, so every bubble's highlight is served by one layout, not one per bubble (layout_batch.js).
+    measure(() => {
+        const selection = root.ownerDocument?.getSelection?.();
+        return !selection?.isCollapsed && selection?.rangeCount
+            ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i)) : [];
+    }, (ranges) => codeNodes.forEach((code) => {
         const source = code.textContent || '';
         if (source.length > MAX_RICH_BLOCK_SOURCE_LENGTH) return;
         // A fence the reader has selected keeps its plain text only while that
@@ -506,7 +510,7 @@ function highlightCodeIn(root, state, onDomWrite) {
         };
         if (ranges.some(range => range.intersectsNode?.(code))) writeUnselected(code, state, onDomWrite, paint);
         else paint();
-    });
+    }));
 }
 
 /** Math in `root`'s text drawn by the vendored KaTeX auto-render, as a mounted message is enhanced; a formula it cannot
