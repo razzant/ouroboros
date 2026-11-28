@@ -167,6 +167,37 @@ def test_each_cause_has_its_own_period_closed_by_a_held_start_of_its_openers_roo
     assert [(periods[key]["task"], periods[key]["room"]) for key in ("memory", "route:glm")] == [("rootK", "1"), ("rootE", "nova")]
 
 
+def test_a_refused_start_with_no_known_window_opens_a_period_its_room_can_close(tmp_path, monkeypatch, sent):
+    """A first send refused on a route with no known window starts in Low with no Max room to read. Its period
+    (``refusal:<model>``) records the room of its receipt and the work room of its captured view, so the next start
+    that holds Max there with that work room closes it, and one in another room or beside another work room does
+    not. Recorded with no room, as before, nothing could ever close it and the model's later refusals said nothing."""
+    ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
+                          task_attempt=None)
+    bit = tmp_path.resolve() / "state" / "low_start_episode.json"
+    core = _core()  # a root's capture: two eighths of its window for work
+    real = _start(core, 2_000_000, monkeypatch).projection("max").memory_facts
+    assert real["room_id"] == real["max_room"]["room_id"] and real["max_room"]["levels"] == 2  # the receipt's own room
+
+    def refused(task, room_id="1"):
+        facts = {"role": "integrator", "first_contact_preference": "maps", "room_id": room_id}  # no Max room
+        plan = SimpleNamespace(projection=lambda _mode: SimpleNamespace(memory_facts=facts), model="m", core=core)
+        loop._note_low_start(ctx, plan, "low", task, None)
+        return json.loads(bit.read_text(encoding="utf-8"))
+
+    def held(task, room_id, levels):
+        loop._note_low_start(ctx, _plan(_room("held", levels=levels, room_id=room_id)), "max", task, None)
+        return json.loads(bit.read_text(encoding="utf-8"))
+
+    opened = refused("rootA")
+    assert (opened["refusal:m"]["room"], opened["refusal:m"]["levels"], opened["refusal:m"]["task"]) == ("1", 2, "rootA")
+    assert refused("rootB") == opened and len(sent) == 1  # open: no second line
+    assert held("turnC", "1", 1) == opened and held("rootD", "nova", 2) == opened  # another work room, another room
+    assert held("rootE", "1", 2) == {}  # the opener's room and work room hold Max: closed silently
+    assert refused("rootF")["refusal:m"]["task"] == "rootF"
+    assert [event["delivery_id"] for _root, event in sent] == ["low_start:rootA:1", "low_start:rootF:1"]
+
+
 def test_a_failing_outbox_never_fails_the_start_and_keeps_the_episode_closed(tmp_path, monkeypatch, sent):
     queued = {"outcome": "unavailable"}
     monkeypatch.setattr(outbox, "enqueue_terminal_delivery_outcome", lambda root, event, event_queue=None: (

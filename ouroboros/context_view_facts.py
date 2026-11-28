@@ -342,27 +342,37 @@ def low_start_line(plan, mode, task_id):
             f"in your Max: {why}{'; Low did not fit either' if ran == 'Nano' else ''}. Your setting stays Max.")
 
 
+def _work_room_levels(plan):
+    """A start's work room in eighths of its window, read from its captured view where its receipt has no Max room."""
+    try:
+        return int(mv.snapshot_from_json(plan.core.memory_view_json).spec.work_room_levels)
+    except Exception:
+        return 1
+
+
 def low_start_episode(root, plan, mode, task_id, send):
     """One Main line per open period of each cause (owner A, 07.11.2026, replacing 1B of 29.10; a period per cause by
-    the coordinator's option C, 22.11.2026). ``state/low_start_episode.json`` maps each open period's key to
-    ``{since, task, levels, room}``: ``memory`` for the installation, ``request:<model>`` and ``route:<model>`` for the
-    plan's model. A fresh start that the window took from my human's Max (``low_start_line``) sends its line and opens its
-    key's period only when that key has none open; while it is open nothing more is sent for that key, and keys are
-    independent, so a route start never silences the memory line. A start that holds Max (it runs in Max, its room
-    held, no delegated role) silently closes every open period opened in its room (``room_id``) beside its work room
-    (a root keeps two eighths, a chat turn or wake one); the others stay open, so lines never alternate as the owner
-    moves between rooms. Every other start (a delegated child or nanny, the owner's Low or Nano, an unknown window, a
-    held room in a lower mode, as a voice envelope fitted below Max) leaves the file as it is. The single episode
-    written before periods (a top-level ``since``) holds no period: the first lowered start replaces it. Residual, by
-    design: a period stays open until a start of its opener's room and kind holds Max (a room that never starts again,
-    or keeps starting crowded, keeps it open), so later starts of its cause send no line; the work's own facts and task
-    card always say Low and the cause. The file is rewritten under its lock in the terminal
-    outbox's failure domain; ``send`` runs inside that lock and a period opens only when it queued the line."""
+    the coordinator's option C, 22.11.2026). ``state/low_start_episode.json`` maps each open period's key to ``{since,
+    task, levels, room}``: ``memory`` for the installation, ``request:<model>``, ``route:<model>`` and
+    ``refusal:<model>`` (a recorded refusal of the first send) for the plan's model. A fresh start that the window took
+    from my human's Max (``low_start_line``) sends its line and opens its key's period only when that key has none open;
+    while it is open nothing more is sent for that key, and keys are independent, so a route start never silences the
+    memory line. A start that holds Max (it runs in Max, its room held, no delegated role) silently closes every open
+    period opened in its room (``room_id``) beside its work room (a root keeps two eighths, a chat turn or wake one);
+    the others stay open, so lines never alternate as the owner moves between rooms. A start with no Max room (a refused
+    first send on a route with no known window) records the same two from its receipt's room and its captured view, so a
+    later Max held there closes its period too. Every other start (a delegated child or nanny, the owner's Low or Nano,
+    an unknown window no refusal lowered, a held room in a lower mode, as a voice envelope fitted below Max) leaves the
+    file as it is. The single episode written before periods (a top-level ``since``) holds no period: the first lowered
+    start replaces it. Residual, by design: a period stays open until a start of its opener's room and kind holds Max (a
+    room that never starts again, or keeps starting crowded, keeps it open), so later starts of its cause send no line;
+    the work's own facts and task card always say Low and the cause. The file is rewritten under its lock in the
+    terminal outbox's failure domain; ``send`` runs inside that lock and a period opens only when it queued the line."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room") or {}
     held = room.get("cause") == "held" and mode == "max" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
-    levels = int(room.get("levels") or 1)  # the start's work room in eighths of its window
-    place = room.get("room_id")
+    levels = int(room.get("levels") or 0)  # the start's work room in eighths of its window; 0: no Max room
+    place = room["room_id"] if "room_id" in room else receipt.get("room_id")
     line = low_start_line(plan, mode, task_id)
     refused = receipt.get("first_contact_preference") == "maps"  # a period of its own, by model, like the route's
     cause = "refusal" if line and refused else floor.lowered_cause(room) if line else ""
@@ -372,11 +382,12 @@ def low_start_episode(root, plan, mode, task_id, send):
         opened = {} if "since" in bits else bits  # the single episode written before periods: none open
         if held:
             kept = {name: bit for name, bit in opened.items()
-                    if not (bit.get("room") == place and int(bit.get("levels") or 1) == levels)}
+                    if not (bit.get("room") == place and int(bit.get("levels") or 1) == (levels or 1))}
             return kept if len(kept) < len(opened) else None
         if key in opened or not send(line):
             return None
-        return {**opened, key: {"since": utc_now_iso(), "task": task_id, "levels": levels, "room": place}}
+        return {**opened, key: {"since": utc_now_iso(), "task": task_id, "levels": levels or _work_room_levels(plan),
+                                "room": place}}
     if line or held:
         update_json_locked(pathlib.Path(root) / "state" / LOW_START_EPISODE, periods)
 
