@@ -771,3 +771,34 @@ def test_the_room_draws_the_development_bytes_where_its_runs_move():
                                            "### Retold before the update") if marker in text}
             assert mv.json_chars(text) == mv.room_chars(replace(snap), level)
     assert len(seen) == 11, seen
+
+
+def test_a_saved_level_naming_a_step_twice_explains_the_start_room_alike():
+    """A saved floor fact may name one step twice (``kept_level`` keeps both entries; ``level_with`` reads both). The
+    owner level the start-room line weighs, from the previous level's table, reads every occurrence too: at the bound
+    where the level with every uncovered owner row just fits (516 here) the line says those words remain in view with
+    and without the fit's memo, and one token less says even the shortest forms exceed it, alike (review k14brev1,
+    Astra 3)."""
+    rows = [syn.said(i, "human" if i % 3 == 0 else "ouroboros", syn.prose(100 + (i * 41) % 4000), owner_side=i % 3 == 0)
+            for i in range(6)]
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=rows))
+    table = mf._elements(snap)
+    first, second = [i for i in table.ids["F2"] if i.startswith("row:")][:2]
+    level = mf.kept_level(snap, {"floor": {"forms_version": mf.FORMS_VERSION, "addressed": [["F2", [first]], ["F2", [second]]],
+                                           "by_budget": 3}})
+    owned = {("F7", ident) for _step, ident, *_ in mf.uncovered_owner_rows(snap)}
+    with_owners = mf.level_with(snap, level, [f"F7:{ident}" for _step, ident in sorted(owned)], owner_note=True)
+    assert forms.NormalizedLevels(table, owned)(level) == with_owners
+    bound = mf.tokens_of(mv.room_chars(snap, with_owners)) + mf.tokens_of(mv.story_chars(snap, with_owners))
+    reserve = mf.context_budget.context_mode_limits("max", "max", 100)[1]
+
+    def margin(fixed):
+        return mf.floor_allowances(window_tokens=30_000, output_reserve_tokens=reserve, non_memory_tokens=fixed,
+                                   calibration_ratio=1, work_room_levels=snap.spec.work_room_levels)["margin"]
+    for room, words in ((bound, "uncovered owner words remain in view"), (bound - 1, "even in its shortest forms exceeds")):
+        fixed = margin(0) - room
+        assert margin(fixed) == room
+        lines = [mf.render_view_for_mode(snap, mode="max", owner_mode="max", window_tokens=30_000, known_window=True,
+                                         output_reserve=100, ratio=1.0, non_memory_tokens=fixed, level=level,
+                                         prices=prices).note.splitlines()[-1] for prices in (None, {})]
+        assert lines[0] == lines[1] and words in lines[0], (room, lines)

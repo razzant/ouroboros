@@ -175,8 +175,9 @@ class NormalizedLevels:
         self.ordered[step] = tuple(i for i in self.table.ids.get(step, ()) if i in self.chosen[step])
 
     def __call__(self, level):
-        changed = set()
-        steps = dict(level.addressed)
+        changed, steps = set(), {}
+        for step, ids in level.addressed:  # a saved level may name a step twice (``kept_level``): every occurrence counts
+            steps[step] = steps[step] + tuple(ids) if step in steps else ids
         for step in set(steps) | set(self.levels):
             ids = steps.get(step, ())
             held = self.levels.get(step, ())
