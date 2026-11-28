@@ -31,7 +31,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from ouroboros import subagent_worktrees as _wt
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -854,7 +854,8 @@ def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefuse
     from ouroboros.tools.tool_resolution import _ROOT_ARG_REPO_WRITE_TOOLS
 
     marker = _metadata(ctx).get("body_candidate")
-    if is_bound(ctx) or (isinstance(marker, dict) and marker.get("in_place")):
+    held = is_bound(ctx) or (isinstance(marker, dict) and marker.get("in_place"))
+    if held and _metadata(ctx).get(ENTERED) != ROADS_LOST:
         return None
     if name in _ROOT_ARG_REPO_WRITE_TOOLS:  # the one set every repo-write fence keys on
         applies = _targets_body(ctx, str(args.get("root") or "active_workspace"))
@@ -869,6 +870,8 @@ def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefuse
         applies = False
     if not applies or _refusal_before_prepare(ctx) is not None:
         return None
+    if held:  # the result that carried this work's roads never returned (a refused first write): this write carries them
+        return entry_contact(ctx) or None
     try:
         if not _serving_worktree(serving_repo_dir_for(ctx)):
             # No Git body (wheel/image install): the legacy in-place contract, disclosed in the map; its first write
@@ -1352,7 +1355,9 @@ def discard_scratch(row: Dict[str, Any]) -> None:
 # Contacts: the host names the manuals' addresses where the body is touched (BIBLE P1)
 # --------------------------------------------------------------------------- #
 CLOSED_ROADS = "10.2 Closed roads"
-ENTERED = "body_change_entered"  # task metadata: this work already received the closed roads
+ROADS_HEAD = "[Own body — roads already closed"
+ENTERED = "body_change_entered"  # task metadata: True once this work received the closed roads (``settle_entry``)
+ROADS_OFFERED, ROADS_LOST = "offered", "lost"  # composed into a result not yet seen returned; seen returned without them
 
 
 def own_body_root(ctx: Any, target: Any) -> Optional[pathlib.Path]:
@@ -1436,14 +1441,24 @@ def entry_contact(ctx: Any) -> str:
     on every later one. One decision for every entry: a candidate prepared fresh, a first explicit resume (by this
     work or another that takes it over), Cyber Pro's in-place choice, the first automatic bind and the first write
     of an install with no Git body. The work's task metadata records the delivery, so a repeated resume of the
-    candidate it already holds, a second in-place choice or a later write carries none."""
+    candidate it already holds, a second in-place choice or a later write carries none. Composing them is not yet
+    delivering them (``settle_entry``): a write refused after this returns no roads, and the next entry carries them."""
     metadata = _metadata(ctx)
-    if metadata.get(ENTERED):
+    if metadata.get(ENTERED) not in (None, False, ROADS_LOST):
         return ""
     roads = closed_roads_contact(ctx)
     if roads:
-        metadata[ENTERED] = True
+        metadata[ENTERED] = ROADS_OFFERED
     return roads
+
+
+def settle_entry(ctx: Any, returned: Iterable[str]) -> None:
+    """After a batch of results returned to the work: roads composed for it are delivered if one of those results
+    carries them, else lost (a first body write refused after the bind), so the work's next entry carries them
+    again. A caller that never settles keeps the composed roads as said once."""
+    metadata = _metadata(ctx)
+    if metadata.get(ENTERED) == ROADS_OFFERED:
+        metadata[ENTERED] = True if any(ROADS_HEAD in text for text in returned) else ROADS_LOST
 
 
 def closed_roads_contact(ctx: Any) -> str:
@@ -1460,5 +1475,5 @@ def closed_roads_contact(ctx: Any) -> str:
     except (OSError, ValueError, KeyError):
         log.debug("closed roads contact unavailable", exc_info=True)
         return ""
-    return (f"[Own body — roads already closed, from `{BODY_INVARIANTS_CHAPTER}`, which also holds the invariants "
+    return (f"{ROADS_HEAD}, from `{BODY_INVARIANTS_CHAPTER}`, which also holds the invariants "
             f"every part keeps; the manuals that own each file are named where it is read]\n{roads}")

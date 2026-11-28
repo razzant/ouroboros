@@ -1439,6 +1439,42 @@ def test_entering_a_body_change_carries_the_closed_roads_once_and_only_for_the_o
     assert "Closed roads" not in told and ROAD not in told
 
 
+def test_a_refused_first_body_write_does_not_spend_the_closed_roads(body, monkeypatch):
+    """The roads count as said once only when a result that carries them returned to the work. A first body write
+    the registry refuses after the bind (a protected path) returns none: once the loop has seen that batch
+    (``tool_result_delivery.delivery_notes``), the work's next body write carries them, and after that batch none
+    does. An allowed first write carries them at once and once."""
+    from ouroboros.tool_result_delivery import delivery_notes
+
+    serving, data = body
+    _with_manuals(serving)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+
+    def write(registry, ctx, path):
+        result = registry.execute_result("write_file", {"root": "system_repo", "path": path, "content": "valid = True\n"})
+        delivery_notes(ctx, [{"fn_name": "write_file", "tool_args": {"path": path}, "result": result.text,
+                              "tool_result": result}])  # the loop's own step after every batch
+        return result
+
+    refused = make_ctx(serving, data, "root-refused-first")
+    registry = _registry(serving, data, refused)
+    denied = write(registry, refused, "BIBLE.md")
+    assert denied.status == "blocked" and "Closed roads" not in denied.text and body_candidate.is_bound(refused)
+    assert refused.task_metadata[body_candidate.ENTERED] == body_candidate.ROADS_LOST
+    allowed = write(registry, refused, "ouroboros/mod_a.py")
+    assert allowed.status == "ok" and allowed.text.endswith(ROAD) and "### 10.2 Closed roads" in allowed.text
+    assert refused.task_metadata[body_candidate.ENTERED] is True
+    assert "Closed roads" not in write(registry, refused, "ouroboros/mod_a.py").text  # once per work, as before
+
+    direct = make_ctx(serving, data, "root-allowed-first")
+    registry = _registry(serving, data, direct)
+    first = write(registry, direct, "ouroboros/mod_b.py")
+    assert first.status == "ok" and first.text.endswith(ROAD) and direct.task_metadata[body_candidate.ENTERED] is True
+    assert "Closed roads" not in write(registry, direct, "ouroboros/mod_b.py").text
+    # A reading of another file's result between the bind and the write's own batch loses nothing delivered.
+    assert "Closed roads" not in registry.execute("prepare_self_change", {})
+
+
 def test_the_first_write_of_an_install_without_a_git_body_carries_the_closed_roads_once(tmp_path, monkeypatch):
     """A packaged (wheel or image) install writes its body in place; its first body write is the work's entry and
     carries the roads, its later writes none, and each write lands as before."""

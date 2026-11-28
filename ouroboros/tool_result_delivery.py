@@ -121,10 +121,13 @@ def delivery_notes(ctx: Any, results: Sequence[Mapping[str, Any]]) -> list:
     time in the task (``mark_anchors``); and for a read of a source file of Ouroboros's own body, one line naming
     its owning manual (``body_candidate.read_contact``, BIBLE P1), decided by where the read physically resolved
     (its ``read_view``), so a foreign project's file of the same name gets none. That line keeps no state: it
-    follows every such read again."""
-    from ouroboros.body_candidate import read_contact
+    follows every such read again. The batch also settles whether this work's closed roads were delivered
+    (``body_candidate.settle_entry``)."""
+    from ouroboros.body_candidate import read_contact, settle_entry
     from ouroboros.mark_anchors import anchored_note
 
+    if ctx is not None:  # the closed roads count as said once only when a returned result carries them
+        settle_entry(ctx, (str(row.get("result") or "") for row in results))
     notes = []
     for row in results:
         view = (getattr(row.get("tool_result"), "meta", None) or {}).get("read_view") or {}
