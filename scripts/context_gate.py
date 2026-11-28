@@ -68,6 +68,7 @@ TESTS = (
     "tests/test_installed_skills_manifest_syntax.py",
     "tests/test_memory_resident_facts.py",
     "tests/test_memory_scale_fit.py",
+    "tests/test_context_fit_walk_equality.py",
     "tests/test_live_preparation_fit_refusal.py",
     "tests/test_live_tool_catalog_transaction.py",
     "tests/test_memory_view_forms.py",

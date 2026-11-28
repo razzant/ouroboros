@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from ouroboros import store, store_import, store_switch, usage_store
+from ouroboros import store, store_checkpoint, store_import, store_switch, usage_store
 from tests.test_store import publish
 
 
@@ -139,17 +139,20 @@ def test_wal_is_full_and_export_checkpoints_to_standalone_delete(tmp_path, monke
     # this serial synthetic lifecycle; the production version gate above stays strict.
     monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 53, 1))
     monkeypatch.setattr(store, "_filesystem_type", lambda _path: "apfs")
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))  # the install's own store: its writers keep the ceiling
     if money:
         usage_store.migrate_from_journal(tmp_path)
     else:
         publish(tmp_path)
+    retained = "x" * (4096 * (store_checkpoint.inline_frames() + 100))  # more frames than SQLite's own threshold
     with usage_store.hold(tmp_path) if money else store.open_store(tmp_path, write=True) as txn:
-        txn.set_meta("retained", 42)
+        txn.set_meta("retained", retained)
         assert txn.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert txn.conn.execute("PRAGMA synchronous").fetchone()[0] == 2
         held = txn.conn
     path = tmp_path / (usage_store.STORE_REL if money else store.STORE_REL)
     assert path.with_name(path.name + "-wal").exists()
+    assert store.log_identity(path)[1] > store_checkpoint.inline_frames(), "below the ceiling the log stays for the seam"
     if money:
         result = usage_store.export_journal(tmp_path)
         retired = path.with_name(result["store_retired_as"])
@@ -163,8 +166,124 @@ def test_wal_is_full_and_export_checkpoints_to_standalone_delete(tmp_path, monke
     assert all(not path.with_name(path.name + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))
     with contextlib.closing(sqlite3.connect(retired)) as conn:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
-        assert conn.execute("SELECT value FROM meta WHERE key='retained'").fetchone()[0] == "42"
+        assert json.loads(conn.execute("SELECT value FROM meta WHERE key='retained'").fetchone()[0]) == retained
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def _commit_frames(conn, frames, key="filler"):
+    """One commit whose value takes about FRAMES pages (overflow pages each), so as many frames of the log."""
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, "x" * (4096 * frames)))
+    conn.execute("COMMIT")
+
+
+def test_a_wal_writer_copies_its_log_inline_only_once_the_log_reaches_the_ceiling(tmp_path, monkeypatch):
+    """A WAL connection ``store.connect`` opens to one of the install's own stores checkpoints inline only at
+    ``store_checkpoint.ceiling`` frames, the log size the store keeps after a reset (16,288 frames of 4 KiB pages),
+    never at SQLite's own 1,000: commits past 1,000 frames leave the database file as it was. The same connection set
+    back to SQLite's own threshold copies that log at its next commit, and under a smaller kept size the commit that
+    reaches the ceiling copies the log inline (no checkpoint job ran: the worse worst case store_checkpoint discloses)."""
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: "WAL")
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "kept"))
+    path = publish(tmp_path / "kept")
+    store.close_connections()
+    held = sqlite3.connect(path, isolation_level=None)  # another open connection: no last close copies the log
+    held.execute("SELECT 1 FROM meta").fetchone()
+    conn = store.connect(path, store.TIER_ENFORCED)
+    try:
+        page, threshold = conn.execute("PRAGMA page_size").fetchone()[0], store_checkpoint.inline_frames()
+        assert store_checkpoint.ceiling(4096) == 16288
+        assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == store_checkpoint.ceiling(page) > threshold
+        size = path.stat().st_size
+        _commit_frames(conn, threshold + 100)
+        assert path.stat().st_size == size and store.log_identity(path)[1] > threshold, "nothing was copied inline"
+        conn.execute(f"PRAGMA wal_autocheckpoint = {threshold}")
+        _commit_frames(conn, 1, key="next")
+        assert path.stat().st_size > size, "at SQLite's own threshold the same log is copied inline"
+    finally:
+        conn.close()
+        held.close()
+    monkeypatch.setattr(store_checkpoint, "JOURNAL_SIZE_LIMIT", (threshold + 300) * (page + 24) + 32)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "small"))
+    small = publish(tmp_path / "small")
+    conn = store.connect(small, store.TIER_ENFORCED)
+    try:
+        assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == threshold + 300
+        assert conn.execute("PRAGMA journal_size_limit").fetchone()[0] == store_checkpoint.JOURNAL_SIZE_LIMIT
+        size = small.stat().st_size
+        _commit_frames(conn, threshold + 100)
+        assert small.stat().st_size == size, "past SQLite's threshold, below the ceiling: still in the log"
+        _commit_frames(conn, 300, key="more")
+        assert small.stat().st_size > size, "the commit that reached the ceiling copied the log inline"
+    finally:
+        conn.close()
+
+
+def test_the_ceiling_is_a_trigger_and_a_pinned_reader_lets_the_log_grow_past_it(tmp_path, monkeypatch):
+    """SQLite compares the log with the threshold after a commit, and no checkpoint copies past a reader's snapshot:
+    with a reader on the log's first snapshot, commits take the log past a ceiling of 15 frames and copy nothing, and
+    the first small commit after the reader lets go copies the whole backlog inline, far more than the ceiling's worth
+    of pages. The ceiling bounds when an inline copy starts, not how much it copies (store_checkpoint)."""
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: "WAL")
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(store_checkpoint, "JOURNAL_SIZE_LIMIT", 15 * (4096 + 24) + 32)
+    path = publish(tmp_path)
+    store.close_connections()
+    reader = sqlite3.connect(path, isolation_level=None)
+    conn = store.connect(path, store.TIER_ENFORCED)
+    try:
+        page = conn.execute("PRAGMA page_size").fetchone()[0]
+        assert page == 4096 and conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == store_checkpoint.ceiling(page) == 15
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM meta").fetchone()  # its snapshot: the log as it stands, empty
+        size = path.stat().st_size
+        for number in range(7):
+            _commit_frames(conn, 5, key=f"pinned-{number}")
+        assert store.log_identity(path)[1] > 2 * store_checkpoint.ceiling(page), "the log grew past the ceiling"
+        assert path.stat().st_size == size, "no checkpoint copied past the reader's snapshot"
+        reader.execute("ROLLBACK")
+        _commit_frames(conn, 1, key="after")
+        assert path.stat().st_size - size > store_checkpoint.ceiling(page) * page, "one commit copied the whole backlog"
+    finally:
+        conn.close()
+        reader.close()
+
+
+def test_only_the_stores_the_checkpoint_job_passes_take_the_ceiling(tmp_path, monkeypatch):
+    """The job passes the three stores of the install a process acts as (``store_journal.root_stores``); every
+    other WAL store keeps SQLite's own threshold, since nothing would copy its log before the ceiling: a child drive,
+    headless child data (also in a process configured at it: the install around that layout is the one served), a
+    private build's temporary file, the evidence index, and another install's stores."""
+    from ouroboros import store_journal
+    from tests.test_store_checkpoint import _root
+
+    install = _root(tmp_path, monkeypatch, "WAL")  # this process acts as it (OUROBOROS_DATA_DIR)
+    other = tmp_path / "other"
+    drives = (install / "task_drives" / "child-1", install / "state" / "headless_tasks" / "child-2" / "data", other)
+    for drive in drives:
+        publish(drive)
+    build = install / "state" / "current.sqlite.import-1"
+    index = install / "observability" / "packs" / "index.sqlite"
+    for path in (build, index):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.closing(store.connect(path, store.TIER_ENFORCED, create=True)) as conn:
+            conn.execute("CREATE TABLE t (x)")
+    store.close_connections()
+
+    def threshold(path):
+        with contextlib.closing(store.connect(path, store.TIER_ENFORCED)) as conn:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal", path
+            return conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+
+    own = [path for path, _tier, _lock in store_journal.root_stores(install)]
+    foreign = [store.store_path(drive) for drive in drives] + [build, index]
+    ceiling, default = store_checkpoint.ceiling(4096), store_checkpoint.inline_frames()
+    assert [threshold(path) for path in own] == [ceiling] * 3
+    assert [threshold(path) for path in foreign] == [default] * len(foreign)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(drives[1]))  # a process configured at headless child data
+    assert [threshold(path) for path in own] == [ceiling] * 3 and threshold(store.store_path(drives[1])) == default
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(other))  # acting as another install: that one's stores are passed
+    assert threshold(store.store_path(other)) == ceiling and [threshold(path) for path in own] == [default] * 3
 
 
 @pytest.mark.parametrize(("mode", "money"), [("PERSIST", False), ("WAL", True)])

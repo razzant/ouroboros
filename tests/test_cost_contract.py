@@ -74,7 +74,7 @@ from typing import Any, Callable, Dict, Hashable, Iterable, Iterator, List, Tupl
 
 import pytest
 
-from tests._cost_driver import ACTIVITIES, name_owed, refused, schedule_child_job
+from tests._cost_driver import ACTIVITIES, NO_WAL_LOG, name_owed, refused, schedule_child_job
 from tests._cost_meter import EXECUTION, HISTORY, VM_STEP, CostMeter, tagged
 from tests._stand_cache import STAND_MARKS, measuring
 from tests._turn_law import TURN_GAPS, TurnLawBreach, hold_turn_law, hold_work_equal, readers_of, turn_gap
@@ -823,6 +823,8 @@ COMPANION_COUNTERS = {
     "pause_notice_replay": ("writes",),
     "post_task_synthesis_recovery": ("writes",),
     "subscription-census": ("open",),  # the engine's descriptor, read once a census file exists
+    "wal_checkpoint_look": ("child_spawn",),  # the checkpoint lane's child, once a log holds SQLite's own threshold
+    "display-projections": ("replace",),  # state.json and its last-good copy, written for the marked budget
 }
 
 
@@ -890,6 +892,8 @@ def test_b7_each_duty_costs_the_same_after_unrelated_activity(measured, phase, n
 def test_b7_each_duty_works_again_when_its_input_changes(measured, name):
     """The rest is not death: after one addressed input change the duty does the work and its counts appear."""
     for k in (K_SMALL, measured["large"]):
+        if measured[k]["duties"][name].get("companion") == NO_WAL_LOG:
+            pytest.skip(f"{name}: {NO_WAL_LOG}, so its input cannot change on this stand")
         for counter in COMPANION_COUNTERS[name]:
             rest, work = (_companion_counter(measured, name, k, phase, counter) for phase in ("rest", "work"))
             assert work > rest, (name, k, counter, rest, work, measured[k]["duties"][name].get("companion"))

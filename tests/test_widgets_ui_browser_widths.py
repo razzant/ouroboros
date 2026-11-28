@@ -301,7 +301,9 @@ def test_ui_smoke_widget_board_masonry_and_owner_widths(direct_server_with_data,
                 page.screenshot(path=str(evidence_dir / f"widget-board-menu-{browser_name}.png"))
                 menu.locator('[data-widget-size="12"]').click()
                 wait_saved(page, "gauge", {"w": 12})
-                wait_width(page, "gauge", list_width(page))
+                # Full width is every track of the plan, in whole pixels per track: the list's width less the few
+                # pixels the integer track width drops (912 px wide beside the rail: 3 x 294 + 2 x 14 = 910).
+                wait_width(page, "gauge", 3 * column + 2 * GAP_PX)
                 assert status(page) == "Width: full width", "a menu choice is named like a key or a drag"
 
                 # The right edge drags in the board's column pitch: one column wider is two.

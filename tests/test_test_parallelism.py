@@ -42,7 +42,9 @@ def test_native_probe_failure_admits_one_worker(monkeypatch):
 def test_physical_headroom_parent_slots_and_other_runs_cap_the_same_budget(monkeypatch, requested, inherited,
                                                                            host, expected):
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
-    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(10 * peak, 4 * peak))
+    # macOS's measurement-only figures change no budget, however alarming (issue #3397: an upper estimate of 0, warn).
+    alarming = host_memory.DarwinVM(16384, dict.fromkeys(("Pages free", "Pages speculative", "Pages inactive",
+                                                          "File-backed pages"), 0), 2, 0.0)
 
     def census():
         assert host is not None, "a child with a parent allocation reads no ledger and runs no census"
@@ -50,7 +52,10 @@ def test_physical_headroom_parent_slots_and_other_runs_cap_the_same_budget(monke
 
     monkeypatch.setattr(budget, "other_runs", census)
     env = {} if inherited is None else {budget.NESTED_WORKERS_ENV: str(inherited)}
-    assert budget.admission(requested, env=env) == budget.Admission(expected, host or budget.HostRuns())
+    for vm in (None, alarming):
+        monkeypatch.setattr(budget, "physical_memory", lambda vm=vm: host_memory.MemorySnapshot(
+            10 * peak, 4 * peak, False, vm))
+        assert budget.admission(requested, env=env) == budget.Admission(expected, host or budget.HostRuns()), vm
 
 
 def _lock_is_free(ledger: Path) -> bool:

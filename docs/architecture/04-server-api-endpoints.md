@@ -6,7 +6,7 @@ This part gives me every route my server answers. Browser/CLI routes: `gateway/r
 
 `server_web.ServedUI` (`server_web.py`) applies `OUROBOROS_UI_DIR` (§7) per generation to `/`, `/static/*`, `onboarding.html` and `auth/index.html`; one record feeds the auth gate, builtin index's response-only owner marker and `StateResponse.served_ui` (source, not digest). Builtin `/onboarding/static/*` and the author kit stay independent; builtin files revalidate `private` (ETag); Telegram phones keep only `GET /static/*`. `GzipText` gzips GET 200 text from 1 KiB (checked against declared `Content-Length`, else the first body chunk, so a stream without `Content-Length` whose first chunk is short passes uncompressed; weak ETag), excluding event streams, downloads and outside stored files (selection, `?builtin=1`, `/auth/*`, fallback: CLIENT_CONTRACT §2–4).
 
-Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity: §11) resolve inside the configured root: in-root symlinks work, while outside links may list (`is_symlink: true`) but are never read, written, downloaded, deleted or traversed. Chat downloads (`?upload=<id>`) use `chat_uploads.open_upload` in `data/uploads`, independent of the Files root. `gateway/host_service.py::create_host_service_app` builds the separate token-authenticated loopback Host Service, no public owner API.
+Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity: §11) resolve inside the configured root: in-root symlinks work, while outside links may list (`is_symlink: true`) but are never read, written, downloaded, deleted or traversed. Chat downloads (`?upload=<id>`) use `chat_uploads.open_upload` in `data/uploads`, independent of the Files root.
 
 | Method | Path | Note |
 |---|---|---|
@@ -241,6 +241,7 @@ Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity:
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/decision` | `task_decision.answer_decision` (transport skill); same `/api/decisions` answer, winner's Reply file kept; read via `rejoin_decision` |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/ui/language` | shares `ui_i18n.choose_language` |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/place` | connector place state |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/place` | DM recheck |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/turn` | capture before attention |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/delivery` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/history` | |
@@ -279,7 +280,7 @@ Project panels take chat, typing, media and log frames by `chat_id` or `also_roo
 
 Extension WS traffic namespaces via `extension_loader.extension_surface_name()` so extensions cannot shadow built-ins. Each inbound frame resolves its skill and rechecks desired/reviewed/granted/enabled/live state; out-of-process handlers run in their extension child off the event loop, in-process synchronous ones off the ASGI loop, trusted in-process async ones on it; handler failure never ends the socket loop.
 
-Each socket owns one writer and outbox (`ws._Connection`), so slow/half-open browsers delay only themselves; each broadcast is encoded once, for open sockets only, with one loop wake per burst (`ws.py`), and send failures retire the socket and log `broadcast_partial_failure` off-loop while durable producers keep their events.
+Each socket owns one writer and outbox (`ws._Connection`), so slow/half-open browsers delay only themselves; send failures retire the socket and log `broadcast_partial_failure` off-loop while durable producers keep their events.
 
 #### Reconnect and recovery
 

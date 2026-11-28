@@ -903,7 +903,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          max_room: Optional[Mapping[str, Any]] = None, stated_window_tokens: Optional[int] = None,
                          shortest: bool = False, level: Optional[mv.FloorLevel] = None,
                          report_nano_miss: bool = False, start_saving: int = 0, telling_only: bool = False,
-                         telling_floor: bool = False, request_limit: Optional[int] = None) -> ViewFit:
+                         telling_floor: bool = False, request_limit: Optional[int] = None,
+                         prices: Optional[Dict[Any, Any]] = None) -> ViewFit:
     """One mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
@@ -922,6 +923,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     the two memory texts of a whole request (by default their own tokens).
     ``request_limit`` is a measured running input goal after crediting host forms and books. The optional
     ``start_saving`` is separate advice: it folds to tellings only, after the ordinary view was chosen.
+    ``prices``: one fit's memo (``context_fit._view_projections`` owns it, never a later fit): a level's floor note and
+    the sizes its start-room line weighs are priced once there, keyed by what they read; None prices each anew.
     """
     target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve, working_reserve_tokens=working_reserve_tokens)
     if kept is not None:
@@ -950,19 +953,29 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     asked_at = None  # the level a first send's soft ask (``start_saving``) walks on from, so its own cuts are named
     def softly(level):
         return dict(asked_at.steps) if asked_at is not None and level.steps != asked_at.steps else None
+    called = (id(snapshot), named, mode, target, lowered_from, owner_mode, repr(max_room))
+    def once(key, price):  # a pure price of this snapshot and level, from this fit's memo when it keeps one
+        if prices is None:
+            return price()
+        if key not in prices:
+            prices[key] = price()
+        return prices[key]
     def receipt(level):
-        note = floor_note(level, window_tokens=named, mode=mode, target_tokens=target, lowered_from=lowered_from,
-                          tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot,
-                          preference=softly(level))
+        names = None if tool_names is None else tuple(tool_names)  # read where each note read them: a one-shot once
+        preference = softly(level)
+        note = once(("note", called, names, level, repr(preference)), lambda: floor_note(
+            level, window_tokens=named, mode=mode, target_tokens=target, lowered_from=lowered_from, tool_names=names,
+            budget_mode=owner_mode, max_room=max_room, snapshot=snapshot, preference=preference))
         if reports_miss and (need := total(level, note)) > target:
             telling = " with my memory in its shortest tellings" if binds else ""
             note += (f"\n{mode.capitalize()}'s target ({target:,} tokens) is not met at this start: this request needs "
                      f"about {need:,}{telling}, "
                      f"{math.ceil(non_memory_tokens * ratio) + reserve:,} with no memory at all.")
-        if room_bound is not None and size(level) > room_bound:
+        if room_bound is not None and once(("size", id(snapshot), level), lambda: size(level)) > room_bound:
             gone = dict(level.addressed)
             held = [f"F7:{ident}" for step, ident, *_ in uncovered if ident not in gone.get(step, ())]
-            owners = held and size(level_with(snapshot, level, held, owner_note=True)) <= room_bound
+            owners = held and once(("owners", id(snapshot), level),
+                                   lambda: size(level_with(snapshot, level, held, owner_note=True))) <= room_bound
             note += "\nStart room is smaller than requested: " + (
                 "uncovered owner words remain in view; only physical pressure can turn their oldest rows into named addresses."
                 if owners else "what my memory shows even in its shortest forms exceeds it.")

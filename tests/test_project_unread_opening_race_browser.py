@@ -10,9 +10,7 @@ reply itself: the opening lands on it with no return.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -185,10 +183,7 @@ class _Race:
 
     def chains(self):
         """The frozen chain each older page continued: its cursor's ``upper``. A rebase starts a new one."""
-        def upper(url):
-            cursor = parse_qs(urlparse(url).query)["cursor"][0]
-            return json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))["upper"]["chat"]
-        return [upper(url) for url in self.room.older]
+        return [opening._cursor(url)["upper"]["chat"] for url in self.room.older]
 
     def receipts(self):
         return [(posted["seen"][self.project_id], posted["box"]) for posted in

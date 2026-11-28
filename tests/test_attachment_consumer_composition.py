@@ -704,7 +704,7 @@ def test_bundled_telegram_adapter_media_through_the_host_ingress_to_main(host_se
                                                                      "mime_type": "application/pdf", "file_size": len(_DOC)})])
             _poll_once(plugin, _SkillApi(state, "stale-token"), denied)
             assert not list((state / "inbox").iterdir()) and len(_inbound(data)) == 4 and len(_uploads(data)) == 4
-            assert any("Could not deliver" in text for _chat, text in denied.sent), denied.sent
+            assert any("Could not confirm" in text for _chat, text in denied.sent), denied.sent
 
             host_service_server["restart_server"]()
             phone = _phone(browser, engine)

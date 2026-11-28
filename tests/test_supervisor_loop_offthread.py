@@ -486,7 +486,7 @@ def test_history_sized_steps_stay_off_the_cancel_sweep(quiet_tick, monkeypatch):
     for thread in threads:
         thread.join(5)
     assert [name for name, _ in done] == ["review_jobs", "orphans", "projects", "deletions", "prunes", "drives", "maintenance"]
-    assert [thread.name for thread in threads if thread.name not in {"cold-custody", "schedule-admission"}] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "reconcile-maintenance"]
+    assert [thread.name for thread in threads if thread.name not in {"cold-custody", "schedule-admission"}] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "wal_checkpoint_look", "reconcile-maintenance"]
 
 
 def test_a_closed_generation_stops_the_reconcile_block_before_its_next_mutation(quiet_tick, monkeypatch):

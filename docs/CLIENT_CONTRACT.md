@@ -307,7 +307,7 @@ answer through §7.
 
 ### The WebSocket `/ws`
 
-**Format and liveness.** One socket per client; JSON text frames carry `type`. A `heartbeat` (~15 s) confirms connectivity, not work progress. Reconnect after ~45 s of silence. Restart closes with code 1012.
+**Format and liveness.** One socket per client; JSON text frames carry `type`. A `heartbeat` (~15 s) confirms connectivity, not work progress. Reconnect after ~45 s of silence. Restart closes with code 1012. A client that closes a silent socket itself may say so with code 4408 and the reason `silent_ms=<n> tick_gap_ms=<n> hidden=<0|1>` (milliseconds of silence, milliseconds since its previous silence check, whether the page was hidden); the core logs those three fields and nothing else of a reason, and any other close by its code alone.
 
 **Message types.** `ws.messages` in the contract lists every built-in type with each direction's shape:
 - **Client to core:** `chat` and `command`.

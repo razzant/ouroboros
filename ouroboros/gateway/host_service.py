@@ -1513,7 +1513,7 @@ def create_host_service_app(
             Route("/chat/cancel", _api_chat_cancel, methods=["POST"]),
             Route("/chat/decision", _api_chat_decision, methods=["POST"]),
             Route("/ui/language", _api_ui_language, methods=["POST"]),
-            Route("/presence/place", _api_presence_place, methods=["GET"]),
+            Route("/presence/place", _api_presence_place, methods=["GET", "POST"]),
             Route("/presence/turn", _api_presence_turn, methods=["POST"]),
             Route("/presence/delivery", _api_presence_delivery, methods=["POST"]),
             Route("/presence/history", _api_presence_history, methods=["POST"]),

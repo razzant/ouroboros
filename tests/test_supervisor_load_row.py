@@ -112,13 +112,15 @@ def test_the_row_reads_the_real_q_and_neither_it_nor_the_drain_waits_for_q(monke
     from supervisor import events as events_mod, queue
 
     sections = sl._load_sections()
-    assert set(sections) == {"queue_lock", "store_locks", "history_reads", "dialogue_retry", "conversation_lane", "machine"}
+    assert set(sections) == {"queue_lock", "store_locks", "wal_frames", "history_reads", "dialogue_retry",
+                             "conversation_lane", "machine"}
     assert sections["machine"] is loop_load.machine_load
-    from ouroboros import dialogue_retry, store_timing
+    from ouroboros import dialogue_retry, store_checkpoint, store_timing
     from ouroboros.gateway import history_attribution
     from supervisor import conversation_lane
 
     assert sections["store_locks"] is store_timing.drain and sections["dialogue_retry"] is dialogue_retry.snapshot
+    assert sections["wal_frames"] is store_checkpoint.drain_frames  # the checkpoint looks' log lengths, from memory
     assert sections["history_reads"] is history_attribution.drain  # the history route's window (GETs write nothing)
     assert sections["conversation_lane"] is conversation_lane.carrier_vitals  # the lane's carriers and RSS (4A)
     assert {"rows", "bytes", "evicted", "max_rows"} <= set(sections["dialogue_retry"]())

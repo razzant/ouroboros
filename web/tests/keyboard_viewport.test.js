@@ -227,6 +227,57 @@ test('document scroll resets to 0 on stack viewport events while leaving pinch z
     } finally { w.restore(); }
 });
 
+// The pinch path closes the keyboard without resizing the room; WebKit's native anchoring would move the passage
+// again (tests/test_phone_keyboard_recovery_browser.py, pinch). Only that close holds the shown feed's anchoring.
+for (const inline of ['', 'auto']) test(`a keyboard closed under a pinch holds the feed's native anchoring for two frames${inline ? ', then gives back its inline value' : ''}`, () => {
+    const w = world();
+    try {
+        const props = new Map(inline ? [['overflow-anchor', [inline, 'important']]] : []);
+        const style = {
+            getPropertyValue: (name) => props.get(name)?.[0] || '',
+            getPropertyPriority: (name) => props.get(name)?.[1] || '',
+            setProperty: (name, value, priority = '') => props.set(name, [value, priority]),
+            removeProperty: (name) => props.delete(name),
+        };
+        const anchoring = () => props.get('overflow-anchor') || null;
+        const atReflow = [];
+        const page = { querySelector: (selector) => (selector === '#chat-messages, .chat-messages' ? { style } : null),
+            hasAttribute: () => false, toggleAttribute() {} };
+        const room = { page, composer: { remeasureInput: (fn) => fn() },
+            reflowViewport() { atReflow.push([read(w).open, anchoring()]); } };
+        const release = bindKeyboardViewport({ shownRoom: () => room });
+        const before = anchoring();
+
+        // An ordinary close resizes the room: the engine's anchoring is left as it is.
+        w.focus(true);
+        w.vv.height = 508;
+        w.vv.emit('resize');
+        w.focus(false);
+        w.vv.height = 844;
+        w.run(300);
+        assert.equal(read(w).open, false);
+        assert.deepEqual(atReflow.map(([, held]) => held), atReflow.map(() => before), 'no hold without a pinch');
+
+        // Under a pinch the room keeps its height and the hold spans the relayout.
+        atReflow.length = 0;
+        w.focus(true);
+        w.vv.height = 508;
+        w.vv.emit('resize');
+        assert.equal(read(w).open, true);
+        w.vv.width = 195;
+        w.vv.emit('resize');
+        w.focus(false);
+        w.frame();
+        assert.equal(read(w).open, false, 'the blur closes the keyboard while pinched');
+        assert.deepEqual(atReflow.at(-1), [false, ['none', '']], 'the close relayouts with native anchoring held');
+        w.frame();
+        assert.deepEqual(anchoring(), ['none', ''], 'still held one frame later');
+        w.frame();
+        assert.deepEqual(anchoring(), before, 'given back as it was after two frames');
+        release.dispose();
+    } finally { w.restore(); }
+});
+
 test('keyboard-open is never set on a fine pointer and resets on width change, Telegram mode change, and pageshow', () => {
     const w = world();
     try {

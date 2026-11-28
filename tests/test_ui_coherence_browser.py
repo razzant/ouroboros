@@ -1258,11 +1258,13 @@ def test_dictation_offer_transcript_is_a_keyboard_stop_only_while_overflowed(fad
                     text: (a?.textContent || '').trim().slice(0, 24)}; }"""))
     if engine == "chromium":
         assert chain[0]["inActions"] and chain[0]["text"] == "Insert", (pre_tab, chain)
-    else:
-        # Headless WebKit wraps from the region to the document start and passes over the offer's
-        # visible, enabled buttons on this fixture; the stop itself stays reachable by Tab, which is
-        # what the binder promises. Recorded, not papered over: see the handoff's WebKit note.
-        assert any(step["inWords"] for step in chain), (pre_tab, chain)
+    # The stop is reached by a real key on every engine: Shift+Tab from Insert, the first action after the words,
+    # lands on the overflowing transcript. (Where Tab goes forward from the words differs by engine, and a WebKit
+    # build whose chain started after the stop never "entered" it; the way back from a known button does not.)
+    page.locator(".voice-offer-actions button").first.focus()
+    assert page.evaluate("() => document.activeElement?.closest?.('.voice-offer-actions') !== null")
+    page.keyboard.press("Shift+Tab")
+    assert page.evaluate("() => document.activeElement === document.querySelector('.voice-offer-text')"), (pre_tab, chain)
     page.screenshot(path=str(frames / f"voice-offer-{engine}.png"))
     page.evaluate("text => window.__offer(text)", "ok")
     fitted = page.locator(".voice-offer-text")

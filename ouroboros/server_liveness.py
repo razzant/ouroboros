@@ -22,9 +22,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
-from ouroboros.runtime_limits import (
-    BUDGET_PROJECTION_RETRY_SEC, SUPERVISOR_EVENT_BATCH_MAX_EVENTS, SUPERVISOR_EVENT_BATCH_MAX_SEC,
-)
+from ouroboros.runtime_limits import SUPERVISOR_EVENT_BATCH_MAX_EVENTS, SUPERVISOR_EVENT_BATCH_MAX_SEC
 from ouroboros.server_process import DATA_DIR, log, _restart_requested
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -224,7 +222,6 @@ SUPERVISOR_LOAD_WINDOW_SEC = 60.0
 _LOAD_FAILURES_SEEN: set = set()
 
 
-STORE_SITES_LOG = "store_sites.jsonl"
 STORE_SITES_WINDOW_SEC = 600.0  # a publication's cadence (about the bytes of the row it explains), never a cut of what it holds
 _STORE_SITES_STARTED = [time.monotonic()]
 
@@ -234,13 +231,14 @@ def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
     (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead,
     ``conversation_lane`` the lane's carriers now, each with its last own RSS report, and ``machine``
     the machine's load averages and cores now)."""
-    from ouroboros import dialogue_retry, store_timing
+    from ouroboros import dialogue_retry, store_checkpoint, store_timing
     from ouroboros.gateway import history_attribution
     from supervisor import conversation_lane, loop_load, queue
 
     return {
         "queue_lock": lambda: queue._queue_lock.drain(),
         "store_locks": store_timing.drain,
+        "wal_frames": store_checkpoint.drain_frames,  # how long each store's log was at the checkpoint lane's looks
         "history_reads": history_attribution.drain,  # why and how fast the history route answered (GETs write nothing)
         "dialogue_retry": dialogue_retry.snapshot,
         "conversation_lane": conversation_lane.carrier_vitals,
@@ -252,7 +250,8 @@ def _publish_store_sites(drive_root: Any) -> Optional[dict]:
     """At most one row of the whole store-site table per window into its own journal, after a busy minute's row (an idle
     stretch folds in, ``window_sec`` says how long). In ``logs/supervisor.jsonl`` a table of 36 to 42 KB would leave the
     256 KB tail every context reads six minutes; a row a minute would write 58 MB a day of continuous work, nine times
-    the row it explains. Rotated here, the one place that grows it. Fail-soft and logged once per class, as that row is."""
+    the row it explains. Rotated here (the journal's other rows are the checkpoint child's passes, ``store_checkpoint``).
+    Fail-soft and logged once per class, as that row is."""
     from ouroboros import store_timing
     from supervisor.state import rotate_jsonl_log_if_needed
 
@@ -265,8 +264,8 @@ def _publish_store_sites(drive_root: Any) -> Optional[dict]:
         table = store_timing.drain_sites()
         row = {"ts": utc_now_iso(), "type": "store_sites", "window_sec": round(window_sec, 3), "store_locks": table}
         if table:
-            append_jsonl(drive_root / "logs" / STORE_SITES_LOG, row, lock_timeout_sec=0)
-            rotate_jsonl_log_if_needed(drive_root, STORE_SITES_LOG, "store_sites")
+            append_jsonl(drive_root / "logs" / store_timing.JOURNAL, row, lock_timeout_sec=0)
+            rotate_jsonl_log_if_needed(drive_root, store_timing.JOURNAL, "store_sites")
         return row if table else None
     except Exception as exc:
         if type(exc).__name__ not in _LOAD_FAILURES_SEEN:
@@ -345,42 +344,6 @@ def _release_delivery(event_q: Any, evt: Any) -> None:
             _RELEASE_FAILURES_SEEN.add(failure_class)
             log.warning("Delivery membership release failed (%s); replay reads it as unknown",
                         failure_class, exc_info=True)
-
-
-def flush_budget_projection(ctx: Any) -> None:
-    """The usage-driven projections of one loop turn, paid once, AFTER bridge intake.
-
-    ``llm_usage`` events only mark: the root they name in ``LIVE_ROOT_COSTS``, whose
-    marked roots are read again here (the cost figure root heartbeats carry, so a
-    heartbeat itself reads no store), and ``ctx.budget_projection_dirty``. This is the
-    one place that pays the compatibility budget-projection ledger render and the
-    STATE_LOCK write. The flag clears only when the writer returns True; a False
-    (unknown or stale ledger marker) or an exception keeps it dirty and the next attempt
-    waits ``BUDGET_PROJECTION_RETRY_SEC``, logged once per attempt, so a frozen-marker
-    install does not render every turn."""
-    from ouroboros.cost_projection import LIVE_ROOT_COSTS
-
-    try:
-        LIVE_ROOT_COSTS.refresh(getattr(ctx, "RUNNING", None), getattr(ctx, "DRIVE_ROOT", None))
-    except Exception:
-        log.warning("Live root cost figures not refreshed this turn", exc_info=True)
-    if not getattr(ctx, "budget_projection_dirty", False):
-        return
-    now = time.monotonic()
-    if now < float(getattr(ctx, "budget_projection_retry_at", 0.0) or 0.0):
-        return
-    try:
-        written = ctx.update_budget_from_usage({}) is not False
-    except Exception:
-        written = False
-        log.error("Compatibility budget projection update failed; retrying in %.0fs",
-                  BUDGET_PROJECTION_RETRY_SEC, exc_info=True)
-    else:
-        if not written:
-            log.warning("Compatibility budget projection not written (ledger marker unknown or stale); "
-                        "retrying in %.0fs", BUDGET_PROJECTION_RETRY_SEC)
-    ctx.budget_projection_dirty = not written
-    ctx.budget_projection_retry_at = 0.0 if written else now + BUDGET_PROJECTION_RETRY_SEC
 
 
 def _published_loop_facts(liveness: list) -> dict:
@@ -643,14 +606,19 @@ def _start_supervisor_liveness_watchdog(
     owner's chat from that half: a stall they cannot act on is an alarm, not
     information, and the rows carry the diagnosis anyway. A direct turn whose start
     phase stops advancing before its first model request is journal only the same way,
-    with its own thread's stack, whatever its heartbeat says (``_TurnPhaseWatch``). It deliberately does NOT
+    with its own thread's stack, whatever its heartbeat says (``_TurnPhaseWatch``), and so is
+    the ASGI loop whose heartbeat falls a whole beat behind while browser sockets are open
+    (``asgi_beat.AsgiLateWatch``: one ``asgi_loop_late`` row per episode, observed first in each
+    pass so that no sink of the pass can outlast its evidence). It deliberately does NOT
     kill a hung thread; independent native actors keep the chat responsive
     meanwhile. ``loop_thread_ident`` is the thread whose stack a stall row carries;
     it defaults to the CALLER, because the loop thread starts its own watchdog
     (startup phase included). ``stop_event`` is
     a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (the
     Fault door included, which never sets the global restart flag), it is set so
-    this watchdog stops watching a now-stale liveness list (no false post-revival alert)."""
+    this watchdog stops watching a now-stale liveness list (no false post-revival alert);
+    it, the lifespan stop and the restart flag are asked before each sleep and again on waking,
+    so no pass runs for an ended generation or behind a teardown, whose own work holds the loop."""
     from ouroboros.config import get_supervisor_liveness_deadline_sec
 
     deadline = get_supervisor_liveness_deadline_sec()
@@ -659,6 +627,9 @@ def _start_supervisor_liveness_watchdog(
     watched_ident = loop_thread_ident if loop_thread_ident is not None else threading.get_ident()
 
     def _watch() -> None:
+        from ouroboros.asgi_beat import AsgiLateWatch
+        from ouroboros.gateway.ws import has_ws_clients
+        from ouroboros.server_process import _supervisor_stop  # the lifespan stop, read as AsgiLateWatch.tick reads it
         from supervisor.state import append_jsonl
         interval = min(15, max(1, deadline // 3))
         loop_alerted = False
@@ -666,14 +637,34 @@ def _start_supervisor_liveness_watchdog(
         stall: dict = {"samples": {}, "last_stack": []}  # its stack samples while the stall is open
         wedged_tasks: set[str] = set()
         turn_phases = _TurnPhaseWatch(interval)
-        while not _restart_requested.is_set() and not (stop_event is not None and stop_event.is_set()):
+        asgi_beat = AsgiLateWatch(_loop_thread_stack, has_ws_clients)
+        pass_started: Optional[float] = None  # when this watchdog's previous pass began
+
+        def stopped() -> bool:  # this generation ended (its own token), its lifespan stops or the process restarts
+            return (_restart_requested.is_set() or _supervisor_stop.is_set()
+                    or (stop_event is not None and stop_event.is_set()))
+
+        while not stopped():
+            slept_since = time.monotonic()
+            last_pass = 0.0 if pass_started is None else slept_since - pass_started  # the previous pass's own time
             time.sleep(interval)
+            if stopped():  # asked again on waking: an ended generation or a begun teardown reports nothing
+                break
             # ONE clock: both halves measure an ELAPSED GAP against stamps taken on
             # the monotonic clock (the loop-liveness tick here, and the chat-turn
             # heartbeat in agent.py), so a wall-clock jump — NTP step, DST/timezone
             # change, manual set, VM resume — can neither fabricate a stall/wedge
             # nor mask a real one on either half.
-            now = time.monotonic()
+            now = pass_started = time.monotonic()
+            # (0) The ASGI loop's own beat, looked at FIRST: its stamp and stack are taken before any row of
+            # this pass is written, so a beat that resumes while a sink below waits on the disk cannot erase
+            # the episode; the row, with this watchdog's own timing, is journaled at the end of the pass.
+            try:
+                late = asgi_beat.tick(now, now - slept_since - interval, last_pass)
+                asgi_row = {"ts": utc_now_iso(), **late} if late is not None else None
+            except Exception:
+                asgi_row = None
+                log.debug("ASGI beat watch failed", exc_info=True)
             # (1) Supervisor loop stall — new-message intake starvation.
             if _supervisor_loop_stalled(liveness[_STAMP], now, deadline):
                 if not loop_alerted:
@@ -754,6 +745,12 @@ def _start_supervisor_liveness_watchdog(
                 turn_phases.tick(now, dict(turns))
             except Exception:
                 log.debug("direct-turn phase watch failed", exc_info=True)
+            # (4) The ASGI observation of (0): one row per episode the loop falls a whole beat behind.
+            if asgi_row is not None:
+                try:
+                    append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", asgi_row)
+                except Exception:
+                    log.debug("asgi_loop_late log failed", exc_info=True)
         turn_phases.close(time.monotonic())
 
     threading.Thread(target=_watch, name="supervisor-liveness-watchdog", daemon=True).start()

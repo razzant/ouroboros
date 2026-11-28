@@ -440,7 +440,7 @@ def test_periodic_bulk_work_does_not_block_drain_or_duplicate_sweep(roots, monke
     marker = [0.0]
 
     def cancel_sweeps():
-        return [thread for thread in threads if thread.name in ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery"]]
+        return [thread for thread in threads if thread.name in ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "wal_checkpoint_look"]]
 
     maintenance._periodic_supervisor_maintenance([clock[0]], marker)  # both cadences due
     assert entered.wait(2)
@@ -454,7 +454,7 @@ def test_periodic_bulk_work_does_not_block_drain_or_duplicate_sweep(roots, monke
         maintenance._periodic_supervisor_maintenance([clock[0]], marker)
         for thread in cancel_sweeps():
             thread.join(3)
-        assert [t.name for t in threads if t.name != "cold-custody"] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery"] + ["reconcile-maintenance"] + ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery"]
+        assert [t.name for t in threads if t.name != "cold-custody"] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "wal_checkpoint_look"] + ["reconcile-maintenance"] + ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "wal_checkpoint_look"]
         assert calls.count("cancel") == 2 and calls.count("drives") == 1, "cancel cadence held; no duplicate walk"
         assert marker[0] == 0.0 and reconcile_lock.locked(), "stamped only when the walk ENDS"
     finally:

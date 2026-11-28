@@ -16,7 +16,7 @@ _REAL_THREAD = threading.Thread
 
 import pytest
 
-from ouroboros.host_memory import MemorySnapshot
+from ouroboros.host_memory import DarwinVM, MemorySnapshot
 from supervisor import conversation_lane, pool_admission, queue, worker_pool_lifecycle as lifecycle, workers
 from tests.test_owner_wait_pool import InputQueue, Process, park, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
@@ -34,6 +34,7 @@ def assigning(pool, monkeypatch):  # noqa: F811 -- the imported fixture is this 
     monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "")  # no number: the machine is the limit
     monkeypatch.setattr(pool_admission, "_READY", {"seq": 0, "generation": None, "rss_bytes": None})
     monkeypatch.setattr(pool_admission, "_FACTS", {})
+    monkeypatch.setattr(pool_admission, "_VM", {})
     return pool
 
 
@@ -45,12 +46,12 @@ def child(tid, parent="owner", depth=1):
     return task(tid, delegation_role="subagent", root_task_id="owner", parent_task_id=parent, depth=depth)
 
 
-def machine(monkeypatch, available_gib, *, total_gib=10, pressure=False, calls=None):
+def machine(monkeypatch, available_gib, *, total_gib=10, pressure=False, calls=None, vm=None):
     """The host reading: ``total_gib`` with ``available_gib`` reclaimable; a reserve of 10% (1 GiB of 10)."""
     def physical_memory():
         if calls is not None:
             calls.append((queue._queue_lock._is_owned(), lifecycle._WORKER_LIFECYCLE_LOCK._is_owned()))
-        return MemorySnapshot(int(total_gib * GIB), int(available_gib * GIB), pressure)
+        return MemorySnapshot(int(total_gib * GIB), int(available_gib * GIB), pressure, vm)
 
     monkeypatch.setattr(pool_admission, "physical_memory", physical_memory)
 
@@ -475,8 +476,10 @@ def test_an_idle_process_and_a_warm_return_go_at_zero_room(assigning, monkeypatc
 
 def test_the_machine_is_read_once_a_pass_outside_q_and_the_serializer_and_never_beside_an_idle_process(
         assigning, monkeypatch):
-    calls = []
-    machine(monkeypatch, 9, calls=calls)
+    calls, measured = [], []
+    machine(monkeypatch, 9, calls=calls, vm=DarwinVM(16384, {}, 1, 1.0))
+    monkeypatch.setattr(DarwinVM, "measurement", lambda self, previous=None: measured.append(
+        (queue._queue_lock._is_owned(), lifecycle._WORKER_LIFECYCLE_LOCK._is_owned())) or {})
     assigning.original.rss = {"rss_bytes": GIB, "rss_measure": "current"}
     workers.assign_tasks()
     assert calls == [], "nothing queued: nothing read"
@@ -486,6 +489,7 @@ def test_the_machine_is_read_once_a_pass_outside_q_and_the_serializer_and_never_
     workers.PENDING.extend(task(f"t{i}") for i in range(5))
     workers.assign_tasks()
     assert calls == [(False, False)], "one reading, outside Q and outside the lifecycle serializer"
+    assert measured == calls, "macOS's measurement is taken with it, outside both"
     assert len(assigning.created) == 5
     print(f"MEMORY_READINGS_PER_PASS {{'idle': 0, 'nothing_queued': 0, 'held_only': 0, 'growth': {len(calls)}}}")
     for slot in workers.WORKERS.values():
@@ -520,10 +524,46 @@ def test_byte_noise_keeps_the_census_and_a_changed_verdict_moves_it(assigning, m
     with queue._queue_lock:
         assert _census() == census, "byte noise moves no revision"
         assert _pool_counts()["memory_admission"]["available_bytes"] == int(5.003 * GIB), "the facts are fresh"
+    machine(monkeypatch, 5, vm=DarwinVM(16384, {"Swapouts": 1}, 2, 1.0))  # macOS's measurement beside the verdict
+    starts()
+    with queue._queue_lock:
+        assert _census() == census, "nor does a measurement"
+        assert _pool_counts()["memory_admission"]["vm_measurement"]["pressure_level"] == "warn", "it is published"
     machine(monkeypatch, 5, pressure=True)  # the verdict changes
     starts()
     with queue._queue_lock:
         assert _census() != census
+
+
+def test_a_macos_measurement_rides_the_dated_facts_and_admits_exactly_what_the_same_reading_admits(
+        assigning, monkeypatch):
+    """Issue #3397 is decided on numbers: a macOS reading's measurement-only figures (``host_memory.DarwinVM``) are
+    published with the dated facts, rated against this process's previous reading, and change nothing it decides:
+    with them or without, however alarming they read (an upper estimate under the reserve, heavy swapping, warn),
+    the same total, available and verdict admit the same starts and publish the same facts. A reading without them
+    (Linux, Windows, an unknown machine) publishes none."""
+    assigning.original.rss = {"rss_bytes": GIB, "rss_measure": "current"}
+    ticks = iter(range(1, 100))
+
+    def alarming():  # each reading a second after the one before, a GiB more swapped out
+        tick = next(ticks)
+        pages = {"Pages free": 0, "Pages speculative": 0, "Pages inactive": 9 * GIB // 16384, "File-backed pages": 0,
+                 "Swapouts": tick * GIB // 16384}
+        return DarwinVM(16384, pages, 2, float(tick))
+
+    for available, pressure in ((9, False), (0.5, False), (9, True), (9, None)):
+        machine(monkeypatch, available, pressure=pressure)
+        admitted, published = starts(), pool_admission.facts()
+        machine(monkeypatch, available, pressure=pressure, vm=alarming())
+        assert starts() == admitted, (available, pressure)
+        measured = pool_admission.facts()
+        figures = measured.pop("vm_measurement")
+        assert figures["file_bounded_upper_bytes"] == 0 < measured["reserve_bytes"]
+        assert {**measured, "read_at": None} == {**published, "read_at": None}, (available, pressure)
+    assert (figures["rate_interval_sec"], figures["rates_bytes_per_sec"]["swapouts"]) == (1.0, GIB), "since the last"
+    machine(monkeypatch, 9)
+    starts()
+    assert "vm_measurement" not in pool_admission.facts()
 
 
 def test_the_published_facts_reach_the_mind_dated_and_the_worker_never_reads_the_machine(assigning, monkeypatch,

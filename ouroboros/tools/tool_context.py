@@ -140,6 +140,14 @@ class ToolContext:
 
         return call_ref(self)
 
+    @property
+    def owner_dm_condition(self) -> Dict[str, Any] | None:
+        """Opaque constraint for this exact opted-in connector call, else None."""
+        from ouroboros.place_guard import owner_dm_condition
+
+        return owner_dm_condition(self)
+
+
     def active_repo_dir(self) -> pathlib.Path:
         if self.is_workspace_mode():
             return pathlib.Path(self.workspace_root)

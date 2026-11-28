@@ -1174,6 +1174,15 @@ contributes:
   (the places they land in, else their audience), never through a group's write or read beside them; words with no
   such address, and a rich call declaring no `text`, keep their exact call. What a call ran with, not a later
   publication, decides what it did.
+- The stock Official `telegram-bot` release can opt in on its reviewed `telegram_send` row with `owner_dm: true`
+  and a context-taking handler. Only `kind: message` with a canonical positive string `chat_id`, no topic, and
+  `account_id` omitted or equal to the admitted event's bot qualifies. That Presence event is already bound to
+  the confirmed owner and keeps `direct_message`, `conversation.chat_type: private`, `conversation.bot_account_id`
+  and `conversation.chat_id` matching its bot and chat, and the human actor's matching `platform_actor_id` with
+  explicit `is_bot: false` and no `sender_chat`. The handler selects that standalone bot by its ordinary rules.
+  `getattr(ctx, "owner_dm_condition", None)` is a host-only condition for this invocation, not a tool argument,
+  address selector or grant. When absent (older hosts included) the ordinary route and check apply without
+  this attestation.
 - `icon` is reduced at staging to viewBox and geometry (path, circle, ellipse, line, polyline, polygon, rect, g),
   bounded, with fills and strokes set to `currentColor`; anything else falls back to the house glyph.
   Authors of `provides: place` skills must include `ui/icon.svg` and declare `icon: ui/icon.svg`.
@@ -1501,6 +1510,13 @@ Use the connector's ordinary content-hash-bound skill token for:
   back with its status; a relay refusal is a Telegram-shaped 403 with `relay_refusal` (nothing sent);
   `503 {relay_outcome: not_sent}`; `502 {relay_outcome: unknown}` has no `ok` and is never resent. Methods and
   arguments are listed in `skills/telegram/lib/telegram_group_feed.py`.
+- Authenticated `POST /presence/place` rechecks the retained condition in the JSON body `{"operation":"check_owner_dm","binding":…}`.
+  It reads current owner confirmation and Place authorization for the same address without changing either.
+  The result `{ok,allowed,owner_dm_checked,state,code}` attests a current match only when `owner_dm_checked` is true.
+  Before each physical send, including after restart, independently match the selected bot, chat and thread to
+  the retained tuple, then require a positive recheck. The POST knows only that tuple; it cannot verify the
+  client actually selected at send time. No confirmation (including HTTP 405 on an older host) grants no send;
+  a conditional row never falls back to ordinary unconditioned delivery. No receipt or content travels in this read.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
   including after a place is Paused or disconnected. The binding query is optional;
   the authenticated connector must still own the stored work.

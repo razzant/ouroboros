@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import inspect
 import threading
+from types import SimpleNamespace
 from typing import List
 
 from ouroboros import server_maintenance as sm
@@ -46,7 +47,10 @@ def _started_by_one_tick(monkeypatch) -> List[str]:
     # A child of this test's own: owed by construction (a process's first tick), never the process
     # singleton an earlier test's server shutdown stopped (``server._emergency_process_cleanup``).
     monkeypatch.setattr(maintenance, "child", maintenance.MaintenanceChild())
-    sm._periodic_supervisor_maintenance([0.0], [0.0])
+    # The turn's usage marked the compatibility budget projection: the display-projection pass is due.
+    ctx = SimpleNamespace(DRIVE_ROOT=None, RUNNING={}, budget_projection_dirty=True,
+                          update_budget_from_usage=lambda usage: True)
+    sm._periodic_supervisor_maintenance([0.0], [0.0], ctx=ctx)
     return names
 
 
