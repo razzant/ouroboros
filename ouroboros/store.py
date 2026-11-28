@@ -659,7 +659,7 @@ def connect(path: pathlib.Path, tier: str, *, create: bool = False, wait_sec: fl
             actual = _set_journal_mode(conn, journal_mode, wait_sec if tier == TIER_ENFORCED else 0.0)
             if actual != journal_mode.lower():
                 raise sqlite3.OperationalError(f"store journal mode {actual}, expected {journal_mode}")
-        store_checkpoint.limit(conn)  # the kept journal size; on WAL, the inline-checkpoint ceiling
+        store_checkpoint.limit(conn, path)  # the kept journal size; on a store its job passes, the inline ceiling
     except BaseException as exc:
         exc.rollback_confirmed = not conn.in_transaction
         conn.close()

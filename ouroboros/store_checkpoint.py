@@ -2,11 +2,20 @@
 
 SQLite checkpoints INLINE: whichever COMMIT leaves the log at ``wal_autocheckpoint`` frames or more copies every
 frame no checkpoint copied yet into the database file and syncs it, on that writer's thread, inside its COMMIT
-(the default, 1,000 frames, is about 4 MiB of 4 KiB pages). ``store.connect`` sets the threshold of every WAL
-connection it opens, in every process, to ``ceiling``: the frames that fit in ``JOURNAL_SIZE_LIMIT``, the log size
-each store already keeps after a reset (16,288 frames of 4 KiB pages). Nothing is persisted in the file: an older
-body opens with SQLite's default again. A rollback-journal store (PERSIST, the name tier) has no log; its threshold
-is left alone and the job passes it by.
+(the default, 1,000 frames, is about 4 MiB of 4 KiB pages). ``store.connect`` sets that threshold, in every process,
+to ``ceiling`` on a WAL connection to a store the job below passes (``serviced``: the three stores of the install the
+process acts as): the frames that fit in ``JOURNAL_SIZE_LIMIT``, the log size each store already keeps after a reset
+(16,288 frames of 4 KiB pages). Every other WAL store (a child drive's, headless child data's, a private build's, the
+evidence index) keeps SQLite's own threshold, since no pass copies its log. Nothing is persisted in the file: an
+older body opens with SQLite's default again. A rollback-journal store (PERSIST, the name tier) has no log; its
+threshold is left alone and the job passes it by.
+
+The ceiling is a trigger, not a bound. SQLite counts the log's frames after a transaction has appended its pages,
+so one large transaction crosses it by its own size; a reader holding an old snapshot stops every checkpoint at that
+snapshot and keeps the log from resetting while writers append past the ceiling, and the first commit after that
+reader lets go copies the whole backlog inline. A last close (no other connection in any process) copies every
+frame not yet copied inside its ``close``, and crash recovery reads the whole log on the next open, however long it
+grew: ``JOURNAL_SIZE_LIMIT`` bounds only the file a reset leaves.
 
 Below the ceiling the maintenance child's job ``wal_checkpoint`` copies the log, in a lane of its own
 (``maintenance.OWN_LANES``: packing or an import never holds it), with ``PRAGMA wal_checkpoint(PASSIVE)``: it waits
@@ -25,10 +34,9 @@ whether a reader holds the log back (``checkpointed`` below ``log``), and whethe
 growing pass after pass though each pass copied it all: a reader was on the log whenever a writer began).
 
 The worse worst case, disclosed: when the job is down, late, starved or held back by a reader, the log grows to the
-ceiling and the next interactive COMMIT copies up to ~64 MiB of frames inline, more than any inline checkpoint
-before (about 16 times the old 4 MiB); a last close (no other connection in any process) copies as much inside its
-``close``; crash recovery replays up to the ceiling on the next open. ``store.hand_off`` and the export seam still
-truncate the log.
+ceiling and the next interactive COMMIT copies its frames inline, about 64 MiB (more past a large transaction or a
+pinned reader, as above), more than any inline checkpoint before (about 16 times the old 4 MiB); a last close and
+crash recovery meet the same log. ``store.hand_off`` and the export seam still truncate the log.
 """
 from __future__ import annotations
 
@@ -38,6 +46,8 @@ import pathlib
 import sqlite3
 import time
 from typing import Any, Callable, Dict, Iterator, Tuple
+
+from ouroboros import store_timing
 
 JOURNAL_SIZE_LIMIT = 64 << 20  # bytes a store keeps of an idle rollback journal, or of its WAL log after a reset
 _LOG_HEADER, _FRAME_HEADER = 32, 24  # the WAL log's header and each frame's header (sqlite.org/fileformat2.html §4)
@@ -49,11 +59,29 @@ def ceiling(page_size: int) -> int:
     return (JOURNAL_SIZE_LIMIT - _LOG_HEADER) // (page_size + _FRAME_HEADER)
 
 
-def limit(conn: sqlite3.Connection) -> None:
-    """``store.connect``'s journal limits: the bytes kept after a reset, and a WAL connection's inline ceiling."""
+def limit(conn: sqlite3.Connection, path: Any) -> None:
+    """``store.connect``'s journal limits on CONN to PATH: the bytes kept after a reset, and the inline ceiling of a
+    WAL connection to a store the job passes (``serviced``); any other keeps SQLite's own threshold."""
     conn.execute(f"PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}")
-    if conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+    if conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal" and serviced(path):
         conn.execute(f"PRAGMA wal_autocheckpoint = {ceiling(conn.execute('PRAGMA page_size').fetchone()[0])}")
+
+
+def serviced(path: Any) -> bool:
+    """PATH is a store the job passes: a store kind (``store_timing.KINDS``) right in the ``state`` folder of the
+    install this process acts as (``install_identity.canonical_root``), i.e. one of its ``store_journal.root_stores``.
+    A child drive's store, headless child data's (``canonical_root`` is the install around that layout), a private
+    build's temporary file or the evidence index is not; an install root that cannot be read leaves SQLite's own."""
+    from ouroboros.install_identity import canonical_root
+    from ouroboros.launch_roots import same_location
+
+    path = pathlib.Path(path)
+    if store_timing.kind_of(path) == "other" or path.parent.name != "state":
+        return False
+    try:
+        return same_location(path.parent.parent, canonical_root())
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 @functools.lru_cache(maxsize=None)
@@ -68,7 +96,7 @@ def _logs(root: pathlib.Path) -> Iterator[Tuple[str, pathlib.Path, Callable[[], 
     """Each store of ROOT whose WAL log holds a commit: its kind, path, header-tier reader and the log's
     ``[generation, last committed frame]``. A store without a log costs one ``stat``; the database header is read
     only beside a log (a rollback store's leftover log is not a WAL store's)."""
-    from ouroboros import store, store_journal, store_timing
+    from ouroboros import store, store_journal
 
     for path, tier, _lock in store_journal.root_stores(root):
         log = store.log_identity(path)
