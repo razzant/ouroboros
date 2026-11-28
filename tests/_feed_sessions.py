@@ -27,7 +27,6 @@ scroll anchoring that the macOS window runs too (``overflow-anchor: none``).
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import struct
@@ -274,16 +273,19 @@ class Stand:
 
 
 def _cursor_kind(cursor: str) -> str:
-    """What a read asks for, from its cursor (opaque to the client; the server's own JSON, base64url)."""
+    """What a read asks for, from its cursor (opaque to the client; read with the server's own reader, plain or packed).
+
+    A cursor the server cannot read is recorded as ``unreadable``: it is never taken for an older page."""
     if not cursor:
         return 'latest'
+    from ouroboros.gateway.history_paging import _unpack_cursor
     try:
-        decoded = json.loads(base64.urlsafe_b64decode(cursor + '=' * (-len(cursor) % 4)))
-    except ValueError:
-        return 'older'
-    if decoded.get('kind') == 'page':
+        decoded = _unpack_cursor(cursor)
+    except (ValueError, TypeError, RecursionError, zlib.error):
+        return 'unreadable'
+    if decoded['kind'] == 'page':
         return 'latest' if decoded.get('recent') else 'older'
-    return str(decoded.get('kind') or 'older')
+    return str(decoded['kind'])
 
 
 class _Handler(SimpleHTTPRequestHandler):

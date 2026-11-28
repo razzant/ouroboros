@@ -795,7 +795,11 @@ export function createChatInstance({
         const work = !record.isSubagent && blockHasWork(record);
         // The first row of work lands after the title writers ran for its frame: an empty title
         // takes a name here (Working is the chip's word, #1369); the writers own it from then on.
-        if ((work || isPortal(record)) && !record.titleEl.textContent) record.titleEl.textContent = cardTitle(record, true);
+        // A work card is named by the headline writer, so a held cause the empty name hid is drawn too.
+        if (!record.titleEl.textContent) {
+            if (work) syncCardHeadline(record);
+            else if (isPortal(record)) record.titleEl.textContent = cardTitle(record, true);
+        }
         portals.syncConvert(record, isMain && work && !isPortal(record) && !(window.__ouroTaskBindings || {})[record.groupId]);
     }
 
