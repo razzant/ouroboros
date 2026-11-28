@@ -888,8 +888,9 @@ def _launcher_no_real_network(request):
 @pytest.fixture(autouse=True)
 def _isolate_restart_generation(monkeypatch):
     """Panic and parent observation belong to one process generation, not later tests;
-    so do a returning stop's named queue, the launch/schedule process memory and a launcher's Quit."""
-    from ouroboros import delegate_recovery, launcher_bootstrap, launcher_server_reaper, server_control
+    so do a returning stop's named queue, the launch/schedule process memory, the WAL checkpoint
+    looks' memory and a launcher's Quit."""
+    from ouroboros import delegate_recovery, launcher_bootstrap, launcher_server_reaper, server_control, store_checkpoint
     from supervisor import dispatch_choice, pool_admission, queue, schedule_occurrence, worker_assignment
 
     monkeypatch.setattr(server_control, "_restart_successors", [])
@@ -905,6 +906,8 @@ def _isolate_restart_generation(monkeypatch):
     monkeypatch.setattr(pool_admission, "_READY", {"seq": 0, "generation": None, "rss_bytes": None})
     monkeypatch.setattr(pool_admission, "_FACTS", {})  # the last reading and the last fresh size: this test's own
     monkeypatch.setattr(pool_admission, "_VM", {})  # the last macOS VM sample, the base of the next reading's rates
+    monkeypatch.setattr(store_checkpoint, "_LOOKS", {"looks": 0, "max": {}})  # the WAL looks' window: this test's own
+    monkeypatch.setattr(store_checkpoint, "_SEEN", {})  # the job row's baselines its looks read, per store path
 
 
 @pytest.fixture(autouse=True)

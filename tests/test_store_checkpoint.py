@@ -353,8 +353,7 @@ def test_each_look_notes_how_long_the_logs_were_for_the_minute_row_from_memory(r
     beside how long its store's log was, whether or not the job was due. The drain runs on the supervisor loop: it
     reads no file. A minute nobody looked says ``looks`` 0, never an empty log (the section's place in the row:
     tests/test_supervisor_load_row.py)."""
-    store_checkpoint.drain_frames()
-    assert store_checkpoint.drain_frames() == {"looks": 0, "max": {}}
+    assert store_checkpoint.drain_frames() == {"looks": 0, "max": {}}, "every test starts with an empty window (conftest)"
     _backlog(root, 8, key="short")
     assert maintenance.due(root, lane="checkpoint") == []
     short = store.log_identity(store.store_path(root))[1]
