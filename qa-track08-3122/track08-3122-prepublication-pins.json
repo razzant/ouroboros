@@ -1,0 +1,22 @@
+{
+  "core_head": "a02300e5de3583c1d56ab40e30aab776a5a77016",
+  "core_tree": "f86ad013ae9a85253648d009152edb4b021e3dba",
+  "files": {
+    "track08-3122-prepublication-driver.py.in": {
+      "bytes": 16021,
+      "sha256": "c3e6b82f26fe16243a26f27243192d09fb76fc8c070c6c39f978fb945eac869f"
+    },
+    "track08-3122-prepublication-pair.json": {
+      "bytes": 14195,
+      "sha256": "189d3dff8c386bb9f1cc100609f244c4910eb5769008dd1b617270a31dfa84be"
+    },
+    "track08-3122-prepublication-witness.zip": {
+      "bytes": 22433,
+      "sha256": "c6657b7fee12c909b38877ff36a32ac36c796f1c9b9b40c9f4ee17150c028c98"
+    }
+  },
+  "hub_head": "c42c25082128474a27acdf251d3793da6551ee68",
+  "hub_tree": "941012431d7393d2c97dda18aa3653bc691b7d37",
+  "qualification": "ordinary prepublication only",
+  "witness_manifest_sha256": "8a98a6b01ce68f500e9e62d756cdec31ea91e78f64950eba76c5ce2c248af4e0"
+}
