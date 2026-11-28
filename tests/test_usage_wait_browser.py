@@ -28,7 +28,7 @@ from ouroboros.task_results import write_task_result
 from ouroboros.utils import append_jsonl, utc_now_iso
 from supervisor.events_worker_reports import _handle_log_event
 from tests._shared import producer_evidence_dir
-from tests.test_subscription_setup_browser import subscription_ui as subscription_ui, capture
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, PROFILE_FRAME, subscription_ui as subscription_ui, capture
 from tests.test_usage_lock_continuity import held_lock
 from tests._usage_store_testing import request, root as root
 
@@ -47,10 +47,12 @@ def test_accounting_waits_fold_into_one_receipt_row_while_logs_keep_each_phase(s
     write_task_result(root, task, "running", result="", chat_id=1)
     ctx = SimpleNamespace(RUNNING={task: {"task": task_row}}, DRIVE_ROOT=root,
                           append_jsonl=append_jsonl, bridge=SimpleNamespace(push_log=published.append))
-    page.route_web_socket("**/ws", lambda socket: sockets.append(socket))
+    # The serving socket proves the document's data profile first (gateway/ws.py), or the page drops every frame.
+    page.route_web_socket("**/ws", lambda socket: (sockets.append(socket), socket.send(PROFILE_FRAME)))
     app = Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(root)),
                             Route("/api/logs/{name}", api_logs_tail), Route("/api/tasks/{task_id}", api_task_get)])
     app.state.drive_root = root
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: PREVIEW_SCOPE)  # the proof the page's scope meta names
     second, finish = threading.Event(), threading.Event()
     sends = []
 

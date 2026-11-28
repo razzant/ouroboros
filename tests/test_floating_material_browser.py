@@ -197,6 +197,10 @@ def test_official_explanation_on_a_short_screen_scrolls_its_words_to_close(skill
         page.mouse.wheel(0, 2000)
         page.wait_for_function("""el => { const body = el.querySelector(':scope > .ui-popup-body');
             return body.scrollTop >= body.scrollHeight - body.clientHeight - 1; }""", arg=explanation.element_handle())
+        # The scroll's last pixel can still be coming when its offset is within one of the end (a runner's smooth wheel):
+        # wait for the very endpoint the next line asserts, with the same half pixel, never a wider one.
+        page.wait_for_function("""([el, reach]) => { const r = eval(reach)(el);
+            return r.closeTop >= r.top - 0.5 && r.closeBottom <= r.bottom + 0.5; }""", arg=[explanation.element_handle(), _REACH])
         end = explanation.evaluate(_REACH)
         assert end["closeTop"] >= end["top"] - 0.5 and end["closeBottom"] <= end["bottom"] + 0.5, ("Close shows whole", tag, end)
         explanation.locator("[data-popup-close]").click()

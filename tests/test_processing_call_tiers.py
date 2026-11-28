@@ -472,11 +472,11 @@ def test_work_admitted_on_the_main_chats_ultrafast_sends_it_to_that_model_and_pr
     # choice there: the profile's work carried its own answer through every round above.
 
 
-def test_work_admitted_on_auto_sends_the_main_chats_ultrafast_to_the_pool_only_while_that_choice_stands(setup, monkeypatch):  # noqa: F811
-    """Auto is its source's pool: the send names no account, and no profile was confirmed for it. Such a work keeps
-    the rule every route had: its rounds ask Ultrafast while the chat's choice is still saved for that model on
-    Auto, and take the default once the chat took another tier. The document is spelled as the chat's confirmed
-    write leaves it; that write and its refusals are tests/test_processing_tier_choice.py's."""
+def test_work_admitted_on_auto_keeps_the_main_chats_ultrafast_for_the_pool_whatever_the_chat_chooses_later(setup, monkeypatch):  # noqa: F811
+    """Auto is its source's pool: the send names no account, and no profile was confirmed for it. Work carries its
+    answer from admission (``route_choice.task_processing``): it asks Ultrafast on the pool for as long as it runs,
+    whatever tier the Main chat takes afterwards (a later chip change never reprices started work). The tier is
+    the pool's alone: a send that Main's pin binds to a named profile is another destination and asks the default."""
     from ouroboros import config
     from ouroboros.composer_cognition import chat_consent_word
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
@@ -487,22 +487,23 @@ def test_work_admitted_on_auto_sends_the_main_chats_ultrafast_to_the_pool_only_w
     document = root / "settings.json"
     monkeypatch.setattr(config, "SETTINGS_PATH", document)
 
-    def chat(tier):  # the settings document as it stands: Main on Auto, the Main chat's own model and tier
-        document.write_text(json.dumps({"OUROBOROS_MODEL": MODEL, MODEL_ACCOUNTS_KEY: "{}", ROLES: "{}", GLOBAL: "economy",
+    def chat(tier, accounts="{}"):  # the settings document as it stands: Main on Auto, the Main chat's own model and tier
+        document.write_text(json.dumps({"OUROBOROS_MODEL": MODEL, MODEL_ACCOUNTS_KEY: accounts, ROLES: "{}", GLOBAL: "economy",
                                         "OUROBOROS_MAIN_CHAT_MODEL": MODEL, "OUROBOROS_MAIN_CHAT_PROCESSING": tier}), encoding="utf-8")
 
-    confirmed = "ultrafast@" + chat_consent_word([MODEL, False, ""])
-    chat(confirmed)
+    chat("ultrafast@" + chat_consent_word([MODEL, False, ""]))
     auto = {"lead": {"source": "room", "model": MODEL, "use_local": False},
             "processing": {"source": "room", "tier": "ultrafast", "route": [MODEL, False, ""]}}
     pool = {"model": "exact-model", "account": {"mode": "auto"}}  # no account is named, and none is assumed
     assert _round_sent(setup, auto, role="lead") == {**pool, "tier": "ultrafast"}
-    chat("fast")  # another tier chosen in the chat: that work's rounds take what they would without the choice
-    assert _round_sent(setup, auto, role="lead") == {**pool, "tier": "economy"}
-    chat(confirmed)  # chosen again for the same model on Auto: the same work asks it again
+    chat("fast")  # another tier chosen in the chat afterwards: the started work keeps what it was admitted on
     assert _round_sent(setup, auto, role="lead") == {**pool, "tier": "ultrafast"}
-    chat("ultrafast@" + chat_consent_word([MODEL, False, "account-a"]))  # confirmed for a profile, never for the pool
-    assert _round_sent(setup, auto, role="lead") == {**pool, "tier": "economy"}
+    chat("ultrafast@" + chat_consent_word([MODEL, False, "account-a"]))  # a choice for a profile changes nothing either
+    assert _round_sent(setup, auto, role="lead") == {**pool, "tier": "ultrafast"}
+    # The other direction: a send bound to a named profile is not the pool the tier was confirmed for.
+    chat("fast", json.dumps({"main": "account-a"}))
+    pinned = _round_sent(setup, auto, role="main")
+    assert pinned["account"] == {"mode": "pin", "profileId": "account-a"} and pinned["tier"] == "economy"
 
 
 # --- A helper's tier ------------------------------------------------------------------------------------------------
