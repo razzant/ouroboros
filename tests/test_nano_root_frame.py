@@ -207,7 +207,8 @@ def test_ordinary_round_refits_or_refuses_without_losing_sources(
     from ouroboros import loop, peer_roster
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.focus import normalize_focus
-    from ouroboros.live_works import live_works_present
+    from ouroboros.live_works import WORKS_LINES_HEADING, WORKS_LINES_LEGEND, live_works_present
+    from tests.test_live_works_line_form import _rebuild, _without_handle_path
     from tests.test_live_works_present import _runtime
     from ouroboros.loop_llm_call import _record_llm_call_error, _LlmErrorContext
     from ouroboros.usage_accounting import current_physical_attempt_predicate, PhysicalAttemptPreconditionFailed
@@ -300,7 +301,19 @@ def test_ordinary_round_refits_or_refuses_without_losing_sources(
     if world_needed:
         assert manifests[0]["minimum"]["native_input_sha256"] == input_fingerprint(wire)
         assert manifests[0]["minimum"]["input_tokens"] == counted[-3][1]
-    assert _runtime(wire["messages"])["live_works_present"]["works"] == [work_fact]
+    # Decode the work rows in the sent Runtime section; its retained full text is read back below.
+    [carrier] = [row["content"] for row in wire["messages"] if WORKS_LINES_HEADING in row["content"]]
+    assert carrier.count(WORKS_LINES_HEADING) == 1
+    body = carrier.split("## Runtime context\n\n", 1)[1]
+    runtime, end = json.JSONDecoder().raw_decode(body)
+    assert runtime["live_works_present"]["works"] == "one line per work, after this object"
+    opening = f"\n\n{WORKS_LINES_HEADING}{WORKS_LINES_LEGEND}\n"
+    assert body[end:].startswith(opening)
+    assert ("get_task_result(task_id=<task_id>, include_focus_source=True, "
+            "focus_source_sha256=<focus_sha256>)") in opening
+    [line] = body[end + len(opening):].split("\n\n", 1)[0].split("\n")
+    assert _rebuild(line) == _without_handle_path(work_fact)
+    assert _runtime([{"content": original.full_text}])["live_works_present"]["works"] == [work_fact]
     assert any("alpha again" in row["content"] for row in wire["messages"])
     saved = {row["section_id"]: row for row in ctx.context_fit_plan.projection("nano").memory_facts["host_sections_addressed"]}
     for section in (original, world) if world_needed else (original,):

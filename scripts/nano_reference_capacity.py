@@ -240,40 +240,55 @@ def guarded_write(memory, markers, probe, *, label, operation, active_name):
     from ouroboros.nano_publication import MEMORY_CEILING
 
     before = active_publication(memory)
-    counted = {}
+    first_count = None
     needle = markers[label]
 
     def observe(payload, key, size):
+        nonlocal first_count
         if any(needle in row["content"] for row in payload["messages"]):
             if active_publication(memory)[active_name] != before[active_name]:
                 raise ValueError(f"{label}: proposal was already active when the counter saw it")
-            counted[key] = size
+            if first_count is None:
+                first_count = {"sha256": key, "input_tokens": size}
 
     probe["observe"] = observe
     try:
         result = str(operation())
+    except ValueError:
+        raise ValueError(f"guarded_writer.{label}: proposal_outcome_unknown (ValueError; first_counted_proposal={first_count})") from None
     finally:
         probe.pop("observe")
-    refusal = re.search(r"(?m)^(busy|unavailable|stale|incomplete|bootstrap_pending):", result)
-    if refusal is not None:
+    refusal = re.search(r"(?m)^(busy|unavailable|stale|incomplete|bootstrap_pending|over_capacity):", result)
+    if refusal is not None and refusal[1] != "over_capacity":
         raise ValueError(f"guarded_writer.{label}: {refusal[1]}")
-    if not counted:
-        raise ValueError(f"guarded_writer.{label}: proposal did not reach the exact counter")
     after = active_publication(memory)
     if after["rules"] != before["rules"]:
         raise ValueError(f"guarded_writer.{label}: initial Settings bytes changed")
-    observation = {"sha256": next(iter(counted)), "input_tokens": next(iter(counted.values()))}
-    if "over_capacity:" in result:
-        excess = re.search(r"over_capacity: memory excess ([0-9]+) tokens; work shortfall ([0-9]+) tokens", result)
-        if before != after or excess is None or int(excess[1]) <= 0:
-            raise ValueError(f"{label}: capacity refusal failed to preserve bytes/revision or prove memory pressure")
-        return {"outcome": "over_capacity", "candidate_memory": MEMORY_CEILING + int(excess[1]),
-                "work_shortfall": int(excess[2]), "active_sha256": publication_digests(after), "counted_proposal": observation}
+    if refusal is not None:
+        numbers = re.match(r" memory excess ([0-9]+) tokens; work shortfall ([0-9]+) tokens(?=;|\n|$)",
+                           result[refusal.end():])
+        pressure = tuple(map(int, numbers.groups())) if numbers else (None, None)
+        memory_excess, work_shortfall = pressure
+        changed = [name for name in before if before[name] != after[name]]
+        failed = [name for name, condition in (
+            ("numeric_refusal_missing", numbers is None),
+            ("no_positive_memory_excess", memory_excess == 0),
+            ("refusal_changed_active_sources", bool(changed)),
+            ("proposal_count_missing", first_count is None),
+        ) if condition]
+        if failed:
+            raise ValueError(f"guarded_writer.{label}: {failed}; changed_active_sources={changed}; "
+                             f"{memory_excess=}; {work_shortfall=}; first_counted_proposal={first_count}")
+        return {"outcome": "over_capacity", "candidate_memory": MEMORY_CEILING + memory_excess,
+                "work_shortfall": work_shortfall, "active_sha256": publication_digests(after),
+                "first_counted_proposal": first_count}
+    if first_count is None:
+        raise ValueError(f"guarded_writer.{label}: proposal_count_missing; outcome not established")
     if (before["publication"] == after["publication"] or not after["publication"]
             or before[active_name] == after[active_name] or not after[active_name]
             or markers[label].encode() not in after[active_name]):
         raise ValueError(f"guarded_writer.{label}: counted, but active bytes or publication revision did not match")
-    return {"outcome": "accepted", "active_sha256": publication_digests(after), "counted_proposal": observation}
+    return {"outcome": "accepted", "active_sha256": publication_digests(after), "first_counted_proposal": first_count}
 
 
 def publication_digests(active):
@@ -305,6 +320,7 @@ def publication_sample(memory, probe, rules, stage):
         raise ValueError(f"guarded_profile.{stage}: initial rules absent, duplicated or not isolated by ablation")
     return {"memory": sample["whole_memory_tokens"], "work_headroom": sample["minimum_work_headroom_at_reply_floor_tokens"],
             "background": sample["without_memory"]["input_tokens"], "reply": sample["reply_floor_tokens"],
+            "minimum_input": sample["minimum"]["input_tokens"], "whole_index_input": sample["whole_index"]["input_tokens"],
             "request_sha256": request_sha}
 
 
@@ -327,7 +343,21 @@ def initialize_guarded_settings(drive, settings, rules):
     return sha(path.read_bytes())
 
 
-def grow_guarded_memory(memory, probe, rules, settings_sha):
+def guarded_boundary_problems(initial, seeded, boundary, last_accept, final, refusal, *, memory_limit, work_floor):
+    """Label every failed part of the joint growth and readback witness."""
+    checks = {
+        "unexpected_acceptance": refusal["outcome"] == "accepted",
+        "refusal_changed_active_sources": refusal["outcome"] == "over_capacity" and refusal["active_sha256"] != final,
+        "no_strict_memory_growth": not initial["memory"] < seeded["memory"] < boundary["memory"],
+        "boundary_exceeds_memory_limit": boundary["memory"] > memory_limit,
+        "boundary_below_work_floor": boundary["work_headroom"] < work_floor,
+        "boundary_more_than_256_below_limit": memory_limit - boundary["memory"] > 256,
+        "accepted_revision_not_active": last_accept["revision_sha256"] != final["publication"],
+    }
+    return [reason for reason, failed in checks.items() if failed]
+
+
+def grow_guarded_memory(memory, probe, rules, settings_sha, *, model):
     """Reach the writer's actual threshold; let final F/W independently disagree with it."""
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.knowledge import read_knowledge_note, resolve_knowledge_address
@@ -367,7 +397,7 @@ def grow_guarded_memory(memory, probe, rules, settings_sha):
         row = guarded_write(memory, markers, probe, label=label, operation=operation, active_name=active_name)
         if row["outcome"] != "accepted":
             raise ValueError(f"guarded profile: seed write {label} unexpectedly exceeded capacity")
-        accepted[label] = {"revision_sha256": row["active_sha256"]["publication"], "counted_proposal": row["counted_proposal"]}
+        accepted[label] = {"revision_sha256": row["active_sha256"]["publication"], "first_counted_proposal": row["first_counted_proposal"]}
     seeded = publication_sample(memory, probe, rules, "seeded")
     lines = fixture_lines("Nano guarded identity", 640).splitlines()
 
@@ -379,16 +409,18 @@ def grow_guarded_memory(memory, probe, rules, settings_sha):
 
     low, high = 32, len(lines)
     last_accept = accepted["identity"]
-    if try_identity(high)["outcome"] != "over_capacity":
-        raise ValueError("guarded profile: the fixed oversized proposal was not refused")
+    bracket_refusal = try_identity(high)
+    if bracket_refusal["outcome"] == "accepted":
+        raise ValueError(f"guarded_profile.{model}: unexpected_acceptance of fixed oversized proposal; "
+                         f"rows={high}; first_counted_proposal={bracket_refusal['first_counted_proposal']}")
     while high - low > 1:
         trial = (high + low) // 2
         row = try_identity(trial)
         if row["outcome"] == "accepted":
             low = trial
-            last_accept = {"revision_sha256": row["active_sha256"]["publication"], "counted_proposal": row["counted_proposal"]}
+            last_accept = {"revision_sha256": row["active_sha256"]["publication"], "first_counted_proposal": row["first_counted_proposal"]}
         else:
-            high = trial
+            high, bracket_refusal = trial, row
     markers["identity"] = lines[low - 1]
     boundary = publication_sample(memory, probe, rules, "boundary")
     final = publication_digests(active_publication(memory))
@@ -397,17 +429,22 @@ def grow_guarded_memory(memory, probe, rules, settings_sha):
     refusal = try_identity(high, rejected=True)
     rejected_marker = markers["identity"]
     markers["identity"] = lines[low - 1]
-    if (refusal["outcome"] != "over_capacity" or refusal["active_sha256"] != final
-            or not initial["memory"] < seeded["memory"] < boundary["memory"] <= MEMORY_CEILING
-            or boundary["work_headroom"] < 15_000 or MEMORY_CEILING - boundary["memory"] > 256
-            or last_accept["revision_sha256"] != final["publication"]):
-        raise ValueError("guarded profile: no measured growth to the boundary followed by an unchanged refusal")
+    # The boundary witness checks the independent 15k promise, not the writer's own constant.
+    failed = guarded_boundary_problems(initial, seeded, boundary, last_accept, final, refusal,
+                                       memory_limit=MEMORY_CEILING, work_floor=15_000)
+    if failed:
+        facts = {"model": model, "failed": failed, "initial": initial, "seeded": seeded, "boundary": boundary,
+                 "accepted_rows": low, "final_probe_rows": high, "last_accept": last_accept, "active_sha256": final,
+                 "bracket_refusal": bracket_refusal, "final_probe": refusal}
+        raise ValueError("guarded profile: no measured growth to the boundary followed by an unchanged refusal: "
+                         + json.dumps(facts, sort_keys=True, separators=(",", ":")))
     return markers, rejected_marker, {"seeds": accepted, "last_accept": last_accept, "initial": initial,
                                       "rules_fixture": {"source": "initial_synthetic_settings", "owner_save": "not_run",
                                           "rules_sha256": sha(rules.encode()), "settings_sha256": settings_sha,
                                           "boundary_request_sha256": boundary["request_sha256"]},
                                       "seeded": seeded, "boundary": boundary,
-                                      "accepted_rows": low, "refused_rows": high, "active_sha256": final, "refusal": refusal}
+                                      "accepted_rows": low, "refused_rows": high, "active_sha256": final,
+                                      "bracket_refusal": bracket_refusal, "refusal": refusal}
 
 
 def working_text(counters, floor):
@@ -576,7 +613,8 @@ def captured_root(raw, text, model, count, window, source, *, present, grown=Fal
             scope.enter_context(patch.object(send_clock, "stamp_clock_note",
                                             lambda payload, **_kw: stamp(payload, clock_at=when)))
             scope.enter_context(patch("ouroboros.utils.utc_now_iso", return_value=when.isoformat()))
-            markers, rejected_marker, source["publication"] = grow_guarded_memory(memory, source, rules, settings_sha)
+            markers, rejected_marker, source["publication"] = grow_guarded_memory(
+                memory, source, rules, settings_sha, model=model)
             if not probes:
                 raise ValueError("the real memory writers did not reach the exact counter")
             probes.clear()  # writer observations cannot stand in for the following exact start

@@ -124,3 +124,53 @@ def test_initial_rules_bootstrap_reads_settings_and_never_overwrites(tmp_path, m
     with pytest.raises(ValueError, match="settings_bootstrap: FileExistsError"):
         initialize(tmp_path, {}, "A different text must not be saved.")
     assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize(("memory", "work", "revision", "refusal", "refused_revision", "expected"), [
+    (19_744, 15_000, "live", "over_capacity", "live", []),
+    (19_743, 15_000, "live", "over_capacity", "live", ["boundary_more_than_256_below_limit"]),
+    (19_744, 14_999, "live", "over_capacity", "live", ["boundary_below_work_floor"]),
+    (19_744, 15_000, "live", "over_capacity", "different", ["refusal_changed_active_sources"]),
+    (12_000, 14_999, "old", "accepted", "different", ["unexpected_acceptance", "no_strict_memory_growth",
+        "boundary_below_work_floor", "boundary_more_than_256_below_limit", "accepted_revision_not_active"]),
+    (20_001, 15_000, "live", "over_capacity", "live", ["boundary_exceeds_memory_limit"]),
+])
+def test_guarded_boundary_reports_distinct_failed_claims(memory, work, revision, refusal, refused_revision, expected):
+    problems = REFERENCE["guarded_boundary_problems"]
+    assert problems({"memory": 2_760}, {"memory": 12_000}, {"memory": memory, "work_headroom": work},
+                    {"revision_sha256": revision}, {"publication": "live"},
+                    {"outcome": refusal, "active_sha256": {"publication": refused_revision}},
+                    memory_limit=20_000, work_floor=15_000) == expected
+
+
+@pytest.mark.parametrize("detail, expected", [
+    ("a publication count must use whole WORLD", "numeric_refusal_missing"),
+    ("memory excess 0 tokens; work shortfall 17 tokens", "no_positive_memory_excess"),
+    ("memory excess 12 tokens; work shortfall 17 tokens", None),
+])
+def test_guarded_writer_separates_numeric_refusal_from_first_count(monkeypatch, detail, expected):
+    writer = REFERENCE["guarded_write"]
+    active = {"identity": b"Old content", "rules": b"Rules", "publication": b"Revision"}
+    monkeypatch.setitem(writer.__globals__, "active_publication", lambda _: active.copy())
+    probe, markers = {}, {"identity": "Proposed identity"}
+
+    def refuse():
+        payload = {"messages": [{"content": markers["identity"]}]}
+        probe["observe"](payload, "first", 40_000)
+        probe["observe"](payload, "second", 42_000)
+        return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED\nover_capacity: {detail}; attempted source: /private/fixture"
+
+    def call():
+        return writer(None, markers, probe, label="identity", operation=refuse, active_name="identity")
+
+    if expected:
+        with pytest.raises(ValueError, match=expected) as error:
+            call()
+        assert "/private/fixture" not in str(error.value)
+        assert "'input_tokens': 40000" in str(error.value)
+        assert ("memory_excess=None" if expected == "numeric_refusal_missing" else "memory_excess=0") in str(error.value)
+    else:
+        row = call()
+        assert row["outcome"] == "over_capacity"
+        assert row["work_shortfall"] == 17
+        assert row["first_counted_proposal"] == {"sha256": "first", "input_tokens": 40_000}
