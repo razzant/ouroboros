@@ -1,0 +1,60 @@
+name: '#3122 structural size qualification'
+on:
+  push:
+    branches: ['qa/track08-3122-size-41bf465b']
+permissions:
+  contents: read
+jobs:
+  size:
+    if: github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/track08-3122-size-41bf465b' && github.event.deleted == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET: '41bf465b65fcf725d9e5cb65b8a284cc93d49ee8'
+      BASE: '9f6fad44a369a1eaf079129a6d4a69539f25dd86'
+      TREE: '4f28bd37241a2854c35143140d71a111802d37ed'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind exact candidate and base
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-list --parents -n1 HEAD)" == "$GITHUB_SHA $TARGET" ]]
+          [[ "$(git rev-list --parents -n1 "$TARGET")" == "$TARGET $BASE" ]]
+          [[ "$(git rev-parse "$TARGET^{tree}")" == "$TREE" ]]
+          [[ "$(git diff --name-only "$TARGET" HEAD)" == .github/workflows/qualify-track08-3122-size.yml ]]
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.TARGET }}
+          path: product
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Run the size-ratchet lane on the exact product
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/product"
+          [[ "$(git rev-parse HEAD)" == "$TARGET" && "$(git rev-parse HEAD^{tree})" == "$TREE" && -z "$(git status --porcelain=v1)" ]]
+          tmp=$(mktemp -d "$RUNNER_TEMP/tg3122-size.XXXXXXXX")
+          mkdir -m 700 "$tmp/home" "$tmp/tmp"
+          python="${VIRTUAL_ENV:-}/bin/python"
+          [[ -x "$python" ]]
+          env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$tmp/home" TMPDIR="$tmp/tmp"             OURO_SIZE_RATCHET_BASE_REF="$BASE" "$python" -m pytest tests/ -o addopts='' -m size_ratchet -q --tb=short --junitxml="$tmp/size.xml"
+          "$python" -I -S - "$tmp/size.xml" "$BASE" "$TARGET" "$TREE" "$GITHUB_SHA" <<'PY_PROOF'
+          import hashlib, json, sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          raw = Path(sys.argv[1]).read_bytes()
+          cases = list(ET.fromstring(raw).iter('testcase'))
+          assert cases and all(not any(x.tag in {'failure','error','skipped'} for x in c) for c in cases)
+          print(json.dumps({'evidence':'size_ratchet','cases':len(cases),'base':sys.argv[2],'head':sys.argv[3],'tree':sys.argv[4],
+                            'carrier':sys.argv[5],'junit_sha256':hashlib.sha256(raw).hexdigest()}, sort_keys=True))
+          PY_PROOF
