@@ -518,7 +518,7 @@ def verify_operator_stop_fixture(root: pathlib.Path, facts: Dict[str, Any]) -> N
     """Real operator CLI + writer lease, on the smoke's own fresh generation only."""
     from unittest.mock import patch
     from ouroboros import claudexor_daemon as daemon, claudexor_runtime, config, process_custody as custody
-    from ouroboros.delegate_progress import poll_bound
+    from ouroboros.delegate_progress import bounded_poll
     from ouroboros.platform_layer import pid_is_alive
     from ouroboros.utils import atomic_write_json
 
@@ -571,11 +571,8 @@ def verify_operator_stop_fixture(root: pathlib.Path, facts: Dict[str, Any]) -> N
             raise SmokeFailure("operator_fixture_run_missing", "fake-hang returned no run id")
         proof["run_id"] = run_id
         deadline = time.monotonic() + 30
-        while True:
-            # Bounded like every product poller (what the window has left, floored at the
-            # gateway's SHORT_POLL_TIMEOUT_SEC): the engine serves control reads in process,
-            # so a busy event loop answers slowly rather than refusing.
-            summary = gateway.get_run(run_id, timeout_sec=poll_bound(deadline - time.monotonic())).get("summary") or {}
+        while (remaining := deadline - time.monotonic()) > 0:
+            summary = bounded_poll(gateway, run_id, remaining, strict=True).get("summary") or {}
             run_dir = pathlib.Path(summary["runDir"]) if summary.get("runDir") else None
             entered = False
             for path in run_dir.glob("events.jsonl") if run_dir else []:
@@ -588,12 +585,14 @@ def verify_operator_stop_fixture(root: pathlib.Path, facts: Dict[str, Any]) -> N
                         if row.get("type") == "harness.event" and event.get("harness_id") == "fake-hang" and event.get("type") == "thinking":
                             entered = True
                             proof["entered_event_seq"] = row.get("seq")
+            if time.monotonic() >= deadline or summary.get("state") in TERMINAL_STATES:
+                break
             if summary.get("state") == "running" and entered:
                 proof.update(fake_hang_entered=True, run_dir=str(run_dir))
                 break
-            if time.monotonic() >= deadline or summary.get("state") in TERMINAL_STATES:
-                raise SmokeFailure("operator_fixture_not_running", "fake-hang did not enter its active wait")
-            time.sleep(.1)
+            time.sleep(min(.1, max(0.0, deadline - time.monotonic())))
+        if not proof.get("fake_hang_entered"):
+            raise SmokeFailure("operator_fixture_not_running", "fake-hang did not enter its active wait")
         fresh = daemon.OwnedClaudexorDaemon()
         actual_run, observed = subprocess.run, []
 
