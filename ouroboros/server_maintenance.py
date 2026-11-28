@@ -273,8 +273,8 @@ def _step_recovered(step: str) -> None:
 # Memory only: each latched off-loop pass's thread, start and stall-journal flag.
 # After its own cadence from START, a held latch records host_duty_stall with the
 # duty and current stack line; completion records host_duty_stall_end; the display-projection
-# duty writes both, in order (``display_projections.journal_duty_stall``). Neither the
-# loop deadline nor the previous completion marker measures this pass's duration.
+# duty writes both, in order, and after its last pass a duty that ends writes its own (``display_projections``).
+# Neither the loop deadline nor the previous completion marker measures this pass's duration.
 _DUTIES: Dict[int, Dict[str, Any]] = {}
 
 

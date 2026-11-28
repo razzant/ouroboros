@@ -37,12 +37,14 @@ the terminal custody was written, after the pass in flight and inside the share 
 gives it and the socket lines together (``server_control.finish_display_and_socket_lines``: half of what is
 left, so the owned stop after it keeps the larger part): the loop's context (``bind``) gives it the budget
 mark of a turn a stop or a restart ended before its look, beside the queued rows and newer after-update
-facts. No pass starts after it. A later drain (the restart census before the
-store switch, the exit, the direct re-exec) waits for that one and reads whether a pass still runs, and the
-store switch refuses while one does; it takes the last pass itself only where no teardown did. A new
-lifespan in this interpreter opens the duty again (``reopen``). What stays unwritten (a pass that outlived
-its share of the grace, one no time was left to wait for, a mark inside a failed write's retry bound) is the
-exit's loss: the ledger is the record of money.
+facts. No pass starts after it: a duty that ends later writes its own closing row, behind what is still
+queued, on its own thread (``journal_duty_stall_end``), never under the latch the restart census reads, and
+one writer at a time keeps the journal in queue order. A later drain (the restart census before the store
+switch, the exit, the direct re-exec) waits for that one and reads whether a pass still runs, and the store
+switch refuses while one does; it takes the last pass itself only where no teardown did. A new lifespan in
+this interpreter opens the duty again (``reopen``). What stays unwritten (a pass that outlived its share of
+the grace, one no time was left to wait for, a mark inside a failed write's retry bound) is the exit's
+loss: the ledger is the record of money.
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ DUTY_NAME = "display-projections"
 LATCH = threading.Lock()  # single flight: the loop takes it before a pass starts, the pass releases it
 _ROWS: Deque[Tuple[Optional[tuple], Dict[str, Any]]] = collections.deque()  # (warning line, journal row)
 _ROWS_LOCK = threading.Lock()
+_WRITE_LOCK = threading.Lock()  # one writer of the queue at a time, from a row's pop to its append (``_write_rows``)
 _CLOSED = threading.Event()  # this lifespan's end took its last pass (``drain``): no pass starts until ``reopen``
 _END = threading.Lock()  # held by the drain that takes the last pass: a later drain waits for it, then reads
 _CONTEXT: Any = None  # the supervisor loop's event context (``bind``): the last pass takes its budget mark
@@ -210,7 +213,9 @@ def journal_duty_stall(duty: Dict[str, Any], cadence_sec: float, stack: List[str
 
 def journal_duty_stall_end(duty: Dict[str, Any]) -> None:
     """A pass ended (on its own thread, ``server_maintenance._duty_ended``; this duty's own pass before it releases
-    its latch, ``project``): an alerted one's closing row is queued behind its onset row, once."""
+    its latch, ``project``): an alerted one's closing row is queued behind its onset row, once. After the lifespan's
+    last pass (``drain``) no pass writes the queue again, so that thread writes it itself, its onset first, and never
+    takes the latch whose state a later drain reads (the restart census)."""
     with _ROWS_LOCK:
         if duty.get("ended"):
             return
@@ -218,6 +223,8 @@ def journal_duty_stall_end(duty: Dict[str, Any]) -> None:
         if duty["alerted"]:
             _ROWS.append((None, {"ts": utc_now_iso(), "type": "host_duty_stall_end", "duty": duty["name"],
                                  "running_sec": round(time.time() - duty["since"], 1)}))
+    if duty["alerted"] and _CLOSED.is_set():  # no onset is alerted once ended (``journal_duty_stall``)
+        _write_rows()
 
 
 def _rows_queued() -> bool:
@@ -226,21 +233,23 @@ def _rows_queued() -> bool:
 
 
 def _write_rows() -> None:
-    """The queued lines and rows, oldest first; a row that cannot be written is logged at debug and dropped,
-    as the loop's own append dropped it."""
+    """The queued lines and rows, oldest first, by one writer at a time from each row's pop to its append (the pass;
+    after the last pass also a duty that ended, ``journal_duty_stall_end``), so the journal keeps the queue's order;
+    a row that cannot be written is logged at debug and dropped, as the loop's own append dropped it."""
     from supervisor.state import append_jsonl
 
     while True:
-        with _ROWS_LOCK:
-            if not _ROWS:
-                return
-            line, row = _ROWS.popleft()
-        if line:
-            log.warning(*line)
-        try:
-            append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", row)
-        except Exception:
-            log.debug("%s row failed", row.get("type"), exc_info=True)
+        with _WRITE_LOCK:
+            with _ROWS_LOCK:
+                if not _ROWS:
+                    return
+                line, row = _ROWS.popleft()
+            if line:
+                log.warning(*line)
+            try:
+                append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", row)
+            except Exception:
+                log.debug("%s row failed", row.get("type"), exc_info=True)
 
 
 def drain(deadline: Optional[float] = None) -> bool:
@@ -249,11 +258,12 @@ def drain(deadline: Optional[float] = None) -> bool:
     and the direct re-exec (``server_control.drain_display_projections``). The first call closes the duty, so no pass
     starts after it until a new lifespan (``reopen``), waits for a pass in flight, then runs the last pass: the bound
     context's due budget mark (``bind``), the queued rows and newer after-update facts, again while rows arrive
-    meanwhile (another duty's end row); root figures are heartbeat display and end with the process. A later call
-    waits for that first one to end, then only reads whether a pass still runs; Panic waits for nothing. Each caller
-    waits until its ``deadline`` at most (monotonic: the share of the stop grace its door takes, half of what is left,
-    ``server_control``; without a started grace no last pass runs), and no pass starts that there is no time left to
-    wait for. True when no pass is left running: one that is stays unjoined, its unwritten work the exit's loss."""
+    meanwhile (an overrun the watchdog still found); root figures are heartbeat display and end with the process. A
+    later call waits for that first one to end, then only reads whether a pass still runs; Panic waits for nothing.
+    Each caller waits until its ``deadline`` at most (monotonic: the share of the stop grace its door takes, half of
+    what is left, ``server_control``; without a started grace no last pass runs), and no pass starts that there is no
+    time left to wait for. True when no pass is left running: one that is stays unjoined, its unwritten work the exit's
+    loss."""
     from ouroboros import update_generation_facts
     from ouroboros.server_control import panic_termination_requested
 

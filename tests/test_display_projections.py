@@ -570,17 +570,18 @@ def test_a_pass_that_cannot_start_leaves_its_work_due_and_the_snapshot_shares_no
 def test_the_exit_takes_one_last_pass_with_the_queued_rows_and_the_bound_mark_and_nothing_after_it(monkeypatch):
     """The lifespan's end (``drain``), once: the queued rows, in order, and the bound loop context's due budget
     mark go in one last pass, off the caller's thread, inside half the stop grace left, and again for a row queued
-    meanwhile (another duty's pass that ended during it); with nothing outstanding nothing starts. After it no look
-    and no later drain starts a pass: what is marked or queued then stays."""
+    meanwhile (an overrun a supervisor loop that outlived its join still found); with nothing outstanding nothing
+    starts. After it no look and no later drain starts a pass: a mark or an onset made then stays (a duty that ends
+    then writes its own closing row)."""
     rows, writes = [], []
     monkeypatch.setattr("supervisor.state.append_jsonl", lambda _path, row: rows.append(row) or True)
     monkeypatch.setattr(update_generation_facts, "_duties", {})
     monkeypatch.setattr(update_generation_facts, "_publish_after", lambda: None)
     running = {"name": "cold-custody", "ident": None, "since": time.time() - 700, "alerted": False}
 
-    def write(_usage):  # the last pass's budget write; meanwhile the overrunning cold-custody pass ends
+    def write(_usage):  # the last pass's budget write; meanwhile the watchdog alerts the overrunning cold-custody pass
         writes.append(threading.current_thread().name)
-        display_projections.journal_duty_stall_end(running)
+        display_projections.journal_duty_stall(running, 600.0, [], {})
         return True
 
     ctx = SimpleNamespace(budget_projection_dirty=True, update_budget_from_usage=write)
@@ -588,12 +589,11 @@ def test_the_exit_takes_one_last_pass_with_the_queued_rows_and_the_bound_mark_an
     duty = {"name": "custody-maintenance", "ident": None, "since": time.time() - 700, "alerted": False}
     display_projections.journal_duty_stall(duty, 600.0, [], {})
     display_projections.journal_duty_stall_end(duty)
-    display_projections.journal_duty_stall(running, 600.0, [], {})
     assert display_projections.drain(time.monotonic() + 10) is True
-    kinds = ("host_duty_stall", "host_duty_stall_end")
     assert [(row["type"], row["duty"]) for row in rows] == [
-        (kind, name) for name in ("custody-maintenance", "cold-custody") for kind in kinds
-    ], "the closing row queued during the last pass is written before the drain returns"
+        ("host_duty_stall", "custody-maintenance"), ("host_duty_stall_end", "custody-maintenance"),
+        ("host_duty_stall", "cold-custody"),
+    ], "the onset queued during the last pass is written before the drain returns"
     assert writes == [f"{display_projections.DUTY_NAME}-drain"] and ctx.budget_projection_dirty is False
     later = {"name": "reconcile-maintenance", "ident": None, "since": time.time() - 400, "alerted": False}
     display_projections.journal_duty_stall(later, 300.0, [], {})
@@ -601,7 +601,7 @@ def test_the_exit_takes_one_last_pass_with_the_queued_rows_and_the_bound_mark_an
     display_projections.dispatch(ctx, lambda *_a: pytest.fail("a look started a pass after the last one"),
                                  lambda *_a: pytest.fail("the latch was free"))
     assert display_projections.drain(time.monotonic() + 10) is True
-    assert len(rows) == 4 and len(writes) == 1 and ctx.budget_projection_dirty is True
+    assert len(rows) == 3 and len(writes) == 1 and ctx.budget_projection_dirty is True
 
     monkeypatch.setattr(display_projections, "_CLOSED", threading.Event())  # another process's end
     monkeypatch.setattr(display_projections, "_ROWS", collections.deque())
@@ -791,3 +791,101 @@ def test_the_last_pass_writes_the_closing_row_an_overrunning_display_pass_queued
         closing.set()
     _pass_ended()
     assert len(rows) == 2 and not display_projections._ROWS, "the wrapper's close queued no second end"
+
+
+def test_a_duty_that_ends_after_the_last_pass_writes_its_own_closing_row_and_leaves_no_stall_open(
+        tmp_path, monkeypatch):
+    """An alerted host duty (an overrun the watchdog journaled while the supervisor ran) whose pass ends during the
+    teardown AFTER its last display pass: no pass writes again in this image, so the duty's own thread writes its
+    ``host_duty_stall_end`` behind the onset, never holding the latch the restart census reads (the census reads no
+    pass running while that row is written); the journal keeps onset and end, and the mind's vitals list no stall that
+    ended. (Queued for a pass that never came, the end stayed in memory and the onset read as a stall with no end.)"""
+    from ouroboros import context_runtime_facts, owned_shutdown, server_control
+    from supervisor import state as state_mod
+
+    journal = tmp_path / "logs" / "supervisor.jsonl"
+    journal.parent.mkdir()
+    monkeypatch.setattr(display_projections, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(update_generation_facts, "_duties", {})
+    monkeypatch.setattr(update_generation_facts, "_publish_after", lambda: None)
+    grace_end = time.monotonic() + 10.0
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: grace_end)
+    held, release, hold, _holding = _held_seam()
+    entered, gate, ends, threads = threading.Event(), threading.Event(), [], []
+    real_append = state_mod.append_jsonl
+
+    def append(path, row):  # the closing row's append stands a while, as on a slow disk
+        ends.append((row["type"], threading.current_thread().name))
+        entered.set()
+        assert gate.wait(10)
+        return real_append(path, row)
+
+    def custody_pass(latch):  # production's duties release their latch last; the wrapper then closes the duty
+        threads.append(threading.current_thread())
+        try:
+            hold()
+        finally:
+            latch.release()
+
+    latch = threading.Lock()
+    assert latch.acquire(blocking=False)
+    assert server_maintenance._start_maintenance_thread(latch, "custody-maintenance", custody_pass, (latch,))
+    try:
+        assert held.wait(10)
+        server_maintenance._DUTIES[id(latch)]["since"] -= 3600  # well past its cadence
+        server_maintenance._duty_busy(latch, 600.0)  # the watchdog alerts the overrun while the supervisor ran
+        server_control.finish_display_and_socket_lines()  # the teardown's last pass writes the onset
+        monkeypatch.setattr(state_mod, "append_jsonl", append)
+        release.set()  # the duty's pass ends later in the teardown
+        assert entered.wait(10), "the ending duty writes its closing row itself"
+        assert server_control.drain_display_projections() is True, "the census reads no pass while that row is written"
+    finally:
+        release.set()
+        gate.set()
+        for thread in threads:
+            thread.join(10)
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert [(row["type"], row["duty"]) for row in rows] == [
+        ("host_duty_stall", "custody-maintenance"), ("host_duty_stall_end", "custody-maintenance")]
+    assert ends == [("host_duty_stall_end", "custody-maintenance")] and not display_projections._ROWS
+    assert context_runtime_facts._supervisor_tail(tmp_path)["open"] == {}
+
+
+def test_a_duty_that_ends_during_the_last_pass_waits_for_the_row_that_pass_is_writing_and_lands_behind_it(monkeypatch):
+    """One writer of the queue at a time, from a row's pop to its append: while the last pass stands inside its append
+    of an overrun's onset (a slow disk), the overrunning duty ends on its own thread and, the duty being closed, writes
+    the queue too; it waits for that append, so the journal reads onset, then end. (Each writer popping and appending
+    on its own, the end overtook the onset it closes.)"""
+    rows, entered, gate = [], threading.Event(), threading.Event()
+
+    def append(_path, row):  # the last pass stands inside the onset's append
+        if row["type"] == "host_duty_stall":
+            entered.set()
+            assert gate.wait(10)
+        rows.append((row["type"], threading.current_thread().name))
+        return True
+
+    monkeypatch.setattr("supervisor.state.append_jsonl", append)
+    monkeypatch.setattr(update_generation_facts, "_duties", {})
+    monkeypatch.setattr(update_generation_facts, "_publish_after", lambda: None)
+    duty = {"name": "cold-custody", "ident": None, "since": time.time() - 700, "alerted": False}
+    display_projections.journal_duty_stall(duty, 600.0, [], {})
+    drained = []
+    teardown = threading.Thread(target=lambda: drained.append(display_projections.drain(time.monotonic() + 10)),
+                                name="lifespan-teardown")
+    ending = threading.Thread(target=display_projections.journal_duty_stall_end, args=(duty,), name="cold-custody")
+    teardown.start()
+    try:
+        assert entered.wait(10)  # the last pass popped the onset and stands inside its append
+        ending.start()  # the duty's pass ends now, after the close
+        _wait_until(lambda: display_projections._rows_queued() or rows)
+        ending.join(0.2)
+        assert ending.is_alive() and rows == [], "the ending thread waits for the append that stands"
+    finally:
+        gate.set()
+        teardown.join(10)
+        if ending.ident is not None:
+            ending.join(10)
+    assert [kind for kind, _thread in rows] == ["host_duty_stall", "host_duty_stall_end"]
+    assert rows[0][1] == f"{display_projections.DUTY_NAME}-drain" and drained == [True]
+    assert not display_projections._ROWS
