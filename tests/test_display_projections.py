@@ -456,6 +456,21 @@ def test_the_last_pass_and_the_socket_lines_share_half_of_the_grace_left_and_the
     assert half(started) <= census <= half(ended)
 
 
+def test_under_an_accepted_panic_the_door_waits_for_neither_the_last_pass_nor_the_record_handoffs(monkeypatch):
+    """Panic owns the exit and its writes: the door that ends this image's serving (``finish_display_and_socket_lines``)
+    then calls neither the display projections' drain nor the record handoffs' finish, whatever grace is left (the
+    drain checks Panic itself too; the door does not reach it)."""
+    from ouroboros import owned_shutdown, process_logging, server_control
+
+    calls = []
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: time.monotonic() + 8.0)
+    monkeypatch.setattr(display_projections, "drain", lambda deadline: calls.append("display projections") or True)
+    monkeypatch.setattr(process_logging, "finish_record_handoffs", lambda deadline: calls.append("record handoffs"))
+    monkeypatch.setattr(server_control, "_restart_stop_requested", True)  # an accepted Panic's claim
+    server_control.finish_display_and_socket_lines()
+    assert calls == [], "under Panic the door waits for neither"
+
+
 class _HeldLogSink(logging.Handler):
     """A handler of the server log whose lock another thread holds (``hold``), as a write stalled on a full disk
     holds it: a record handled on any other thread waits until ``free``."""
