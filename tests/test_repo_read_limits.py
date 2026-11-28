@@ -302,7 +302,9 @@ def test_triad_review_prompt_reaches_architecture_md_by_navigation():
     assert "docs/ARCHITECTURE.md" in [row["path"] for row in context.manifest]
     assert 'read_file(root="system_repo"' not in context.navigation
     assert "index of sources not inlined" in context.navigation
-    assert "docs/architecture/03-web-ui-pages-and-buttons.md" in context.navigation
+    # A packet states each book's chapter folder once, then each chapter's file name (``PACKET_CHAPTER_DIR``).
+    assert "Chapters in `docs/architecture/`:" in context.navigation
+    assert ": 03-web-ui-pages-and-buttons.md\n" in context.navigation
     inlined_whole = [row["path"] for row in context.manifest
                      if row["disposition"] == "inline" and row["tier"] == 3 and "#" not in row["path"]]
     assert inlined_whole == []

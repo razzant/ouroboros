@@ -875,7 +875,9 @@ def test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured(tmp_path)
     # repository index from the modules merged since (#3756, #3981 and others); same headroom again.
     # After composing DESIGN's whole bible (including the palette and recipes), the same subject measures 267,969.
     # Keep the ~23K allowance, not the previous tree's ceiling. The excerpt must actually have been selected.
-    assert without_diff < 291_000, without_diff
+    # Splitting chapter 6 into five files with openings and §10.2 (2026-11-26) measure 295,181 (285,414 before):
+    # five chapter maps and the openings in the navigation, the closed roads in the inlined invariants.
+    assert without_diff < 320_000, without_diff
     assert any(row["path"] == "docs/DESIGN.md#Design bible" and row["disposition"] == "inline"
                for row in manifest["governance_manifest"])
     assert sections["repository_index"] > 20_000          # the index really ran

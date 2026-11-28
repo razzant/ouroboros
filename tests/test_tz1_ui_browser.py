@@ -9,6 +9,7 @@ import pytest
 
 from tests.test_subscription_setup_browser import PREVIEW_SCOPE, subscription_ui as subscription_ui, capture
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
+from tests.test_ui_smoke_playwright import settle_first_launch
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -622,6 +623,7 @@ def test_a_real_restart_is_said_as_it_happens_and_a_message_is_accepted_before_r
     from tests.ui_console_errors import PageErrors
 
     server, url, data_dir = direct_server_with_data, direct_server_with_data["url"], direct_server_with_data["data_dir"]
+    settle_first_launch(server)  # an ordinary restart below, not the first one of a brand-new data folder
     name = _install_slow_start_extension(data_dir)
     with sync_playwright() as playwright:
         browser = getattr(playwright, browser_name).launch(headless=True)

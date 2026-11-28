@@ -41,7 +41,7 @@ from ouroboros.subagent_runtime import (
 )
 from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, TYPED_STAMPS_FACT, declared_words_fact
 from ouroboros.subagents import build_subagent_envelope
-from ouroboros.task_results import STATUS_REQUESTED, write_task_result
+from ouroboros.task_results import STATUS_REQUESTED, new_task_id, write_task_result
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.tools.control_delegation import (
     admitted_depth_cap,
@@ -894,7 +894,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     workspace_root, workspace_mode, parent_workspace, folder_error = _child_workspace(ctx, metadata, params)
     if folder_error:
         return folder_error
-    tid = uuid.uuid4().hex[:8]
+    tid = new_task_id()
     parent_project_id = str(getattr(ctx, "project_id", "") or "").strip()
     requested_surface = str(params.get("write_surface") or "").strip().lower()
     # The explicit read-only alias selects the same authority as omission.

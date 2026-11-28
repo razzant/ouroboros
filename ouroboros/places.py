@@ -582,8 +582,14 @@ def counted_owner_accounts(places: Iterable[Place]) -> dict[str, tuple[OwnerAcco
     the whole bot or app; a note may still say my human's words in one room are not orders, which is my reading,
     never a host gate. Derived at every read from the stored rows: nothing is copied into a place."""
     rows = list(places)
-    return {place.place_id: place.owner_accounts + tuple(account for _other, account in confirmed_elsewhere(rows, place))
+    return {place.place_id: tuple(account for _source, account in owner_account_sources(rows, place))
             for place in rows}
+
+
+def owner_account_sources(places: Iterable[Place], place: Place) -> Iterable[tuple[Place, OwnerAccount]]:
+    """The counted accounts of this place, with each stored confirmation's source."""
+    yield from ((place, account) for account in place.owner_accounts)
+    yield from confirmed_elsewhere(places, place)
 
 
 def confirmed_elsewhere(places: Iterable[Place], place: Place) -> list[tuple[Place, OwnerAccount]]:

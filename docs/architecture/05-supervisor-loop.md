@@ -1,6 +1,6 @@
 # 5. Supervisor Loop
 
-`server.py::_run_supervisor()` owns the pooled scheduling tick and lifecycle lock. Intent precedes teardown; intent, outcome and money stay separate.
+This part gives me my scheduler: `server.py::_run_supervisor()` owns the pooled scheduling tick and lifecycle lock that admit, assign and supervise my work, schedules and wakes. I start work with `start_task`, keep schedules with `schedule_followup` and `manage_schedules`, and read the host's queue snapshot through `query_data` (`queue_snapshot`). Intent precedes teardown; intent, outcome and money stay separate.
 
 ### Tick and locks
 
@@ -24,7 +24,7 @@ Admission names use no model; `task_named` never titles by status. Authored `tit
 
 `_claim_worker_launch` reserves row and slot under Q; the lane reads schedule control and puts only after dispatch marks commit in one write, before anything says `possible` (`_commit_launch`; snapshots never replay puts). Contention is demand (lane retries the same row/attempt/marks; refusal frees the slot, row stays demand). Dispatch, hold release and expiry read `governing_continuation`; saved successors need the frozen source and prior `admitted_dispatch_attempt` (§6). Proven no-put callers bind source/attempt/claim to terminalization (rechecked by reaper); terminal rows stay terminal, and accepted/sealed descendants stay fenced except exact pauses. `task_status.execution_observation` separates fresh activity from lifecycle; orphan inference is pooled-only.
 
-`workspace_preparation` admits children off-loop (lanes, no re-put); store contention retries only the refusal receipt. Neither child-count pre-check (worker `schedule_subagent`, early supervisor) refuses an unknown count; `control_delegation.schedule_delegation_refusal` decides. `recover_interrupted_preparations` settles proven loss as never admitted and keeps uncertain admissions (§10.19). `forward_to_worker` reaches requested children (`events_schedule_task`, `task_admission`).
+`task_results.new_task_id` mints fresh random ids (16 lowercase hex). `workspace_preparation` admits children off-loop (no re-put); contention retries refusal receipts only. Both child-count pre-checks pass unknowns; `control_delegation.schedule_delegation_refusal` decides. `recover_interrupted_preparations` settles proven nonadmission, keeps uncertainty (§10.19). `forward_to_worker` reaches requested children (`events_schedule_task`, `task_admission`).
 
 ### Schedules and follow-ups
 

@@ -89,8 +89,9 @@ def test_the_mature_fixture_is_refused_typed_before_any_socket_on_every_route(tm
     land. The positive assertion is added per route by the pull request that makes it true. This prices the ordinary
     builder with the fixture's synthetic schemas; the adapters' own session candidates are driven on the fresh drive
     (``tests/test_live_call_start_fit.py``). The mature drive holds no MCP servers, running works, nested account
-    changes or gist-bearing finished works (``install``), so its numbers are a lower bound, and OpenAI's 133,554-token
-    route is not asserted here either way."""
+    changes or gist-bearing finished works (``install``), so its numbers are a lower bound. OpenAI's route is asserted
+    on its real call path instead, through its own session candidate with the call's tools, where it admits the mature
+    and the rich install (``tests/test_live_call_start_fit.py``)."""
     from ouroboros import context, llm
 
     skill, _model, facts = route
@@ -110,6 +111,27 @@ def test_the_mature_fixture_is_refused_typed_before_any_socket_on_every_route(tm
     if facts is not None and facts.basis == 'estimator':
         assert not captured and raised.value.memory_measured is False
 
+
+
+@pytest.mark.parametrize('route', [pytest.param(route, id=f'{route[0]}:{route[1]}') for route in scale.call_routes()
+                                   if route[0] == 'openai_realtime'])
+def test_the_mature_fixture_starts_at_the_ordinary_builder_where_the_window_holds_it(tmp_path, monkeypatch, route):
+    """The positive side of the lower bound above: OpenAI's measured window holds the mature install's start at the
+    ordinary builder in the owner's Nano (whose own 85k memory target may still fold memory and say so: a later change)."""
+    from ouroboros import context, llm
+
+    skill, _model, facts = route
+    monkeypatch.setattr(cf, 'main_output_reserve_tokens', lambda **_kw: 16_384)
+    monkeypatch.setattr(llm.LLMClient, 'chat', lambda *_a, **_kw: pytest.fail('no model call'))
+    env, memory = scale.env_on(scale.installed(tmp_path, 'mature'))
+    plan = context.build_context_fit_plan(env, memory, {'id': 'mature-start', 'type': 'task', 'chat_id': 1, 'text': 'hi',
+                                                        '_is_direct_chat': True}, preferred_mode='nano',
+                                          tool_schemas=scale.tools(), nano_base=('list_available_tools', 'enable_tools'),
+                                          route_resolver=scale.route_resolver(
+                                              facts.conversation_window_tokens, facts.basis,
+                                              facts.working_reserve_tokens, provider=skill, facts=facts))
+    assert plan.preferred_mode == 'nano' and plan.initial_mode == 'nano'
+    assert plan.window_tokens == facts.conversation_window_tokens
 
 def test_the_rich_mature_fixture_brings_its_running_works_and_servers_to_a_nano_start(tmp_path, monkeypatch):
     """``install(shape='rich')`` with ``mcp_registry`` is the mature install with what a real one also holds: 39

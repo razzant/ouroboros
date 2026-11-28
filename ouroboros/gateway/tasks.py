@@ -73,6 +73,7 @@ from ouroboros.task_results import (
     STATUS_FAILED,
     STATUS_SCHEDULED,
     load_task_result,
+    new_task_id,
     validate_task_id,
     write_task_result,
 )
@@ -517,7 +518,7 @@ def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[
         return ready_error
     repo_dir = request_repo_dir(request)
     try:
-        task_id = validate_task_id(body.get("task_id") or uuid.uuid4().hex[:16])
+        task_id = validate_task_id(body.get("task_id") or new_task_id())
         created_at = utc_now_iso() if not body.get("task_id") else ""
     except ValueError as exc:
         return json_error(str(exc), 400)

@@ -323,7 +323,10 @@ def _enumerate_files(
     def visible(path: pathlib.Path) -> bool:
         nonlocal visited
         visited += 1
-        return permitted(path)
+        allowed = permitted(path)
+        if not allowed:
+            limits.add("enumeration_entries_not_admitted")  # one anonymous fact: this view skipped an entry it visited
+        return allowed
 
     def add(path: pathlib.Path) -> None:
         if not visible(path):

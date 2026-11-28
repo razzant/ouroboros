@@ -213,7 +213,12 @@ def test_a_long_press_lifts_the_row_over_the_dimmed_feed_until_its_menu_closes(c
     assert lift['transform'].startswith('matrix(1.01'), ('the row lifts', facts)
     assert facts['theme'] == theme, facts
     assert facts['beside'][1] < facts['beside'][0] * 0.85, ('the feed around it dims', facts)
-    assert abs(facts['header'][1] - facts['header'][0]) < 3, ('the header stays bright', facts)
+    # The header stays bright while the feed dims. The bar's translucent glass over the feed's edge shows a little of the
+    # dimmed feed behind it (the edge ends at the capsules, #4389), so the rule is relative: the header moves by a few
+    # levels at most and by less than half of what the feed beside the row moves. A header dimmed like the feed fails both.
+    header_change = abs(facts['header'][1] - facts['header'][0])
+    feed_change = facts['beside'][0] - facts['beside'][1]
+    assert header_change < 6 and header_change < feed_change / 2, ('the header stays bright', header_change, feed_change, facts)
     assert facts['after_up']['press'] == 'lift' and facts['after_up']['menu'], ('lifted while the menu is open', facts)
     assert facts['reflowed']['menu'] == facts['after_up']['menu'], ('the feed scrolling under the lifted row keeps its menu', facts)
     # The press is the row's: the browser selects no word under it (iOS would also open its own edit menu over ours).

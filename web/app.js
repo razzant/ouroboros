@@ -629,6 +629,7 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
     hydrateOpenChatsFromState(null, requestedAt);
     evolution?.hydrateStateSnapshot(null);
 });
+projectHeader?.followState(stateSnapshots);  // its failed reads and retired bodies, beside the bodies applied above
 
 const ctx = {
     ws,

@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
+from tests.test_ui_smoke_playwright import settle_first_launch
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
 pytestmark = [pytest.mark.ui_browser]
@@ -799,6 +800,7 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
     confirmed and offers only Send as new, which puts his words back in the composer and sends nothing."""
     from playwright.sync_api import sync_playwright
 
+    settle_first_launch(direct_server_with_data)  # the restart below is an ordinary one, not a new folder's first
     url, data = direct_server_with_data["url"], direct_server_with_data["data_dir"]
     evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", data.parent))
     evidence.mkdir(parents=True, exist_ok=True)
