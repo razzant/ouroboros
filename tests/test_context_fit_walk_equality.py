@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv
+from ouroboros import context_fit as cf, memory_floor as mf, memory_form_facts as ff, memory_view as mv
 from tests import _memory_scale_fixture as scale
 from tests import _memory_view_synthetic as syn
 from tests.test_first_contact_seams import _hinted_start, seam  # noqa: F401 (the fixture the hinted start reads)
@@ -72,18 +72,46 @@ def counting(counts):
 
 @contextlib.contextmanager
 def whole():
-    """The fit without step two's incremental path: a level's room is drawn whole to price it."""
+    """The fit without step two's incremental path: a level's room is drawn whole to price it, and its form counts and
+    holding prices count and price every source from its text."""
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(mv, "room_block_chars", lambda snapshot, gone: mv.json_chars(mv._room_text(snapshot.room, gone)))
+        patch.setattr(ff, "_kept", lambda _snapshot, _key, make: make())
         yield
+
+
+def _ordered(value):
+    """A value with its dicts' key order, which the floor note's words follow."""
+    return json.dumps(value, ensure_ascii=False)
 
 
 @contextlib.contextmanager
 def oracle(checked):
     """Every number the floor prices, recomputed from scratch on a fresh copy of its snapshot (``replace``: none of the
-    snapshot's stored prices) and asserted equal: a level's room against its whole drawn text, floor note included.
-    ``checked[name]`` counts the distinct values compared."""
+    snapshot's stored prices) and asserted equal: a level's room against its whole drawn text, floor note included;
+    its form counts (key order included) and holding room against their whole recount. ``checked[name]`` counts the
+    distinct values compared."""
     room_chars, seen = mv.room_chars, set()
+    counts, holding = mf.form_counts, mf.holding_room
+
+    def counted(snapshot, level):
+        got = counts(snapshot, level)
+        if ("counts", id(snapshot), level) not in seen:
+            seen.add(("counts", id(snapshot), level))
+            fresh = replace(snapshot)
+            assert _ordered(got) == _ordered(ff._count_forms(fresh, level)), level
+            assert (snapshot.__dict__["_telling_emergency"][level.addressed]
+                    == fresh.__dict__["_telling_emergency"][level.addressed])
+            checked["counts"] += 1
+        return got
+
+    def held(snapshot, level):
+        got = holding(snapshot, level)
+        if ("holding", id(snapshot), level) not in seen:
+            seen.add(("holding", id(snapshot), level))
+            assert _ordered(got) == _ordered(ff._holding_room(replace(snapshot), level)), level
+            checked["holding"] += 1
+        return got
 
     def room(snapshot, level=mv.FULL_VIEW, *, floor_note=""):
         got = room_chars(snapshot, level, floor_note=floor_note)
@@ -94,6 +122,8 @@ def oracle(checked):
         return got
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(mv, "room_chars", room)
+        patch.setattr(mf, "form_counts", counted)
+        patch.setattr(mf, "holding_room", held)
         yield
 
 
@@ -191,7 +221,7 @@ def test_the_fit_reads_alike_with_and_without_the_memo(installs, shape, route, m
         assert outcome(fit) == now
     with whole():  # the same fit without step two's incremental path
         assert outcome(fit) == now
-    assert checked["room"] > 0
+    assert checked["room"] > 0 and checked["counts"] > 0 and checked["holding"] > 0
 
 
 def _snapshot(rows=158, pages=113, marks=40):
@@ -386,20 +416,32 @@ def _changing_room(seed):
                                 "short": f"[2026-08-0{i + 1}; owner; row:1@sealed-{i}] (read by address)"}
                                for i in range(seed % 3)],
                 sealed_by=[{"id": "page-x", "label": "Room 9"}] if seed % 2 == 0 else [])
-    return syn.snapshot(room_facts=room, story=syn.pages(4, 300))
+    story = syn.pointers(rng.randint(2, 6), 2) + syn.pages(rng.randint(3, 7), 300)
+    for i, entry in enumerate(story):
+        entry["floor_order"] = [i, i]
+        if entry["kind"] == "legacy":
+            entry["text"] = syn.prose(rng.randint(100, 500))
+        elif i % 2:
+            entry["quotes"] = [{"speaker": "human" if k % 2 == 0 else "ouroboros", "address": f"row:1@q-{i}-{k}",
+                                "text": syn.prose(80, "owner")} for k in range(1 + i % 3)]
+        if entry["kind"] == "page" and i % 3 == 0:
+            entry["lead_rule"] = "first sentence"
+    return syn.snapshot(room_facts=room, story=story)
 
 
-def _random_levels(snapshot, rng, count=80):
+def _random_levels(snapshot, rng, count=120):
     """Levels a walk could price (each step's listed forms, added and removed a few at a time) and levels no walk
     builds (any id under any room step, ``bare:`` forms on people's rows, my rows under F7): a room's runs must price
     every level as its whole text does."""
     table, room = mf._elements(snapshot), snapshot.room
-    listed = [(step, ident) for step, ident, *_ in table.listed if step in mv._ROOM_STEPS or step == "F2"]
+    listed = [(step, ident) for step, ident, *_ in table.listed]
     addresses = [row["address"] for row in room["lane1"]] + [row["address"] for row in room.get("project_words") or ()]
     loose = ([("F2", a) for a in addresses] + [("F2", "bare:" + a) for a in addresses] + [("F7", a) for a in addresses]
              + [("F7p", "bare:" + a) for a in addresses] + [("F1", t["first"]) for t in room["lane2"]]
              + [("F4", r["id"]) for r in room["legacy"] + room["under_parts"]] + [("F8", n["id"]) for n in room["notes"]]
-             + [("F7a", "1"), ("F8a", "1")])
+             + [("F5", e["id"]) for e in snapshot.story] + [("F5l", e["id"]) for e in snapshot.story]
+             + [("F7", f"quote:{e['id']}:{k}") for e in snapshot.story for k in range(len(e.get("quotes") or ()))]
+             + [("F3", e["room_id"]) for e in snapshot.story] + [("F7a", "1"), ("F8a", "1"), ("F5a", "story")])
     taken, levels = set(), []
     for n in range(count):
         pool = listed if n < count // 2 else listed + loose
@@ -428,3 +470,34 @@ def test_a_room_priced_by_its_runs_equals_its_whole_text_as_rows_enter_leave_and
     empty = syn.snapshot(room_facts=syn.room("1"))  # only its heading drawn: the "Nothing open" line joins, priced too
     assert "Nothing open" in mv._room_text(empty.room, {})
     assert mv.room_block_chars(empty, {}) == mv.json_chars(mv._room_text(empty.room, {}))
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_form_counts_and_the_holding_room_from_their_sources_equal_the_whole_recount(seed):
+    """Over the same random level sequences, a level's form counts (with their key order, which the floor note's words
+    follow) and its holding room, made from the per-source numbers this snapshot keeps, equal their whole recount on a
+    fresh copy (every source counted and priced from its text) at every level and again after others."""
+    import random
+
+    snapshot = _changing_room(seed)
+    levels = _random_levels(snapshot, random.Random(seed))
+    assert {"F3", "F5", "F5a", "F8", "F7a"} & {step for level in levels for step, _ids in level.addressed}
+    for level in levels + levels[::-3]:
+        fresh = replace(snapshot)
+        assert _ordered(ff._count_forms(snapshot, level)) == _ordered(ff._count_forms(fresh, level)), level
+        assert (snapshot.__dict__["_telling_emergency"][level.addressed]
+                == fresh.__dict__["_telling_emergency"][level.addressed])
+        assert _ordered(ff._holding_room(snapshot, level)) == _ordered(ff._holding_room(replace(snapshot), level)), level
+
+
+def test_a_row_range_priced_again_reads_its_new_members():
+    """One aggregate row range (F7a) over three rows, then over a hundred and fifty, then three again: its count line
+    grows by at least four escaped characters (a token), so each priced holding room and room equals its whole recount
+    only if the range's price follows its members."""
+    snapshot = scale.snapshot(rows=158, pages=4)
+    rows = [row["address"] for row in snapshot.room["lane1"] if not row.get("immune")]
+    for k in (3, 150, 3):
+        level = mv.FloorLevel((("F2", tuple(rows[:k])), ("F7a", ("1",))))
+        assert _ordered(ff._holding_room(snapshot, level)) == _ordered(ff._holding_room(replace(snapshot), level)), k
+        gone = dict(level.addressed)
+        assert mv.room_block_chars(snapshot, gone) == mv.json_chars(mv._room_text(snapshot.room, gone)), k

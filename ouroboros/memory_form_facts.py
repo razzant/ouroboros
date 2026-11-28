@@ -5,7 +5,8 @@ counts and prices; an explicit inspection can draw a retained snapshot's ordinar
 forms to account for every escaped character, without keeping its words in the map.
 """
 from ouroboros import memory_view as mv, memory_view_conversations as conversations, memory_view_legacy as legacy
-from ouroboros.memory_view_work import works, folded_work_rows, task_line, task_gist_line, task_gists_before_work_lines
+from ouroboros.memory_view_work import (works, folded_work_rows, task_line, task_gist_line, task_gists_before_work_lines,
+                                        snapshot_works, taken_works, work_line)
 from ouroboros.memory_view_conversation_forms import folds
 
 
@@ -359,6 +360,23 @@ def ordinary_composition(snapshot):
             **memory_composition(snapshot, level)}
 
 
+def _kept(snapshot, key, make):
+    """A number of this snapshot made once (``key`` names its source, the form it takes and every fact of a level that
+    form reads, so equal keys make equal numbers): a level's counts and holding prices reuse their unchanged sources'
+    numbers and make only the changed ones. Only numbers; the aggregation still runs whole, in its own order."""
+    kept = snapshot.__dict__.setdefault("_form_numbers", {})
+    if key not in kept:
+        kept[key] = make()
+    return kept[key]
+
+
+def _quotes_gone(snapshot, entry, gone):
+    """Which of a story entry's quote addresses ``gone``'s F7 holds: all a page's forms read of the level."""
+    keys = _kept(snapshot, ("quote keys", id(entry)), lambda: tuple(
+        f"quote:{entry['id']}:{n}" for n, _quote in enumerate(entry.get("quotes") or ())))
+    return tuple(key for key in keys if key in gone.get("F7", ()))
+
+
 def form_counts(snapshot, level):
     cache = snapshot.__dict__.setdefault("_form_counts", {})
     if level.addressed not in cache:
@@ -388,8 +406,8 @@ def _count_forms(snapshot, level):
             entry["lines"] += lines
             entry["sources"] += sources
     add("emergency", "story quotes", 0, len(set(gone.get("F7", ())) & mv.story_quote_rows(snapshot).keys()))
-    room = snapshot.room or {}
-    hidden, work_lines = folded_work_rows(room, gone)
+    room, listed = snapshot.room or {}, snapshot_works(snapshot)
+    hidden = {row["address"] for _key, _rows, taken, _final in taken_works(listed, gone) for row in taken}
     addressed = hidden | gone.get("F2", set()) | gone.get("F7", set()) | gone.get("F7p", set())
     addressed |= {i[5:] for i in addressed if i.startswith("bare:")}
     aggregate = [r for r in room.get("lane1", ()) if r["address"] in addressed and not r.get("immune")] if gone.get("F7a") else []
@@ -397,7 +415,7 @@ def _count_forms(snapshot, level):
     folded_rows, separate = hidden - grouped, addressed - hidden - grouped
     bare = gone.get("F2", set()) | gone.get("F7p", set())
     add("emergency", "room ranges", bool(aggregate), len(aggregate))
-    for key, rows in works(room):
+    for key, rows in listed:
         folded = [r for r in rows if r["address"] in folded_rows]
         add("retold", "works", int(bool(folded)), len(folded))
     for row in room.get("lane1", ()):
@@ -408,7 +426,7 @@ def _count_forms(snapshot, level):
     add("emergency", "sole task gists", int(bool(sole)), sole)
     add("host", "task facts", int(bool(tasks) and not sole), len(tasks) - sole)
     task_gists = ([t for t in room.get("lane2", ()) if t.get("gist") and t["first"] not in gone.get("F1", ())] if aggregate
-                  else task_gists_before_work_lines(room, gone))
+                  else task_gists_before_work_lines(room, gone, listed))
     add("retold", "task gists", len(task_gists), len(task_gists))
     for row in room.get("project_words") or ():
         if row.get("address") in gone.get("F7", ()):
@@ -429,11 +447,13 @@ def _count_forms(snapshot, level):
                 add("emergency", label + " pointers", 1, 1)
             elif entry["id"] in gone.get("F5l" if step == "F5" else step, ()):
                 lead = "lead_rule" in entry and bool(entry.get("text", "").strip())
-                lines = mv._page_label(entry) if step == "F5" else mv._note_pointer(entry)
-                add("retold" if lead else "emergency", label + (" leads" if lead else " openings"), len(lines.splitlines()), 1)
-    for key, records in legacy.pointer_rooms(snapshot.story).items():
+                lines = _kept(snapshot, ("label lines", step, id(entry)), lambda: len(
+                    (mv._page_label(entry) if step == "F5" else mv._note_pointer(entry)).splitlines()))
+                add("retold" if lead else "emergency", label + (" leads" if lead else " openings"), lines, 1)
+    for key, records in _kept(snapshot, ("pointer rooms",), lambda: legacy.pointer_rooms(snapshot.story)).items():
         if key in gone.get("F3", ()):  # the helper's retelling and a room's transfers are each one line
-            add("emergency", "old story ranges", len(legacy.room_pointer(records).split("\n")), len(records))
+            add("emergency", "old story ranges", _kept(snapshot, ("old story lines", key), lambda: len(
+                legacy.room_pointer(records).split("\n"))), len(records))
     lost = _remote_counts(snapshot, gone, add)
     snapshot.__dict__.setdefault("_telling_emergency", {})[level.addressed] = bool(
         lost or counts["emergency"].keys() - {"conversation count"})
@@ -561,82 +581,100 @@ def _holding_room(snapshot, level):
             unit[0] += tokens
             unit[1][kind] = unit[1].get(kind, 0) + tokens
             unit[2][label] = None
+    def held(key, make):  # a source's tokens in one form, priced once per snapshot (``_kept``)
+        return _kept(snapshot, ("holding", *key), lambda: price(make()))
     pages = [e for e in snapshot.story if not e.get("told_by") and e.get("kind") != "legacy"]
     aggregated = [e for e in pages if e["id"] in gone.get("F5", ())] if gone.get("F5a") else []
     grouped_ids = {e["id"] for e in aggregated}
     seen.update(grouped_ids)
     if aggregated:
-        hold("story lists", "\n".join([mv._story_line(aggregated),
-             *(line for e in aggregated for line in mv.page_quote_lines(e, gone.get("F7", ()), short=True))]),
-             "memory_read(story=true, start=0)", label="older pages and parts",
-             unmarked=sum("lead_rule" not in e for e in aggregated))
+        hold("story lists", "", "memory_read(story=true, start=0)", label="older pages and parts",
+             unmarked=sum("lead_rule" not in e for e in aggregated), tokens=held(
+                 ("story list", tuple(map(id, aggregated)), tuple(_quotes_gone(snapshot, e, gone) for e in aggregated)),
+                 lambda: "\n".join([mv._story_line(aggregated), *(line for e in aggregated for line in
+                                                                  mv.page_quote_lines(e, gone.get("F7", ()), short=True))])))
     for entry in pages:
         ident, kind = entry["id"], entry.get("kind")
         if entry["id"] in grouped_ids:
             continue
         seen.add(ident)
-        text = (mv._page_short(entry, gone.get("F7", ())) if ident in gone.get("F5", ()) else
-                mv._page_short(entry, gone.get("F7", ()), lead=True) if ident in gone.get("F5l", ()) else
-                "\n".join(mv._page_lines(entry, gone.get("F7", ()))))
-        hold({"account": "accounts", "part": "parts"}.get(kind, "pages without part"), text,
+        form = "F5" if ident in gone.get("F5", ()) else "F5l" if ident in gone.get("F5l", ()) else "whole"
+        tokens = held(("page", id(entry), form, _quotes_gone(snapshot, entry, gone)), lambda: (
+            mv._page_short(entry, gone.get("F7", ())) if form == "F5" else
+            mv._page_short(entry, gone.get("F7", ()), lead=True) if form == "F5l" else
+            "\n".join(mv._page_lines(entry, gone.get("F7", ())))))
+        hold({"account": "accounts", "part": "parts"}.get(kind, "pages without part"), "",
              f"memory_read(node_id='{ident}')", label=f"{entry.get('label', kind)} {ident}",
-             unmarked=kind != "account" and "lead_rule" not in entry)
-    for key, records in legacy.pointer_rooms(snapshot.story).items():
-        hold("old story", legacy.room_pointer(records) if key in gone.get("F3", ()) else
-             "\n".join(legacy.retold_record(e) for e in records), f"memory_read(room_id='{key}')",
-             label=records[0].get("label", key), unmarked=len(records))
-    room = snapshot.room or {}
+             unmarked=kind != "account" and "lead_rule" not in entry, tokens=tokens)
+    for key, records in _kept(snapshot, ("pointer rooms",), lambda: legacy.pointer_rooms(snapshot.story)).items():
+        pointer = key in gone.get("F3", ())
+        hold("old story", "", f"memory_read(room_id='{key}')", label=records[0].get("label", key), unmarked=len(records),
+             tokens=held(("old story", key, pointer), lambda: legacy.room_pointer(records) if pointer else
+                         "\n".join(legacy.retold_record(e) for e in records)))
+    room, listed = snapshot.room or {}, snapshot_works(snapshot)
     own_reader, own_label = _rows_reader(room.get("room_id"), room.get("lane1", ())), room.get("label", "this room")
     for entry in [*room.get("legacy", ()), *room.get("under_parts", ())]:
         if entry["id"] in seen:
             continue
         seen.add(entry["id"])
-        hold("room records", mv._retold(entry, entry["id"] in gone.get("F4", ()) or entry.get("standing", False)),
-             f"memory_read(node_id='{entry['id']}')", label=entry["id"],
-             unmarked=not entry.get("standing") and "lead_rule" not in entry)
+        short = entry["id"] in gone.get("F4", ()) or entry.get("standing", False)
+        hold("room records", "", f"memory_read(node_id='{entry['id']}')", label=entry["id"],
+             unmarked=not entry.get("standing") and "lead_rule" not in entry,
+             tokens=held(("room record", id(entry), short), lambda: mv._retold(entry, short)))
     notes = room.get("notes", ())
     aggregate_notes = [e for e in notes if e["id"] in gone.get("F8", ())] if gone.get("F8a") else []
     grouped_notes = {e["id"] for e in aggregate_notes}
     if aggregate_notes:
-        hold("notes", mv._notes_line(aggregate_notes), f"memory_read(room_id='{room['room_id']}')",
-             label=own_label, unmarked=sum("lead_rule" not in e for e in aggregate_notes))
+        hold("notes", "", f"memory_read(room_id='{room['room_id']}')", label=own_label,
+             unmarked=sum("lead_rule" not in e for e in aggregate_notes),
+             tokens=held(("notes", tuple(map(id, aggregate_notes))), lambda: mv._notes_line(aggregate_notes)))
     for note in notes:
         if note["id"] not in grouped_notes:
-            text = mv._note_pointer(note) if note["id"] in gone.get("F8", ()) else "\n".join(mv._note_lines([note]))
-            hold("notes", text, f"memory_read(node_id='{note['id']}')", label=note["id"], unmarked="lead_rule" not in note)
-    hidden, work_lines = folded_work_rows(room, gone)
+            short = note["id"] in gone.get("F8", ())
+            hold("notes", "", f"memory_read(node_id='{note['id']}')", label=note["id"], unmarked="lead_rule" not in note,
+                 tokens=held(("note", id(note), short), lambda: mv._note_pointer(note) if short else
+                             "\n".join(mv._note_lines([note]))))
+    folds = {rows[-1]["address"]: (key, final, taken) for key, rows, taken, final in taken_works(listed, gone)}
+    hidden = {row["address"] for _key, _final, taken in folds.values() for row in taken}
     addressed = hidden | {i.removeprefix("bare:") for step in ("F2", "F7p", "F7") for i in gone.get(step, ())}
     aggregate = [r for r in room.get("lane1", ()) if r["address"] in addressed and not r.get("immune")] if gone.get("F7a") else []
     if aggregate:
-        hold("room ranges", mv._rows_line(room, aggregate), _rows_reader(room["room_id"], aggregate), label=own_label)
+        hold("room ranges", "", _rows_reader(room["room_id"], aggregate), label=own_label,
+             tokens=held(("room range", tuple(map(id, aggregate))), lambda: mv._rows_line(room, aggregate)))
     else:
-        by_address = {r["address"]: (key, rows) for key, rows in works(room) for r in rows}
-        for address, line in work_lines.items():
+        by_address = _kept(snapshot, ("work rows",), lambda: {r["address"]: (key, rows) for key, rows in listed for r in rows})
+        for address, (fold, final, taken) in folds.items():
             key, rows = by_address[address]
-            hold("work gists", line, _rows_reader(room["room_id"], [r for r in rows if r["address"] in hidden]), label="work " + key)
-    folded = {key for key, _rows in works(room) if any("work:" + key + suffix in gone.get("F2", ())
-                                                     for suffix in (":progress", ":final"))} if not aggregate else set()
-    only_gists = {t["first"] for t in task_gists_before_work_lines(room, gone)}
+            hold("work gists", "", _rows_reader(room["room_id"], [r for r in rows if r["address"] in hidden]),
+                 label="work " + key, tokens=held(("work", fold, final), lambda: work_line(taken)))
+    folded = {key for key, _rows in listed if any("work:" + key + suffix in gone.get("F2", ())
+                                                for suffix in (":progress", ":final"))} if not aggregate else set()
+    only_gists = {t["first"] for t in task_gists_before_work_lines(room, gone, listed)}
     for task in room.get("lane2", ()):
         if task.get("gist") and (task["first"] not in gone.get("F1", ()) or task["first"] in only_gists) and task.get("task") not in folded:
-            gist = task["gist"]
-            hold("task gists", task_gist_line(task, room["room_id"]) if task["first"] in only_gists else task_line(task), f"memory_read(room_id='{gist['room_id']}', rows=true, "
-                 f"from='{gist['address']}', to='{gist['address']}')", label="work " + task["task"])
+            gist, alone = task["gist"], task["first"] in only_gists
+            hold("task gists", "", f"memory_read(room_id='{gist['room_id']}', rows=true, "
+                 f"from='{gist['address']}', to='{gist['address']}')", label="work " + task["task"],
+                 tokens=held(("task gist", id(task), alone), lambda: task_gist_line(task, room["room_id"]) if alone
+                             else task_line(task)))
     grouped_rows = {r["address"] for r in aggregate}
     for row in room.get("lane1", ()):
         if row["address"] in grouped_rows or row["address"] in hidden:
             continue
         step = "F2" if row["kind"] == "ouroboros" else "F7" if row.get("owner_side", row["kind"] == "human") else "F7p"
         label = "my reply" if step == "F2" else "words"
-        text = (mv._row_pointer(row, label) if "bare:" + row["address"] in gone.get(step, ()) or
-                step == "F7" and row["address"] in gone.get(step, ()) else mv._row_opening(row, label)
-                if row["address"] in gone.get(step, ()) else row["line"])
-        hold("replies of completed works" if row.get("gist") else "untold in this room", text, own_reader, label=own_label)
+        form = ("pointer" if "bare:" + row["address"] in gone.get(step, ()) or step == "F7" and row["address"] in
+                gone.get(step, ()) else "opening" if row["address"] in gone.get(step, ()) else "line")
+        hold("replies of completed works" if row.get("gist") else "untold in this room", "", own_reader, label=own_label,
+             tokens=held(("row", id(row), form), lambda: mv._row_pointer(row, label) if form == "pointer" else
+                         mv._row_opening(row, label) if form == "opening" else row["line"]))
     for item in room.get("origins", ()):
-        hold("work origins", item.get("text", ""), "memory_read(owner_words=true)", label=own_label)
+        hold("work origins", "", "memory_read(owner_words=true)", label=own_label,
+             tokens=held(("origin", id(item)), lambda: item.get("text", "")))
     for item in room.get("project_words") or ():
-        hold("untold in this room", item.get("short") if item.get("address") in gone.get("F7", ()) else item.get("line", ""),
-             _rows_reader(room.get("room_id"), [item]), label=own_label)
+        short = item.get("address") in gone.get("F7", ())
+        hold("untold in this room", "", _rows_reader(room.get("room_id"), [item]), label=own_label,
+             tokens=held(("project words", id(item), short), lambda: item.get("short") if short else item.get("line", "")))
     _hold_conversations(snapshot, gone, hold, price, counts)
     units = []
     for reader, (tokens, kinds, labels) in sorted(ready.items(), key=lambda pair: (-pair[1][0], pair[0]))[:3]:
