@@ -1,0 +1,121 @@
+# Temporary QA overlay only. Never merge into the product.
+name: Nano cold-return and size verification (one push)
+on:
+  push:
+    branches: ['qa/nano-return-verification']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [s47, s50, base, candidate]
+    env:
+      NANO_BASE: '9de8f3bd6f30b8cef445bf2294c55899eeb29aaa'
+      NANO_BASE_TREE: '5b227dd13f22a612bdc4f7320296f5624d1a0cac'
+      NANO_PRODUCT: '87ada69af39035da4539a227fb430aa26554032e'
+      NANO_PRODUCT_TREE: 'a8dc536e570865b864fecfbd28afccd2b6e4fbdd'
+      NANO_DRIVER_SHA256: 'a21305c73f7a890eb075a40b00d511787aa69cde6be6f828722341651a8f5ec4'
+      NANO_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind initial push, overlay and chosen product checkout
+        id: bind
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL=file GIT_NO_REPLACE_OBJECTS=1
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REPOSITORY" = razzant/ouroboros
+          test "$GITHUB_REF" = refs/heads/qa/nano-return-verification
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          jq -e --arg ref "$GITHUB_REF" --arg head "$GITHUB_SHA" '
+            .ref == $ref and .after == $head and .created == true and .deleted == false and .forced == false
+            and .before == "0000000000000000000000000000000000000000"' "$GITHUB_EVENT_PATH" >/dev/null
+          for value in "$GITHUB_SHA" "$NANO_BASE" "$NANO_BASE_TREE" "$NANO_PRODUCT" "$NANO_PRODUCT_TREE"; do
+            [[ "$value" =~ ^[0-9a-f]{40}$ ]]
+          done
+          [[ "$NANO_DRIVER_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$NANO_PRODUCT"
+          git merge-base --is-ancestor "$NANO_BASE" "$NANO_PRODUCT"
+          test "$NANO_PRODUCT" != "$NANO_BASE"
+          test "$(git rev-parse "$NANO_BASE^{tree}")" = "$NANO_BASE_TREE"
+          test "$(git rev-parse "$NANO_PRODUCT^{tree}")" = "$NANO_PRODUCT_TREE"
+          wf=.github/workflows/nano-return-verification.yml
+          driver=scripts/nano_return_verify.py
+          test "$(git diff-tree --no-renames -r --no-commit-id --name-status "$NANO_PRODUCT" HEAD)" = \
+            "$(printf 'A\t%s\nA\t%s' "$wf" "$driver")"
+          git ls-tree HEAD "$wf" "$driver" | awk '$1 == "100644" && $2 == "blob" {n++} END {exit n != 2}'
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(sha256sum "$driver" | cut -d' ' -f1)" = "$NANO_DRIVER_SHA256"
+          install -m 600 "$driver" "$RUNNER_TEMP/nano_return_verify.py"
+          subject="$NANO_PRODUCT"; tree="$NANO_PRODUCT_TREE"
+          if test "$NANO_LANE" = base; then subject="$NANO_BASE"; tree="$NANO_BASE_TREE"; fi
+          git switch --quiet --detach "$subject"
+          test "$(git rev-parse HEAD^{tree})" = "$tree"
+      - uses: ./.github/actions/setup-python-env
+        id: python
+        with:
+          install-project: 'false'
+      - name: Run exact named nodes on a disposable Ubuntu runner (loopback only)
+        id: cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d "$RUNNER_TEMP/nano-return-XXXXXX")"
+          proof="$(mktemp -d "$RUNNER_TEMP/nano-return-proof-XXXXXX")"
+          printf 'proof=%s\n' "$proof" >>"$GITHUB_OUTPUT"
+          python="$(command -v python)"; uid="$(id -u)"; gid="$(id -g)"
+          status=0
+          # Bring up only loopback in a fresh network namespace; run the launcher without root or ambient credentials.
+          sudo -n unshare --net -- /bin/bash -eu -o pipefail -s -- \
+            "$(readlink /proc/self/ns/net)" "$uid" "$gid" "$python" "$scratch" "$proof" "$RUNNER_TEMP/nano_return_verify.py" \
+            "$PATH" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_REF" "$NANO_LANE" \
+            "$NANO_BASE" "$NANO_BASE_TREE" "$NANO_PRODUCT" "$NANO_PRODUCT_TREE" "$NANO_DRIVER_SHA256" \
+            >"$scratch/private.log" 2>&1 <<'LOCAL_ONLY' || status=$?
+          test "$(readlink /proc/self/ns/net)" != "$1"
+          test "$(/usr/sbin/ip -o link show | wc -l)" = 1
+          /usr/sbin/ip link set lo up
+          test "$(tail -n +2 /proc/net/route | wc -l)" = 0
+          uid="$2"; gid="$3"; python="$4"; scratch="$5"; proof="$6"; driver="$7"; path="$8"
+          shift 8
+          /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs \
+            /usr/bin/env -i PATH="$path" HOME="$scratch" TMPDIR="$scratch" \
+            GITHUB_ACTIONS=true GITHUB_EVENT_NAME=push GITHUB_SHA="$1" GITHUB_RUN_ID="$2" GITHUB_RUN_ATTEMPT="$3" GITHUB_REF="$4" \
+            "$python" -I -S scripts/safe_test.py --timeout 1980 --evidence-dir "$scratch/launcher" -- \
+            "$python" "$driver" "$proof/proof.json" "$@"
+          LOCAL_ONLY
+          printf '%s\n' "$status" >"$proof/launcher.exit"
+          test "$(git rev-parse HEAD)" = "$(if test "$NANO_LANE" = base; then printf '%s' "$NANO_BASE"; else printf '%s' "$NANO_PRODUCT"; fi)"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          exit "$status"
+      - name: Record job stages without test output
+        if: always()
+        env:
+          CHECKOUT: ${{ steps.checkout.outcome }}
+          BIND: ${{ steps.bind.outcome }}
+          PYTHON: ${{ steps.python.outcome }}
+          CASES: ${{ steps.cases.outcome }}
+        shell: bash
+        run: |
+          printf 'checkout=%s\nbind=%s\npython=%s\ncases=%s\n' "$CHECKOUT" "$BIND" "$PYTHON" "$CASES" \
+            >"$RUNNER_TEMP/nano-return-stages.txt"
+      - name: Upload allowlisted synthetic evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nano-return-${{ matrix.lane }}
+          path: |
+            ${{ runner.temp }}/nano-return-stages.txt
+            ${{ steps.cases.outputs.proof || format('{0}/nano-return-no-proof', runner.temp) }}/proof.json
+            ${{ steps.cases.outputs.proof || format('{0}/nano-return-no-proof', runner.temp) }}/launcher.exit
+          if-no-files-found: error
+          retention-days: 3
