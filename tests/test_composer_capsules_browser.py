@@ -168,7 +168,9 @@ SETTLED = """sel => {
     const el = document.querySelector(sel);
     const value = el.querySelector('.chat-capsule-value');
     // A capsule the row folded to its glyph draws no value by design (style.css: kept in the button as its name).
-    const folded = el.closest('.chat-toolbar-row')?.dataset.ownerGlyphs === 'true';
+    // The sheet folds per capsule: the Model capsule keeps its words and an open capsule shows its value.
+    const folded = el.closest('.chat-toolbar-row')?.dataset.ownerGlyphs === 'true'
+        && !el.matches('.chat-model-mode') && el.dataset.open !== 'true';
     return { width: el.getBoundingClientRect().width, clipped: value.scrollWidth > value.clientWidth + 1, folded,
              held: el.style.getPropertyValue('--capsule-value-width') + el.style.getPropertyValue('--capsule-body-width') };
 }"""
