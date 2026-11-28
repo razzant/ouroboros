@@ -222,17 +222,30 @@ def _fixture_js(lines: int, word: str = "fixture") -> bytes:
 # the books' entry lines and the Reference Atlas line +242; about 650 tokens. The expectations are re-measured to
 # what the packet delivers with that text (28 Nov 2026, against the target at ca7009c149c1, whose own boundary is
 # named beside each): one line of the fixture, or one 250-token step of the window, less and the witness fails.
+# Since the packet's own room settles what the inline share selected (``governance_context.settled_by_fit``,
+# razzant/ouroboros#4419), a packet too large with that selection gives its units up in the share's order before
+# it is refused: ``SELECTED`` holds the units each such size carries, and the refusal is the irreducible packet's.
 
 # (comment-touched file lines, added test file lines or 0, window, the delivery held)
 MEASURED_DELIVERY = [
     (900, 0, 131_072, "full"),
     (150, 220, 100_000, "diff"),
-    (150, 279, 100_000, "diff"),     # the last fitting size (that target: 305): a larger fixed cost refuses it
-    (150, 320, 100_000, "refused"),  # refused there and here: the control that keeps the boundary honest
-    (285, 0, 100_000, "full"),       # the last whole-source size at this window (that target: 311)
+    (150, 279, 100_000, "diff"),     # the last size that holds all the inline share selected (that target: 305, then refused)
+    (150, 280, 100_000, "diff"),     # one line more: the design bible gives way to its principles, nothing is refused
+    (150, 586, 100_000, "diff"),     # the last size this window reviews at all: every reviewer's rules and the whole diff
+    (150, 587, 100_000, "refused"),  # the irreducible packet: the control that keeps the boundary honest
+    (286, 0, 100_000, "full"),       # the last whole-source size at this window (that target: 311)
     (312, 0, 100_000, "diff"),
     (900, 0, 256_000, "full"),       # roomy control
 ]
+_RULES = ["docs/CHECKLISTS.md#Shared Contract Ownership", "docs/architecture/10-key-invariants.md"]
+_PROTOCOL = "docs/development/05-review-and-commit-protocol.md"
+# The governance units (``## <address>`` in the packet, in its order) at the sizes where the selection gives way.
+SELECTED = {
+    (150, 279): [*_RULES, _PROTOCOL, "docs/DESIGN.md#Design bible (excerpt: the whole section)"],
+    (150, 280): [*_RULES, _PROTOCOL, "docs/DESIGN.md#Design bible (excerpt: principles 1–9 only)"],
+    (150, 586): _RULES,
+}
 
 
 FIXTURE_SENTINEL = "// fixture line 00007: "  # inside the source, outside the diff's hunk
@@ -245,7 +258,7 @@ def test_a_tool_less_packet_delivers_at_least_its_measured_delivery(tmp_path, mo
     as the comment above the table says. The subject is frozen synthetic bytes; the books,
     their navigation, tier-1 governance, the builder and the cold sizing are the real ones, which is
     what this guards. A failure means the packet's fixed cost (navigation, tier-1 governance, the selected sections)
-    grew past what was measured, so a change now loses its snapshot or its review. A legitimate
+    grew past what was measured, so a change now loses its snapshot, a selected unit or its review. A legitimate
     re-measure follows only a deliberate change of that fixed cost, with its cause stated by source."""
     from ouroboros.tools import review as review_tool
     from ouroboros.tools.registry import ToolContext
@@ -278,6 +291,10 @@ def test_a_tool_less_packet_delivers_at_least_its_measured_delivery(tmp_path, mo
         omitted = "Full post-change snapshots were omitted" in text
         got = "diff" if omitted else "full"
         assert RANK[got] >= RANK[delivered], where  # strictly better than measured is not a failure
+        if (touched, added) in SELECTED:
+            import re
+
+            assert re.findall(r"(?m)^## (docs/[^\n]*)$", text) == SELECTED[touched, added], where
         staged = text.split("## Staged diff\n\n", 1)[1].split("\n\n## Changed files", 1)[0].strip()
         # the delivered diff section is exactly the frozen full or -U0 rendering: headers, order and context included
         assert staged in (frozen.diff_text.strip(), frozen.render_prompt_diff(0).strip()), where
@@ -443,16 +460,59 @@ def test_a_chapter_opening_naming_a_touched_file_is_sent_once(tmp_path, monkeypa
 
 
 # Real history replayed by a reviewer (rev-pr2j), frozen as synthetic files of the same names and sizes and the same
-# numbers of changed lines: (paths with (added, deleted, bytes before), window, the target's rung, sections it selected).
-# The window is the smallest 250-token step at which this packet carries both sections (``MEASURED_DELIVERY``'s
-# comment; that target: 100,000 for both).
+# numbers of changed lines: (paths with (added, deleted, bytes before), window, the target's rung, the governance units
+# it selected, by the address the packet heads each with). The window is the smallest 250-token step at which this
+# packet carries both units (``MEASURED_DELIVERY``'s comment; that target: 100,000 for both).
+UI_CONTRACTS = "docs/architecture/03-web-ui-pages-and-buttons.md#Navigation and shared UI contracts"
+DIRECTORY_ROWS = "docs/architecture/01-module-directory.md#opening block 2 (excerpt: its lines naming a touched file)"
+CI_TOPOLOGY = "docs/architecture/08-git-branching-ci-and-build.md#CI topology"
+# The change 0bd22b704587 (eleven files, ``scripts/context_gate.py`` among them), whose reviewer needs the CI trust
+# rules. The inline share alone left that section out over a band of route windows although the packet had room
+# (razzant/ouroboros#4419): 340,892-341,068 on the target at ca7009c149c1, 340,892-344,811 with this change's
+# governance text. The replayed windows are the two ends of that band; the packet's own room carries the section there.
+CI_CHANGE = {"docs/architecture/06-agent-core.md": (1, 1, 183_469), "ouroboros/context.py": (4, 4, 79_955),
+             "ouroboros/context_start_bound.py": (1, 2, 10_795), "ouroboros/loop_tool_execution.py": (5, 5, 83_684),
+             "ouroboros/tool_connections.py": (9, 49, 14_396), "ouroboros/tools/compact_context.py": (1, 5, 58_797),
+             "ouroboros/tools/tool_discovery.py": (12, 158, 42_584), "scripts/context_gate.py": (0, 1, 5_598),
+             "tests/test_context_start_bound.py": (1, 1, 32_393), "tests/test_nano_connections.py": (0, 383, 24_504),
+             "tests/test_tool_connections.py": (4, 6, 42_846)}
 HISTORY = [
-    ({"docs/DESIGN.md": (1, 1, 321_047), "web/ui.css": (0, 2, 120_198)}, 100_250, "diff",
-     ("Navigation and shared UI contracts", "opening block 2 (excerpt: its lines naming a touched file)")),
+    ({"docs/DESIGN.md": (1, 1, 321_047), "web/ui.css": (0, 2, 120_198)}, 100_250, "diff", (UI_CONTRACTS, DIRECTORY_ROWS)),
     ({"docs/DESIGN.md": (1, 1, 317_362), "tests/test_phone_keyboard_recovery_browser.py": (5, 5, 81_942),
       "tests/test_ui_coherence_browser.py": (1, 1, 89_734), "web/ui.css": (1, 1, 113_592)}, 101_250, "diff",
-     ("Navigation and shared UI contracts", "opening block 2 (excerpt: its lines naming a touched file)")),
+     (UI_CONTRACTS, DIRECTORY_ROWS)),
+    (CI_CHANGE, 340_892, "diff", (CI_TOPOLOGY,)),
+    (CI_CHANGE, 344_811, "diff", (CI_TOPOLOGY,)),
 ]
+
+
+def _delivered_unit(text: str, address: str) -> str:
+    """What a packet carries under one governance address (``## <source>#<title>``), up to its next unit."""
+    head = f"## {address}\n\n"
+    assert text.count(head) == 1, address
+    return text.split(head, 1)[1].split("\n\n## ", 1)[0].strip()
+
+
+def _source_section(root: pathlib.Path, address: str) -> str:
+    """That section as its chapter's file holds it: its heading through the line before the next heading of its
+    level or above."""
+    import re
+
+    chapter, title = address.split("#", 1)
+    source = (root / chapter).read_text(encoding="utf-8")
+    head = re.search(rf"(?m)^(#+) {re.escape(title)}$", source)
+    following = re.search(rf"(?m)^#{{1,{len(head[1])}}} ", source[head.end():])
+    return source[head.start():head.end() + following.start() if following else len(source)].strip()
+
+
+def _directory_rows(root: pathlib.Path, touched) -> list[str]:
+    """The module directory's own lines that name a touched file as a whole token (its path or its file name)."""
+    import re
+
+    names = {name for path in touched for name in (path, path.rsplit("/", 1)[-1])}
+    listing = (root / DIRECTORY_ROWS.split("#", 1)[0]).read_text(encoding="utf-8").splitlines()
+    return [line.strip() for line in listing
+            if any(re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", line) for name in names)]
 
 
 @pytest.mark.parametrize("files, window, rung, sections", HISTORY)
@@ -460,7 +520,9 @@ def test_replayed_history_keeps_the_target_sections_and_directory_rows(tmp_path,
                                                                       sections):
     """A chapter opening already carried by the packet navigation is not selected again, so the change-specific share
     goes to the sections and directory rows the pre-PR target selected for the same paths (measured 27 Nov 2026 at
-    7981018bb40e with the target's governance code and documents), at the window ``HISTORY`` holds each to."""
+    7981018bb40e with the target's governance code and documents), at the window ``HISTORY`` holds each to. Each
+    unit is read where the packet heads it and compared with its source: a section's whole text as its chapter's
+    file holds it, the directory's own rows that name a touched file, all of them and no other."""
     from ouroboros.tools import review as review_tool
     from ouroboros.tools.registry import ToolContext
 
@@ -491,8 +553,16 @@ def test_replayed_history_keeps_the_target_sections_and_directory_rows(tmp_path,
     text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review")["system"]
     got = "diff" if "Full post-change snapshots were omitted" in text else "full"
     assert RANK[got] >= RANK[rung]
-    for section in sections:
-        assert f"#{section}\n" in text, section
+    for address in sections:
+        unit = _delivered_unit(text, address)
+        if address == DIRECTORY_ROWS:
+            assert [row.strip() for row in unit.splitlines()] == _directory_rows(root, files) != [], address
+        else:
+            assert unit == _source_section(root, address), address
+    if CI_TOPOLOGY in sections:  # the rules this change is reviewed by: who runs keyless, what may hold credentials
+        trust = [row for row in _delivered_unit(text, CI_TOPOLOGY).splitlines()
+                 if row.startswith(("| Context PRs", "| Read-only checks", "| Trusted skill matrix"))]
+        assert len(trust) == 3, trust
 
 
 def test_a_packet_sendable_with_the_resident_opening_selected_stays_sendable(monkeypatch):

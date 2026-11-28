@@ -173,6 +173,58 @@ def test_a_packet_is_the_same_bytes_wherever_its_governance_root_lies(governance
         assert f"Source: {root / 'docs' / 'DESIGN.md'}." in _native_prompt(root, layer="body")
 
 
+def test_the_packets_own_room_settles_what_the_inline_share_selected(governance_root):
+    """The inline share is a first selection; the packet's physical room has the last word, in the share's order
+    (razzant/ouroboros#4419). Where the packet fits, the matched units the share left out are carried while it
+    still holds them, nothing already in it displaced; where it does not fit, the share's units are taken out and
+    return in that order while it holds them, so a larger unit never costs the review; a packet with no room
+    carries nothing more, and one that cannot fit bare is the irreducible packet a refusal names."""
+    from ouroboros.tools.governance_context import governance_context, settled_by_fit
+    from ouroboros.utils import estimate_tokens
+
+    def governed(window):
+        return governance_context(governance_root, surface="triad", touched_paths=TOUCHED,
+                                  usable_window_tokens=window, delivery="packet")
+
+    def size(governance):
+        return estimate_tokens("\n\n".join((governance.stable_inline, governance.selected_inline, governance.navigation)))
+
+    def state(governance):
+        return {row["path"]: (row["disposition"], row["reason"]) for row in governance.manifest}
+
+    protocol, section = "docs/development/05-review-and-commit-protocol.md", "docs/architecture/01-core.md#Core loop"
+    roomy, bare = governed(1_000_000), governed(0)
+    assert [path for path, _cost in roomy.share_admitted] == [protocol, section] and not roomy.left_out
+    assert [path for path, _cost in bare.left_out] == [protocol, section] and not bare.share_admitted
+    assert RELEASE_SYNC_TEXT in roomy.selected_inline and ARCH_TEXT in roomy.selected_inline and not bare.selected_inline
+    costs, slack = dict(bare.left_out), 8
+    # It fits and has room for both: carried, the same units a roomy share selects, and the manifest says how.
+    both = settled_by_fit(bare, size(bare), size(bare) + sum(costs.values()) + slack, size)
+    assert both.selected_inline == roomy.selected_inline and both.stable_inline == bare.stable_inline
+    assert all(state(both)[path][0] == "inline" and "carried beyond the inline share" in state(both)[path][1]
+               for path in (protocol, section))
+    assert "inline share exhausted" in state(bare)[protocol][1] and state(bare)[protocol][0] == "navigation"
+    # Room for the first in the share's order only: that one, not a later one that would also fit alone.
+    assert costs[section] < costs[protocol]
+    first = settled_by_fit(bare, size(bare), size(bare) + costs[protocol] + slack, size)
+    assert RELEASE_SYNC_TEXT in first.selected_inline and ARCH_TEXT not in first.selected_inline
+    # Room for the smaller, later one only: the larger is passed over, the smaller rides.
+    later = settled_by_fit(bare, size(bare), size(bare) + costs[section] + slack, size)
+    assert ARCH_TEXT in later.selected_inline and RELEASE_SYNC_TEXT not in later.selected_inline
+    # No room: the same context, nothing rendered again.
+    assert settled_by_fit(bare, size(bare), size(bare), size) is bare
+    # It does not fit with what the share selected: the units give way in order instead of the review.
+    tight = settled_by_fit(roomy, size(roomy), size(bare) + costs[protocol] + slack, size)
+    assert tight.selected_inline == first.selected_inline and size(tight) <= size(bare) + costs[protocol] + slack
+    assert state(tight)[section][0] == "navigation" and "left out" in state(tight)[section][1]
+    # Not even bare: nothing of the share's is left in what the refusal measures.
+    irreducible = settled_by_fit(roomy, size(roomy), size(bare) - 1, size)
+    assert not irreducible.selected_inline and size(irreducible) == size(bare) and not irreducible.share_admitted
+    # A layer with nothing to settle is returned as it is.
+    core = governance_context(governance_root, surface="triad", touched_paths=TOUCHED, layer="core")
+    assert settled_by_fit(core, 10, 5, size) is core
+
+
 @pytest.mark.parametrize("layer", ["body", "core"])
 @pytest.mark.parametrize("delivery", sorted(DELIVERIES))
 def test_countercheck_reaches_each_layer_and_delivery_once(delivery, layer, governance_root, subject_root):

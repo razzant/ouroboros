@@ -756,6 +756,11 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     full_words = words_section
     _assemble_prompt.fallback = _fallback if getattr(governance, "fallback", None) else None
 
+    def _settle(candidate):  # the fit ladder's last word on what the inline share selected
+        nonlocal governance
+        governance = candidate
+    _assemble_prompt.governance, _assemble_prompt.settle = (lambda: governance), _settle
+
     # P3 stays one-pass. The api pack, its fit ladder and the fixed_overflow
     # gate exist ONLY for the api rows (5.2/5.7): a retrieving row reads with
     # its own tools, so it neither constrains the fit limit nor is blocked by

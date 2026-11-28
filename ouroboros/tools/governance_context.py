@@ -33,6 +33,12 @@ Every document that is not inlined is NAMED in the returned manifest and in the
 navigation text, never silently dropped (BIBLE P1), and the manifest is the
 disclosure record the durable review evidence carries.
 
+The budget share of tiers 2 and 3 is a first selection, not the last word: a
+packet's own size settles it once its fit ladder has chosen a rendering
+(:func:`settled_by_fit`), carrying what the share left out where the packet
+holds it and giving the share's units up, in its order, before a review is
+refused.
+
 The tiers above are the **body layer**: they govern a change to Ouroboros's own
 body. A change review of another repository runs the **core layer**
 (``layer="core"``; `review_body_fact.layer_for` decides): tier 1 is the
@@ -203,6 +209,13 @@ class GovernanceContext:
     # last step before refusing, so a packet sendable before the skip stays sendable.
     fallback: Any = None
     layer: str = BODY_LAYER
+    # The inline share is provisional: the packet's own size has the last word (``settled_by_fit``). Each list is
+    # ``[(manifest path, estimated tokens)]`` in the order the matched units were considered: those the share
+    # admitted, and those not in the packet. ``resettle`` renders this context again with some decisions
+    # overruled (``{path: True}`` carried, ``{path: False}`` left out).
+    share_admitted: list = field(default_factory=list)
+    left_out: list = field(default_factory=list)
+    resettle: Any = field(default=None, compare=False, repr=False)
 
 
 def _normalize(path: Any) -> str:
@@ -590,6 +603,7 @@ def governance_context(
     manifest_facts: Any = None,
     review_words: Any = None,
     resident_openings_selectable: bool = False,
+    settled: Any = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -605,7 +619,8 @@ def governance_context(
     :func:`_core_layer_context` over ``subject_root``; ``skill`` (a skill payload)
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
     manifest's ``declares``)."""
-    call = {key: value for key, value in locals().items() if key != "resident_openings_selectable"}
+    call = {key: value for key, value in locals().items() if key not in ("resident_openings_selectable", "settled")}
+    settled = dict(settled or {})
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
 
     if layer not in GOVERNANCE_LAYERS:
@@ -681,15 +696,30 @@ def governance_context(
     budget = max(0, int(int(usable_window_tokens or 0) * REVIEW_GOVERNANCE_INLINE_SHARE))
     remaining = budget
 
+    admitted: list[tuple[str, int]] = []
+    left_out: list[tuple[str, int]] = []
+
     def _admit(path: str, title: str, text: str, tier: int, reason: str) -> bool:
+        """The share's decision on one matched unit, unless the packet's own size overruled it (``settled``): one
+        taken out because no rendering of the packet fit is treated as refused (its smaller form, where it has
+        one, is tried in its place), and one not in the packet is carried, uncharged, where the finished packet
+        holds it."""
         nonlocal remaining
         cost = estimate_tokens(_render(title, text))
-        if cost > remaining:
-            rows.append(_row(path, tier, "navigation", len(text),
-                             f"{reason}; inline share exhausted "
-                             f"({cost} tokens needed, {remaining} of {budget} left)"))
+        why = ("left out: with what the inline share selected, no rendering of this packet fits its reviewer's "
+               "input limit, and the room it has went to the units before this one" if settled.get(path) is False
+               else f"inline share exhausted ({cost} tokens needed, {remaining} of {budget} left)"
+               if cost > remaining and settled.get(path) is not True else "")
+        if why:
+            rows.append(_row(path, tier, "navigation", len(text), f"{reason}; {why}"))
+            if path not in touched:  # a touched document is the change's own evidence: its pack and diff carry it
+                left_out.append((path, cost))
             return False
-        remaining -= cost
+        if cost > remaining:
+            reason += f"; carried beyond the inline share ({cost} tokens): this packet holds it within its reviewer's input limit"
+        else:
+            remaining -= cost
+            admitted.append((path, cost))
         selected.append((title, text))
         if "#" not in path:
             inline_texts[path] = text
@@ -852,5 +882,37 @@ def governance_context(
         stable_inline=stable_inline,
         selected_inline=selected_inline,
         inline_whole_documents=inline_texts,
-        fallback=governance_context(**call, resident_openings_selectable=True) if skipped_resident else None,
+        fallback=(governance_context(**call, resident_openings_selectable=True)
+                  if skipped_resident and not settled else None),
+        share_admitted=admitted, left_out=left_out,
+        resettle=lambda decisions: governance_context(
+            **call, resident_openings_selectable=resident_openings_selectable, settled={**settled, **decisions}),
     )
+
+
+def settled_by_fit(governance: Any, tokens: int, limit: int, measure: Any) -> Any:
+    """The governance a packet sends once its own size has spoken (``review_admission.fit_triad_prompt``, on the
+    rendering its ladder ended with: ``tokens`` of ``limit``; ``measure(candidate)`` is that rendering's size with
+    another selection). The inline share orders and bounds a first selection, and by itself it makes delivery
+    uneven in the window: a larger unit admitted a little higher up takes the room of a smaller one, or makes the
+    packet too large to send (#4419). The packet's physical room is the second word, in the same order: where no
+    rendering fits, every unit the share admitted is taken out first (a packet that still does not fit is the
+    irreducible one its refusal names); then, there and where the packet fit at once, the matched units not in it
+    are carried in the order they were considered while the packet holds them, displacing nothing already in it.
+    Unchanged for a context with nothing to settle (another layer, a selection the share did not bound)."""
+    if getattr(governance, "resettle", None) is None:
+        return governance
+    while tokens > limit and governance.share_admitted:  # a smaller form admitted in a unit's place goes the same way
+        governance = governance.resettle(dict.fromkeys((path for path, _cost in governance.share_admitted), False))
+        tokens = measure(governance)
+    carried, room = [], limit - tokens
+    for path, cost in governance.left_out:
+        if cost <= room:
+            carried.append(path)
+            room -= cost
+    while carried:
+        candidate = governance.resettle(dict.fromkeys(carried, True))
+        if measure(candidate) <= limit:
+            return candidate
+        carried.pop()
+    return governance

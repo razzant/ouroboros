@@ -151,7 +151,10 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
     this pack at all (5.2/5.7): they retrieve with their own tools.
     ``compact_diff`` is a frozen subject's own -U0 rendering (a zero-argument
     callable); without it the rung re-captures the staged diff of
-    ``target_repo``. Returns ``(prompt, stable_prefix_len, block_message_or_empty)``."""
+    ``target_repo``. On the rendering the ladder ends with, the packet's own size
+    settles what the governance inline share selected (``assemble.settle``,
+    ``governance_context.settled_by_fit``): the refusal below is the irreducible
+    packet's. Returns ``(prompt, stable_prefix_len, block_message_or_empty)``."""
     # Resolved through the review-module namespace on purpose: these names are
     # documented monkeypatch seams pinned by the fit-ladder tests.
     from ouroboros.tools import review as _rv
@@ -185,10 +188,11 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
     # buys no second cold-density probe for the same route).
     slot_limits = None if calibrated is not None else {key: _slot_input_limit(index) for index, key in enumerate(keys)}
     input_limit = calibrated if calibrated is not None else _rv._quorum_input_token_limit(keys, slot_limits)
-    prompt, stable_prefix_len = assemble(current_files_section, diff_text)
+    rung = (current_files_section, diff_text)  # the rendering the ladder is on: what a settled selection is measured in
+    prompt, stable_prefix_len = assemble(*rung)
     if input_limit and estimate_tokens(prompt) > input_limit and getattr(assemble, "compact_optional_evidence", None):
         assemble.compact_optional_evidence()
-        prompt, stable_prefix_len = assemble(current_files_section, diff_text)
+        prompt, stable_prefix_len = assemble(*rung)
     if input_limit and estimate_tokens(prompt) > input_limit and calibrated is None:
         # Cold-start density rung: every api slot the full prompt overflows and
         # whose route has no fresh witness gets ONE bounded probe on a slice of
@@ -221,7 +225,8 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
             input_limit = _rv._quorum_input_token_limit(keys, slot_limits)
     if input_limit and estimate_tokens(prompt) > input_limit:
         fit_note = triad_fit_note()
-        prompt, stable_prefix_len = assemble(fit_note, diff_text)
+        rung = (fit_note, diff_text)
+        prompt, stable_prefix_len = assemble(*rung)
         if input_limit and estimate_tokens(prompt) > input_limit:
             from ouroboros.tools.review_binary_context import StagedDiffUnavailable
             from ouroboros.tools.review_subject import capture_review_diff
@@ -237,13 +242,25 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
             except StagedDiffUnavailable:
                 compact = ""  # keep the hardened full diff; the gate below blocks if it still overflows
             if compact.strip():
-                prompt, stable_prefix_len = assemble(fit_note, compact)
+                rung = (fit_note, compact)
+                prompt, stable_prefix_len = assemble(*rung)
     prompt_tokens = estimate_tokens(prompt)
     if input_limit and prompt_tokens > input_limit and getattr(assemble, "fallback", None):
         assemble.fallback()  # the governance selection that fit before (``GovernanceContext.fallback``), once
         assemble.fallback = None
         return fit_triad_prompt(api_models, assemble, current_files_section, diff_text, changed, target_repo, ctx=ctx,
                                 subject=subject, slots=slots, compact_diff=compact_diff, calibrated=input_limit)
+    if input_limit and getattr(assemble, "settle", None):
+        # The inline share was provisional; this rendering's own size settles it (``settled_by_fit``, #4419).
+        from ouroboros.tools.governance_context import settled_by_fit
+
+        def measure(candidate) -> int:
+            assemble.settle(candidate)
+            return estimate_tokens(assemble(*rung)[0])
+
+        assemble.settle(settled_by_fit(assemble.governance(), prompt_tokens, input_limit, measure))
+        prompt, stable_prefix_len = assemble(*rung)
+        prompt_tokens = estimate_tokens(prompt)
     if not input_limit or prompt_tokens > input_limit:
         # The split imperative is structurally impossible for a managed
         # resolution — its terminal REPLACES the clause (never appends the
@@ -815,6 +832,11 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
         governance, words_section = governance.fallback, full_words
     full_words = words_section
     _assemble.fallback = _fallback if getattr(governance, "fallback", None) else None
+
+    def _settle(candidate):  # the fit ladder's last word on what the inline share selected
+        nonlocal governance
+        governance = candidate
+    _assemble.governance, _assemble.settle = (lambda: governance), _settle
 
     prompt, stable_len, fit_error = fit_triad_prompt(
         [model], _assemble, files_section, frozen_subject.diff_text, changed, str(review_root), ctx=None,
