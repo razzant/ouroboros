@@ -927,6 +927,7 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "ouroboros/tools/__init__.py" = "D04"
 "ouroboros/tools/arg_feedback.py" = "D04"
 "ouroboros/tools/browser.py" = "D05"
+"ouroboros/tools/browser_download.py" = "D05"
 "ouroboros/browser_output.py" = "D05"
 "ouroboros/tools/browser_session.py" = "D05"
 "ouroboros/tools/chronicle.py" = "D15"

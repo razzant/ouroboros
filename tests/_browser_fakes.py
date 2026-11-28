@@ -20,7 +20,13 @@ def coro(function: Callable[..., Any]) -> Callable[..., Any]:
     return call
 
 
-class TimeoutError(Exception):  # noqa: A001 - the fake module's ``playwright.async_api.TimeoutError``
+class Error(Exception):
+    @property
+    def message(self) -> str:
+        return str(self)
+
+
+class TimeoutError(Error):  # noqa: A001 - the fake module's ``playwright.async_api.TimeoutError``
     pass
 
 
@@ -32,7 +38,7 @@ def install_async_api(monkeypatch: Any, playwright: Any, starts: list | None = N
         return playwright
 
     module = types.SimpleNamespace(async_playwright=lambda: types.SimpleNamespace(start=start),
-                                   TimeoutError=TimeoutError)
+                                   Error=Error, TimeoutError=TimeoutError)
     monkeypatch.setitem(sys.modules, "playwright.async_api", module)
     from ouroboros.tools import browser_session
 

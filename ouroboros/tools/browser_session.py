@@ -236,8 +236,17 @@ class PlaywrightDriver:
     """
 
     def __init__(self) -> None:
+        import os
+        import shutil
+
+        from playwright._impl._driver import compute_driver_executable
         from playwright.async_api import _context_manager
 
+        node, _ = compute_driver_executable()
+        # Snapshot the executable at driver start, including a relative operator
+        # choice. Later URL normalization must not re-select it from a changed PATH.
+        driver_node = node if os.path.isabs(node) else shutil.which(node)
+        self.node_executable = os.path.abspath(driver_node) if driver_node else None
         client = getattr(_context_manager, "PlaywrightClient", None)
         self._client = client() if client is not None else None
         if self._client is not None:

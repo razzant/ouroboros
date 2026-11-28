@@ -756,10 +756,12 @@ class _HashingSink:
 
 
 def stream_actor_source(drive_root: Union[pathlib.Path, str], task_id: str, *, category: str, source_id: str,
-                        extension: str, fill: Any, expected: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                        extension: str, fill: Any, expected: Optional[Dict[str, Any]] = None,
+                        admit_target: Optional[Callable[[pathlib.Path], None]] = None) -> Dict[str, Any]:
     """``store_actor_source_bytes`` for bytes too large to hold: ``fill(sink)`` streams them into a temporary
     sibling, hashed here, and the file is published write-once under its digest name only when the measured
-    bytes match ``expected`` (``size``/``sha256`` where given); a mismatch or a failed ``fill`` publishes nothing."""
+    bytes match ``expected`` (``size``/``sha256`` where given). ``admit_target`` can refuse the exact measured
+    address before publication or reuse. A mismatch, denial or failed ``fill`` publishes nothing."""
     folder = task_artifact_dir_path(drive_root, task_id, create=True) / _SOURCE_HANDLES_SUBDIR / str(category)
     folder.mkdir(parents=True, exist_ok=True)
     temporary = temporary_sibling(folder / f"{validate_task_id(task_id)}.stream")
@@ -780,6 +782,8 @@ def stream_actor_source(drive_root: Union[pathlib.Path, str], task_id: str, *, c
         parts = pathlib.PurePosixPath(ref["path"]).parts
         check_source_release(drive_root, task_id, parts)
         target = task_artifact_dir_path(drive_root, task_id).joinpath(*parts)
+        if admit_target is not None:
+            admit_target(target)
         try:  # write-once by digest: an intact file of these bytes IS this handle; a damaged one is repaired
             present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=measured))
         except OSError:

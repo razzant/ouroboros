@@ -609,7 +609,10 @@ class ToolRegistry:
             elif entry.name in {"browse_page", "browser_action"}:
                 schema = copy.deepcopy(entry.schema)
                 if entry.name == "browse_page":
+                    from ouroboros.tools.browser_download import DOWNLOAD_DESCRIPTION
+
                     schema["description"] = "Open an HTTP(S) URL (external, or localhost on non-Ouroboros ports) or a parent-readable file:// path in this task's own headless Playwright browser (not the owner's signed-in Chrome) and return its content as text, html, markdown, or screenshot (base64 PNG) — use it with analyze_screenshot to visually verify your own built apps. The Ouroboros API ports, private/link-local IPs, and other URL schemes are blocked for subagents. Use viewport to test mobile layouts (e.g. '375x812')."
+                    schema["description"] += " " + DOWNLOAD_DESCRIPTION
                 if entry.name == "browser_action":
                     schema["description"] = "Act on the page open in this task's headless browser (from browse_page: external HTTP(S), localhost on non-Ouroboros ports, or a parent-readable file:// page). Actions: click (selector), fill (selector + value), select (selector + value), screenshot (base64 PNG), scroll (value: up/down/top/bottom), wait (selector + state, without navigation). JavaScript evaluate is unavailable to local-readonly subagents."
                     props = schema.get("parameters", {}).get("properties", {})

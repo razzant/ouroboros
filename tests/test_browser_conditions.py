@@ -12,10 +12,9 @@ CI browser lane, ``tests/test_browser_tools_smoke.py``.
 """
 from __future__ import annotations
 
-from tests._tool_result_delivery_shared import measured_fit
-
 import base64
 import json
+import sys
 import threading
 import time
 import types
@@ -28,7 +27,8 @@ from ouroboros import chromium_runtime, owner_pause
 from ouroboros.task_results import write_task_result
 from ouroboros.tools import browser_session
 from ouroboros.tools.registry import ToolRegistry
-from tests._browser_fakes import close_generations, coro, install_async_api, track_sessions, wait_event
+from tests._browser_fakes import Error, close_generations, coro, install_async_api, track_sessions, wait_event
+from tests._tool_result_delivery_shared import measured_fit
 
 PINNED = chromium_runtime.CHROMIUM_VERSION
 CHROMIUM_SUPPLY = ("(Playwright; pinned Chrome for Testing headless shell, Chromium sandbox requested at launch "
@@ -49,12 +49,20 @@ class FakeStealth:
 class FakePage:
     def __init__(self, ctx, text="Fake page body", on_read=None):
         self.ctx, self.text, self.on_read, self.url = ctx, text, on_read, "https://observed.example/"
+        self.main_frame, self.listeners = object(), {}
 
     def set_default_timeout(self, _ms):
         pass
 
-    def on(self, *_a):
-        pass
+    def on(self, event, callback):
+        self.listeners.setdefault(event, []).append(callback)
+
+    def remove_listener(self, event, callback):
+        self.listeners[event].remove(callback)
+
+    def emit(self, event, value):
+        for callback in tuple(self.listeners.get(event, ())):
+            callback(value)
 
     async def goto(self, url, **_kw):
         self.url = url
@@ -287,6 +295,76 @@ def test_refusals_and_action_receipts_are_never_relabelled(sticky, monkeypatch):
     blocked = sticky.call("browse_page", {"url": "https://observed.example/"})
     assert blocked.text == "⚠️ BROWSER_URL_BLOCKED: refused" and blocked.status != "ok"
     assert blocked.producer_text is None
+
+
+@pytest.mark.parametrize('nullable_fields', [False, True])
+def test_download_keeps_old_and_new_subframe_observations(sticky, monkeypatch, nullable_fields):
+    monkeypatch.setitem(sys.modules, 'playwright._impl._connection', None)
+    base = "https://observed.example"
+    document, download = base + "/document", base + "/notes.txt"
+    subframe = object()
+
+    def request(url, frame, previous=None):
+        return types.SimpleNamespace(url=url, frame=frame, method="GET", redirected_from=previous,
+                                     is_navigation_request=lambda: True)
+
+    class Page(FakePage):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.main_frame = types.SimpleNamespace(_impl_obj=types.SimpleNamespace(
+                _event_emitter=types.SimpleNamespace(on=lambda _name, callback: setattr(self, 'commit', callback))))
+
+        def frame_redirect(self, name):
+            start = request(f"{base}/frame/{name}", subframe)
+            final = request(start.url + "/finished", subframe, start)
+            self.emit("response", types.SimpleNamespace(frame=subframe, request=final))
+
+        def navigation_event(self, **event):
+            if nullable_fields:
+                event = {'error': None, 'newDocument': None, **event}
+            self.commit(event)
+
+        async def goto(self, url, **kwargs):
+            if url == document:
+                await super().goto(url, **kwargs)
+                self.navigation_event(newDocument={})
+                self.frame_redirect("old")
+                return None
+            self.frame_redirect("during")
+            root = request(download, self.main_frame)
+            self.emit("request", root)
+            self.emit("response", types.SimpleNamespace(frame=self.main_frame, request=root, status=200, headers={}))
+            self.navigation_event(error='synthetic aborted navigation',
+                                  newDocument={'request': types.SimpleNamespace(_object=root)})
+            self.frame_redirect("later")
+            self.emit("download", types.SimpleNamespace(url=download, delete=coro(lambda: None)))
+            raise Error("Page.goto: Download is starting")
+
+    targets_seen = []
+
+    def decide(targets, *_args):
+        targets_seen.append(set(targets))
+        return "BROWSER_URL_BLOCKED: synthetic document decision" if download in targets else ""
+
+    sticky.install(page_factory=Page)
+    monkeypatch.setattr(browser_mod, "_first_url_block", decide)
+    assert sticky.call("browse_page", {"url": document}).producer_text == "Fake page body"
+    page = sticky.registry._ctx.browser_state.page
+    page.navigation_event(url=document + '#part')
+    denied = sticky.call("browse_page", {"url": download})
+    assert denied.status == "blocked" and "synthetic document decision" in denied.text
+    assert sticky.call("browser_action", {"action": "screenshot"}).status == "ok"
+    assert targets_seen[-1] == {document} | {
+        f"{base}/frame/{name}{suffix}" for name in ("old", "during", "later") for suffix in ("", "/finished")
+    }
+    # Only the generation's passive observers remain, one of each. No
+    # navigation capture callback retains the finished call.
+    assert {event: len(callbacks) for event, callbacks in page.listeners.items() if callbacks} == dict.fromkeys(
+        ("request", "requestfinished", "requestfailed", "response", "download"), 1,
+    )
+    page.navigation_event(newDocument={})
+    assert sticky.call("browser_action", {"action": "screenshot"}).status == "ok"
+    assert targets_seen[-1] == {document}
 
 
 class DyingPage(FakePage):
