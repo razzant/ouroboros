@@ -371,8 +371,9 @@ def body_map(architecture: ReferenceBook, development: ReferenceBook | None = No
     physical window cannot hold the Map: every chapter of both books by title and every Atlas address, each
     folder and shared extension named once above its files (``_under_folders``), nothing else. A linked Atlas address is taken from its
     parsed link; a row with no link keeps its address side as written. It is ``""`` for a legacy single-file
-    revision, whose only view is its source navigation. ``readable`` false (a Presence turn whose ceiling cannot
-    read the system repository) replaces each form's reader line by ``BODY_MAP_NO_READER``.
+    revision, whose only view is its source navigation. ``readable`` false (an actor whose own ``read_file``
+    would not open these addresses as asked: ``context._actor_reads``) replaces each form's reader line by
+    ``BODY_MAP_NO_READER``.
     """
     if architecture.legacy:  # one physical file: its navigation is its only view; the other book stays one address away
         view = overview_book(architecture)

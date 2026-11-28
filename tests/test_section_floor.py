@@ -307,11 +307,16 @@ def _presence_ceiling(*tool_names):
 
 def test_host_sections_stay_whole_for_an_actor_that_could_not_read_a_pointer_back(tmp_path):
     env = SimpleNamespace(drive_root=tmp_path)
-    # An owner turn (no ceiling) and a Presence ceiling that grants read_file: pointers resolve.
+    # An owner turn (no ceiling): pointers resolve. (A Presence ceiling that admits the read of a retained capture
+    # through the real registry: tests/test_book_context_capture.py, "retained-reader".)
     assert context._section_root_for(env, SimpleNamespace()) == str(tmp_path)
-    assert context._section_root_for(env, SimpleNamespace(task_contract=_presence_ceiling("read_file"))) == str(tmp_path)
-    # A Presence ceiling without read_file: a pointer would name a source this actor cannot
+    # A Presence ceiling without read_file, or with it and no grant that admits the artifact store's retained
+    # captures, or a task whose contract disables the tool: a pointer would name a source this actor cannot
     # open, so the preparation leaves its host sections whole (an empty section root).
+    assert context._section_root_for(env, SimpleNamespace(task_contract=_presence_ceiling("read_file"))) == ""
+    assert context._section_root_for(env, SimpleNamespace(task_contract={"disabled_tools": ["read_file"]})) == ""
+    assert context._section_root_for(env, None, {"task_contract": {"disabled_tools": ["read_file"]}}) == ""
+    assert context._section_root_for(env, None, {"task_contract": {"disabled_tools": ["web_search"]}}) == str(tmp_path)
     assert context._section_root_for(env, SimpleNamespace(task_contract=_presence_ceiling())) == ""
     assert context._section_root_for(env, SimpleNamespace(task_metadata={"task_contract": _presence_ceiling()})) == ""
     # An unreadable carrier also keeps the sections whole rather than publishing a dead pointer.

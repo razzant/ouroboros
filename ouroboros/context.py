@@ -836,47 +836,59 @@ def build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[s
     return list(memory.recent_activity_sections(task_id))
 
 
-def _section_root_for(env: Any, ctx: Any) -> str:
-    """Where relocated host sections are retained; empty when this actor could not read them back.
-
-    A section-floor pointer is a ``read_file(root='artifact_store', ...)``. A Presence
-    turn runs under its binding's capability ceiling; when that ceiling does not grant
-    ``read_file`` the pointer would name a source the actor cannot resolve, so its host
-    sections stay whole instead (BIBLE P1: a disclosure names a resolvable source), all
-    but the optional attachments (``memory_floor.OPTIONAL_STEPS``): short of room, one
-    keeps its heading, named unavailable to this actor, with no path to read.
-    """
+def _actor_reads(ctx: Any, task: Any, root: str, path: str) -> bool:
+    """Whether this actor's own ``read_file`` would open ``root:path`` as asked. Not where its task contract
+    disables the tool (``registry_guards._disabled_tools``: refused at dispatch whether or not the schema is shown).
+    A Presence turn under its binding's capability ceiling reads it where the ceiling grants ``read_file`` with its
+    ``path`` left to the caller and its ``root`` left to it or fixed to this one (a bound argument reads what the
+    host fixed, whatever address is asked) and the read path's own admission admits the address
+    (``core_file_tools.read_admission``). An actor whose reader cannot be told counts as having none."""
     try:
-        from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
+        from types import SimpleNamespace
 
-        ceiling = presence_ceiling_from_context(ctx)
-    except Exception:
-        log.debug("presence ceiling unreadable; host sections stay whole", exc_info=True)
-        return ""
-    if ceiling is not None and not presence_ceiling_allows_tool(ceiling, "read_file"):
-        return ""
-    return str(env.drive_root)
+        from ouroboros.contracts.task_contract import canonical_tool_name
+        from ouroboros.presence_authority import presence_ceiling_from_context
+        from ouroboros.tools.registry_guards import _disabled_tools
 
-
-def _manuals_readable(ctx: Any) -> bool:
-    """Whether this actor can follow the Body Map's addresses. Every actor reads the system repository's manuals but
-    a Presence turn under its binding's capability ceiling: it can where the ceiling grants ``read_file``, which
-    admits exactly the addresses the Map names (``presence_authority.presence_ceiling_allows_binding``; the read
-    path's own admission decides, ``core_file_tools.read_admission``). A ceiling without file reading, or one that
-    cannot be read, is not a reader: the Map then says so instead of naming a call that would be refused."""
-    try:
-        from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
-
+        task = task if isinstance(task, dict) else {}
+        actor = ctx if ctx is not None else SimpleNamespace(task_metadata=task, task_contract=task.get("task_contract"))
+        if "read_file" in _disabled_tools(actor):
+            return False
         if (ceiling := presence_ceiling_from_context(ctx)) is None:
             return True
-        from ouroboros.reference_books import BOOK_ENTRYPOINTS
         from ouroboros.tools.core_file_tools import read_admission
 
-        return (presence_ceiling_allows_tool(ceiling, "read_file")
-                and read_admission(ctx, "system_repo", BOOK_ENTRYPOINTS["architecture"])[2] is None)
+        grant = next((grant for grant in ceiling.tool_grants if canonical_tool_name(grant.name) == "read_file"), None)
+        fixed = {str(binding.argument_path[0]): binding for binding in grant.bindings if binding.argument_path} if grant else {}
+        return (grant is not None and "path" not in fixed and read_admission(ctx, root, path)[2] is None
+                and ("root" not in fixed or (fixed["root"].source, fixed["root"].static_value) == ("static", root)))
     except Exception:
-        log.debug("presence ceiling unreadable; the Body Map names no reader", exc_info=True)
+        log.debug("actor's reader unreadable; it is told of none", exc_info=True)
         return False
+
+
+def _section_root_for(env: Any, ctx: Any, task: Any = None) -> str:
+    """Where relocated host sections are retained; empty when this actor could not read them back.
+
+    A section-floor pointer is a ``read_file(root='artifact_store', ...)`` of a retained capture. An actor whose
+    contract disables ``read_file``, and a Presence turn whose capability ceiling does not grant the tool or admits
+    no read of the artifact store's retained captures, would be pointed at a source it cannot resolve, so its host
+    sections stay whole instead (BIBLE P1: a disclosure names a resolvable source), the Body Map among them, all but
+    the optional attachments (``memory_floor.OPTIONAL_STEPS``): short of room, one keeps its heading, named
+    unavailable to this actor, with no path to read.
+    """
+    retained = "source_handles/context_checkpoints/host-section.md"
+    return str(env.drive_root) if _actor_reads(ctx, task, "artifact_store", retained) else ""
+
+
+def _manuals_readable(ctx: Any, task: Any = None) -> bool:
+    """Whether this actor can follow the Body Map's addresses with ``read_file`` as the Map's reader line says: a
+    Presence ceiling that grants the tool admits exactly the addresses the Map names
+    (``presence_authority.presence_ceiling_allows_binding``). Otherwise the Map says so instead of naming a call
+    that would be refused or answered with another file."""
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS
+
+    return _actor_reads(ctx, task, "system_repo", BOOK_ENTRYPOINTS["architecture"])
 
 
 def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
@@ -974,7 +986,7 @@ def _capture_context_core(
     body_map, body_map_parts = "", ""
     if "architecture" in books:
         map_view, body_map_parts = reference_books.body_map(books["architecture"], books.get("development"),
-                                                            readable=_manuals_readable(ctx))
+                                                            readable=_manuals_readable(ctx, task))
         body_map = map_view.text
     development_md = reference_books.compose_book(books["development"]) if required and "development" in books else ""
     from ouroboros.context_layout import task_design_navigation
@@ -1212,7 +1224,7 @@ def _capture_context_core(
         semi_stable_sections=capture_sections(semi_stable_parts, prefix="stable"),
         dynamic_head_sections=capture_sections(head_parts, prefix="head"),
         dynamic_sections=capture_sections(dynamic_parts, prefix="dynamic"),
-        section_root=_section_root_for(env, ctx), section_task_id=str(task.get("id") or ""),
+        section_root=_section_root_for(env, ctx, task), section_task_id=str(task.get("id") or ""),
         user_content_json=json.dumps(_first_user_content(task, env, attachment_facts=attachment_facts),
                                      ensure_ascii=False, sort_keys=True),
         initial_attachment_facts=attachment_facts,

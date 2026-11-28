@@ -174,15 +174,17 @@ def test_authored_common_understanding_is_resident_with_every_note_summary(tmp_p
     assert "scope='global'" in sections
 
 
-@pytest.mark.parametrize("ceiling", ["no-ceiling", "system-docs", "no-reader", "workspace-reader"])
+@pytest.mark.parametrize("ceiling", ["no-ceiling", "system-docs", "no-reader", "workspace-reader", "retained-reader"])
 def test_a_presence_ceiling_that_grants_file_reading_follows_the_maps_addresses_and_nothing_more(tmp_path, ceiling):
     """The Map names its reader only for an actor that can follow it, and every address it names is followable by
     one that carries it and was granted file reading (owner's decision, 27 Nov 2026): a Presence turn whose positive
     ceiling grants ``read_file``, whatever its resource grants, reads the shipped manuals the Map names (both
     books' entrypoints and chapters, the Reference Atlas's documents) through the real capture and registry, and
     still reads nothing else its grants do not admit. A ceiling with no ``read_file`` reads none of them and gets
-    ``BODY_MAP_NO_READER`` in the whole Map and in its parts form."""
-    from ouroboros import reference_books
+    ``BODY_MAP_NO_READER`` in the whole Map and in its parts form. A pointer to a retained host section (the Map's
+    full text behind its parts) is a read of the artifact store: it is issued exactly where that read is admitted,
+    so a ceiling without that grant keeps its sections whole and the Map's own ``system_repo`` line."""
+    from ouroboros import reference_books, section_floor
     from ouroboros.tools.registry import ToolContext, ToolRegistry
     from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED
     from tests import test_presence_authority as pa
@@ -191,7 +193,9 @@ def test_a_presence_ceiling_that_grants_file_reading_follows_the_maps_addresses_
                "workspace-reader": (pa.PresenceToolTarget("builtin", "read_file"),
                                     pa.PresenceResourceTarget("active_workspace", ("read",), "shared")),
                "system-docs": (pa.PresenceToolTarget("builtin", "read_file"),
-                               pa.PresenceResourceTarget("system_repo", ("read",), "docs"))}[ceiling]
+                               pa.PresenceResourceTarget("system_repo", ("read",), "docs")),
+               "retained-reader": (pa.PresenceToolTarget("builtin", "read_file"), pa.PresenceResourceTarget(
+                   "artifact_store", ("read",), "source_handles/context_checkpoints"))}[ceiling]
     contract = {} if targets is None else {"capability_ceiling": pa.presence_ceiling_payload(
         pa.build_presence_capability_ceiling(skill_name="moderator", skill_content_hash="c" * 64,
                                              state_fingerprint="d" * 64, resolution=pa._resolution(*targets)))}
@@ -202,12 +206,19 @@ def test_a_presence_ceiling_that_grants_file_reading_follows_the_maps_addresses_
     for path in ("docs/DESIGN.md", "README.md", "docs/unlisted.md", "ouroboros/loop.py"):
         (env.repo_dir / path).parent.mkdir(parents=True, exist_ok=True)
         (env.repo_dir / path).write_text("text\n", encoding="utf-8")  # CONTRIBUTING.md is named and absent: no address
-    ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_contract=contract)
+    ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_contract=contract, task_id=task["id"])
     registry = ToolRegistry(repo_dir=env.repo_dir, drive_root=env.drive_root)
     registry.set_context(ctx)
     core = context._capture_context_core(env, Memory(drive_root=env.drive_root, repo_dir=env.repo_dir), task, None, ctx,
                                          registry)
     readable = ceiling != "no-reader"
+    # The pointer a stepped section would carry, read through the registry as this actor: issued iff it resolves.
+    kept = section_floor.retain_section(section_floor.HostSection("body_map", core.body_map, core.body_map_parts),
+                                        root=str(env.drive_root), task_id=task["id"])
+    back = registry.execute_result("read_file", {"root": "artifact_store", "path": kept["source_ref"]["path"]})
+    assert (back.status == "ok") is (ceiling in ("no-ceiling", "retained-reader")), back.text[:200]
+    assert (core.section_root == str(env.drive_root)) is (back.status == "ok")
+    assert back.status == "ok" or (not core.section_root and PRESENCE_RESOURCE_BLOCKED in back.text) or not readable
     promise = 'read_file(root="system_repo"'
     for form in (core.body_map, core.body_map_parts):
         assert (promise in form) is readable and (reference_books.BODY_MAP_NO_READER in form) is not readable, form
@@ -226,5 +237,80 @@ def test_a_presence_ceiling_that_grants_file_reading_follows_the_maps_addresses_
                            ("BIBLE.md", ("no-ceiling",))):
         got = read(path)
         assert (got.status == "ok") is (ceiling in admitted), (path, got.text[:200])
-        if ceiling in ("system-docs", "workspace-reader") and ceiling not in admitted:
+        if ceiling in ("system-docs", "workspace-reader", "retained-reader") and ceiling not in admitted:
             assert PRESENCE_RESOURCE_BLOCKED in got.text, (path, got.text[:200])
+
+
+def _acting(tmp_path, contract, *, with_ctx=True):
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    env, plain, task = _capture(tmp_path, {"task_contract": contract})
+    if not with_ctx:
+        return env, plain, task, None
+    ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_metadata={"task_contract": contract},
+                      task_contract=contract, task_id=task["id"])
+    registry = ToolRegistry(repo_dir=env.repo_dir, drive_root=env.drive_root)
+    registry.set_context(ctx)
+    core = context._capture_context_core(env, Memory(drive_root=env.drive_root, repo_dir=env.repo_dir), task, None, ctx,
+                                         registry)
+    return env, core, task, registry
+
+
+@pytest.mark.parametrize("with_ctx", [True, False])
+@pytest.mark.parametrize("disabled", [(), ("read_file",), ("web_search",)])
+def test_a_task_whose_contract_disables_read_file_is_not_told_to_read_with_it(tmp_path, disabled, with_ctx):
+    """The Map's reader line is rendered from the acting task's effective ability: a contract that disables
+    ``read_file`` (refused at dispatch) gets the no-reader form with every address kept and no pointer to a retained
+    section; a contract that disables another tool, or none, keeps the reader line and the pointer."""
+    from ouroboros import reference_books
+    from ouroboros.consciousness_authority import OBSERVE_DISABLED
+    from ouroboros.contracts.task_contract import build_task_contract
+
+    contract = build_task_contract({"description": "Read material", "disabled_tools": list(disabled)})
+    env, core, task, registry = _acting(tmp_path, contract, with_ctx=with_ctx)
+    reads = "read_file" not in disabled
+    for form in (core.body_map, core.body_map_parts):
+        assert ('read_file(root="system_repo"' in form) is reads, form
+        assert (reference_books.BODY_MAP_NO_READER in form) is not reads
+        assert "docs/architecture/" in form and "docs/development/" in form and "Runtime" in form and "Change" in form
+    assert (core.section_root == str(env.drive_root)) is reads
+    if registry is not None:
+        got = registry.execute_result("read_file", {"root": "system_repo", "path": "docs/architecture/runtime.md"})
+        assert (got.status == "ok") is reads, got.text[:200]
+    # A wake-up's list binds at dispatch only so that its prefix stays an owner turn's: it never names the reader.
+    assert "read_file" not in OBSERVE_DISABLED
+
+
+@pytest.mark.parametrize("bound", ["", "path", "root"])  # "root": fixed to the artifact store, not the Map's root
+def test_a_presence_whose_read_file_address_is_bound_gets_the_no_reader_form(tmp_path, bound):
+    """A Presence grant of ``read_file`` whose ``path`` the host fixed (or whose ``root`` it fixed elsewhere) answers
+    a call with what was bound, not with the address asked, so the Map does not tell it to read its addresses; the
+    same grant with both arguments left to the caller keeps the reader line. A retained pointer is issued exactly
+    where the call it names reads the retained text back."""
+    from dataclasses import replace
+
+    from ouroboros import reference_books, section_floor
+    from tests import test_presence_authority as pa
+
+    resolution = pa._resolution(pa.PresenceToolTarget("builtin", "read_file"),
+                                pa.PresenceResourceTarget("artifact_store", ("read",), "."))
+    if bound:
+        fixed = pa.PresenceArgumentBinding((bound,), "static", static_value={
+            "path": "docs/ARCHITECTURE.md", "root": "artifact_store"}[bound])
+        resolution = replace(resolution, active=tuple(
+            replace(item, argument_bindings=(fixed,)) if getattr(item.target, "name", "") == "read_file" else item
+            for item in resolution.active))
+    contract = {"capability_ceiling": pa.presence_ceiling_payload(pa.build_presence_capability_ceiling(
+        skill_name="moderator", skill_content_hash="c" * 64, state_fingerprint="d" * 64, resolution=resolution))}
+    env, core, task, registry = _acting(tmp_path, contract)
+    follows = not bound
+    for form in (core.body_map, core.body_map_parts):
+        assert ('read_file(root="system_repo"' in form) is follows, form
+        assert (reference_books.BODY_MAP_NO_READER in form) is not follows
+    got = registry.execute_result("read_file", {"root": "system_repo", "path": "docs/architecture/runtime.md"})
+    assert ("Full mechanism and WHY." in got.text) is follows, got.text[:200]
+    kept = section_floor.retain_section(section_floor.HostSection("body_map", "THE WHOLE MAP", "parts"),
+                                        root=str(env.drive_root), task_id=task["id"])
+    back = registry.execute_result("read_file", {"root": "artifact_store", "path": kept["source_ref"]["path"]})
+    assert ("THE WHOLE MAP" in back.text) is (bound != "path"), back.text[:200]
+    assert (core.section_root == str(env.drive_root)) is (bound != "path")
