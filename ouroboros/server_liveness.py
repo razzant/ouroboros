@@ -607,14 +607,16 @@ def _start_supervisor_liveness_watchdog(
     phase stops advancing before its first model request is journal only the same way,
     with its own thread's stack, whatever its heartbeat says (``_TurnPhaseWatch``), and so is
     the ASGI loop whose heartbeat falls a whole beat behind while browser sockets are open
-    (``asgi_beat.AsgiLateWatch``: one ``asgi_loop_late`` row per episode). It deliberately does NOT
+    (``asgi_beat.AsgiLateWatch``: one ``asgi_loop_late`` row per episode, observed first in each
+    pass so that no sink of the pass can outlast its evidence). It deliberately does NOT
     kill a hung thread; independent native actors keep the chat responsive
     meanwhile. ``loop_thread_ident`` is the thread whose stack a stall row carries;
     it defaults to the CALLER, because the loop thread starts its own watchdog
     (startup phase included). ``stop_event`` is
     a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (the
     Fault door included, which never sets the global restart flag), it is set so
-    this watchdog stops watching a now-stale liveness list (no false post-revival alert)."""
+    this watchdog stops watching a now-stale liveness list (no false post-revival alert);
+    it is asked before each sleep and again on waking, so a pass never runs for an ended generation."""
     from ouroboros.config import get_supervisor_liveness_deadline_sec
 
     deadline = get_supervisor_liveness_deadline_sec()
@@ -633,14 +635,30 @@ def _start_supervisor_liveness_watchdog(
         wedged_tasks: set[str] = set()
         turn_phases = _TurnPhaseWatch(interval)
         asgi_beat = AsgiLateWatch(_loop_thread_stack, has_ws_clients)
-        while not _restart_requested.is_set() and not (stop_event is not None and stop_event.is_set()):
+
+        def stopped() -> bool:  # this generation ended (its own token) or the process restarts
+            return _restart_requested.is_set() or (stop_event is not None and stop_event.is_set())
+
+        while not stopped():
+            slept_since = time.monotonic()
             time.sleep(interval)
+            if stopped():  # asked again on waking: a generation that ended during the sleep reports nothing
+                break
             # ONE clock: both halves measure an ELAPSED GAP against stamps taken on
             # the monotonic clock (the loop-liveness tick here, and the chat-turn
             # heartbeat in agent.py), so a wall-clock jump — NTP step, DST/timezone
             # change, manual set, VM resume — can neither fabricate a stall/wedge
             # nor mask a real one on either half.
             now = time.monotonic()
+            # (0) The ASGI loop's own beat, looked at FIRST: its stamp and stack are taken before any row of
+            # this pass is written, so a beat that resumes while a sink below waits on the disk cannot erase
+            # the episode; the row, with this watchdog's own lateness, is journaled at the end of the pass.
+            try:
+                late = asgi_beat.tick(now, now - slept_since - interval)
+                asgi_row = {"ts": utc_now_iso(), **late} if late is not None else None
+            except Exception:
+                asgi_row = None
+                log.debug("ASGI beat watch failed", exc_info=True)
             # (1) Supervisor loop stall — new-message intake starvation.
             if _supervisor_loop_stalled(liveness[_STAMP], now, deadline):
                 if not loop_alerted:
@@ -721,13 +739,12 @@ def _start_supervisor_liveness_watchdog(
                 turn_phases.tick(now, dict(turns))
             except Exception:
                 log.debug("direct-turn phase watch failed", exc_info=True)
-            # (4) The ASGI loop's own beat: one row per episode it falls a whole beat behind (asgi_beat).
-            try:
-                late = asgi_beat.tick(now)
-                if late is not None:
-                    append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), **late})
-            except Exception:
-                log.debug("ASGI beat watch failed", exc_info=True)
+            # (4) The ASGI observation of (0): one row per episode the loop falls a whole beat behind.
+            if asgi_row is not None:
+                try:
+                    append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", asgi_row)
+                except Exception:
+                    log.debug("asgi_loop_late log failed", exc_info=True)
         turn_phases.close(time.monotonic())
 
     threading.Thread(target=_watch, name="supervisor-liveness-watchdog", daemon=True).start()
