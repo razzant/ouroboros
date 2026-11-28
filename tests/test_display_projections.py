@@ -563,3 +563,38 @@ def test_a_pass_that_ended_while_its_stall_was_read_leaves_no_onset_without_an_e
     display_projections.journal_duty_stall_end(running)
     assert [row["type"] for _line, row in display_projections._ROWS] == ["host_duty_stall", "host_duty_stall_end"]
     assert update_generation_facts._duties == {"custody-maintenance": 1}
+
+def test_the_last_pass_writes_the_closing_row_an_overrunning_display_pass_queued_before_letting_go(monkeypatch):
+    """A display pass the watchdog alerted as overrunning ends just before the lifespan's end: it queues its own
+    ``host_duty_stall_end`` while it still holds its latch, so the last pass, which takes that latch, writes the end
+    beside the onset even while the duty wrapper's close has not run yet; that later close queues no second end.
+    (Queued after the latch was released, the end found the duty closed and stayed unwritten.)"""
+    rows = []
+    monkeypatch.setattr("supervisor.state.append_jsonl", lambda _path, row: rows.append(row) or True)
+    monkeypatch.setattr(update_generation_facts, "_duties", {})
+    monkeypatch.setattr(update_generation_facts, "_publish_after", lambda: None)
+    held, release, hold, _holding = _held_seam()
+    ctx = SimpleNamespace(DRIVE_ROOT=None, RUNNING={}, budget_projection_dirty=True,
+                          update_budget_from_usage=lambda usage: hold() or True)
+    closing, real_close = threading.Event(), server_maintenance._duty_ended
+
+    def late_close(latch, duty):  # the wrapper's close, scheduled only after the pass let go of its latch
+        assert closing.wait(10)
+        real_close(latch, duty)
+
+    monkeypatch.setattr(server_maintenance, "_duty_ended", late_close)
+    server_maintenance.dispatch_display_projections(ctx)
+    try:
+        assert held.wait(10)
+        server_maintenance._DUTIES[id(display_projections.LATCH)]["since"] -= 3600  # well past its cadence
+        server_maintenance._duty_busy(display_projections.LATCH, 60.0)  # the watchdog alerts the overrun
+        release.set()
+        _wait_until(lambda: not display_projections.LATCH.locked())
+        assert display_projections.drain(time.monotonic() + 10) is True
+        assert [(row["type"], row["duty"]) for row in rows] == [
+            ("host_duty_stall", display_projections.DUTY_NAME), ("host_duty_stall_end", display_projections.DUTY_NAME)]
+    finally:
+        release.set()
+        closing.set()
+    _pass_ended()
+    assert len(rows) == 2 and not display_projections._ROWS, "the wrapper's close queued no second end"

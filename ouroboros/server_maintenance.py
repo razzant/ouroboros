@@ -289,9 +289,10 @@ def _duty_busy(latch: Any, cadence_sec: float) -> None:
 
 
 def _duty_ended(latch: Any, duty: Dict[str, Any]) -> None:
-    """Close THIS pass's duty. The pass released its latch before this runs, so the next pass
-    may already have registered its own entry: that one is put back, never dropped (it holds
-    the latch, so nothing registers again meanwhile)."""
+    """Close THIS pass's duty (the display projections' pass queued its closing row itself, still
+    holding its latch). The pass released its latch before this runs, so the next pass may already
+    have registered its own entry: that one is put back, never dropped (it holds the latch, so
+    nothing registers again meanwhile)."""
     current = _DUTIES.pop(id(latch), None)
     if current is not None and current is not duty:
         _DUTIES.setdefault(id(latch), current)
@@ -432,8 +433,9 @@ def _periodic_supervisor_maintenance(
 
 def dispatch_display_projections(ctx: Any = None) -> None:
     """Start the display-projection pass when it has work (``display_projections.dispatch``): its snapshot
-    is taken on the calling thread, the loop's, at each tick's end (the exit's last pass: ``drain``)."""
-    display_projections.dispatch(ctx, _start_maintenance_thread, _duty_busy)
+    is taken on the calling thread, the loop's, at each tick's end (the exit's last pass: ``drain``); the
+    pass finds its watchdog entry here to queue its own closing row before it releases its latch."""
+    display_projections.dispatch(ctx, _start_maintenance_thread, _duty_busy, lambda latch: _DUTIES.get(id(latch)))
 
 
 def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> None:

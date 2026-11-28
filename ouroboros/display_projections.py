@@ -12,7 +12,8 @@ stalled ``os.replace`` of ``state.json`` (134 s) or ``os.stat`` of ``usage.sqlit
 intake on 27.11.2026:
 
 * the queued diagnostics, oldest first: an overrun's warning line and ``host_duty_stall`` row, then its
-  ``host_duty_stall_end`` (``journal_duty_stall_end``), each episode once and in order;
+  ``host_duty_stall_end`` (``journal_duty_stall_end``; this duty queues its own while it holds its latch),
+  each episode once and in order;
 * each due root's cost figure (``LiveRootCosts.read``), published while its carrier still stands and no
   mark made since its take supersedes it;
 * the compatibility budget write (``supervisor.state.update_budget_from_usage``: the ledger read before
@@ -117,11 +118,13 @@ def _take_budget_mark(ctx: Any) -> Optional[Callable[[], None]]:
     return write
 
 
-def dispatch(ctx: Any, start: Callable[..., bool], busy: Callable[[Any, float], None]) -> None:
+def dispatch(ctx: Any, start: Callable[..., bool], busy: Callable[[Any, float], None],
+             duty_of: Optional[Callable[[Any], Optional[Dict[str, Any]]]] = None) -> None:
     """The tick's look, on the loop (``server_maintenance``): a pass still running is the watchdog's
     (``busy`` journals it once past the projection's retry bound); otherwise, when anything is due, one
-    pass starts with the snapshot taken here. A start that fails has released the latch; its work is due
-    again. A look that raises frees the latch for the next tick's; after the last pass nothing starts."""
+    pass starts with the snapshot taken here (``duty_of``: its watchdog entry, which it closes itself).
+    A start that fails has released the latch; its work is due again. A look that raises frees the latch
+    for the next tick's; after the last pass nothing starts."""
     if not LATCH.acquire(blocking=False):
         busy(LATCH, BUDGET_PROJECTION_RETRY_SEC)
         return
@@ -132,15 +135,18 @@ def dispatch(ctx: Any, start: Callable[..., bool], busy: Callable[[Any, float], 
         work = None
     if work is None:
         LATCH.release()
-    elif not start(LATCH, DUTY_NAME, project, (work, LATCH)):
+    elif not start(LATCH, DUTY_NAME, project, (work, LATCH, duty_of)):
         LIVE_ROOT_COSTS.restore(work.roots)
         if work.budget is not None:
             ctx.budget_projection_dirty = True
 
 
-def project(work: Optional[ProjectionWork], latch: Any = None) -> None:
+def project(work: Optional[ProjectionWork], latch: Any = None,
+            duty_of: Optional[Callable[[Any], Optional[Dict[str, Any]]]] = None) -> None:
     """ONE pass, off the loop: the queued rows, the due root figures, the budget write, then the after-update
-    facts. A step that raises is logged and the next one still runs; the pass releases its latch last."""
+    facts. A step that raises is logged and the next one still runs. Last, still holding its latch, a watched
+    pass queues its own closing row (its watchdog entry, ``duty_of``), so the last pass, which reads the queued
+    rows under that latch (``drain``), finds it; then it releases the latch."""
     from ouroboros import update_generation_facts
 
     steps: List[Tuple[str, Callable[[], None]]] = [("journal rows", _write_rows)]
@@ -156,8 +162,12 @@ def project(work: Optional[ProjectionWork], latch: Any = None) -> None:
             except Exception:
                 log.warning("Display projection step failed: %s", name, exc_info=True)
     finally:
-        if latch is not None:
-            latch.release()
+        try:
+            if latch is not None and duty_of is not None and (duty := duty_of(latch)) is not None:
+                journal_duty_stall_end(duty)
+        finally:
+            if latch is not None:
+                latch.release()
 
 
 def journal_duty_stall(duty: Dict[str, Any], cadence_sec: float, stack: List[str], flags: Dict[str, Any]) -> None:
@@ -184,9 +194,11 @@ def journal_duty_stall(duty: Dict[str, Any], cadence_sec: float, stack: List[str
 
 
 def journal_duty_stall_end(duty: Dict[str, Any]) -> None:
-    """A pass ended (on its own thread, ``server_maintenance._duty_ended``): an alerted one's closing row is queued
-    behind its onset row."""
+    """A pass ended (on its own thread, ``server_maintenance._duty_ended``; this duty's own pass before it releases
+    its latch, ``project``): an alerted one's closing row is queued behind its onset row, once."""
     with _ROWS_LOCK:
+        if duty.get("ended"):
+            return
         duty["ended"] = True
         if duty["alerted"]:
             _ROWS.append((None, {"ts": utc_now_iso(), "type": "host_duty_stall_end", "duty": duty["name"],
@@ -220,8 +232,8 @@ def drain(deadline: Optional[float] = None) -> bool:
     """The process's end, once (``server_control.drain_display_projections``: the restart census before the store
     switch, else the exit or the direct re-exec); a later call and Panic wait for nothing. It closes the duty, so no
     pass starts after it, waits for a pass in flight, then runs the last pass: the bound context's due budget mark
-    (``bind``), the queued rows and newer after-update facts, again while rows arrive meanwhile (a pass's own end
-    row); root figures are heartbeat display and end with the process. Both waits share at most half of the stop
+    (``bind``), the queued rows and newer after-update facts, again while rows arrive meanwhile (another duty's
+    end row); root figures are heartbeat display and end with the process. Both waits share at most half of the stop
     grace left (``deadline``, the bound ``server_process.end_task_runs`` keeps; without a started grace no last pass
     runs). True when no pass is left running: one that is stays unjoined, its unwritten work the exit's loss."""
     from ouroboros import update_generation_facts
