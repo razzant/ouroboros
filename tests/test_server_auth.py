@@ -278,6 +278,91 @@ def test_a_held_settings_read_leaves_the_loop_serving_and_admits_its_request_whe
     assert loop_threads and loop_threads[0] not in reads, "every settings read ran off the ASGI loop"
 
 
+def _echo_socket_app(*routes):
+    """The gate around a socket that echoes, plus ``routes``; returns the app and the loop threads that served it."""
+    loop_threads: list[int] = []
+
+    async def echo(websocket):
+        await websocket.accept()
+        loop_threads.append(threading.get_ident())
+        with contextlib.suppress(WebSocketDisconnect):
+            while True:
+                await websocket.send_text(await websocket.receive_text())
+
+    return Starlette(routes=[*routes, WebSocketRoute("/ws", echo)]), loop_threads
+
+
+def _round_trip(socket):
+    socket.send_text("still here")
+    return socket.receive_text()
+
+
+def test_a_held_sign_in_page_read_leaves_the_loop_serving(monkeypatch):
+    """Every sign-in page the gate renders (the form, the form a refused page gets, the form after a wrong password)
+    reads theme.js and ui.css and names the appearance scope on the gate's reader: while such a read waits on the
+    disk an open socket keeps answering, and each page arrives whole once the read returns."""
+    from ouroboros import server_web, standalone_page
+    from ouroboros.server_web import ServedUI
+
+    monkeypatch.setenv(server_auth.NETWORK_PASSWORD_KEY, "secret")  # no settings read: only the page waits
+    entered, release = threading.Event(), threading.Event()
+    reads: list[int] = []
+    inline, scope_of = standalone_page._inline, server_web.appearance_scope
+
+    def held_inline(path, tag):
+        reads.append(threading.get_ident())
+        if path.name == "theme.js":
+            entered.set()
+            assert release.wait(10), "the test never released the held read"
+        return inline(path, tag)
+
+    monkeypatch.setattr(standalone_page, "_inline", held_inline)
+    monkeypatch.setattr(server_web, "appearance_scope",
+                        lambda root: reads.append(threading.get_ident()) or scope_of(root))
+    app, loop_threads = _echo_socket_app()
+    pages = (("get", "/auth/login?next=/", {}, 200), ("get", "/api/secret", {"headers": {"accept": "text/html"}}, 401),
+             ("post", "/auth/login", {"data": {"password": "wrong", "next": "/"}}, 401))
+    with TestClient(server_auth.NetworkAuthGate(app, served_ui=ServedUI(pathlib.Path(__file__).resolve().parents[1]))) \
+            as client, client.websocket_connect("/ws", headers={"x-ouroboros-password": "secret"}) as socket, \
+            ThreadPoolExecutor(max_workers=2) as pool:
+        for method, path, kwargs, status in pages:
+            entered.clear()
+            release.clear()
+            held = pool.submit(getattr(client, method), path, **kwargs)
+            try:
+                assert entered.wait(5), f"{path} never reached its asset read"
+                assert pool.submit(_round_trip, socket).result(timeout=5) == "still here", "the loop waited"
+                assert not held.done()
+            finally:
+                release.set()
+            response = held.result(timeout=10)
+            assert response.status_code == status and "Enter the network password" in response.text, path
+    assert loop_threads and reads and loop_threads[0] not in reads, "every page read ran off the ASGI loop"
+
+
+def test_a_selected_interfaces_sign_in_page_is_read_off_the_loop(monkeypatch, tmp_path):
+    from ouroboros.server_web import ServedUI
+
+    selected = tmp_path / "selected"
+    (selected / "auth").mkdir(parents=True)
+    (selected / "index.html").write_text("<!doctype html><title>selected</title>", encoding="utf-8")
+    (selected / "auth" / "index.html").write_text("<!doctype html><title>SELECTED-SIGN-IN</title>", encoding="utf-8")
+    threads: list[str] = []
+    read = ServedUI.custom_page
+    monkeypatch.setattr(ServedUI, "custom_page",
+                        lambda self, page: threads.append(threading.current_thread().name) or read(self, page))
+    served = ServedUI(pathlib.Path(__file__).resolve().parents[1])
+    app = Starlette(routes=[Route("/", endpoint=_ok)])
+    monkeypatch.setattr("ouroboros.server_process.record_applied_restart_settings", lambda settings: None)
+    assert served.apply(app, {"OUROBOROS_UI_DIR": str(selected)}).source == "directory"
+    monkeypatch.setattr(server_auth, "get_configured_network_password", lambda: "secret")
+    with TestClient(server_auth.NetworkAuthGate(app, served_ui=served)) as client:
+        assert "SELECTED-SIGN-IN" in client.get("/auth/login").text
+        refused = client.get("/", headers={"accept": "text/html"}, follow_redirects=False)
+        assert refused.status_code == 303 and refused.headers["location"] == "/auth/login?next=%2F"
+    assert threads == ["auth-gate-reader", "auth-gate-reader"], threads
+
+
 def test_a_password_in_the_environment_takes_no_settings_read_and_no_reader(monkeypatch):
     monkeypatch.setenv(server_auth.NETWORK_PASSWORD_KEY, " env-secret ")
     monkeypatch.setattr(server_auth, "load_settings", lambda: pytest.fail("the environment's password read settings"))

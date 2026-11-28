@@ -1,9 +1,11 @@
 """Minimal auth gate for non-localhost browser/server access.
 
 The gate runs on the ASGI loop for every HTTP and WebSocket scope, so nothing it does there waits for the disk: a
-password in the environment needs no read at all, a settings read and the first read or creation of the session
-key run on the gate's own reader thread (``_SettingsReader``), and each scope's fresh resolution takes effect in
-order (``NetworkAuthGate._resolve``). While such a read waits, open sockets, heartbeats and Panic go on.
+password in the environment needs no read at all, a settings read, the first read or creation of the session key
+and the rendering of a sign-in page (a selected interface's own page, or the builtin form with its inlined assets
+and the installation's appearance scope) run on the gate's own reader thread (``_SettingsReader``), and each
+scope's fresh resolution takes effect in order (``NetworkAuthGate._resolve``). While such a read waits, open
+sockets, heartbeats and Panic go on.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import functools
 import hashlib
 import hmac
 import html
@@ -62,9 +65,10 @@ def get_configured_network_password() -> str:
 
 
 class _SettingsReader:
-    """The gate's own reader thread: the settings document and the session key are read (or the key created) here,
-    one at a time in the order asked, never on the ASGI loop and never behind the loop's shared handler pool. One
-    daemon thread per process, started by the first read: an interpreter exit never waits for it."""
+    """The gate's own reader thread: the settings document and the session key are read (or the key created) and the
+    sign-in pages rendered here, one at a time in the order asked, never on the ASGI loop and never behind the loop's
+    shared handler pool. One daemon thread per process, started by the first read: an interpreter exit never waits
+    for it."""
 
     def __init__(self) -> None:
         self._jobs: queue.SimpleQueue = queue.SimpleQueue()
@@ -374,11 +378,6 @@ def _builtin_web_dir(served_ui: ServedUI | None) -> pathlib.Path:
     return resolve_web_dir(pathlib.Path(__file__).resolve().parents[1])
 
 
-def _appearance_meta(served_ui: ServedUI | None, request: Request) -> str:
-    """The form names the installation's appearance scope as the interface's own pages do."""
-    return served_ui.appearance_meta(request.headers) if served_ui is not None else ""
-
-
 # Every sign-out (GET or POST /auth/logout) and every ended or refused session reaches the builtin form before the
 # interface can run again: it takes this browser's saved conversation text, every key of web/modules/chat_preview.js
 # PREVIEW_FAMILY (its record PREVIEW_KEY first, as that module's own eraser does), and nothing else the browser keeps.
@@ -408,18 +407,26 @@ def _login_page(next_url: str, error: str = "", web_dir: pathlib.Path | None = N
     return themed_page(web_dir or _builtin_web_dir(None), "Ouroboros Login", form, _LOGIN_CSS, head)
 
 
+def _sign_in_page(served_ui: ServedUI | None, headers, next_url: str, error: str = "", *,
+                  selected: bool = True) -> tuple[str | None, str]:
+    """On the gate's reader (``_off_loop``): the selected interface's own sign-in page when ``selected`` asks for it
+    and one exists, else ``(None, form)``: the builtin form wearing the installation's appearance scope, which it
+    names as the interface's own pages do. Every file and identity read for the page happens here."""
+    page = served_ui.custom_page("auth/index.html") if selected and served_ui is not None else None
+    if page is not None:
+        return page, ""
+    head = served_ui.appearance_meta(headers) if served_ui is not None else ""
+    return None, _login_page(next_url, error, _builtin_web_dir(served_ui), head)
+
+
 async def _handle_login(scope: Scope, receive: Receive, send: Send, password: str,
                         served_ui: ServedUI | None = None) -> None:
     request = Request(scope, receive)
-    web_dir = _builtin_web_dir(served_ui)
-    head = _appearance_meta(served_ui, request)
     if request.method == "GET":
-        page = (served_ui.custom_page("auth/index.html")
-                if served_ui is not None and request.query_params.get("builtin") != "1" else None)
-        response = HTMLResponse(page if page is not None else _login_page(request.query_params.get("next", "/"),
-                                                                          web_dir=web_dir, head=head),
-                                headers=_NO_STORE)
-        await response(scope, receive, send)
+        page, form = await _off_loop(functools.partial(
+            _sign_in_page, served_ui, request.headers, request.query_params.get("next", "/"),
+            selected=request.query_params.get("builtin") != "1"))
+        await HTMLResponse(page if page is not None else form, headers=_NO_STORE)(scope, receive, send)
         return
     if request.method != "POST":
         response = JSONResponse({"error": "Method not allowed."}, status_code=405)
@@ -443,8 +450,9 @@ async def _handle_login(scope: Scope, receive: Receive, send: Send, password: st
         if is_json:
             response = JSONResponse({"error": "Invalid password."}, status_code=401)
         else:
-            response = HTMLResponse(_login_page(next_url, "Invalid password.", web_dir, head), status_code=401,
-                                    headers=_NO_STORE)
+            _page, form = await _off_loop(functools.partial(_sign_in_page, served_ui, request.headers, next_url,
+                                                             "Invalid password.", selected=False))
+            response = HTMLResponse(form, status_code=401, headers=_NO_STORE)
         await response(scope, receive, send)
         return
 
@@ -670,17 +678,16 @@ class NetworkAuthGate:
             return
 
         if _request_wants_html(scope):
-            builtin_setup = path == "/onboarding" and Request(scope).query_params.get("builtin") == "1"
-            custom = (self.served_ui.custom_page("auth/index.html")
-                      if self.served_ui is not None and not builtin_setup else None)
+            request = Request(scope)
+            builtin_setup = path == "/onboarding" and request.query_params.get("builtin") == "1"
             next_url = _sanitize_next_url(_build_next_url(scope))
+            custom, form = await _off_loop(functools.partial(_sign_in_page, self.served_ui, request.headers,
+                                                              next_url, selected=not builtin_setup))
             if custom is not None:
                 response = RedirectResponse("/auth/login?" + urlencode({"next": next_url}), status_code=303,
                                             headers=_NO_STORE)
             else:
-                response = HTMLResponse(_login_page(next_url, web_dir=_builtin_web_dir(self.served_ui),
-                                                    head=_appearance_meta(self.served_ui, Request(scope))),
-                                        status_code=401, headers=_NO_STORE)
+                response = HTMLResponse(form, status_code=401, headers=_NO_STORE)
         else:
             response = JSONResponse({"error": "Authentication required."}, status_code=401)
         await response(scope, receive, send)
