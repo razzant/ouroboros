@@ -26,19 +26,22 @@ _LOCK = threading.Lock()
 
 
 def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reason: str, *,
-                  fence: dict | None = None, cause: str | None = None) -> dict:
+                  fence: dict | None = None, cause: str | None = None, facts: Any = None) -> dict:
     """Called inside the result writer, only for a newly confirmed pause episode.
 
     ``fence`` is the owner Pause this episode confirms: the author it declared
     (``control_actor.pause_author``) is kept with the notice, so a later Pause
     of the same task never rewords it. So are the damaged records its census
     settled without (``membership_gaps``): the owner reads them in this row.
+    ``facts`` are a window park's own numbers (``cold_return``), kept the same way.
     """
     from ouroboros.control_actor import pause_author
 
     if not episode_id or reason not in {"budget", "owner", "authority"}:
         return {}
-    technical = reason == "authority"
+    from ouroboros.cold_return import CAUSE as WINDOW_PARK  # each such park waits for the owner: one notice per episode
+
+    technical = reason == "authority" and cause != WINDOW_PARK
     pending = dict(current.get("pause_notices") or {})
     if technical:
         if current.get("authority_notice_registered"):
@@ -49,7 +52,8 @@ def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reaso
     by = {"by": pause_author(fence)} if fence is not None else {}
     gaps = (fence or {}).get("membership_gaps")
     gaps = {"membership_gaps": dict(gaps)} if isinstance(gaps, dict) and gaps.get("count") else {}
-    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by, **gaps, **({"cause": cause} if cause else {})})
+    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by, **gaps, **({"cause": cause} if cause else {}),
+                                  **({"facts": dict(facts)} if isinstance(facts, dict) else {})})
     return {"pause_notices": pending, **({"authority_notice_registered": True} if technical else {})}
 
 
@@ -94,7 +98,15 @@ def authority_subject(cause: str) -> str:
     }.get(str(cause or "").partition(":")[0], "")
 
 
-def authority_wait_text(cause: str) -> str:
+def authority_wait_text(cause: str, *, stop: dict | None = None) -> str:
+    """A technical pause's own line: what it waits for, or, for a park only Resume returns, the owner's step."""
+    from ouroboros import cold_return
+    from ouroboros.budget_pause import STATE_PAUSED
+
+    if stop and stop.get("rail") == cold_return.RAIL_CONTEXT_WINDOW and stop.get("state") == STATE_PAUSED:
+        return cold_return.park_wait_text(stop.get(cold_return.FACTS_KEY))
+    if str(cause or "") == cold_return.CAUSE:
+        return cold_return.WAIT_TEXT
     subject = authority_subject(cause)
     return f"The task will continue automatically when it can read {subject}." if subject else ""
 
@@ -148,7 +160,8 @@ def cap_exhausted_error(money: dict, axis: str | None = None) -> str:
 
 def notice_text(notice: dict) -> str:
     """The sentence one owed notice says; an owner Pause names the author its own fence declared, and the words that
-    press recorded follow its head verbatim, whoever declared it (a press without words says none)."""
+    press recorded follow its head verbatim, whoever declared it (a press without words says none). A window park's
+    names the numbers its own episode recorded."""
     if notice.get("reason") == "delegated_start_risk":
         from ouroboros.delegate_resume import risk_words
         return risk_words(notice["decision"])
@@ -162,6 +175,10 @@ def notice_text(notice: dict) -> str:
             head = f"{actor} paused this task." if actor else "This task was paused."
         return f"{head} {_RETAINED}{gap_words(notice.get('membership_gaps'))}"
     authority = notice.get("reason") == "authority"
+    from ouroboros import cold_return
+
+    if authority and notice.get("cause") == cold_return.CAUSE:
+        return cold_return.park_notice(notice.get("facts"))
     if authority and (words := authority_wait_text(notice.get("cause"))):
         return f"{words} Its work is saved."
     if authority:

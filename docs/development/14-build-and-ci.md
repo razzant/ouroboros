@@ -34,9 +34,9 @@ Start real processes only for process-boundary claims (signals, exit/teardown or
 
 ### The local battery entry point
 
-Context PR checks: `python scripts/context_gate.py`.
+`scripts/context_gate.py`; `nano_reference_capacity.py`: pinned Qwen/Gemma, joint index/work/reply fit. Qwen SYSTEM/BIBLE/maps cap: 17,972 + 5%.
 
-`python scripts/run_tests.py` (`make test`) runs Node and default Python lanes (forwarding pytest args); `--selected [--base REF]` (default `HEAD`) runs commit-selected passes, printing tier/rule/module count via inventory plugin (`preflight_inventory.launch_args` avoids Windows' 32,767-char argv cap); `--extra-test PATH`/`--full-tests` widen with `--test-reason`. Missing Node fails `NOT_RUN`, never green. Workers come from `test_parallelism.SlotLease` (floor 1, waiting only on critical kernel memory pressure; ledger/counting: `ouroboros/test_parallelism.py` docstring). The runner first warms the bytecode prefix (`ouroboros/test_bytecode.py`) that later processes only read.
+`python scripts/run_tests.py` (`make test`): Node and Python, forwards pytest args. `--selected [--base REF]` (default `HEAD`) prints the selection and runs commit passes; `preflight_inventory.launch_args` avoids Windows' argv cap. Widen via `--extra-test PATH`/`--full-tests` with `--test-reason`. No Node: `NOT_RUN`. Worker slots: `test_parallelism.SlotLease` (floor 1; wait only under critical memory pressure). `test_bytecode.py` prewarms the read-only worker prefix.
 
 `--evidence-dir DIR` sets per-pass `--ci-evidence-dir` and keeps prior exports/journals (`selection.json` + inventory JSONL for `--selected`); never set via `PYTEST_ADDOPTS` (nested pytest could overwrite).
 

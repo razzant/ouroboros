@@ -75,8 +75,8 @@ OWED_SET = "late_review_marks"  # owner-held rows: id -> {record | left_review, 
 
 class LateReviewMark(NamedTuple):
     """``saved``, ``unchanged``, ``not_activated`` (the owning room is not proven), ``memory_not_activated``,
-    ``conflict``, ``invalid``, ``owed`` (kept for after its author ended) or ``failed`` (an I/O or lock
-    failure: the publication stays owed)."""
+    ``conflict``, ``invalid``, ``owed`` (kept for after its author ended), ``capacity_held`` (the source is kept
+    but not resident), or ``failed`` (an I/O or lock failure: the publication stays owed)."""
     status: str
     mark_id: str = ""
     room_id: str = ""
@@ -145,11 +145,14 @@ def _text(facts: Mapping[str, Any]) -> str:
     return truncate_within_limit("\n".join(head + body), TEXT_LIMIT)
 
 
-def _mark(mark_id: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
+def _source_with_task(facts: Mapping[str, Any]) -> Dict[str, Any]:
     ref = facts["source_ref"]
-    target = {**ref, "task_id": str(ref.get("task_id") or facts["task_id"])}  # readable from any focus
+    return {**ref, "task_id": str(ref.get("task_id") or facts["task_id"])}  # readable from any focus
+
+
+def _mark(mark_id: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
     outcome = facts.get("outcome")
-    return {"id": mark_id, "kind": "mark", "room_id": room, "target_ref": target, "text": _text(facts),
+    return {"id": mark_id, "kind": "mark", "room_id": room, "target_ref": _source_with_task(facts), "text": _text(facts),
             "author": {"kind": "host", "operation": LATE_REVIEW_OPERATION, "surface": facts["surface"],
                        "task_id": facts["task_id"]},
             "scope": "room", "quote": None, "visibility": "full",
@@ -337,8 +340,33 @@ def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateRevie
     if outcome.status not in {"saved", "unchanged"}:
         log.warning("late review %s of task %s kept no mark in view: %s (%s)", facts["publication_id"],
                     facts["task_id"], outcome.status, outcome.detail)
-    _owed(drive_root, mark_id, {"record": facts} if outcome.status == "failed" else None)
+    owed = {"record": facts} if outcome.status in {"failed", "capacity_held"} else None
+    if outcome.status == "capacity_held":
+        owed["capacity_held"] = {"room_id": outcome.room_id, "reason": outcome.detail}
+    if not _owed(drive_root, mark_id, owed) and outcome.status == "capacity_held":
+        return outcome._replace(status="failed", detail=f"{outcome.detail}; pending placement was not recorded")
     return outcome
+
+
+def capacity_held_listing(drive_root: Any) -> list[str]:
+    """Read the existing late-review duties on demand, not into resident memory."""
+    from ouroboros import store
+
+    try:
+        with store.open_store(drive_root, write=False) as txn:
+            rows = txn.set_rows(OWED_SET)
+    except (OSError, ValueError, TimeoutError, sqlite3.Error):
+        return ["Pending late-review placements could not be read."]
+    lines = []
+    for _, row in sorted(rows.items()):
+        hold, facts = row.get("capacity_held"), row.get("record")
+        if not isinstance(hold, dict) or not isinstance(facts, dict):
+            continue
+        read = facts.get("source_read") or {"tool": "memory_read", "arguments": {"source_ref": _source_with_task(facts)}}
+        call = ", ".join(f"{key}={value!r}" for key, value in read.get("arguments", {}).items())
+        lines.append(f"- Room {hold['room_id']}, task {facts['task_id']}: {outcome_words(facts.get('outcome'))}. "
+                     f"Not active in memory: {hold['reason']}. Full source: {read['tool']}({call})")
+    return lines
 
 
 # The objective keys ``outcomes._objective_axis`` derives from the review axis; any other key on the objective (its
@@ -640,7 +668,7 @@ def _settle_owed(drive_root: Any, duty_id: str, row: Mapping[str, Any]) -> str:
     except Exception:
         log.warning("owed late review %s could not be settled; it stays owed", duty_id, exc_info=True)
         return "failed"
-    if status == "waiting":
+    if status in {"waiting", "capacity_held"}:
         return "waiting"
     if status == "failed":
         return "failed"
@@ -685,6 +713,8 @@ def ended_task_row(drive_root: Any, task_id: str, *, strict: bool = False) -> Op
 
 
 def _publish(root: pathlib.Path, mark_id: str, facts: Mapping[str, Any]) -> LateReviewMark:
+    from ouroboros.nano_publication import NanoPublicationRefused
+
     try:
         room = facts["room_id"] if "room_id" in facts else owning_room(root, facts["task_id"], facts.get("chat_id"))
     except (OSError, ValueError, sqlite3.Error) as exc:  # an unreadable binding or Project registry
@@ -701,6 +731,8 @@ def _publish(root: pathlib.Path, mark_id: str, facts: Mapping[str, Any]) -> Late
             return LateReviewMark("failed" if kind == "import_pending" else "memory_not_activated", mark_id, room,
                                   f"{kind}: {(receipt or {}).get('reason') or 'no activation receipt'}")
         result = store.publish([_mark(mark_id, room, facts)])
+    except NanoPublicationRefused as exc:
+        return LateReviewMark("capacity_held", mark_id, room, f"{exc.reason}: {exc.detail}")
     except (OSError, TimeoutError, sqlite3.Error) as exc:
         return LateReviewMark("failed", mark_id, room, f"{type(exc).__name__}: {exc}")
     except ValueError as exc:  # the store's own refusal to open its journal

@@ -842,53 +842,10 @@ class StateResponse(WorkStateFields):
     served_ui: NotRequired[ServedUiState]  # this generation's main interface; absent on older cores
 
 
-from ouroboros.gateway.client_contracts import SettingsReceipt, SettingsTiming, SettingsRestartState
-
-
-class SettingsNetworkMeta(TypedDict):
-    bind_host: str
-    bind_port: int
-    lan_ip: str
-    reachability: Literal["loopback_only", "lan_reachable", "host_ip_unknown"]
-    recommended_url: str
-    warning: str
-
-
-class AvailableSubagentsSettingsMeta(TypedDict, total=False):
-    """Saved/migrated intent returned beside ``GET /api/settings``.
-
-    ``candidate`` is an unsaved canonical object.  Absence stays ``None``; a
-    read never materializes the value on disk.  ``automatic``: the catalog is
-    the read's own, following Main and access until an edit saves one.
-    """
-
-    source: str
-    diagnostic: str
-    diagnostics: list[Dict[str, Any]]
-    candidate: Optional[Dict[str, Any]]
-    automatic: bool
-
-
-class SettingsPolicyAxis(TypedDict, total=False):
-    """Configured/effective owner policy values shown by Settings."""
-
-    configured: str
-    effective: str
-    restart_required: bool
-    pending: bool
-    applies: Literal["restart", "next_task"]
-
-
-class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):  # `_meta` of `GET /api/settings`.
-    custom_secret_keys: list[str]
-    setup_contract: Dict[str, Any]
-    available_subagents: AvailableSubagentsSettingsMeta
-    policy_state: SettingsPolicyState
-    restart_state: SettingsRestartState  # Component application and source uncertainty.
-    connections: list[Dict[str, Any]]  # every API connection as the picker shows it, with its opaque ``revision`` (owner_settings): {kind, name, label, builtin, enabled, configured, source, id, display, revision?}
-    main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
-    known_spend_gaps: list[str]  # display labels of groups with unknown prices (pricing.spend_coverage), e.g. model roles, Web search or Agents
-    partly_counted_spend: list[Dict[str, str]]  # {name, condition}: counted only under a price condition (the same), e.g. off_peak_usd or usd
+from ouroboros.gateway.client_contracts import (  # noqa: F401 -- public re-exports
+    AvailableSubagentsSettingsMeta, NanoPublicationSettingsMeta, SettingsMeta, SettingsNetworkMeta,
+    SettingsPolicyAxis, SettingsReceipt, SettingsRestartState, SettingsTiming,
+)
 
 
 class SettingsSaveResponse(SettingsReceipt, total=False):  # `POST /api/settings` success; `restart_keys` apply only after a restart.
@@ -1189,6 +1146,9 @@ class TaskDetailResponse(TypedDict, total=False):
     owner_hurry: OwnerHurryProjection  # Current typed hurry projection, absent unless the task was hurried; task detail only, never chat.
     owner_hurry_history: list[OwnerHurryProjection]  # Prior attempts’ typed hurry records, archived separately from the current block.
     project_admission_hold: Dict[str, Any]  # while the queue snapshot lists a non-final row: {reason, detail, label} or {}; its wait for original Project/scope evidence
+    # The same row's current stop ({} when none). Saved work that does not fit the model's window adds ``window``: {pause_id,
+    # pause_generation, input_tokens, window_tokens, reply_floor_tokens, over_tokens, overview?} (TaskResumeRequest.context_choice).
+    current_stop: Dict[str, Any]
     # Every adoption this task authorized, as boot settled them: {adoption_id, outcome, commit_sha, previous_sha, branch,
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]  # The bounded commits range is previous..candidate; commits_omitted counts the cut remainder.

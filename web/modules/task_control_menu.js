@@ -12,7 +12,9 @@
 // work_status.js lays them on this menu); endpoints, stop policy, request-id
 // retry and verbatim refusals are shared.
 
-import { cancelTask, closeExpiredTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
+import {
+    cancelTask, closeExpiredTask, fetchTaskDetailStrict, heldOnWindow, hurryTask, pauseTask, resumeTask,
+} from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { haptic } from './haptics.js';
 import { formatUsd } from './storage_format.js';
@@ -391,6 +393,91 @@ async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
         : KEPT_PAUSED;
 }
 
+// A work held because its saved work does not fit the model's window (`current_stop.window`; CLIENT_CONTRACT
+// "Resume"). Its Resume first asks which of that hold's own steps the owner takes; each is one request to the same
+// door, naming the hold it was shown for. Taking the current overview is two presses on purpose: the work tries once
+// more as it is, and only a new refusal saves it holding that overview, where it waits for the next Resume.
+// A press on such a card sends only what its dialog showed and the owner confirmed. A hold that cannot be read, one
+// the task's own read no longer shows, and a step that hold does not offer send nothing and say so: the press never
+// becomes a plain Resume the owner was not asked about. The reconciling read then repaints the card, and the next
+// press is made on what it shows.
+export const WINDOW_HOLD_STEPS = Object.freeze({
+    again: 'Try again as it is', overview: 'Use the current overview', end: 'End this attempt' });
+const WINDOW_HOLD_RECHECK = 'The task first retries with the earlier overview. If that still does not fit and the '
+    + 'chosen revision is still current and fits, the task saves it and waits for another Resume.';
+const WINDOW_HOLD_ACCEPTED = Object.freeze({
+    overview: WINDOW_HOLD_RECHECK,
+    end: 'End requested. If Continue is available after the attempt ends, it starts a new attempt from the record.',
+});
+const UNREAD = Symbol('window hold unread');
+const GONE = Symbol('window hold gone');
+const UNOFFERED = Symbol('window hold step not offered');
+const WINDOW_HOLD_UNSENT = new Map([
+    [UNREAD, ['This task\'s hold could not be read, so nothing was sent. Press Resume again.', 'error']],
+    [GONE, ['The window hold was not found. Nothing was sent. Refresh the task card for its current status.', 'info']],
+    [UNOFFERED, ['This hold does not offer that step, so nothing was sent. Press Resume to choose again.', 'error']],
+]);
+const tokens = (count) => Number(count).toLocaleString('en-US');
+
+/** Last measured fit and the next available steps. Once the chosen overview is in place, lead with the fit
+ *  of that request, not the earlier attempt's refusal. */
+export function windowHoldWords(shown) {
+    const offer = shown?.overview && typeof shown.overview === 'object' ? shown.overview : null;
+    const taken = offer?.taken === true;
+    const floor = shown?.reply_floor_tokens;
+    const counted = [shown?.input_tokens, shown?.window_tokens, shown?.over_tokens, floor].every(Number.isFinite);
+    const earlier = taken ? ' with the earlier overview' : '';
+    const refused = counted
+        ? `At the last check, the request${earlier} needed ${tokens(shown.input_tokens + floor)} tokens with room for a reply: `
+            + `${tokens(shown.over_tokens)} more than the ${tokens(shown.window_tokens)}-token window.`
+        : `The request${earlier} did not fit the model's window at the last check.`;
+    const size = Number.isFinite(offer?.input_tokens) && Number.isFinite(floor)
+        ? `: ${tokens(offer.input_tokens + floor)} tokens with room for a reply` : '';
+    const fits = `At the last check, the request fit with the ${taken ? 'chosen' : 'current'} overview${size}.`;
+    const ending = 'Ending this attempt gives up its saved state. If Continue is available, it starts a new attempt from the record.';
+    if (taken) return [fits, refused, ending].join('\n\n');
+    const next = offer ? `${fits} The earlier overview is still in use. ${WINDOW_HOLD_RECHECK}`
+        : 'Make room in always-loaded memory or raise the window, then try again.';
+    return [refused, next, ending].join('\n\n');
+}
+
+/** The step the owner takes for a window hold, read strictly from the task itself: the `context_choice` with its
+ *  `step` (including Try again), `KEPT_PAUSED` when the
+ *  owner left the dialog, `UNREAD` when the read failed or its answer could not tell (an unreadable queue, an
+ *  unknown or stale stop), `GONE` when the read shows no such hold (not proof it ended), or `UNOFFERED` when the confirmed value
+ *  is not one of the steps this dialog offered. Nothing but a confirmed step of the dialog yields a request: what
+ *  the owner did not see is never chosen for them. */
+async function windowHoldStep(id, { readTask, askOwner }) {
+    let detail = null;
+    try { detail = await readTask(id); } catch { return UNREAD; }
+    const stop = detail?.current_stop;
+    // An unreadable queue (`queue_reconciliation_warning`; the detail then carries no `current_stop`), an `unknown` or
+    // stale stop, or an unreadable root basis tells nothing about the hold: a reading to repeat, never a hold gone.
+    if (detail?.queue_reconciliation_warning || stop?.state === 'unknown' || stop?.queue_freshness === 'stale'
+        || stop?.resume_basis === 'unreadable') return UNREAD;
+    const shown = stop?.window;
+    if (!shown || typeof shown !== 'object' || typeof shown.pause_id !== 'string' || !shown.pause_id
+        || !Number.isInteger(shown.pause_generation)) return GONE;
+    if (typeof stop.identity !== 'string' || !stop.identity || stop.release === 'none') return UNREAD;
+    const taken = shown.overview?.taken === true;
+    const offer = shown.overview && typeof shown.overview === 'object' && !shown.overview.taken
+        && typeof shown.overview.current_revision === 'string' ? shown.overview : null;
+    const steps = ['again', ...(offer ? ['overview'] : []), 'end'];
+    const answer = await askOwner({
+        title: taken ? 'Your chosen overview is in place' : 'The last request did not fit the window',
+        body: windowHoldWords(shown), input: true,
+        choices: steps.map((value) => ({ value,
+            label: taken && value === 'again' ? 'Resume with the chosen overview' : WINDOW_HOLD_STEPS[value] })),
+        confirmLabel: 'Confirm',
+    });
+    if (!answer?.confirmed) return KEPT_PAUSED;
+    const hold = { pause_id: shown.pause_id, pause_generation: shown.pause_generation, stop_identity: stop.identity };
+    if (!steps.includes(answer.value)) return UNOFFERED;
+    if (answer.value === 'overview') return { step: 'overview', choice: { ...hold, overview_revision: offer.current_revision } };
+    return answer.value === 'end' ? { step: 'end', choice: { ...hold, end_attempt: true } }
+        : { step: 'again', choice: { ...hold, try_again: true } };
+}
+
 /** An accepted Resume in the words every Resume door says it with: a press's toast, a Panic selection's row. */
 export function resumeAcceptedWords(ack) {
     // An answered root's late work (D10) continues in place; its answer stays delivered. A Continue whose earlier
@@ -457,16 +544,22 @@ export async function holdResumes(taskIds, run, settle = null) {
  * (`readState`), and a closed socket retires it. A second press of the same task while pending sends nothing.
  */
 export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast, askOwner = openConfirmDialog,
-    settle = null } = {}) {
+    settle = null, held = heldOnWindow, readTask = fetchTaskDetailStrict } = {}) {
     const id = String(taskId || '').trim();
     if (!id || resumePending(id)) return;
     const release = holdControl(id);
     try {
-        const ack = await resume(id).catch((refusal) => resumeWithoutUnknown(id, refusal, { resume, askOwner }));
+        // A window hold's own step rides the same door, alone and naming its hold: a refusal of it is said as it is.
+        // `held` is the card's own fact: the accepted state its row was painted from says a window holds this work.
+        const chosen = held(id) ? await windowHoldStep(id, { readTask, askOwner }) : null;
+        if (chosen === KEPT_PAUSED) return;
+        if (WINDOW_HOLD_UNSENT.has(chosen)) { toast(...WINDOW_HOLD_UNSENT.get(chosen)); return; }
+        const ack = chosen ? await resume(id, { context_choice: chosen.choice })
+            : await resume(id).catch((refusal) => resumeWithoutUnknown(id, refusal, { resume, askOwner }));
         if (ack === KEPT_PAUSED) return;
         if (ack?.ok !== true) throw new Error('Resume acknowledgement is unknown; retry this action.');
         pauseRequestIds.delete(id);
-        toast(resumeAcceptedWords(ack), 'info');
+        toast(WINDOW_HOLD_ACCEPTED[chosen?.step] ?? resumeAcceptedWords(ack), 'info');
         announceMembershipGap(ack.membership_gaps, 'resume', toast);  // read from the Pause's current record
     } catch (exc) {
         // Handled here, never rethrown: the menu callback is fire-and-forget.

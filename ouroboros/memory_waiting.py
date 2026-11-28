@@ -154,3 +154,19 @@ def listing(kind, marks, notes, label=None, outcome=mark_outcome, landing=None):
     rows.sort(key=lambda row: (row["date"], row["id"]))
     return (f"{WAITING_CLASSES[kind]['subject']}: {len(rows)}",
             "\n".join(f"{row['id']}; room {row['room']}; {row['date']}; memory_read(node_id='{row['id']}')" for row in rows))
+
+
+def current_listing(root, store, kind):
+    """Read a requested waiting list; a held review is named outside the active count."""
+    from ouroboros.chronicle_store import capture
+    from ouroboros.late_review_marks import capacity_held_listing, mark_landing
+    from ouroboros.memory_view import _notes_by_room, room_labeler
+
+    reviews = kind == "late_reviews"
+    with capture(root, tail="none"):  # for a mark older than its outcome facts, read its review record now
+        head, body = listing(kind, store.active_marks(None) if reviews else (),
+                             {} if reviews else _notes_by_room(store), label=room_labeler(root) if reviews else None,
+                             outcome=lambda mark: mark_outcome(mark, root), landing=lambda mark: mark_landing(mark, root))
+    if reviews and (held := capacity_held_listing(root)):
+        body += "\n\nLate reviews retained but not active in memory:\n" + "\n".join(held)
+    return head, body

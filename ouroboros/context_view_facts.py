@@ -425,6 +425,10 @@ def remember_size_refusal(ctx, refused, *, measured):
     if basis == "exact_local_count":
         slot["local_window"] = int(refused.context_window_tokens)  # the serving instance's own, which refused it
         slot["reply_limit"] = int(getattr(refused, "max_completion_tokens", 0) or 0)
+        if own and getattr(refused, "refused_before_dispatch", False) and (
+                proof := getattr(refused, "nano_reply_floor", None)):
+            slot["nano_reply_floor"] = proof
+            slot["model"] = str(refused.model)
     elif measured and usage.get("_context_window"):
         slot["window"] = dict(usage["_context_window"])  # the projection this request was sized against
     if own and physical.required_book_tokens:  # that request's own book, never a later measure of its route

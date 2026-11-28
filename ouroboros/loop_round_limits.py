@@ -1424,7 +1424,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     return receipt
 
 
-def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, slack: int = 0, telling_floor: bool = False) -> bool:
+def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, slack: int = 0,
+                         telling_floor: bool = False, exact_local_pressure: bool = False) -> bool:
     """Narrow memory beside the actual transcript without inventing a smaller route window.
 
     The view saves the measured ``saving`` (else the capacity
@@ -1455,8 +1456,8 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
             reasoning_effort=str(getattr(ctx, "active_effort", "") or ""),
             refused_tokens=(int(saving) if saving or (saving == 0 and slack)
                             else max(1, int(measurement.capacity_deficit_tokens or 0))),
-            **({"slack_tokens": int(room)} if room else {}),
-            **({"telling_floor": True} if telling_floor else {}), unsent_start=unread,
+            slack_tokens=int(room), telling_floor=telling_floor,
+            unsent_start=unread, exact_local_pressure=exact_local_pressure,
         )
 
     def carried(view):  # what a request holds of memory: its system text and the program data row beside the transcript
@@ -1483,11 +1484,10 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     maps_retry = mode == "max" and selected_mode == "low"
     books_only = maps_retry and (
         (before.memory_facts.get("floor") or {}).get("runs") == (after.memory_facts.get("floor") or {}).get("runs"))
-    mode = selected_mode
-    ctx.active_context_mode = ctx.tools._ctx.active_context_mode = mode
+    ctx.active_context_mode = ctx.tools._ctx.active_context_mode = selected_mode
     ctx.context_fit_plan = rebound
     ctx.tools._ctx.context_fit_plan = rebound
-    ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
+    ctx.messages[:] = rebound.reproject_transcript(ctx.messages, selected_mode)
     if maps_retry and not books_only:
         sanction_rewrite(ctx.tools._ctx, "memory_coarsened", scope="system")
     if trial:
@@ -1496,11 +1496,11 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     ctx.tools._ctx.messages = ctx.messages
     from ouroboros.loop_model_call import _adopt_view_facts, _shown
 
-    _adopt_view_facts(ctx.tools._ctx, rebound, mode)  # the narrowed view's fact, read back as a memory shortage
+    _adopt_view_facts(ctx.tools._ctx, rebound, selected_mode)  # the narrowed view's fact, read back as a memory shortage
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "checkpoint_kind": "context_fit_low_retry" if books_only else "context_memory_coarsened", "round": ctx.round_idx,
         **({"preferred_mode": plan.preferred_mode, "owner_visible": True} if maps_retry else {}),
-        "route_fp": measurement.route_fp, **_shown(rebound, mode),
+        "route_fp": measurement.route_fp, **_shown(rebound, selected_mode),
         "window_tokens": rebound.window_tokens,
         "input_tokens_estimate": measurement.estimated_input_tokens,
     })

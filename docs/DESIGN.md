@@ -1663,7 +1663,14 @@ when earlier work settles. Running work offers no Resume there. If only recorded
 Resume asks the server to check; only its fresh offer asks for the owner's choice. A paused or saved
 Continue resumes into its wait if all earlier work is running or queued (owner 1.11,
 «Один Resume возвращает в существующее ожидание»); other unknowns refuse. A newer Pause,
-Stop, Panic or the owner's Restart replaces the wait. A
+Stop, Panic or the owner's Restart replaces the wait. A work parked by a window refusal
+keeps one Resume control. Its confirmation dialog shows the last check. `Try again as it is`
+(preselected, the plain Resume), `Use the current overview` if offered and not yet taken, and
+`End this attempt` name the steps. The task retries with the earlier overview first; only if
+it is refused again and the chosen revision is still current and fits does it save that revision and wait.
+The card and dialog then say the chosen overview is in place. `Resume with the chosen overview`
+is still plain Resume. `End this attempt` gives up the saved state; Continue, when available,
+starts from the record. Leaving the dialog sends nothing. No menu entry, capsule or card is added. A
 refused Resume stays as dated history beside the stop it answered about, never
 the reason, a control or the owner's turn: the line ends `Resume refused at
 17:49` (`Resume by Ouroboros refused…` for its own), the card's and row's

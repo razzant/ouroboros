@@ -436,6 +436,7 @@ def _update_scratchpad(ctx: ToolContext, content: str, replaces: list | None = N
             "⚠️ REJECTED: replaces is a list of block sha256 strings (shown after each block's heading).")))
     from ouroboros.memory import Memory, ScratchpadFoldFailed, ScratchpadProjectionStale, scratchpad_block_sha256
     from ouroboros.knowledge import focus_signature
+    from ouroboros.nano_publication import NanoPublicationRefused, admission_for
     from ouroboros.tool_access import canonical_data_root
 
     # One working memory, every room (P1): the scratchpad is the same file in
@@ -455,11 +456,18 @@ def _update_scratchpad(ctx: ToolContext, content: str, replaces: list | None = N
     draft = str(draft_source or "").strip()
     stale = ""
     try:
+        admission = admission_for(ctx, mem.drive_root)
         if replaces:
-            written = mem.fold_scratchpad_blocks(content, replaces, metadata=metadata, draft_source=draft)
+            written = mem.fold_scratchpad_blocks(content, replaces, metadata=metadata, draft_source=draft,
+                                                 nano_admission=admission)
         else:
             written = mem.append_scratchpad_block(content, source="task", metadata={
-                **metadata, **({"draft_source": draft} if draft else {})})
+                **metadata, **({"draft_source": draft} if draft else {})}, nano_admission=admission)
+    except NanoPublicationRefused as error:
+        source = getattr(error, "source_ref", None)
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
+            text=f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: No active scratchpad block changed.\n{error.tool_detail()}",
+            meta={"nano_proposal_source": source} if source else {}))
     except ScratchpadProjectionStale as error:
         written, stale = error.result, str(error)
     except ScratchpadFoldFailed as error:

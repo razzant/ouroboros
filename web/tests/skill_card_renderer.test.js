@@ -260,6 +260,14 @@ test('each rejected update states its cause and keeps the reviewed retry; only f
     }
 });
 
+test('an update restored for Nano capacity reports the window, not an unfinished review', () => {
+    const row = structuredClone(ROUND2.find(row => row.name === 'review_unfinished'));
+    row.install.update_rejected.reason = 'nano_publication_over_capacity';
+    const tray = traysOf(renderInstalledSkillCard(row));
+    assert.match(tray, /it didn&#39;t fit the Nano context window; the previous version runs\./);
+    assert.doesNotMatch(tray, /review didn|data-skill-action="read_findings"/);
+});
+
 test('conflicts lock an off switch with a visible reason but never trap an enabled skill', () => {
     const conflict = { code: 'skill_conflict', skills: ['beta'], omitted: 0 };
     const off = renderInstalledSkillCard(skill({ conflict }));

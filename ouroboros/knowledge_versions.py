@@ -440,13 +440,20 @@ def held_write(address: Any, history: Mapping[str, Any]) -> None:
         pass  # a file left behind is a copy the journal backs: a later write removes a proof, no write a body
 
 
-def inventory_claim_names(shelf: Path, rows: Iterator[dict[str, Any]]) -> Iterator[tuple[str, list[str]]]:
+def projected_claim_names(path: Path) -> list[str]:
+    return claim_names((utils.json_snapshot(path) or {}).get("active_claims"))
+
+
+def inventory_claim_names(shelf: Path, rows: Iterator[dict[str, Any]], *, proposed=None) -> Iterator[tuple[str, list[str]]]:
     """Intersect each inventory row with the record at its shelf address."""
     for row in rows:
         topic = row["topic"]
-        record = utils.json_snapshot(claim_record_path(shelf, topic)) or {}
         written = set(row["claims"])
-        yield topic, [name for name in claim_names(record.get("active_claims")) if name in written]
+        if proposed is not None and topic in proposed:
+            active = proposed[topic]
+        else:
+            active = projected_claim_names(claim_record_path(shelf, topic))
+        yield topic, [name for name in active if name in written]
 
 
 def _claim_publication(address: Any) -> dict | None:

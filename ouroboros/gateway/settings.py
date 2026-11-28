@@ -899,6 +899,18 @@ async def api_settings_get(request: Request) -> JSONResponse:
     }
     meta["connections"] = connection_revisions(connections_meta(settings, document), document)  # each with its revision
     meta["main_connection_choice"] = main_connection_choice(settings, document)  # Main waits for the owner's pick
+    if str(settings.get("OUROBOROS_CONTEXT_MODE", "")).strip().lower() == "nano":
+        # Display only: the reader owns scope and freshness; Settings never qualifies a sample.
+        try:
+            from ouroboros.nano_publication import read_root_sample
+
+            # Off the event loop: the reader stats the bound inputs and discovers the skill catalogue.
+            meta["nano_publication"] = await asyncio.to_thread(read_root_sample, request_drive_root(request),
+                                                               provider=_active_main_route(settings)["provider"])
+        except Exception:
+            log.warning("Could not read the Nano facts for Settings", exc_info=True)
+            meta["nano_publication"] = {"status": "not_claimed", "reason": "settings_read_failed",
+                                        "measurement": "unavailable", "current_sample": "unavailable", "pressure": None}
     try:  # what the limits cannot count, said under them on Dashboard › Costs
         from ouroboros.pricing import spend_coverage
         # No valid catalog is no helper: the runtime refuses an invalid one whole.
@@ -1029,8 +1041,15 @@ def _api_settings_post_sync(request: Request, body: Any) -> JSONResponse:
     # that, so the whole body holds the seam-wide document lock — the
     # single-decision endpoints hold the same lock, and the loop itself stays
     # free to serve everything else.
+    from ouroboros.nano_host_publication import settings_body_rules_ticket
+    from ouroboros.nano_publication import NanoPublicationRefused
+
+    try:  # a Cyber save that authors the owner's rules counts them before the document lock, as their endpoint does
+        nano_ticket = settings_body_rules_ticket(body)
+    except NanoPublicationRefused as exc:
+        return settings_write_refusal(exc)
     with settings_document_mutation():
-        return _api_settings_post_locked(request, body)
+        return _api_settings_post_locked(request, body, nano_ticket=nano_ticket)
 
 
 _NETWORK_FIELDS = ("OUROBOROS_SERVER_HOST", "OUROBOROS_NETWORK_PASSWORD")
@@ -1127,7 +1146,7 @@ def _network_exposure_warning(current: Dict[str, Any]) -> str:
     return ""
 
 
-def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True) -> JSONResponse:
+def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True, nano_ticket=None) -> JSONResponse:
     """Merge a patch; the boundary separates its durable commit from subsequent projection."""
     boundary = CommitBoundary()
     original_body = body
@@ -1318,7 +1337,8 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
         if runtime_mode_at_least(current_runtime_mode, "cyber_pro") and "OUROBOROS_CONTEXT_MODE" in body:
             authored_keys += tuple(_CONTEXT_MODE_KEYS)
         changes = _owner_write_settings(settings_to_save, authored_keys=authored_keys, boundary=boundary,
-                                        expected_digest=digest, if_unchanged=body.get("if_unchanged"), unset=unset)
+                                        expected_digest=digest, if_unchanged=body.get("if_unchanged"), unset=unset,
+                                        nano_ticket=nano_ticket)
         record_settings_change(request, changes)
         from ouroboros.gateway.safety_settings import audit_safety_change
         audit_safety_change(request, old_effective_settings, current)
@@ -1423,5 +1443,5 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
             # comes FIRST so a post-commit lock refusal is not misread as one.
             return post_commit_failure_response(e, boundary)
         if type(e) is SettingsPreconditionFailed and retry:
-            return _api_settings_post_locked(request, original_body, retry=False)
+            return _api_settings_post_locked(request, original_body, retry=False, nano_ticket=nano_ticket)
         return settings_write_refusal(e) or unsaved_error(str(e), 400)

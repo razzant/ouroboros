@@ -807,6 +807,20 @@ def _presend_context_fit(ctx: _RoundModelCallContext | None = None, admitted: Op
             ctx.accumulated_usage.pop(FRESH_FACTS_KEY, None)
 
 
+def _physical_context_for_round(ctx, disposition, plan):
+    if disposition is None:
+        return None
+    from ouroboros.cold_return import unsent_return
+    from ouroboros.nano_minimum import measurement_episode
+
+    local = getattr(plan, "provider", "") == "local"
+    episode = measurement_episode(ctx, plan) if local else ""
+    # A round after the entry one keeps a return's reply-floor witness while nothing was sent, without its count.
+    returned = bool(local and not episode) and unsent_return(ctx, plan)
+    return with_attempt_prefix(_physical_context_for_fit(disposition, plan, nano_episode=episode, nano_return=returned),
+                               ctx.accumulated_usage)
+
+
 def _dispatch_round_model(
     ctx: _RoundModelCallContext,
     disposition: Any,
@@ -877,7 +891,7 @@ def _dispatch_round_model(
                 stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx, mailbox_peek=mailbox_peek)) if attempt_cap is None else None,
                 owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
                 allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
-                physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage) if disposition is not None else None),
+                physical_context=_physical_context_for_round(ctx, disposition, plan),
                 candidate_predicate=candidate_predicate, physical_fit_predicate=hint(admit), model_role=role,
                 model_account_override=return_account(ctx, account),
                 **({"processing_preference": return_processing_preference(ctx)} if restricted else send_processing_options(
@@ -1045,7 +1059,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
                                          and not use_local and provider_for_model(model) != "claudexor")
     if provider_for_model(model) == "claudexor":
         kwargs["bypass_response_cache"] = False
-    physical = with_attempt_prefix(_physical_context_for_fit(disposition, ctx.context_fit_plan), ctx.accumulated_usage) if disposition else None
+    physical = _physical_context_for_round(ctx, disposition, ctx.context_fit_plan)
     if physical is not None:
         physical = ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = bind_contribution_input(physical, kwargs, ctx.messages, ctx.tools._ctx)
     return PreparedModelCall(kwargs, physical, current_physical_attempt_predicate())
@@ -1457,7 +1471,12 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
             if key in done or steps in BOOK_YIELD_PASSES and not book_yield_due(ctx):  # a yield: due on this view
                 continue
             done.add(key)
-            if not _apply_refusal_pass(ctx, steps, fit, target, slack, real, earlier_change=fit.measurement.round_id in changed):
+            exact_local = (failed_capture.provider == "local" and getattr(failed_capture, "refused_before_dispatch", False)
+                           and failed_capture.physical_context.round_id == fit.measurement.round_id
+                           and failed_capture.physical_context.route_fp == fit.measurement.route_fp
+                           and getattr(failed_capture, "input_tokens", 0) and getattr(failed_capture, "context_window_tokens", 0))
+            if not _apply_refusal_pass(ctx, steps, fit, target, slack, real, earlier_change=fit.measurement.round_id in changed,
+                                       **({"exact_local": True} if exact_local else {})):
                 continue
             changed.add(fit.measurement.round_id)  # a fallback's re-entry of this round reads it too
         density, ctx.refused_density = ctx.refused_density, None  # the retry is measured and sent ordinarily
@@ -1495,7 +1514,8 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
 
 
 def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit: Any, target: Optional[int],
-                        slack: Optional[int] = None, refused: bool = False, *, earlier_change: bool = False) -> bool:
+                        slack: Optional[int] = None, refused: bool = False, *, earlier_change: bool = False,
+                        exact_local: bool = False) -> bool:
     """Apply a pass's steps in order until together they shed ``target``; True when the candidate changed.
 
     Each step is sized by what the earlier ones left: host copies that freed the room leave every body in place,
@@ -1518,7 +1538,8 @@ def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit
             if remaining is None or remaining - (slack or 0) <= book:
                 return changed or _shorten_book_map(ctx)
             remaining, charged = remaining - book, charged + book
-        shed = _apply_refusal_step(ctx, step, fit, remaining, slack)
+        shed = _apply_refusal_step(ctx, step, fit, remaining, slack,
+                                   **({"exact_local": True} if step == "memory_rest" and exact_local else {}))
         if shed is not None:
             changed = True
             remaining = None if remaining is None else remaining - shed
@@ -1528,7 +1549,7 @@ def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit
 
 
 def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target: Optional[int],
-                        slack: Optional[int] = None) -> Optional[int]:
+                        slack: Optional[int] = None, *, exact_local: bool = False) -> Optional[int]:
     """Apply one step of a refusal pass to the live transcript: the tokens it shed, None when unchanged.
 
     Shown bodies pay the measured excess only, oldest first, a shown chosen read only after a provider's refusal
@@ -1565,4 +1586,8 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
     excess, asked = ((max(0, target - slack), min(slack, target)) if target else (deficit, slack) if deficit
                      else (WHOLE_CATEGORY, 0) if step == "memory_rest" else (0, slack or WHOLE_CATEGORY))
     order = {"telling_floor": True} if step == "floor" and target is not None else {}
+    if exact_local and excess and ctx.active_context_mode == "nano":
+        # On the last memory rung the serving counter, not a cold estimate of the
+        # refused view, decides whether the window needs its ordinary WORLD reader.
+        order["exact_local_pressure"] = True
     return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked, **order) else None

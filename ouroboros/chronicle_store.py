@@ -51,12 +51,12 @@ import json
 import os
 import pathlib
 import sqlite3
-import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
-from ouroboros import store, store_timing
+from ouroboros import chronicle_publication, store, store_timing
+from ouroboros.chronicle_publication import prospective_chronicle as prospective_chronicle
 from ouroboros.chronicle_quotes import QuoteResolver, quote_refusal
 from ouroboros.context_timing import counted, timed
 from ouroboros.platform_layer import (acquire_exclusive_file_lock, kernel_file_locks_enforced,
@@ -453,10 +453,16 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
     """
     store = ChronicleStore(data_root)
     snapshot = store._pinned()
-    if snapshot is not None and proposed is None or snapshot is None and not store.log_path.exists():
+    pending = chronicle_publication.proposed_transaction(store.data_root)
+    if (snapshot is not None and proposed is None and (pending is None or snapshot.proposed)
+            or snapshot is None and pending is None and not store.log_path.exists()):
         yield None if snapshot is None else snapshot.memo
         return
-    if snapshot is None:
+    if pending is not None and (snapshot is None or not snapshot.proposed):
+        texts, held = chronicle_publication.prospective_snapshot(store, tail, pending, _snapshot_tables)
+        snapshot = _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
+        snapshot.proposed = True
+    elif snapshot is None:
         snapshot = timed("memory_view.chronicle", _read_snapshot, store, tail)
     if proposed is not None:  # read as published after every record: [sequence, id, kind, room, target, body]
         rows, kept = snapshot.tables[0], {key: snapshot.memo[key] for key in _SELECTION_FREE if key in snapshot.memo}
@@ -473,11 +479,15 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
 
 def _read_snapshot(store: "ChronicleStore", tail: str) -> _Snapshot:
     """One state of the index in one read transaction, then parsed outside it (``capture``)."""
-    terminal_only = _TAIL_SCOPES[tail]
     with store._index() as db:
-        texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
-        held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
+        texts, held = _snapshot_tables(db, tail)
     return _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
+
+
+def _snapshot_tables(db, tail):
+    terminal_only = _TAIL_SCOPES[tail]
+    return ([db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL],
+            () if terminal_only is None else (_tail_rows(db, terminal_only),))
 
 
 def capture_memo(data_root: Any, key: str, compute: Callable[[], Any]) -> Any:
@@ -494,7 +504,8 @@ def capture_memo(data_root: Any, key: str, compute: Callable[[], Any]) -> Any:
 class ChronicleStore:
     """One installation's derived pages, parts, notes, corrections, decisions and marks."""
 
-    def __init__(self, data_root: Any):
+    def __init__(self, data_root: Any, *, admission=None):
+        self.admission = admission
         self.data_root = pathlib.Path(data_root)
         self.directory = self.data_root / "memory" / "chronicle"
         self.log_path = self.data_root / "memory" / "chronicle" / "records.jsonl"
@@ -703,7 +714,22 @@ class ChronicleStore:
         repeated activation returns the existing receipt. ``record`` is the
         batch's last record with its ``sequence``.
         """
-        with self._publishing() as db:
+        from ouroboros.memory_inventory import FALLBACK_REFUSAL_PREFIX
+
+        if (isinstance(records, (list, tuple)) and not records and isinstance(scan_state, dict)
+                and all(isinstance(key, str) and key.startswith(FALLBACK_REFUSAL_PREFIX) for key in scan_state)):
+            # A refusal receipt changes no record, so no count can refuse it; but my story shows it
+            # (``memory_view_legacy.retelling_status``), so the fence withdraws any measured observation.
+            from ouroboros.nano_publication import publication_fence
+
+            with publication_fence(self.data_root), self._publishing() as db:
+                return self._commit(db, records, scan_state)
+        with chronicle_publication.writing(self) as (locks, db):
+            return self._commit(db, records, scan_state, locks=locks)
+
+    def publish_legacy_import(self, records, *, scan_state):
+        """The importer restores existing memory before it can qualify; this is not an authoring path."""
+        with chronicle_publication.writing(self, restoring=True) as (_, db):
             return self._commit(db, records, scan_state)
 
     def room_head(self, room_id: Any) -> int:
@@ -724,8 +750,8 @@ class ChronicleStore:
                   **({"id": str(record_id)} if record_id else {})}
         if (refusal := verify_quotes(quotes, quote_resolver)) is not None:
             return refusal
-        with self._publishing() as db:
-            return self._commit(db, [record], quotes_verified=True,
+        with chronicle_publication.writing(self) as (locks, db):
+            return self._commit(db, [record], quotes_verified=True, locks=locks,
                                 pre=lambda: self._head_refusal(db, room, expected_sequence))
 
     def publish_part(self, *, room_id: Any, text: str, member_ids: List[str], author: Dict[str, Any],
@@ -742,7 +768,7 @@ class ChronicleStore:
         quotes = list(quotes or ())
         if (refusal := verify_quotes(quotes, quote_resolver)) is not None:
             return refusal
-        with self._publishing() as db:
+        with chronicle_publication.writing(self) as (locks, db):
             if expected_sequence is None:
                 return _refuse("revision_required", "a part folds revisable records: pass expected_sequence, "
                                "the room head its text is based on", current_head=self._head(db, room))
@@ -752,7 +778,7 @@ class ChronicleStore:
                 record["quotes"] = quotes
             if host_stamp is not None:
                 record["host_stamp"] = host_stamp
-            return self._commit(db, [record], quotes_verified=True,
+            return self._commit(db, [record], quotes_verified=True, locks=locks,
                                 pre=lambda: self._head_refusal(db, room, expected_sequence))
 
     def write_note(self, *, room_id: Any, task_id: str, text: str, author: Dict[str, Any],
@@ -774,7 +800,7 @@ class ChronicleStore:
         quotes = list(quotes or ())
         if (refusal := verify_quotes(quotes, quote_resolver)) is not None:
             return refusal
-        with self._publishing() as db:
+        with chronicle_publication.writing(self) as (locks, db):
             refs = []
             for given in sources if isinstance(sources, (list, tuple)) else ():
                 frozen, refusal = self._source_version(db, given)
@@ -785,7 +811,7 @@ class ChronicleStore:
                       "metadata": metadata or {}, **({"quotes": quotes} if quotes else {})}
             if record_id:
                 record["id"] = str(record_id)
-            return self._commit(db, [record], quotes_verified=True)
+            return self._commit(db, [record], quotes_verified=True, locks=locks)
 
     def select_account(self, account_id: str, *, replaces: Iterable[Any], author: Dict[str, Any], reason: str,
                        shown: bool = True, propose: bool = False) -> PublishResult:
@@ -794,14 +820,15 @@ class ChronicleStore:
         ``propose`` writes nothing and takes no lock: the selection is checked by the same rules on a read
         and returned unsaved (reason ``proposed``), for ``capture(proposed=…)`` to show what it would change.
         """
-        with (self._reading() if propose else self._publishing()) as db:
+        with (self._reading() if propose else chronicle_publication.writing(self)) as held:
+            locks, db = (None, held) if propose else held
             target = self._get(db, account_id)
             if target is None:
                 return _refuse("target_missing", conflict_ids=(str(account_id),))
             record = {"kind": "selection", "room_id": target["room_id"], "target_id": target["id"],
                       "replaces": [str(r) for r in (replaces or ())], "shown": shown, "reason": reason, "author": author}
             if not propose:
-                return self._commit(db, [record])
+                return self._commit(db, [record], locks=locks)
             refusal = self._rules(db, {**record, "id": "proposed"}, False)
             return refusal or PublishResult(True, "proposed", {**record, "id": "proposed", "ts": utc_now_iso()})
 
@@ -810,7 +837,7 @@ class ChronicleStore:
         """The mind's correction beside the original; it acts at once and moves the target room's head."""
         if not isinstance(author, dict) or author.get("kind") != "mind":
             return _refuse("invalid", "only the mind corrects a record")
-        with self._publishing() as db:
+        with chronicle_publication.writing(self) as (locks, db):
             target = self._get(db, target_id)
             if target is None:
                 return _refuse("target_missing", conflict_ids=(str(target_id),))
@@ -829,16 +856,16 @@ class ChronicleStore:
                 return None
 
             return self._commit(db, [{"kind": "correction", "room_id": room, "target_id": target["id"],
-                                      "text": text, "author": author}], pre=pre)
+                                      "text": text, "author": author}], pre=pre, locks=locks)
 
     def decide(self, draft_id: str, accepted: bool, author: Dict[str, Any], reason: str) -> PublishResult:
         """Accept a helper draft, or withdraw a draft, own or accepted page/part, with a reason."""
-        with self._publishing() as db:
+        with chronicle_publication.writing(self) as (locks, db):
             target = self._get(db, draft_id)
             if target is None:
                 return _refuse("target_missing", conflict_ids=(str(draft_id),))
             return self._commit(db, [{"kind": "decision", "room_id": target["room_id"], "target_id": target["id"],
-                                      "accepted": bool(accepted), "reason": reason, "author": author}])
+                                      "accepted": bool(accepted), "reason": reason, "author": author}], locks=locks)
 
     def mark(self, target_ref: Dict[str, Any], text: str, author: Dict[str, Any], *, room_id: Any,
              scope: str = "room", quote: Optional[str] = None, record_id: Optional[str] = None,
@@ -858,43 +885,18 @@ class ChronicleStore:
         return self._mark_decision("mark_release", mark_id, author, reason)
 
     def _mark_decision(self, kind, mark_id, author, reason, **fields):
-        with self._publishing() as db:
+        with chronicle_publication.writing(self) as (locks, db):
             active = db.execute("SELECT room FROM active_marks WHERE id=?", (str(mark_id),)).fetchone()
             room = active[0] if active else ""
             return self._commit(db, [{"kind": kind, "room_id": room, "target_id": str(mark_id),
-                                      "author": author, "reason": reason, **fields}])
+                                      "author": author, "reason": reason, **fields}], locks=locks)
 
-    def _commit(self, db, records, scan_state=None, *, quotes_verified=False, pre=None) -> PublishResult:
-        if scan_state is not None and not isinstance(scan_state, dict):
-            return _refuse("invalid", "scan_state is an object merged by top-level key")
-        if not isinstance(records, (list, tuple)) or not all(isinstance(r, dict) for r in records):
-            return _refuse("invalid", "records is a list of objects")
-        if any(r.get("kind") == "activation" for r in records):
-            active = self._state(db, "activation")
-            if active:
-                return PublishResult(True, "unchanged", self._get(db, active["id"]) or active)
-        prepared, identities = [], {}
-        for supplied in records:
-            record = json.loads(_json(supplied))
-            record["id"] = str(record.get("id") or uuid.uuid4().hex)
-            record["room_id"] = str(record.get("room_id", ""))
-            old = db.execute("SELECT body FROM records WHERE id=?", (record["id"],)).fetchone()
-            old_record = json.loads(old[0]) if old else identities.get(record["id"])
-            if old_record is None and "ts" in record and _mapping(record.get("metadata")).get("transfer") is not None:
-                return _refuse("invalid", "the store dates a transfer's publication; its source's date is legacy_written_at")
-            record.setdefault("ts", old_record["ts"] if old_record else utc_now_iso())
-            if old_record is not None and old_record != record:
-                return _refuse("invalid", "identity collision: this id already holds a different record",
-                               conflict_ids=(record["id"],))
-            if record["id"] not in identities:
-                prepared.append(record)
-                identities[record["id"]] = record
-        new = [r for r in prepared if not db.execute("SELECT 1 FROM records WHERE id=?", (r["id"],)).fetchone()]
-        scan = self._state(db, "scan", {})
-        changed = scan_state is not None and {**scan, **scan_state} != scan
-        last = prepared[-1] if prepared else None
-        if not new and not changed:
-            return PublishResult(True, "unchanged", self._get(db, last["id"]) if last else None)
+    def _commit(self, db, records, scan_state=None, *, quotes_verified=False, pre=None, locks=None) -> PublishResult:
+        prepared = chronicle_publication.prepare(self, db, records, scan_state, encode=_json)
+        if isinstance(prepared, PublishResult):
+            return prepared
+        tx, last = prepared
+        new = tx["records"]
         if not db.in_transaction:  # lock-free readers drain BEFORE the authority append: busy refuses here, not after it
             db.execute("BEGIN EXCLUSIVE")
         refusal = pre() if pre is not None and new else None
@@ -902,7 +904,8 @@ class ChronicleStore:
             refusal = self._trial(db, new, quotes_verified)
         if refusal is not None:
             return refusal
-        tx = {"kind": "transaction", "schema": 1, "records": new, "scan_state": scan_state}
+        if locks is not None:
+            db = chronicle_publication.admitted_db(self, locks, self._state(db, "offset", 0), tx, _json)
         if not append_jsonl(self.log_path, tx, ensure_record_boundary=True, require_lock=True):
             raise OSError("chronicle transaction append failed")
         with self.log_path.open("ab") as stream:

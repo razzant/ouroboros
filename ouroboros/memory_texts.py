@@ -71,6 +71,9 @@ class Deferred:
     build: Any  # () -> TextSource
 
 
+_COUNTED = ("identity", "world")  # the texts a qualified Nano root counts before they publish
+
+
 def identity_source(root: Path, footer: str = "") -> TextSource:
     from ouroboros.memory import Memory
 
@@ -191,9 +194,9 @@ def _prepare(source: TextSource, mode: str, content: str, items: list | None, ve
     return prepare
 
 
-def _answer(ctx: Any, source: TextSource, text: str, *, status: str = "ok", code: str = "OK") -> str:
+def _answer(ctx: Any, source: TextSource, text: str, *, status: str = "ok", code: str = "OK", meta=None) -> str:
     footer = f"\n{source.footer}" if source.footer else ""
-    return _publish_tool_result(ctx, ToolResult(status=status, code=code, text=text + footer))
+    return _publish_tool_result(ctx, ToolResult(status=status, code=code, text=text + footer, meta=meta or {}))
 
 
 def _size(source: TextSource, text: str) -> list[str]:
@@ -283,6 +286,10 @@ def _refusal(ctx: Any, source: TextSource, mode: str, publication: Publication, 
             f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: history_unavailable; current_revision={current!r}. Its history journal "
             f"could not record this version, so the {source.noun} was not changed; the same call can be retried."),
             status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED")
+    if reason.startswith("nano_"):
+        return _answer(ctx, source, f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: The active text was not changed.\n{publication.detail}",
+                       status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
+                       meta={"nano_proposal_source": publication.proposal_source} if publication.proposal_source else None)
     if reason == "empty_result":
         return _answer(ctx, source, f"⚠️ TOOL_ARG_ERROR: {publication.detail}.", status="error", code="TOOL_ARG_ERROR")
     if reason.endswith("_source_missing"):
@@ -354,10 +361,17 @@ def write_text(ctx: Any, source: Any, *, content: Any = None, mode: Any = "overw
     if isinstance(source, Deferred):
         source = source.build()
     from ouroboros.knowledge import focus_signature
+    from ouroboros.nano_publication import NanoPublicationRefused, admission_for
 
+    try:
+        # Identity is budgeted memory; the map is background a fresh root shows whole: both are counted.
+        admission = admission_for(ctx, Path(source.path).parent.parent) if source.name in _COUNTED else None
+    except NanoPublicationRefused as error:
+        return _refusal(ctx, source, mode, Publication(False, f"nano_{error.reason}", "", "", "", detail=error.tool_detail()),
+                        expected_revision)
     publication = publish_text(source, expected_revision, _prepare(source, mode, content, items, version),
                                author=focus_signature(ctx), source_type=source_type, mode=mode, reason=reason,
-                               reverted_from=version if mode == "revert" else None)
+                               reverted_from=version if mode == "revert" else None, nano_admission=admission)
     if not publication.ok:
         return _refusal(ctx, source, mode, publication, expected_revision)
     lines = _receipt(source, mode, publication, version)

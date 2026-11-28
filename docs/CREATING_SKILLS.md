@@ -3212,9 +3212,10 @@ fetched.
 A review-basis replacement stays off while reviewed and keeps the previous
 payload, lifecycle state and install record durably. Executable new bytes keep
 the update; blockers (`review_blockers`), preflight failure (`preflight_failed`),
-an interrupted review (`review_unfinished`), or files/dependencies that could
-not be installed (`landing_failed`) restore the previous copy and its state,
-recording `update_rejected` with that reason. An owner Skip during
+an interrupted review (`review_unfinished`), files/dependencies that could not
+be installed (`landing_failed`), or Nano refusing activation after review
+(`nano_publication_*`) restore the previous copy and its state, recording
+`update_rejected` with that reason. The review's verdict stays on its subject. An owner Skip during
 review accepts the new bytes. After a rejection, **Update without review**
 (`skip_review: true`, replace only) installs that release with exact-digest
 `owner_skip` acceptance; preflight still runs. A later update clears the rejection.

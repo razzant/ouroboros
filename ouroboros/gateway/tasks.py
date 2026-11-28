@@ -1434,10 +1434,16 @@ async def api_task_resume(request: Request) -> JSONResponse:
     body = await request_json_or(request, {})
     named = body.get("accept_unknown", []) if isinstance(body, dict) else None
     expected_panic = body.get("expected_panic_hold_id") if isinstance(body, dict) else None
-    if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason", "expected_panic_hold_id"}
+    from ouroboros.cold_return import CHOICE_KEY, choosing, door_choice
+    if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason", "expected_panic_hold_id", CHOICE_KEY}
             or not all(isinstance(value, str) for value in named)):
         return json_error("Unexpected Resume fields or invalid accept_unknown.", 400, task_id=task_id,
                           reason_code="unexpected_fields")
+    choice, refused = door_choice(body)  # the owner's explicit choice about a window park (``cold_return``)
+    if refused or choice and (set(body) != {CHOICE_KEY} or not isinstance(choice.get("stop_identity"), str)
+                              or not choice["stop_identity"].strip()):
+        return json_error(refused or "A window park's choice is sent alone and names its current stop.", 400, task_id=task_id,
+                          reason_code="invalid_context_choice")
     if "expected_panic_hold_id" in body and (set(body) != {"expected_panic_hold_id"}
                                              or not isinstance(expected_panic, str) or not expected_panic.strip()):
         return json_error("A Panic selection requires only its current hold ID.", 400, task_id=task_id,
@@ -1451,7 +1457,7 @@ async def api_task_resume(request: Request) -> JSONResponse:
         from supervisor.queue import resume_budget_paused_task
 
         # Bound on the worker thread itself: the grant decisions read these where the call runs.
-        with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")):
+        with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")), choosing(choice):
             return (resume_budget_paused_task(task_id, expected_panic_hold_id=expected_panic) if expected_panic
                     else resume_budget_paused_task(task_id))
 

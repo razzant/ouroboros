@@ -460,6 +460,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_
     act, which needs no root grant above itself. ``gaps`` receives the damaged rows each door's owner-Pause tree
     census ties to no tree.
     """
+    from ouroboros.cold_return import _NOT_OFFERED, bound_choice
     from ouroboros.control_actor import control_actor, observed_control_stop, resume_author
     from ouroboros.work_stop import SELECTION_KEY, clear_refusal, release_refusal, selection_record, unsafe_replay_response
     from supervisor.budget_resume import (
@@ -475,17 +476,18 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_
     )
 
     external = observation = current = panic_money = None
+    window = bound_choice()  # this answer may enter only the exact grant door
     with q._queue_lock:
         located = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
+        if window and not ((located or {}).get("_budget_pause") or {}).get("exact_continuation"):
+            return dict(_NOT_OFFERED)
         if refusal := panic_resume_refusal(q, located, expected_panic_hold_id, selected_by):
             return refusal
         if refusal := release_refusal(observed_control_stop(
                 q.DRIVE_ROOT, located, budget=q.BUDGET_ROOT_FENCES), resume_author()):
             return refusal
     if located is None:
-        # A member parked WARM under the owner's Pause (its stack retained while a
-        # started critic finishes) wakes on the fence; the owner's own Resume and
-        # a model's selection reach it here.
+        # A warm Pause keeps the stack and wakes on its own fence.
         from supervisor.budget_resume import resume_warm_owner_pause_root
 
         warm = resume_warm_owner_pause_root(task_id, selected_by=selected_by, gaps=gaps)
@@ -511,11 +513,11 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_
         located = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
         if refusal := panic_resume_refusal(q, located, expected_panic_hold_id, selected_by):
             return refusal
-        if located and located.get("_budget_pause_resume"):
+        if not window and located and located.get("_budget_pause_resume"):
             from supervisor.budget_resume import repark_after_active_start
             if refusal := repark_after_active_start(q, located):
                 return refusal
-        if located is not None and not located.get("_budget_pause"):
+        if not window and located is not None and not located.get("_budget_pause"):
             from supervisor.restart_retention import pause_retention, park_saved_pause, RETAIN_SLEEP, RETAIN_OWNER_PAUSE
 
             retention_root = pathlib.Path(located.get("budget_drive_root") or q.DRIVE_ROOT)
@@ -530,6 +532,8 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_
                     return {"ok": False, "error": "snapshot_not_persisted"}
         exact = bool(located is not None and isinstance(located.get("_budget_pause"), dict)
                      and located["_budget_pause"].get("exact_continuation"))
+        if window and not exact:
+            return dict(_NOT_OFFERED)
         result_root = pathlib.Path((located or {}).get("budget_drive_root") or q.DRIVE_ROOT)
         located_state = copy.deepcopy(located)
         needs_selection = located is not None and budget_pause_fact(located) is not None
@@ -567,6 +571,8 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_
                 q.DRIVE_ROOT, task, budget=q.BUDGET_ROOT_FENCES), resume_author()):
             return refusal
         pause = task.get("_budget_pause") if isinstance(task.get("_budget_pause"), dict) else None
+        if window and not (pause and pause.get("exact_continuation")):
+            return dict(_NOT_OFFERED)
         if pause and pause.get("exact_continuation"):
             if task is not located or task != located_state:
                 return {"ok": False, "error": "selection_authority_changed"}

@@ -104,13 +104,13 @@ class _NotActivated(Exception):
         self.receipt = receipt
 
 
-def _activated(root: Path) -> ChronicleStore:
+def _activated(root: Path, *, admission=None) -> ChronicleStore:
     """The store after the one-time legacy import: a repeat call is the fast path.
 
     A busy import lock is waited for until the other importer finishes; a refused
     or failed import raises ``_NotActivated``, so no tool reads or writes before the import.
     """
-    store = ChronicleStore(root)
+    store = ChronicleStore(root, admission=admission)
     try:
         receipt = store.ensure_activated(wait=True)
     except ValueError as exc:  # the store's own refusal to open its journal, not an argument error
@@ -166,6 +166,12 @@ def _refused(ctx: Any, reason: str, detail: str = "", **fields: Any) -> str:
     payload = {"ok": False, "reason": reason, "detail": detail,
                **{key: value for key, value in fields.items() if value not in (None, (), [])}}
     return _reply(ctx, payload, code="TOOL_REPORTED_FAILURE")
+
+
+def _nano_refused(ctx: Any, error: Any) -> str:
+    source = getattr(error, "source_ref", None)
+    return _reply(ctx, {"ok": False, "reason": error.reason, "detail": error.tool_detail()}, code="TOOL_REPORTED_FAILURE",
+                  meta={"nano_proposal_source": source} if source else None)
 
 
 def _not_activated(ctx: Any, exc: _NotActivated) -> str:
@@ -649,9 +655,13 @@ def _chronicle_write(ctx: Any, kind: str = "", room_id: Any = None, text: str = 
             "task_id": task_id, "target_id": target_id, "expected_revision": expected_revision,
             "expected_sequence": expected_sequence, "accepted": accepted, "reason": reason, "sources": sources,
             "replaces": replaces, "shown": shown}
+    from ouroboros.nano_publication import NanoPublicationRefused, admission_for
+
     try:
         root = _root(ctx)
-        return writer(ctx, root, _activated(root), author, args)
+        return writer(ctx, root, _activated(root, admission=admission_for(ctx, root)), author, args)
+    except NanoPublicationRefused as exc:
+        return _nano_refused(ctx, exc)
     except _NotActivated as exc:
         return _not_activated(ctx, exc)
     except ValueError as exc:
@@ -1319,16 +1329,9 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
         elif str(room_id) == "conversations":
             text = _read_owed(root, store, start, limit)
         elif str(room_id) in {"late_reviews", "notes"}:
-            from ouroboros.late_review_marks import mark_landing, mark_outcome
-            from ouroboros.memory_view import _notes_by_room, room_labeler
-            from ouroboros.memory_waiting import listing
+            from ouroboros.memory_waiting import current_listing
 
-            with capture(root, tail="none"):  # a mark older than its outcome facts: its review record as it reads now
-                head, body = listing(str(room_id), store.active_marks(None) if room_id == "late_reviews" else (),
-                                     _notes_by_room(store) if room_id == "notes" else {},
-                                     label=room_labeler(root) if room_id == "late_reviews" else None,
-                                     outcome=lambda mark: mark_outcome(mark, root),
-                                     landing=lambda mark: mark_landing(mark, root))
+            head, body = current_listing(root, store, str(room_id))
             text = _window(head, body, start, limit, lambda n: f"memory_read(room_id='{room_id}', start={n})")
         elif node_id:
             text = _read_node(root, str(node_id), start, limit, str(revision or ""))
@@ -1411,13 +1414,20 @@ def _mark_target(ctx: Any, root: Path, store: ChronicleStore, a: Dict[str, Any])
 
 
 def _release_marks(ctx: Any, store: ChronicleStore, author: Dict[str, Any], ids: Any, reason: str) -> str:
+    from ouroboros.nano_publication import NanoPublicationRefused
+
     if (not isinstance(ids, list) or not ids or any(not isinstance(item, str) or not item.strip() for item in ids)
             or len(set(ids)) != len(ids)):
         raise ValueError("release_ids is a non-empty array of distinct mark ids")
-    released, refused = [], []
+    released, refused, proposals = [], [], []
     for mark in ids:
         try:
             result = store.release_mark(mark, author, reason)
+        except NanoPublicationRefused as exc:
+            refused.append({"id": mark, "reason": exc.reason, "detail": exc.tool_detail()})
+            if source := getattr(exc, "source_ref", None):
+                proposals.append(source)
+            continue
         except (OSError, TimeoutError) as exc:
             refused.append({"id": mark, "reason": "unavailable", "detail": str(exc)})
             continue
@@ -1429,18 +1439,20 @@ def _release_marks(ctx: Any, store: ChronicleStore, author: Dict[str, Any], ids:
                         "reason": "saved" if not refused else "partial" if released else refused[0]["reason"],
                         "resident_marks": _resident_marks(ctx)},
                   code="TOOL_REPORTED_FAILURE" if refused else "OK",
-                  meta={"memory_mark_ids": released, "memory_mark_operation": "mark_release"})
+                  meta={"memory_mark_ids": released, "memory_mark_operation": "mark_release",
+                        **({"nano_proposal_sources": proposals} if proposals else {})})
 
 
 def _memory_mark(ctx: Any, text: str = "", node_id: str = "", address: str = "", task_id: str = "",
                  source_ref: Any = None, quote: Optional[str] = None, room_id: Any = None, scope: str = "room",
                  mark_id: str = "", visibility: str = "", release_ids: Any = None, reason: str = "",
                  anchor: Any = None) -> str:
+    from ouroboros.nano_publication import NanoPublicationRefused, admission_for
     from ouroboros.tools.recent_tasks import RetainedFocusForbidden  # D15->D05 is lazy-only
 
     try:
         root = _root(ctx)
-        store, author = _activated(root), focus_signature(ctx)
+        store, author = _activated(root, admission=admission_for(ctx, root)), focus_signature(ctx)
         if release_ids is not None:
             if any((mark_id, visibility, node_id, address, task_id, source_ref, text, quote, anchor)):
                 return _arg_error(ctx, "release_ids takes only one reason, without a mark target or view change")
@@ -1463,6 +1475,8 @@ def _memory_mark(ctx: Any, text: str = "", node_id: str = "", address: str = "",
                 room = str(room_id).strip()
             result = store.mark(target, str(text or ""), author, room_id=room or _room(ctx, root, None),
                                 scope=str(scope or "room"), quote=quote, anchor=anchor)
+    except NanoPublicationRefused as exc:
+        return _nano_refused(ctx, exc)
     except _NotActivated as exc:
         return _not_activated(ctx, exc)
     except RetainedFocusForbidden as exc:
