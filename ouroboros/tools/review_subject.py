@@ -124,29 +124,37 @@ def _tree_delta_diff(repo_dir, m0_tree: str, staged_tree: str, unified: int, pat
     return _decode_diff(raw)
 
 
-def _tree_delta_name_status(repo_dir, m0_tree: str, staged_tree: str) -> Tuple[Tuple[str, str], ...]:
-    """(status, path) rows of the resolution delta (rename target path for R rows)."""
-    rc, raw, err = _git_bytes(
-        repo_dir, ["diff", "--name-status", "-z", m0_tree, staged_tree]
-    )
-    if rc != 0:
-        raise StagedDiffUnavailable(
-            f"resolution delta name-status failed (rc {rc}): {err or 'no detail'}"
-        )
+def name_status_rows(raw: bytes) -> Tuple[Tuple[str, str, str], ...]:
+    """(status, path, source path or "") rows of NUL-terminated ``--name-status -z`` output: a rename or copy row
+    keeps both sides; a malformed tail keeps the well-formed prefix."""
     fields = [f.decode("utf-8", "replace") for f in raw.split(b"\0")]
     if fields and not fields[-1]:
         fields.pop()  # trailing NUL terminator
-    rows: List[Tuple[str, str]] = []
+    rows: List[Tuple[str, str, str]] = []
     index = 0
     while index < len(fields):
         status = fields[index]
-        # rename/copy rows carry TWO paths (src, dst); the reviewed identity is dst
-        width = 3 if status[:1].upper() in ("R", "C") else 2
+        width = 3 if status[:1].upper() in ("R", "C") else 2  # rename/copy rows carry (src, dst)
         if index + width - 1 >= len(fields):
-            break  # malformed tail: keep the well-formed prefix
-        rows.append((status, fields[index + width - 1]))
+            break
+        rows.append((status, fields[index + width - 1], fields[index + 1] if width == 3 else ""))
         index += width
     return tuple(rows)
+
+
+def _tree_delta_name_status(repo_dir, m0_tree: str, staged_tree: str) -> Tuple[Tuple[str, str], ...]:
+    """(status, path) rows of the resolution delta (rename target path for R rows)."""
+    rc, raw, err = _git_bytes(repo_dir, ["diff", "--name-status", "-z", m0_tree, staged_tree])
+    if rc != 0:
+        raise StagedDiffUnavailable(f"resolution delta name-status failed (rc {rc}): {err or 'no detail'}")
+    return tuple((status, path) for status, path, _source in name_status_rows(raw))
+
+
+def subject_changes(repo_dir) -> Tuple[Tuple[str, str, str], ...]:
+    """The staged index against HEAD as NUL-decoded ``(status, path, source path)`` rows, the synchronous gate's
+    path set (a display-quoted UTF-8 name would not open in its touched-file pack). ``()`` when Git cannot answer."""
+    rc, raw, _err = _git_bytes(repo_dir, ["diff", "--name-status", "-z", "--cached", "HEAD"])
+    return name_status_rows(raw) if rc == 0 else ()
 
 
 def _full_candidate_path_count(repo_dir, staged_tree: str) -> Optional[int]:

@@ -772,7 +772,7 @@ def test_pending_reconcile_guards_new_caps_keeps_spending_zero_scan_and_recovers
         assert group_money_spent(root, load_task_result(root, "work-a")["billing_group"])
         # Readers agree with the writer while reconciliation is pending: Resume and review wave report pending
         # reconciliation (never telling the owner to call set_task_cost_cap), while a local SQLite cap stays amendable.
-        from ouroboros.consciousness_view import _resume_room
+        from ouroboros.consciousness_hold import _resume_room
         from ouroboros.tools.review_helpers import review_wave_binding_fence
         from supervisor.budget_resume import _root_money_refusal
 

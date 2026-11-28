@@ -49,7 +49,9 @@ export function roomBarHtml({ asPanel, title }) {
 /**
  * Wire one room's bar: Restart and Panic on their own buttons, the budget's door and its words, the consciousness chip,
  * and (Main, `shade` = the room status control of room_work.js) the narrow bar's placement of Restart and the budget.
- * `update(data)` takes every `/api/state` answer the room reads. Returns `{ update, destroy }`.
+ * `update(data)` takes every `/api/state` answer the room reads; `followState(snapshots)` binds the chip's Shade to the
+ * page's state clock (state_snapshots.js), whose failed read or retired body withdraws its controls (kept, disabled)
+ * until the next applied body reaches `update`. Returns `{ update, followState, destroy }`.
  */
 export function createRoomHeader({ bar, ws, shade = null, openDashboardTab = null, refreshState = () => {} }) {
     if (!bar) return null;
@@ -71,6 +73,7 @@ export function createRoomHeader({ bar, ws, shade = null, openDashboardTab = nul
     const endGroup = [...bar.children].find((node) => node.classList?.contains('app-page-actions')
         || node.classList?.contains('app-page-trailing'));
     if (consciousness?.chip && endGroup) endGroup.prepend(consciousness.chip);
+    let unfollow = () => {};
     return {
         update(data) {
             consciousness?.update(data);
@@ -82,7 +85,14 @@ export function createRoomHeader({ bar, ws, shade = null, openDashboardTab = nul
             budget.style.setProperty('--budget-fill', `${view.fillPct}%`);
             budget.dataset.attention = view.attention ? '1' : '0';
         },
+        followState(snapshots) {
+            unfollow();
+            unfollow = snapshots?.watch?.(() => {
+                if (!snapshots.latest()) consciousness?.update({ accounting: { available: false } });
+            }) || (() => {});
+        },
         destroy() {
+            unfollow();
             commands.forEach((button) => button.removeEventListener('click', onCommand));
             budget?.removeEventListener('click', onBudget);
             disposePlacement();

@@ -198,7 +198,11 @@ current inventory with the same file admission and exclusions as the other
 inventory operations; population modules without an indexed outline (enumeration
 or time limits, skipped or excluded files, syntax errors) are named as a coverage limit, so an
 empty or short owner list is not reported as absence. Module-path and dotted
-lookups read only the manifest. The existing import-text and
+lookups read only the manifest. `module_map` (`domains`, a domain id or a path
+prefix) lists addresses with each file's own lead (Python docstring, JS/TS/CSS
+header) from a path-only inventory of exactly that prefix, never a parse of the
+repository; walk, time, read, admission and inventory-exclusion limits make the reply incomplete, never an empty
+complete list. The existing import-text and
 relative-import helpers remain available to their architecture/review consumers.
 Restricted/scoped, path-only and name-prepared views never overwrite the shared
 inventory cache. A bounded full-source refresh keeps unvisited prior facts only in

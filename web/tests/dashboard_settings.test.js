@@ -1276,10 +1276,12 @@ test('Costs reads nothing for a setting saved while its page is not drawn, its o
     assert.deepEqual(asked(calls.slice(base)), [2, 1, 2, 2, 1], 'drawn, a save elsewhere reads the totals, the limits and the allowance again');
     saved(own('TOTAL_BUDGET'));
     await settle();
-    assert.deepEqual(asked(calls.slice(base)), [3, 1, 2, 2, 1], 'a saved total reads the totals only');
+    // Its own wake held by the total budget is said under that card from the consciousness read: a raise resumes
+    // nothing, so the line is read again with the totals (owner 27.11).
+    assert.deepEqual(asked(calls.slice(base)), [3, 1, 2, 3, 1], 'a saved total reads the totals and what holds its own wake');
     saved(own('OUROBOROS_CONSCIOUSNESS_DAILY_USD'));
     await settle();
-    assert.deepEqual(asked(calls.slice(base)), [3, 1, 2, 3, 1], 'a saved allowance reads the allowance only');
+    assert.deepEqual(asked(calls.slice(base)), [3, 1, 2, 4, 1], 'a saved allowance reads the allowance only');
     dashboard.destroy();
 });
 

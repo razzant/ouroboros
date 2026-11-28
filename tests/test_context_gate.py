@@ -19,7 +19,7 @@ def test_workflow_filters_cover_the_lane_and_request_builders():
                  "ouroboros/tools/registry.py", "ouroboros/physical_attempt_context.py",
                  "ouroboros/reviewer_window.py", "ouroboros/review_native_episode.py",
                  "ouroboros/server_window.py", "ouroboros/_usage_response.py", "prompts/SYSTEM.md", "BIBLE.md",
-                 "docs/architecture/06-agent-core.md", "docs/development/14-build-and-ci.md",
+                 "docs/architecture/06-1-loop-tools-and-safety.md", "docs/development/14-build-and-ci.md",
                  "tests/fixtures/size_refusals/manifest.json", "tests/_window_history.py",
                  "tests/_first_contact_server.py", "scripts/context_gate.py", "ouroboros/deployment_policy.py",
                  "ouroboros/gateway/settings.py", "ouroboros/pricing.py", "tests/fixtures/llm_golden/aux_routes.json",

@@ -890,7 +890,7 @@ class BackgroundConsciousness:
         places = context.pop("places")
         # Held: its own wake waits in the pool (paused, held or not yet dispatched), not running.
         held = bool(wake) and wake in queued_wakes(held_only=True)
-        from ouroboros.consciousness_view import held_wake_cause
+        from ouroboros.consciousness_hold import held_wake_cause
         from ouroboros.place_projection import starts_work_here
         from supervisor.panic_choice import handover_available
         return {**dict(zip(SNAPSHOT_KEYS, values)), **context, "appointment_at": _iso(self._appointment_at),

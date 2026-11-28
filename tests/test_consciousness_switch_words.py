@@ -175,7 +175,7 @@ def test_recent_people_counts_each_person_once_across_places_and_skips_bots(tmp_
     assert people == {"by_place": {"p1": 2, "p2": 1, "p3": 0}, "total": 2, "capped": False, "capped_places": []}
 
 
-def test_a_turn_off_says_what_it_ends_at_once_only_when_something_runs():
+def test_a_turn_off_says_what_it_ends_at_once_only_when_something_is_there():
     running = {"live_wake_task_id": "w1", "live_wake_held": False, "tasks_running": 2}
     lines = V.switch_preview("off", PLACES, running=running)["lines"]
     # The stop asks: no instant end and no saved result is promised (review r3).
@@ -183,8 +183,12 @@ def test_a_turn_off_says_what_it_ends_at_once_only_when_something_runs():
     assert "The wake running now is asked to stop now." in V.switch_preview("off", PLACES, running={**running, "tasks_running": 0})["lines"]
     assert "Its 1 own task is asked to stop now." in V.switch_preview("off", PLACES, running={"tasks_running": 1})["lines"]
     assert not any("at once" in line or "saves" in line for line in lines)
+    # Off stops a held wake too (BackgroundConsciousness.stop takes the pool's own wake): the turn says so before it.
     held = {"live_wake_task_id": "w1", "live_wake_held": True}
-    assert not any("stop" in line for line in V.switch_preview("off", PLACES, running=held)["lines"])  # a held wake is not running
+    assert "Its waiting wake-up is asked to stop now." in V.switch_preview("off", PLACES, running=held)["lines"]
+    assert ("Its waiting wake-up and its 1 own task are asked to stop now."
+            in V.switch_preview("off", PLACES, running={**held, "tasks_running": 1})["lines"])
+    assert not any("stop" in line for line in V.switch_preview("off", PLACES, running={"tasks_running": 0})["lines"])
 
 
 def test_a_place_is_named_as_its_row_names_it():

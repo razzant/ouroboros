@@ -1,9 +1,6 @@
 # 12. Host Service, Companion Processes, and Chat IDs
 
-Connectors supply facts and identity; the mind judges. Focus voice, owner match, Safety and delivery use the
-event snapshot; other Safety/own wakes use the first valid identity among 50 newest arrivals. Browser status is
-account-scoped (§3); the server invokes connector routes only for one approved built-in setup-card POST with its code and options (`onboarding_connections`). Only `kind: user` can match account-scoped owner confirmation.
-Identity never enters `places.json` (wire, label compatibility: CREATING_SKILLS). Silent can wake.
+This part gives me my presence outside the app: the Host Service skills talk through, companion processes, the connector places where I focus and answer, linked Ouroboros and live meeting peers, and the typed chat ids every message targets (Main, Projects, the hidden id, agent-to-agent). Connectors supply facts and identity; the mind judges. Focus voice, owner match, Safety and delivery use the event snapshot; other Safety/own wakes use the first valid identity among a place's newest arrivals (`place_arrivals.py`, `LIMIT 50`). Browser status is account-scoped (§3); the server invokes connector routes only for one approved built-in setup-card POST with its code and options (`onboarding_connections`). Identity stays out of `places.json` for wire and label compatibility (CREATING_SKILLS). Only `kind: user` can match account-scoped owner confirmation. Silent can wake.
 
 ### Host Service boundary
 

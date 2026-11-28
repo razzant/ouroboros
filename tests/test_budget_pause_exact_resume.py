@@ -8,6 +8,7 @@ threshold refresh. The loop-side pause and HOLD tests are in
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import pathlib
 import time
@@ -353,8 +354,9 @@ def test_owner_resume_renews_only_the_same_wake_and_consumption_keeps_its_new_ce
         shown = panel.json()
         assert (shown["status"], shown["live_wake_task_id"], shown["unknown_unmetered"]) == ("wake_paused", "own-wake", 1)
         assert (shown["spent_24h_usd"], shown["daily_usd"]) == (17.0, 22.0)
-        assert shown["live_wake_hold"] == {"cause": "allowance", "ceiling_usd": 4.0,
-                                           "resume_additional_usd": 5.0, "resume_available_usd": 3.0}
+        hold = dict(shown["live_wake_hold"])
+        assert dt.datetime.fromisoformat(hold.pop("started_at")).tzinfo, "the wake's own start, kept by its pause row"
+        assert hold == {"cause": "allowance", "ceiling_usd": 4.0, "resume_additional_usd": 5.0, "resume_available_usd": 3.0}
         assert "_budget_pause_resume" not in task and queue.PENDING == [task], "saving does not Resume"
         response = client.post(route, json={})
         assert response.status_code == 200
@@ -467,7 +469,7 @@ def test_a_pause_that_moved_since_it_was_observed_is_never_extended_by_the_obser
 def test_the_card_names_the_allowances_room_and_what_the_total_budget_leaves_of_it(
         tmp_path, monkeypatch, daily, total, additional, available):
     from ouroboros import usage_store
-    from ouroboros.consciousness_view import held_wake_cause
+    from ouroboros.consciousness_hold import held_wake_cause
 
     _daily_wake_pause(tmp_path, monkeypatch)
     reads = _observe_allowance_reads(monkeypatch)

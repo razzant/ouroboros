@@ -198,6 +198,10 @@ class GovernanceContext:
     stable_inline: str = ""
     selected_inline: str = ""
     inline_whole_documents: dict = field(default_factory=dict)
+    # A packet whose selection skipped chapter openings already resident in its navigation keeps, as ``fallback``,
+    # the selection that re-sends them instead (smaller where that skip admitted larger sections): the fit ladder's
+    # last step before refusing, so a packet sendable before the skip stays sendable.
+    fallback: Any = None
     layer: str = BODY_LAYER
 
 
@@ -320,18 +324,20 @@ def _opening_units(source) -> list:
     return [(offset, text.strip(), is_code) for offset, text, is_code in units if text.strip()]
 
 
-def _book_navigation(repo_dir: Path, book_id: str, book, load_doc, *, instructions: bool = True) -> str:
+def _book_navigation(repo_dir: Path, book_id: str, book, load_doc, *, instructions: bool = True,
+                     inline: str = "") -> str:
     from ouroboros.context_layout import book_navigation, generate_doc_nav_map
     from ouroboros.reference_books import BOOK_ENTRYPOINTS
 
     entrypoint = BOOK_ENTRYPOINTS[book_id]
     if book is not None:
-        return book_navigation(book, instructions=instructions)
+        return book_navigation(book, instructions=instructions, inline=inline)
     # No book: map whatever the entrypoint reader returns, so the document stays
     # named and addressable even when its membership cannot be assembled.
     text = load_doc(repo_dir, entrypoint, on_missing="explicit")
     return generate_doc_nav_map(
-        text, title=entrypoint.rsplit("/", 1)[-1], rel_path=entrypoint, instructions=instructions)
+        text, title=entrypoint.rsplit("/", 1)[-1], rel_path=entrypoint, instructions=instructions,
+        compact=not instructions)
 
 
 def _subject_documents(subject_root: Path) -> list:
@@ -374,7 +380,7 @@ def navigation_material(layer: str, delivery: str) -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a layer's governance navigation
     as its renderer composes it for ``delivery``, over placeholders (the subject's documents, the sources a skill
     owes). The documents it names, their headings and the guides' own text are not here."""
-    from ouroboros.context_layout import design_navigation
+    from ouroboros.context_layout import PACKET_CHAPTER_DIR, PACKET_INDEX, design_navigation
     from ouroboros.tools.review_helpers import GOVERNANCE_OMISSION
 
     words = NAVIGATION_WORDS.get(layer, {})
@@ -382,11 +388,11 @@ def navigation_material(layer: str, delivery: str) -> list:
         pointers = [_checklist_pointer(rules, shared) for rules in (True, False) for shared in (True, False)]
         omissions = [text.format(rel_path="⟨path⟩", path="⟨path⟩", error="⟨error⟩") for text in GOVERNANCE_OMISSION.values()]
         if layer == BODY_LAYER:
-            pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note)
+            pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note, compact=delivery == PACKET_DELIVERY)
                             for note in _DESIGN_REVIEW_MAP.values())
             pointers.append(_INVARIANTS_UNAVAILABLE)
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
-                *(pointers if layer == BODY_LAYER else ())]
+                *(pointers if layer == BODY_LAYER else ()), *([PACKET_INDEX, PACKET_CHAPTER_DIR.format(folder="⟨folder⟩")] if delivery == PACKET_DELIVERY else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
     (tail,) = words[delivery]
     return [heading, *(rules + subject_words + tail for rules in (with_rules, without_rules)),
@@ -484,7 +490,7 @@ def _contract_text(root: Path, path: str) -> str:
 def _skill_layer_context(repo_dir: Any, *, surface: str, delivery: str, checklist_section_text: str,
                          manifest_facts: Any) -> GovernanceContext:
     """The skill layer (module docstring): tiers by the manifest's facts, never by a verdict."""
-    from ouroboros.context_layout import generate_doc_nav_map
+    from ouroboros.context_layout import PACKET_INDEX, generate_doc_nav_map
     from ouroboros.tools.review_helpers import load_governance_doc
 
     root = Path(repo_dir)
@@ -549,14 +555,17 @@ def _skill_layer_context(repo_dir: Any, *, surface: str, delivery: str, checklis
         for chapter in _book_sources(book):
             if chapter.source_path not in SKILL_REQUIRED_CHAPTERS:
                 rows.append(_row(chapter.source_path, 3, "navigation", len(chapter.text), "the map is never inlined whole"))
-        maps.append(_book_navigation(root, book_id, book, load_governance_doc, instructions=not packet))
+        maps.append(_book_navigation(root, book_id, book, load_governance_doc, instructions=not packet,
+                                     inline="\n".join(text for _title, text in tier1 + selected)))
     creating = load_governance_doc(root, CREATING_SKILLS_PATH, on_missing="explicit")
     rows.append(_row(CREATING_SKILLS_PATH, 3, "navigation", len(creating), "the skill author's guide: its heading map"))
     maps.append(generate_doc_nav_map(creating, title=CREATING_SKILLS_PATH.rsplit("/", 1)[-1], rel_path=CREATING_SKILLS_PATH,
-                                     instructions=not packet) if not creating.startswith("[⚠️") else creating)
+                                     instructions=not packet, compact=packet)
+                if not creating.startswith("[⚠️") else creating)
     required_names = [row["path"] for row in rows if row["disposition"] == "required"]
     heading, words = NAVIGATION_WORDS[SKILL_LAYER][PACKET_DELIVERY if packet else RETRIEVING_DELIVERY]
-    navigation = _join([heading, words.format(required=", ".join(f"`{name}`" for name in required_names)), *maps])
+    navigation = _join([heading, words.format(required=", ".join(f"`{name}`" for name in required_names)),
+                        PACKET_INDEX if packet else "", *maps])
     stable_inline = _join(_render(title, text) for title, text in tier1)
     selected_inline = _join(_render(title, text) for title, text in selected)
     return GovernanceContext(
@@ -579,6 +588,7 @@ def governance_context(
     subject_root: Any = None,
     manifest_facts: Any = None,
     review_words: Any = None,
+    resident_openings_selectable: bool = False,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -594,6 +604,7 @@ def governance_context(
     :func:`_core_layer_context` over ``subject_root``; ``skill`` (a skill payload)
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
     manifest's ``declares``)."""
+    call = {key: value for key, value in locals().items() if key != "resident_openings_selectable"}
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
 
     if layer not in GOVERNANCE_LAYERS:
@@ -712,7 +723,7 @@ def governance_context(
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
     # The design bible alone: its whole section, principles, seed table and recipes, the
     # very slice its author carries (``context_layout.design_bible_section``).
-    from ouroboros.context_layout import design_bible_section, design_navigation
+    from ouroboros.context_layout import PACKET_INDEX, design_bible_section, design_navigation
 
     bible_path, principles_path = _DESIGN_BIBLE_PATH, _DESIGN_PRINCIPLES_PATH
     bible = None if design_missing else design_bible_section(design_text)
@@ -773,6 +784,7 @@ def governance_context(
     rows.append(_row("docs/ARCHITECTURE.md", 3, "navigation", 0, arch_reason if arch_chapters
                      else arch_problem or "no chaptered membership: navigation only"))
     sections: list[tuple[tuple, str, str, str]] = []
+    skipped_resident = False
     any_name = re.compile("|".join(pattern.pattern for group in names for pattern in group)) if names else None
     for chapter in arch_chapters:
         if chapter.source_path == BODY_INVARIANTS_CHAPTER:  # tier 1 above, whole
@@ -785,8 +797,14 @@ def governance_context(
                  for number, (start, text, is_code) in enumerate(_opening_units(chapter), 1)]
         units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section), False)
                   for heading in _top_sections(chapter)]
+        from ouroboros.reference_books import _preamble
+
+        resident = chapter.text_at(_preamble(chapter)).strip()  # the packet navigation carries it either way
         for start, title, body, is_code in units:
-            if is_code:  # a listing (the module tree) gives its lines that name a touched file, not all of itself
+            if not is_code and body.strip() == resident and not resident_openings_selectable:
+                skipped_resident = skipped_resident or bool(_mentions(body, names)[0])
+                continue
+            if is_code:  # a listing (the module directory) gives its lines that name a touched file, not all of itself
                 body = "\n".join(line for line in body.splitlines() if any_name.search(line))
                 title += " (excerpt: its lines naming a touched file)"
             files, mentions = _mentions(body, names)
@@ -809,14 +827,16 @@ def governance_context(
                           and row["path"] in (bible_path, principles_path)), DESIGN_PATH)
         design_map = design_navigation(
             None if design_missing else design_text, source=str(root / DESIGN_PATH),
-            disclosure=_DESIGN_REVIEW_MAP[delivered])
+            disclosure=_DESIGN_REVIEW_MAP[delivered], compact=packet)
     nav_heading, nav_words = NAVIGATION_WORDS[BODY_LAYER][PACKET_DELIVERY if packet else RETRIEVING_DELIVERY]
     navigation = _join([
         nav_heading, nav_words,
         "\n".join(pointer for pointer in pointers if pointer),
+        PACKET_INDEX if packet else "",
         design_map,
-        _book_navigation(root, DEVELOPMENT_BOOK_ID, dev_book, load_governance_doc, instructions=not packet),
-        _book_navigation(root, ARCHITECTURE_BOOK_ID, arch_book, load_governance_doc, instructions=not packet),
+        *(_book_navigation(root, book_id, book, load_governance_doc, instructions=not packet,
+                           inline="\n".join(text for _title, text in tier1 + selected)) for book_id, book in ((DEVELOPMENT_BOOK_ID, dev_book),
+                                                                                  (ARCHITECTURE_BOOK_ID, arch_book))),
     ])
 
     stable_inline = _join(_render(title, text) for title, text in tier1)
@@ -829,4 +849,5 @@ def governance_context(
         stable_inline=stable_inline,
         selected_inline=selected_inline,
         inline_whole_documents=inline_texts,
+        fallback=governance_context(**call, resident_openings_selectable=True) if skipped_resident else None,
     )

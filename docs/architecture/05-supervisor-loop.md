@@ -1,6 +1,6 @@
 # 5. Supervisor Loop
 
-`server.py::_run_supervisor()` owns the pooled scheduling tick and lifecycle lock. Intent precedes teardown; intent, outcome and money stay separate.
+This part gives me my scheduler: `server.py::_run_supervisor()` owns the pooled scheduling tick and lifecycle lock that admit, assign and supervise my work, schedules and wakes. I start work with `start_task`, keep schedules with `schedule_followup` and `manage_schedules`, and read the host's queue snapshot through `query_data` (`queue_snapshot`). Intent precedes teardown; intent, outcome and money stay separate.
 
 ### Tick and locks
 

@@ -23,6 +23,7 @@ import pytest
 
 from tests.settings_browser_helpers import commit_row, open_settings, setting_row
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
+from tests.test_ui_smoke_playwright import settle_first_launch
 from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser]
@@ -43,6 +44,7 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
     from playwright.sync_api import expect, sync_playwright
 
     core = direct_server_with_data
+    settle_first_launch(core)  # the restart below is an ordinary one, not a new folder's first
     url = core["url"]
     evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", core["data_dir"].parent)) / "interface-choice"
     evidence.mkdir(parents=True, exist_ok=True)
