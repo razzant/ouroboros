@@ -24,8 +24,8 @@
   "version": "0.1.40"
  },
  "openai_realtime": {
-  "content_hash": "9e0aa1bee8fe6458260b58b9ac87b332f4d17aaa83be0b5ddaed60009a96ae8d",
-  "version": "0.1.11"
+  "content_hash": "28075eb7d62922b1c5a10bb9200f5fe432887d59857ae26adb6172f9922b8811",
+  "version": "0.1.12"
  },
  "telegram": {
   "content_hash": "a85cd530d81808668f31d666a4b7d766a97a61a31b9173f4607a4f7e35c18494",

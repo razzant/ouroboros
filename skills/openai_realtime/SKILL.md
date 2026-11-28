@@ -1,7 +1,7 @@
 ---
 name: openai_realtime
 description: OpenAI native Realtime audio, images and tools over the host's ordinary selected context.
-version: 0.1.11
+version: 0.1.12
 type: extension
 runtime: python3
 entry: plugin.py
@@ -26,8 +26,14 @@ Automatic truncation is disabled.
 Text fields preserve every character and role across the observed 256000-character
 item limit. Images remain native input. Unsupported content fails explicitly.
 
-Call instructions follow host system text. The first language tag supplies the
-ISO-639-1 transcription hint; additional tags stay in instructions. Pause maps
+Call instructions follow host system text. One recorded language tag becomes the
+ISO-639-1 transcription language; with several, transcription gets none and detects
+each utterance itself (2026-11-28: a pinned code that was not the one spoken
+translated the speech into it), and an instruction line says so. A call that
+records new languages changes transcription in place (`update_languages`): its own
+session.update, alone on the wire until echoed; instructions, tools and history are
+not rewritten, so the cached prefix stays cached (measured 2026-11-28). A refusal or a
+disagreeing echo leaves the session as it was and reports nothing applied. Pause maps
 to server-VAD silence duration (300/500/1000 ms); interruptions follow the owner's
 option. Responses remain host-driven, after setup and context/tool ACKs. `Respond`
 opens the greeting; silent tool outputs request no answer.

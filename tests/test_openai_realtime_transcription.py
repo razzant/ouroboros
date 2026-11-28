@@ -1,5 +1,6 @@
 """An item transcription failure does not end the native spoken conversation."""
 import asyncio
+import copy
 from dataclasses import replace
 
 import pytest
@@ -127,3 +128,123 @@ def test_a_component_sample_without_its_model_still_lands_priced_unknown(host_wo
         [row] = ua.read_usage_records(host.ctx.drive_root)
     assert row['source'] == 'live_transcription_usage' and row['model'] == ''
     assert row['cost_usd'] is None and row['cost_evidence']['unpriced'], 'unknown, never free'
+
+
+# Recorded on 28.11.2026 (probes/languages, gpt-realtime-2.1): the transcription echo carries the whole object with
+# "prompt": null added, an omitted language reads back null, and a refusal leaves the session open.
+REFUSED_CODE = {"type": "error", "error": {"type": "invalid_request_error", "code": "invalid_value",
+    "message": "Invalid value: 'zz'.", "param": "session.audio.input.transcription.language", "event_id": None}}
+REFUSED_FIELD = {"type": "error", "error": {"type": "invalid_request_error", "code": "invalid_parameter",
+    "message": "The 'languages' parameter is not supported for this model.",
+    "param": "session.audio.input.transcription.languages", "event_id": None}}
+
+
+def language_wire(answer=None, echoed=None):
+    from tests.test_grok_openai_protocol import Wire
+
+    class Recorded(Wire):
+        def put(self, event):
+            if event.get("type") == "session.updated":
+                transcription = event["session"].get("audio", {}).get("input", {}).get("transcription")
+                if transcription is not None:
+                    shaped = {"model": transcription.get("model"), "language": transcription.get("language"), "prompt": None}
+                    event = {**event, "session": {**event["session"], "audio": {**event["session"]["audio"], "input": {
+                        **event["session"]["audio"]["input"], "transcription": {**shaped, **(echoed or {})}}}}}
+            super().put(event)
+
+        async def send(self, raw):
+            import json
+            event = json.loads(raw)
+            if answer is not None and str(event.get("event_id", "")).startswith("languages_"):
+                self.sent.append(event)
+                refusal = copy.deepcopy(answer)
+                if refusal["error"]["code"] == "invalid_value":
+                    refusal["error"]["event_id"] = event["event_id"]
+                self.put(refusal)
+                return
+            await super().send(raw)
+    return Recorded()
+
+
+async def opened(providers, wire, languages=()):
+    from ouroboros.contracts.live_conversation import LiveOptions
+    adapter, wire = make(providers, "openai", LiveOptions(languages=languages), wire=wire)
+    await adapter.open()
+    assert (await adapter.receive())[0].kind == "ready"
+    return adapter
+
+
+@pytest.mark.parametrize("languages,sent,taken", [
+    (("ru-RU",), {"model": "gpt-4o-transcribe", "language": "ru"}, ("ru-RU",)),
+    (("ru-RU", "en-US"), {"model": "gpt-4o-transcribe"}, ()),  # several: the engine detects each utterance
+    ((), {"model": "gpt-4o-transcribe"}, ()),
+])
+def test_languages_change_in_place_alone_on_the_wire_until_echoed(providers, languages, sent, taken):
+    from ouroboros.contracts.live_conversation import ContextUpdate
+
+    async def run():
+        wire = language_wire()
+        adapter = await opened(providers, wire, ("de-DE",))
+        try:
+            setup = [event for event in wire.sent if event["type"] == "session.update"]
+            update = asyncio.create_task(adapter.update_languages(languages))
+            await asyncio.sleep(0.01)
+            change = wire.sent[-1]
+            assert change == {"type": "session.update", "event_id": "languages_1",
+                              "session": {"type": "realtime", "audio": {"input": {"transcription": sent}}}}
+            assert not adapter.renewal_ready and not update.done()
+            await adapter.send(ContextUpdate(({"role": "user", "content": "Room words."},)))
+            assert wire.sent[-1] is change, "nothing crosses the update before its echo"
+            await adapter.receive()  # the echo
+            assert await update == taken
+            await adapter.receive()  # the held item's acknowledgement
+            assert [event["type"] for event in wire.sent[-2:]] == ["conversation.item.create", "response.create"]
+            # Instructions, tools and history are not rewritten: the cached prefix stays as it was set up.
+            assert [event for event in wire.sent if event["type"] == "session.update"] == [*setup, change]
+            assert not any(event.get("item", {}).get("role") == "system" for event in wire.sent[len(setup) + 2:])
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("answer", [REFUSED_CODE, REFUSED_FIELD, "other language echoed"])
+def test_a_refused_or_disagreeing_language_update_changes_nothing_and_keeps_the_call(providers, answer):
+    async def run():
+        wire = language_wire(None if isinstance(answer, str) else answer,
+                             echoed={"language": "en"} if isinstance(answer, str) else None)
+        adapter = await opened(providers, wire)
+        try:
+            update = asyncio.create_task(adapter.update_languages(("ru-RU",)))
+            await asyncio.sleep(0.01)
+            events = await adapter.receive()
+            assert not any(event.kind == "closed" for event in events) and not wire.closed
+            assert await update is None
+            assert adapter.renewal_ready, "the list now goes the renewal way"
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+def test_an_error_that_is_not_the_language_updates_stays_fatal(providers):
+    from ouroboros.contracts.realtime import RealtimeSetupError
+
+    async def run():
+        wire = language_wire({"type": "error", "error": {"type": "server_error", "code": "server_error",
+                                                         "param": None, "event_id": None}})
+        adapter = await opened(providers, wire)
+        try:
+            update = asyncio.create_task(adapter.update_languages(("ru-RU",)))
+            await asyncio.sleep(0.01)
+            with pytest.raises(RealtimeSetupError):
+                await adapter.receive()
+            update.cancel()
+        finally:
+            await adapter.close()
+    asyncio.run(run())
+
+
+def test_a_session_not_ready_takes_no_languages(providers):
+    async def run():
+        adapter, wire = make(providers, "openai")
+        assert await adapter.update_languages(("ru-RU",)) is None and not wire.sent
+    asyncio.run(run())

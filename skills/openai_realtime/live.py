@@ -52,6 +52,21 @@ def items(message):
     return result
 
 
+def transcription(languages):
+    """Input transcription for setup and for an in-place update alike. gpt-4o-transcribe takes one ISO-639-1 code; with
+    several recorded languages it gets none and detects each utterance itself: on 28.11.2026 a pinned code that was not
+    the one spoken translated the speech into it (en on Russian), and detection was never worse than the best pin."""
+    config = {"model": "gpt-4o-transcribe"}
+    if len(languages) == 1:
+        config["language"] = languages[0].split("-")[0].lower()
+    return config
+
+
+def transcription_echoed(requested, echoed):
+    # The echo carries the whole object with "prompt": null added; an omitted language reads back null.
+    return isinstance(echoed, dict) and all(echoed.get(key) == requested.get(key) for key in ("model", "language"))
+
+
 class OpenAISession(JsonSession):
     silent_context_updates = True
     def __init__(self, selected, options, *, connect, observe):
@@ -59,7 +74,8 @@ class OpenAISession(JsonSession):
         messages = json.loads(selected.messages_json)
         additions = [options.instructions] if options.instructions else []
         if len(options.languages) > 1:
-            additions.append("Speech recognition should also expect: " + ", ".join(options.languages[1:]) + ".")
+            additions.append("Speech recognition here takes one language at a time, so with several recorded it "
+                             "detects the language of each utterance itself.")
         if additions:
             position = 0
             while position < len(messages) and messages[position]["role"] == "system":
@@ -86,10 +102,8 @@ class OpenAISession(JsonSession):
             self.output_bound_tokens = (min(allowance, self.output_bound_tokens)
                                         if self.output_bound_tokens is not None else allowance)
         session["audio"] = {"input": {"format": {"type": "audio/pcm", "rate": 24000},
-            "transcription": {"model": "gpt-4o-transcribe"}, "turn_detection": None},
+            "transcription": transcription(options.languages), "turn_detection": None},
             "output": {"format": {"type": "audio/pcm", "rate": 24000}}}
-        if options.languages:
-            session["audio"]["input"]["transcription"]["language"] = options.languages[0].split("-")[0].lower()
         self.turn_detection = {"type": "server_vad", "create_response": False,
                                "interrupt_response": options.interruptions,
                                "silence_duration_ms": {"short": 300, "normal": 500, "long": 1000}[options.pause]}
@@ -111,6 +125,9 @@ class OpenAISession(JsonSession):
         self.number = 0
         self.outstanding = {}
         self.tool_update = None
+        # A recognition-language change: requested (config, tags it applies, future), then sent with its event id.
+        self.language_request = self.language_update = None
+        self.language_number = 0
         self.context_queue = []
         self.context_lock = asyncio.Lock()
         self.response_requested = self.want_response = self.speech_active = False
@@ -127,7 +144,7 @@ class OpenAISession(JsonSession):
         return self.ready and not (self.speech_active or self.input_transcripts or self.output_transcripts
             or self.active_response or self.response_requested or self.want_response or self.context_queue
             or self.outstanding or self.tool_update is not None or self.waiting_tools or self.truncations
-            or self.requested_deletions)
+            or self.requested_deletions or self.language_request is not None or self.language_update is not None)
 
     @property
     def input_pending(self):
@@ -193,8 +210,37 @@ class OpenAISession(JsonSession):
         await self.advance_context()
         return events
 
+    async def update_languages(self, languages):
+        """Change recognition in place: the tags it takes from now on (() = it detects each utterance), or None when the
+        engine refused or echoed something else. Instructions, tools and history are untouched, so the cached prefix
+        stays cached (28.11.2026: the next response read 31,488 of 31,635 input tokens from the cache, as without it)."""
+        if not self.ready:
+            return None
+        tags = tuple(languages)
+        request = (transcription(tags), tags if len(tags) == 1 else (), asyncio.get_running_loop().create_future())
+        self.language_request = request
+        await self.advance_context()
+        try:
+            return await request[2]
+        finally:
+            if self.language_request is request:
+                self.language_request = None
+
+    def language_refused(self, error):
+        """28.11.2026: an invalid code is refused naming our event id; an unsupported field names none, only its param."""
+        pending = self.language_update
+        if pending is None or not (error.get("event_id") == pending[0] or error.get("event_id") is None
+                                   and str(error.get("param", "")).startswith("session.audio.input.transcription")):
+            return False
+        self.language_update = None
+        if not pending[3].done():
+            pending[3].set_result(None)
+        return True
+
     def is_benign_error(self, event):
         error = event.get("error")
+        if event.get("type") == "error" and isinstance(error, dict) and self.language_refused(error):
+            return True  # the session keeps its previous recognition; the call applies the list by renewal
         if (event.get("type") != "error" or not isinstance(error, dict) or not self.pending_cancel
                 or error.get("code") != "response_cancel_not_active"
                 or error.get("event_id") not in (None, "cancel_" + self.pending_cancel)
@@ -218,8 +264,19 @@ class OpenAISession(JsonSession):
     async def advance_context(self):
         """Only this provider owns the ordering of item ACKs and responses."""
         async with self.context_lock:
-            if not self.ready or self.active_response or self.response_requested or self.outstanding or self.tool_update is not None:
+            if (not self.ready or self.active_response or self.response_requested or self.outstanding
+                    or self.tool_update is not None or self.language_update is not None):
                 return
+            if self.language_request is not None:
+                # Its own session.update, alone on the wire until echoed (as a tool update): its echo is unambiguous.
+                config, applied, done = self.language_request
+                self.language_request = None
+                if not done.done():
+                    self.language_number += 1
+                    self.language_update = (f"languages_{self.language_number}", config, applied, done)
+                    await self.write({"type": "session.update", "event_id": self.language_update[0], "session": {
+                        "type": "realtime", "audio": {"input": {"transcription": config}}}})
+                    return
             while self.context_queue and not self.outstanding and self.tool_update is None:
                 command = self.context_queue.pop(0)
                 outgoing = [(item, message.get("_call_frame_source", ""))
@@ -267,6 +324,12 @@ class OpenAISession(JsonSession):
                 if actual.get("tools") != self.tool_update:
                     raise RealtimeSetupError("tools_mismatch", "OpenAI changed the ordinary tool catalog")
                 self.tool_update = None
+            elif self.language_update is not None:
+                _, config, applied, done = self.language_update
+                self.language_update = None
+                taken = transcription_echoed(config, actual.get("audio", {}).get("input", {}).get("transcription"))
+                if not done.done():
+                    done.set_result(applied if taken else None)
         if kind == "conversation.item.done":
             actual = event.get("item", {})
             sent = self.outstanding.pop(actual.get("id"), None)

@@ -153,9 +153,11 @@ def test_options_preserve_host_text_and_add_language_hints(providers, engine, la
                 if languages:
                     assert text.index("Feature then owner rules.") < text.index("Speech recognition")
             else:
+                # Several recorded languages: gpt-4o-transcribe takes one code, so it detects each utterance (28.11.2026).
                 transcription = session["audio"]["input"]["transcription"]
-                assert transcription.get("language") == ("ru" if languages else None)
-                assert ("en-US" in text) is bool(languages)
+                assert transcription == {"model": "gpt-4o-transcribe"}
+                assert ("detects the language of each utterance itself" in text) is bool(languages)
+                assert "should also expect" not in text
                 assert session["audio"]["output"]["voice"] == "marin"
                 assert session["truncation"] == "disabled"
         finally:

@@ -514,7 +514,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
             if previous_version != '0.1.38' or path == 'ui/call.css':
                 assert payload != (repo / "skills" / name / path).read_bytes()
     else:
-        version = {'live_conversation': '0.1.40', 'grok_realtime': '0.1.16', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.11',
+        version = {'live_conversation': '0.1.40', 'grok_realtime': '0.1.16', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.12',
                    'unix_computer_use': '0.9.2'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
