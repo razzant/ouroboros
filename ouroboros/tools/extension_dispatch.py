@@ -437,7 +437,9 @@ def _dispatch_extension_tool_result(
     content_hash = str(ext_tool.get("content_hash") or "")
     from ouroboros.extension_late_result import with_call_ref
 
-    with with_call_ref(ctx):
+    from ouroboros.place_guard import owner_dm_call
+
+    with with_call_ref(ctx), owner_dm_call(ctx):
         result = _with_extension_report(ctx, ext_tool, _dispatch_extension_tool_untagged(
             ctx, name, ext_tool, args, **({"handoff": handoff} if handoff is not None else {})))
     if (
@@ -501,6 +503,10 @@ def _dispatch_extension_tool_untagged(
         text = (f"⚠️ TOOL_ERROR ({name}): extension {skill_name!r} was replaced after this call was bound; "
                 "its child would run the replacement, not the code its declaration describes. Call it again.")
         return _extension_result("unavailable", "EXTENSION_UNAVAILABLE", text)
+
+    from ouroboros.place_guard import bind_owner_dm_call
+
+    bind_owner_dm_call(ctx, name, ext_tool, call_args, capability_root)
 
     from ouroboros.safety import check_safety as _ext_check_safety
     _ext_safe, _ext_safety_msg = _ext_check_safety(
