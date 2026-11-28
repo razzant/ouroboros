@@ -59,8 +59,9 @@ chapter maps, a rung that gave 250,000+ mock tokens. The books rung now gives th
 two rooms' sends of one run (A1 against B1: 9,100 at that rung), so no fixed line can sit between those two forms for
 both rooms. What M witnessed is kept where sizes are exact, in the real in-process episode of
 ``tests/test_context_refusal_passes.py::test_first_contact_preference_reaches_the_next_real_chat_request[maps]``: the
-books rung is the first accepted request of the walk, and the next fresh chat starts in Max with its tellings folded,
-never in Low by preference. N's walk below shows the same ladder on the wire, refused at every rung.
+books rung is the first accepted request of the walk, and the next fresh chat starts in Low, temporarily, for the
+window, with the Map at its parts, every telling and the same tools. N's walk below shows the same ladder on the
+wire, refused at every rung.
 
 ``CLEARANCE`` is asserted from the recorded sizes of every scenario's own run: at a scenario's FIXED line, no request
 that belongs to a turn may sit inside 10,000 mock tokens of it (stage R's line is derived from the run, so it is read

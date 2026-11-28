@@ -559,8 +559,8 @@ def _failure_request_text(usage, walked):
 
 def required_book_fact(usage, slot=None):
     """At a size refusal: memory stayed as it was because the book is this task's own requirement, named when the
-    refused request (``slot``) or the current view carries it (a failed walk restores another route's view, which in
-    Max holds the book with no addition). Its size is the refused request's own; what fits without it comes only from
+    refused request (``slot``) or the current view carries it (a failed walk restores another route's view, whose
+    own size of the book may differ). Its size is the refused request's own; what fits without it comes only from
     that refusal's own decomposition (``capacity``: the host's admission refused the candidate before sending, judging
     its book, size, window and reserve), never from another view or a later measure of the same route; otherwise no
     figure. The Continue it names is the one that terminal's cause gets (``owner_continue``)."""

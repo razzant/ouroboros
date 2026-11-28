@@ -576,8 +576,8 @@ def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_u
     session: a story of long old pages a Max start holds whole beside the whole Body Map, and a voice window that
     refuses the first request. Before the call opens, the physical frame (reply reserve and the first send's own room
     kept) is paid by the old pages' written beginnings and the Body Map stays whole; the same preparation without the
-    ``unsent_start`` that ``session_candidate`` hands its floor rung yields the Map first. An opened session whose
-    request fits asks no start room and is not touched."""
+    ``unsent_start`` that ``session_candidate`` hands its floor rung keeps the Map whole too, while this window holds
+    my tellings beside it. An opened session whose request fits asks no start room and is not touched."""
     from ouroboros import context_fit as fit, memory_view
     from ouroboros.contracts.live_conversation import LiveOptions
     from ouroboros.realtime_setup import measure_session_wire, session_candidate
@@ -635,7 +635,7 @@ def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_u
 
     bare, evidence = prepare(refused, unsent_start=False)  # the same preparation, only that argument removed
     assert [row['rung'] for row in evidence['recovery']] == ['floor']
-    # Without it too (carbon B1, PR3 review): below Max the Map answers to the window in every frame, a sent view's
+    # Without it too: below Max the Map answers to the window in every frame, a sent view's
     # reprojection included, so it stays whole while this window holds my tellings beside it.
     assert all(whole_map in bare for whole_map in maps) and pages_of(bare)[1]
 

@@ -226,6 +226,13 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
         assert json.dumps(text, ensure_ascii=False)[1:-1] in users, "the work order is the first user turn"
         _body_view(system_text, flag=flag, required=required, handbooks=handbooks[-1])
     assert len(handbooks) == 2
+    whole = [block["text"] for block in system if block["text"].startswith("## DEVELOPMENT.md\n")]
+    for lower in ("low", "nano"):  # the owner's lower modes: the continued request keeps the requirement and its book
+        monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", lower)
+        _task, messages = _first_request(env, memory, row)
+        assert [block["text"] for block in messages[0]["content"]
+                if block["text"].startswith("## DEVELOPMENT.md\n")] == whole, lower  # the same whole handbook, or none
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
 
     # A recovered admission (queue row kept, result row lost) keeps the same contract.
     assert delete_document(tmp_path, successor)

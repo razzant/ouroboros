@@ -197,11 +197,11 @@ def test_a_presence_ceiling_that_grants_file_reading_follows_the_maps_addresses_
                                              state_fingerprint="d" * 64, resolution=pa._resolution(*targets)))}
     env, _plain, task = _capture(tmp_path, {"task_contract": contract} if contract else None)
     entry = env.repo_dir / "docs" / "ARCHITECTURE.md"
-    entry.write_text(entry.read_text() + "\n## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) — how the screens look.\n"
-                     "- `README.md` and `CONTRIBUTING.md` — the first look.\n")
+    entry.write_text(entry.read_text(encoding="utf-8") + "\n## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) — how the "
+                     "screens look.\n- `README.md` and `CONTRIBUTING.md` — the first look.\n", encoding="utf-8")
     for path in ("docs/DESIGN.md", "README.md", "docs/unlisted.md", "ouroboros/loop.py"):
         (env.repo_dir / path).parent.mkdir(parents=True, exist_ok=True)
-        (env.repo_dir / path).write_text("text\n")  # CONTRIBUTING.md is named and absent: no address
+        (env.repo_dir / path).write_text("text\n", encoding="utf-8")  # CONTRIBUTING.md is named and absent: no address
     ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_contract=contract)
     registry = ToolRegistry(repo_dir=env.repo_dir, drive_root=env.drive_root)
     registry.set_context(ctx)

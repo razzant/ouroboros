@@ -186,7 +186,10 @@ def test_the_size_terminal_names_the_kinds_and_the_largest_unit_once(tmp_path):
 
 
 # The size terminal's frame as f4cd41056 wrote it: a same-task working checkpoint carries it across an Update or a rollback.
-BASE_REFUSAL_FRAME = [["unit:2:2:47f4248f4c33a6e7", 890], ["core and body map", 16], ["assignment", 16]]
+# Its first-block label is the one that revision wrote ("core and books"); a row saved by this body says
+# "core and body map" (``NEW_REFUSAL_FRAME``). Both are plain [label, tokens] pairs and both read.
+BASE_REFUSAL_FRAME = [["unit:2:2:47f4248f4c33a6e7", 890], ["core and books", 16], ["assignment", 16]]
+NEW_REFUSAL_FRAME = [["unit:2:2:47f4248f4c33a6e7", 890], ["core and body map", 16], ["assignment", 16]]
 
 
 def _base_refusal_frame_facts(usage, round_idx):
@@ -207,8 +210,10 @@ def test_the_size_terminal_frame_reads_across_an_update_and_a_rollback(tmp_path)
     it, reads through the base's own reader with its largest single unit as one more labelled pair."""
     from ouroboros.context_view_facts import refusal_frame_facts
 
-    assert refusal_frame_facts({"_context_refusal_frame": BASE_REFUSAL_FRAME}, 3) == (
-        "largest parts: unit:2:2:47f4248f4c33a6e7 ~890, core and body map ~16, assignment ~16 by raw estimate of the current view")
+    for frame, label in ((BASE_REFUSAL_FRAME, "core and books"), (NEW_REFUSAL_FRAME, "core and body map")):
+        assert refusal_frame_facts({"_context_refusal_frame": frame}, 3) == (  # an old row keeps its own word
+            f"largest parts: unit:2:2:47f4248f4c33a6e7 ~890, {label} ~16, assignment ~16 by raw estimate of the current view")
+        assert _base_refusal_frame_facts({"_context_refusal_frame": frame}, 3).count(f"{label} ~16") == 1  # and a rollback reads both
     head = [{"role": "system", "content": "S"}, {"role": "user", "content": "go"}, *(_review_row(n) for n in range(4))]
     long_reply = {"role": "assistant", "content": "My long analysis. " * 1500}
     unit = next(u for u in cc.context_units([*head, long_reply], scope="dialogue") if u.start == len(head))

@@ -1004,7 +1004,7 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
 
 @pytest.mark.parametrize("form", ["parts", "no-parts", "no-reader"])
 def test_a_books_rung_that_cannot_step_the_map_changes_and_counts_nothing(tmp_path, monkeypatch, form):
-    """astra (PR3 review): with no parts form or no reader for the Map's full text the rung has nothing to give: the
+    """With no parts form or no reader for the Map's full text the rung has nothing to give: the
     mode, the plan and the transcript stay, no ``context_fit_low_retry`` checkpoint tells the owner the Map was
     shortened, and the step is no contribution; with both, the same refusal steps the Map and counts its saving."""
     ctx, measure, events = _books_ctx(tmp_path, monkeypatch, _books_core(tmp_path, form))
@@ -1020,7 +1020,7 @@ def test_a_books_rung_that_cannot_step_the_map_changes_and_counts_nothing(tmp_pa
 
 @pytest.mark.parametrize("form", ["parts", "no-reader"])
 def test_an_already_low_frame_on_a_route_with_no_window_steps_the_map_at_a_numberless_refusal(tmp_path, monkeypatch, form):
-    """astra 1 (PR3 review): an owner-Low plan on a route that states no window meets a refusal that names no size; the
+    """An owner-Low plan on a route that states no window meets a refusal that names no size; the
     books rung works in that frame too: the Map steps to its parts, the mode stays Low, the saving counts and the
     owner is told. With no reader for the Map's full text nothing steps, nothing is claimed."""
     ctx, measure, events = _books_ctx(tmp_path, monkeypatch, _books_core(tmp_path, form), mode="low", window=0)

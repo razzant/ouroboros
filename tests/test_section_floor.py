@@ -591,7 +591,7 @@ def _repository_map(core):
 
 
 def test_a_delegated_focus_in_owner_max_carries_the_body_map_whole_or_runs_in_low_with_its_parts(tmp_path):
-    """carbon B2 (PR3 review): Max carries the Body Map whole in every focus, a delegated child's too. Its Max room is
+    """Max carries the Body Map whole in every focus, a delegated child's too. Its Max room is
     measured with the Map whole (priced as an integrating root's is); where Max does not hold, the child runs in Low
     with the Map at its parts like any focus. No window gives a Max frame with the Map at its parts."""
     child = dataclasses.replace(_repository_map(_core(tmp_path, snapshot=syn.snapshot(role="child", story=syn.pages(6, 3_000)))),
@@ -629,7 +629,7 @@ def _below_a_telling(plan, mode):
 
 
 def _mature_memory():
-    """fable's mature probe memory (PR3 review): 300 authored story pages, 2,400 replies, 100 other conversations."""
+    """A mature probe memory: 300 authored story pages, 2,400 replies, 100 other conversations."""
     from ouroboros.chronicle_lead import LEAD_RULE_VERSION
 
     story = [dict(page, lead_rule=LEAD_RULE_VERSION,
@@ -641,7 +641,7 @@ def _mature_memory():
 
 
 def test_the_owners_nano_target_steps_the_body_map_before_it_takes_memory_below_a_telling(tmp_path):
-    """fable 2 (PR3 review): under the owner's own Nano, whose target takes a mature memory below a telling on any
+    """Under the owner's own Nano, whose target takes a mature memory below a telling on any
     window, the Map stands at its parts first, so fewer items go below a telling than with the Map held whole (a Map
     with no parts form) and no fewer than with no Map at all; a small memory that fits the target keeps it whole. The
     owner's own Low never takes memory below a telling by its target: on a window that holds both, the Map is whole."""
@@ -750,7 +750,7 @@ def test_a_required_book_yields_optional_maps_then_the_body_map_and_never_one_th
     assert memory_floor.yield_for_book([body], [], readerless, maps=True) is None
 
 
-def test_unsent_start_reprojection_keeps_the_whole_body_map_distinct_from_sent_views(tmp_path):
+def test_an_unsent_and_a_sent_reprojection_keep_the_whole_body_map_while_the_window_holds_it(tmp_path):
     """Unsent start reprojection (e.g. first text rebind before any send) keeps the whole Body Map of a new Low start
     while tellings fit the physical frame, independent of assistant/user message roles; an already-sent view
     (unsent_start=False) keeps it whole too while the window holds my tellings beside it, and steps it only where not."""
@@ -772,7 +772,7 @@ def test_unsent_start_reprojection_keeps_the_whole_body_map_distinct_from_sent_v
     assert WHOLE_MAP in _text(unsent, "low")
     assert any(unsent.low_projection.memory_facts["floor"]["steps"].values())
 
-    # A sent view (carbon B1, PR3 review): below Max the Map answers to the window in every frame, mid-run
+    # A sent view: below Max the Map answers to the window in every frame, mid-run
     # reprojections included. It stays whole while my shortest tellings fit the window beside it: here memory folds
     # and the Map stands whole; it steps only where the window cannot hold my tellings beside it.
     sent = roomy.reproject_for_route(**args, unsent_start=False)

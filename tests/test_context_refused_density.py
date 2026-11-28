@@ -509,8 +509,10 @@ def test_a_failed_walk_names_each_size_refusal_with_its_own_route(round_call, mo
     mode = "max" if held else "low"  # both routes carry the task's required handbook
     ctx = round_call(200_000, book_chars=8_000, words=4_000, mode=mode)
     primary_plan = ctx.context_fit_plan
-    fallback_plan = replace(_real_plan(preferred=mode, window=500_000, book_chars=8_000),
+    fallback_plan = replace(_real_plan(preferred=mode, window=500_000, book_chars=12_000),
                             model="anthropic/fallback", route_fp="route-b", provider="anthropic")
+    # The two routes' handbooks differ in size, so the refusing candidate's own size cannot be read from the other's.
+    assert primary_plan.core.required_book_tokens() != fallback_plan.core.required_book_tokens()
     # Sizes chosen so a minimum over every model would name the primary's: only the refusing model's key may answer.
     sizes = {primary_plan.model: (210_000, 200_000), fallback_plan.model: (510_000, 500_000)}
     outcomes = {primary_plan.model: primary, fallback_plan.model: fallback}
@@ -590,7 +592,8 @@ def test_a_failed_walk_names_each_size_refusal_with_its_own_route(round_call, mo
                     f"{usable:,} usable.") in text
         else:  # a request the provider refused was admitted with its book: its own size of it, and no arithmetic
             book = sent[-1].physical_context.required_book_tokens
-            assert book and f"handbook (~{book:,} tokens), which stayed. The choices" in text and "without it" not in text
+            assert book == refuser.core.required_book_tokens()  # the refusing route's own, whatever the walk restored
+            assert f"handbook (~{book:,} tokens), which stayed. The choices" in text and "without it" not in text
     else:  # the round's refusal, named apart from the failure that ended it, with no handbook line outside a size end
         assert f"\nEarlier in this round, a size refusal: {named}" in text
         assert text.count("request input") == 1 and "smallest refused" not in text and "handbook" not in text

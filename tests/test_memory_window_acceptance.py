@@ -357,13 +357,13 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
     # A Low the window took from Max is named Low beside the owner's Max (21.11.2026)
     assert sends and {(send["preferred_at_send"], send["applied"], send["books"], send["cause"]) for send in sends} == {
         ("max", start[0], "body_map", start[1])}
-    if not fits:  # every other fact of this case held above; only the first send's room is short
-        raise _FirstSendGap(f"{tokens + plan.output_reserve_tokens + room - window} tokens past the window")
     rows = [event["data"] for event in events if event["type"] == "log_event"
             and event["data"].get("checkpoint_kind") == "context_fit_physical_mode"]
     assert [row["cause"] for row in rows] == ([start[1]] if start[1] else [])  # the task card's start row
     assert [(row["effective_mode"], row["books"]) for row in rows] == ([("low", "body_map")] if start[1] else [])
     assert [event["system_type"] for _root, event in sent] == (["low_start_notice"] if start[1] else [])  # every cause
+    if not fits:  # every other fact of this case held above; only the first send's room is short
+        raise _FirstSendGap(f"{tokens + plan.output_reserve_tokens + room - window} tokens past the window")
 
 
 @pytest.mark.parametrize("window", [40_000, 200_000, 1_000_000])
