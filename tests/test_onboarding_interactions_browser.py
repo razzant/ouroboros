@@ -263,7 +263,8 @@ def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_u
     assert not page.evaluate(strip_shown)
     for field in page.locator(".wizard-content input:not([type=hidden]), .wizard-content select").all():
         assert field.evaluate("el => el.labels.length > 0 || Boolean(el.getAttribute('aria-label'))")
-        assert field.evaluate("el => el.classList.contains('ui-control')")
+        # A text field or select is `ui-control`; a consent checkbox (#4291) is the shared `ui-checkbox`.
+        assert field.evaluate("el => el.classList.contains(el.type === 'checkbox' ? 'ui-checkbox' : 'ui-control')")
         hint = field.get_attribute("aria-describedby")
         if hint:
             assert page.locator(f"#{hint}").inner_text().strip()
