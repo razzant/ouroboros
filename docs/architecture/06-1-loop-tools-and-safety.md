@@ -90,7 +90,7 @@ Credential, Bible and identity fences use physical owner locations (`credential_
 |---|---|---|---|
 | Main-loop native search (provider server tool, if the main-loop setting allows) | the solve model; no second model | provider-side | citations and counts in `llm_usage` and the host-attested retrieval fact (context, never a criterion alone); the query stays invisible |
 | `web_search` function tool | a provider leg may add a model and cost | Source/Model above, via `ToolRegistry` | arguments, legs and bounded results in `tools.jsonl`; never native-search usage on the answering call |
-| Browser tools (`browse_page`, `browser_action`) | the main loop | local stateful Playwright session on arbitrary pages | arguments and previews as tool evidence; neither retrieval path |
+| Browser (`browse_page`, `browser_action`) | main loop | stateful local Playwright | args, previews and originals by address; neither search path |
 
 Delegated profiles, local-readonly or acting, keep the URL, route, private-range and control-plane guards (`browser_policy.py`, §6 MCP); a Cyber-effective acting child inherits the selected access minus task restrictions. Their non-loopback private origins need host-set `resource_policy.allowed_origins` from Main/root `schedule_subagent`, only inherited or narrowed by delegated and external Presence callers (`tools/control_subagent_spec.py`); among delegated profiles only a valid acting child may run JavaScript `evaluate`, on its current page. Claims name their retrieval path.
 

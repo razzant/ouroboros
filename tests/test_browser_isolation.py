@@ -77,6 +77,7 @@ class TestBrowserModuleState:
         routes = []
         contexts = []
         fake_page = types.SimpleNamespace(
+            main_frame=object(),
             set_default_timeout=lambda timeout: None,
             on=lambda event, handler: None,
             close=coro(lambda: None),  # a close that fails otherwise is no confirmed close

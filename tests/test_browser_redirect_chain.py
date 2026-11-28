@@ -84,10 +84,10 @@ def test_observed_navigation_chain_keeps_actions_refused_until_a_new_document(re
     page = FakePage(chain("http://127.0.0.1:3000/final"))
     page.url = "http://127.0.0.1:3000/final"
     monkeypatch.setattr(browser, "_ensure_browser", lambda ctx, *_a, **_k: (page, ctx.browser_state))
-    ctx.browser_state.navigations = [chain("http://127.0.0.1:3000/start", "http://10.9.8.7/middle", page.url)]
+    ctx.browser_state.navigations = ["http://127.0.0.1:3000/start", "http://10.9.8.7/middle", page.url]
     refused = tools.execute("browser_action", {"action": "screenshot"})
     assert "origin_not_granted" in refused and "10.9.8.7" in refused and page.calls == []
-    ctx.browser_state.navigations = [chain("http://127.0.0.1:3000/final")]
+    ctx.browser_state.navigations = ["http://127.0.0.1:3000/final"]
     assert "Screenshot captured" in tools.execute("browser_action", {"action": "screenshot"})
 
 

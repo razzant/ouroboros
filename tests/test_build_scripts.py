@@ -978,7 +978,7 @@ class TestMacOSSigning:
         # the Docker lane keeps its own container spelling here.
         shared = _read(".github/workflows/ui-browser.yml")
         assert "OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit" in shared
-        assert "tests/test_browser_tools_smoke.py -m browser" in shared
+        assert "tests/test_browser_tools_smoke.py tests/test_browser_download.py -m browser" in shared
         assert "Run Docker browser tools Chromium/WebKit smoke" in src
         assert "tests/test_browser_tools_smoke.py -m browser" in src
         assert "-e OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit" in src

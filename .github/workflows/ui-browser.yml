@@ -192,7 +192,7 @@ jobs:
           PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
         run: >-
           python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/tools"
-          -- python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short
+          -- python -m pytest tests/test_browser_tools_smoke.py tests/test_browser_download.py -m browser -q --tb=short
           --junitxml="${{ runner.temp }}/ci-private/ui/tools.xml"
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/tools"
       # The lane's projection is this shard's proof for `ui-smoke`, not a diagnostic: an

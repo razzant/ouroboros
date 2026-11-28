@@ -31,7 +31,7 @@ except ImportError:
     _HAS_STEALTH = False
 
 from ouroboros import browser_policy, chromium_runtime
-from ouroboros.tools import browser_session
+from ouroboros.tools import browser_download, browser_session
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import (
     LegacyTextResultAdapter, ToolResult, _compose_execute_result, _publish_tool_result,
@@ -645,27 +645,7 @@ async def _open_session(ctx: ToolContext, bs: Any, owner: Any, engine: str, requ
         await stealth.apply_stealth_async(bs.page)
 
     bs.page.set_default_timeout(30000)
-    page = bs.page
-    setattr(bs, "navigations", [])
-
-    def observe_navigation(response: Any) -> None:
-        # Native redirect hops never reach the route callback, so a navigation
-        # response that ends a redirect chain is kept for the chain check
-        # (_navigation_block_reason) that runs before any page result. A
-        # main-frame navigation starts a new document and drops the old rows;
-        # an unredirected navigation was already judged by the route callback.
-        try:
-            request = response.request
-            if not request.is_navigation_request():
-                return
-            rows = [] if response.frame == page.main_frame else list(getattr(bs, "navigations", []))
-            if request.redirected_from is not None:
-                rows.append(response)
-            setattr(bs, "navigations", rows)
-        except Exception:
-            log.debug("Browser navigation observation failed", exc_info=True)
-
-    page.on("response", observe_navigation)
+    browser_download.watch_document(bs.page, bs)
     # Requests exposed by Playwright share the target decision, between calls too.
     # Native HTTP redirect hops can bypass route callbacks and are checked after
     # navigation; that check withholds content, not the already-sent request.
@@ -727,7 +707,7 @@ def _session_alive(bs: Any, *, page: bool = True) -> bool:
         return False
 
 
-def _observed(ctx: ToolContext, bs: Any, text: str) -> str:
+def _observed(ctx: ToolContext, bs: Any, text: str, *, meta=None) -> str:
     """One successful observation of the call's own generation, with its host notes.
 
     The generation's browser conditions (and every refused request not shown yet,
@@ -735,13 +715,14 @@ def _observed(ctx: ToolContext, bs: Any, text: str) -> str:
     alike; the extracted data stays unannotated in ``producer_text`` for programmatic readers."""
     notes = tuple(note for note in (browser_session.take_block_notes(bs),
                                     str(getattr(bs, "browser_conditions", "") or "")) if note)
-    if not notes:
+    if not notes and meta is None:
         return text
     composed = text
     for note in notes:
         composed = _compose_execute_result(composed, note, "")
     return _publish_tool_result(ctx, dataclasses.replace(
-        LegacyTextResultAdapter.from_text("", text), text=composed, producer_text=text, host_annotations=notes))
+        LegacyTextResultAdapter.from_text("", text), text=composed, producer_text=text,
+        host_annotations=notes, meta=meta or {}))
 
 
 # The in-process bound on retired browser generations not confirmed closed (a
@@ -1121,12 +1102,8 @@ async def _navigation_block_reason(page: Any, bs: Any, ctx: ToolContext, restric
     dispatched natively by then — a disclosed residual, not a pre-request guard.
     The hops are read on the loop; the decision (DNS, service identity) runs off it.
     """
-    targets = [str(getattr(page, "url", "") or "")]
-    for root in (response, *getattr(bs, "navigations", [])):
-        request = getattr(root, "request", None) if root is not None else None
-        while request is not None:
-            targets.append(str(request.url))
-            request = request.redirected_from
+    targets = [str(getattr(page, "url", "") or ""), *getattr(bs, "navigations", [])]
+    targets.extend(browser_download.redirect_targets(getattr(response, "request", None)))
     return await browser_session.owner_of(bs).decide(_first_url_block, list(dict.fromkeys(targets)), ctx, restricted)
 
 
@@ -1212,6 +1189,11 @@ def _load_page(ctx: ToolContext, url: str, output: str, wait_for: str, timeout: 
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=payload))
     if kind == "waited":
         return payload
+    if kind == "download":
+        text, source = payload
+        return _observed(ctx, generation, text, meta={"browser_download_source": source})
+    if kind == "download_failed":
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR", text=payload))
     return _observed(ctx, generation, _compose_output(ctx, generation, output, payload))
 
 
@@ -1223,7 +1205,19 @@ async def _navigate(ctx: ToolContext, page: Any, generation: Any, url: str, outp
     page.set_default_timeout(int(timeout) if timeout else 30000)
     if viewport:
         await _apply_viewport(page, viewport)
-    response = await page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+    owner = browser_session.owner_of(generation)
+    document_epoch = getattr(generation, "document_epoch", 0)
+    capture = browser_download.NavigationDownload(
+        page, url, owner, lambda: getattr(generation, "document_epoch", 0) != document_epoch,
+        getattr(generation, "download_requests", None))
+    with capture.observe():
+        deadline = browser_download.navigation_deadline(timeout)
+        try:
+            response = await page.goto(url, timeout=browser_download.goto_timeout(deadline), wait_until="domcontentloaded")
+        except Exception as exc:
+            if not capture.available or not browser_download.is_download_transition(exc):
+                raise
+            return await browser_download.capture_file(ctx, generation, capture, deadline, readonly, _first_url_block)
     waited = (True, "")
     if wait_for:
         waited = await _wait_for_page_state(page, wait_for, state, timeout) if state in _WAIT_STATES else None
@@ -1375,6 +1369,7 @@ def get_tools() -> List[ToolEntry]:
                 "description": (
                     "Open a URL in this task's own headless Playwright browser (not the owner's signed-in Chrome) "
                     "and return its content as text, html, markdown, or screenshot (base64 PNG). "
+                    f"{browser_download.DOWNLOAD_DESCRIPTION} "
                     "Browser persists across calls within a task. "
                     "For screenshots: use send_photo tool to deliver the image to the user. "
                     "Use viewport to test mobile layouts (e.g. '375x812'). "

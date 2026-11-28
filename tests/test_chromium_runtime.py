@@ -323,7 +323,7 @@ def test_another_build_answering_is_closed_and_refused():
 
 
 def _fake_session(monkeypatch, chromium):
-    page = types.SimpleNamespace(set_default_timeout=lambda _ms: None, on=lambda *_a: None)
+    page = types.SimpleNamespace(main_frame=object(), set_default_timeout=lambda _ms: None, on=lambda *_a: None)
     context = types.SimpleNamespace(new_page=coro(lambda: page), route=coro(lambda *_a: None), close=coro(lambda: None))
     starts = []
 
