@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Awaitable, Callable
 
+from ouroboros.asgi_beat import ASGI_BEAT
 from ouroboros.provider_models import (
     DIRECT_PROVIDER_DEFAULTS,
     compute_direct_review_models_fallback,
@@ -529,20 +531,36 @@ def setup_remote_if_configured(settings: dict, log) -> None:
         log.warning("Remote configuration failed on startup: %s", remote_msg)
 
 
+# The browser's liveness frame; a client reconnects after about three silent beats (CLIENT_CONTRACT §5).
+WS_HEARTBEAT_INTERVAL_SEC = 15.0
+
+
 async def ws_heartbeat_loop(
     has_clients_fn: Callable[[], bool],
     broadcast_fn: Callable[[dict], Awaitable[None]],
-    interval_sec: float = 15.0,
+    interval_sec: float = WS_HEARTBEAT_INTERVAL_SEC,
+    on_beat: Callable[[float], None] | None = None,
 ) -> None:
-    """Keep embedded clients active and give watchdogs a steady liveness signal."""
-    while True:
-        await asyncio.sleep(interval_sec)
-        if not has_clients_fn():
-            continue
-        await broadcast_fn({
-            "type": "heartbeat",
-            "ts": utc_now_iso(),
-        })
+    """Keep embedded clients active and give watchdogs a steady liveness signal.
+
+    Every beat also stamps the ASGI loop's own beat (``asgi_beat.ASGI_BEAT``: when it came, how much later than
+    ``interval_sec``) and hands that lateness to ``on_beat``; the stamp ends with this coroutine."""
+    token = ASGI_BEAT.start(interval_sec)
+    try:
+        while True:
+            slept_since = time.monotonic()
+            await asyncio.sleep(interval_sec)
+            late = ASGI_BEAT.beat(slept_since)
+            if on_beat is not None:
+                on_beat(late)
+            if not has_clients_fn():
+                continue
+            await broadcast_fn({
+                "type": "heartbeat",
+                "ts": utc_now_iso(),
+            })
+    finally:
+        ASGI_BEAT.stop(token)
 
 
 def start_ws_heartbeat(
@@ -551,6 +569,10 @@ def start_ws_heartbeat(
     has_clients_fn: Callable[[], bool],
     broadcast_fn: Callable[[dict], Awaitable[None]],
 ) -> asyncio.Task[None]:
-    """Bind thread-side broadcasts before starting this generation's heartbeat."""
+    """Bind thread-side broadcasts before starting this generation's heartbeat, whose lateness every open
+    socket keeps for its disconnect line (``gateway.ws.note_loop_lateness``)."""
+    from ouroboros.gateway.ws import note_loop_lateness
+
     bind_broadcast_loop(loop)
-    return asyncio.create_task(ws_heartbeat_loop(has_clients_fn, broadcast_fn), name="ws-heartbeat")
+    return asyncio.create_task(ws_heartbeat_loop(has_clients_fn, broadcast_fn, on_beat=note_loop_lateness),
+                               name="ws-heartbeat")

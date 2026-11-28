@@ -25,13 +25,14 @@ from tests.test_update_progress import (isolated_progress, _boot, _next_server, 
 def samples(monkeypatch):
     monkeypatch.setattr(facts, "_duties", {})
     monkeypatch.setattr(facts, "_direct", None)
-    monkeypatch.setattr(facts, "_dispatch_pending", False)
+    monkeypatch.setattr(facts, "_pending", False)
     monkeypatch.setattr(facts, "_cpu_sample", None)
     monkeypatch.setattr(facts, "_rss", lambda: (512 * 1024 * 1024, "current"))
     monkeypatch.setattr(server_process, "server_source_baseline", lambda: "a" * 40)
 
 
-def test_direct_dispatch_does_no_io_until_supervisor_handles_its_frame(isolated_progress, monkeypatch, tmp_path):  # noqa: F811
+def test_the_first_dispatch_is_published_by_the_projection_duty_never_the_turn_or_loop(isolated_progress, monkeypatch, tmp_path):  # noqa: F811
+    from ouroboros import display_projections
     from supervisor import events
     from supervisor.active_activity import TurnExecution
     from supervisor.log_addressing import TurnEventQueue
@@ -70,24 +71,32 @@ def test_direct_dispatch_does_no_io_until_supervisor_handles_its_frame(isolated_
     assert calls == [], "the turn observer must not read state, sample or write before model dispatch"
     assert isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"]["direct_message_first_dispatch"] is None
 
-    # The send frame publishes the fact its observer stamped. The turn can have ended before the
-    # supervisor drains it: no live registry entry is needed. The same frame carries the turn's
-    # receipt, which the consumer writes to the journal after the update facts (its own opens).
+    # The send frame carries the turn's receipt, which the loop writes to the journal (its own opens);
+    # the first-dispatch fact its observer stamped is not published on the loop: it waits for the
+    # display-projection duty, which needs no live registry entry (the turn may have ended).
     sent_frame = frames.get_nowait()
     assert sent_frame["direct_turn"]["execution_id"] == execution.execution_id
     monkeypatch.setattr("supervisor.active_activity._DIRECT_TURNS", __import__("collections").deque(maxlen=100))
     events._handle_main_llm_call_state(sent_frame, SimpleNamespace(RUNNING={}, DRIVE_ROOT=tmp_path))
+    assert [call for call in calls if call[0] != "open"] == [], "the loop reads, samples or writes no update fact"
+    assert facts.pending()
+    assert isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"]["direct_message_first_dispatch"] is None
+    calls.clear()
+    duty = threading.Thread(target=display_projections.project, args=(None,), name=display_projections.DUTY_NAME)
+    duty.start()
+    duty.join(10)
     after = isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"]["direct_message_first_dispatch"]
     assert after == {"task_id": "owner", "attempt_id": execution.execution_id,
                      "accepted_at": execution.marks[0][1], "dispatched_at": execution.marks[-1][1],
                      "seconds": execution.marks[-1][1] - execution.marks[0][1]}
-    assert [call for call in calls if call[0] != "open"] == [(name, threading.get_ident()) for name in ("_read_saved", "sample", "_store")]
-    assert calls.index(("_store", threading.get_ident())) < len(calls) - 1  # the receipt's journal open comes after
+    assert [call for call in calls if call[0] != "open"] == [(name, duty.ident) for name in ("_read_saved", "sample", "_store")]
+    assert not facts.pending()
     calls.clear()
-    # A repeat and another round carry no new first-dispatch fact and do no persistence work.
+    # A repeat and another round carry no new first-dispatch fact: the next pass does no persistence work.
     events._handle_main_llm_call_state(frame, SimpleNamespace(RUNNING={}))
     turn.put({**frame, "round_id": "round-2", "llm_call_id": "call-2"})
     events._handle_main_llm_call_state(frames.get_nowait(), SimpleNamespace(RUNNING={}))
+    display_projections.project(None)
     assert calls == []
 
 
@@ -113,6 +122,7 @@ def test_update_records_before_and_after_and_events_update_only_its_generation(i
     assert view["generation_facts"]["after"]["direct_message_first_dispatch"] is None
     facts.observe_direct_dispatch(task_id="after", accepted_at=200, dispatched_at=233, attempt_id="attempt-after")
     facts.observe_duty_overrun("custody")
+    facts.publish_pending()  # the display-projection duty's step: both observations in one publication
     after = isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"]
     assert after["direct_message_first_dispatch"]["seconds"] == 33
     assert after["direct_message_first_dispatch"]["task_id"] == "after"
@@ -121,12 +131,40 @@ def test_update_records_before_and_after_and_events_update_only_its_generation(i
     # A later ordinary restart cannot relabel the prior generation's evidence.
     _next_server(isolated_progress, monkeypatch, generation="server-c")
     facts.observe_direct_dispatch(task_id="other-generation", accepted_at=0, dispatched_at=1)
-    facts.publish_pending_dispatch()
+    facts.publish_pending()
     assert isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"] == after
     # One attempt, no growing sample history: admission replaces it.
     progress.begin(base_sha="c" * 40, target_sha="d" * 40)
     assert isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"] is None
     assert isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["before"]["generation"] == "server-c"
+
+
+def test_an_observation_made_during_a_publication_is_published_by_the_next_pass(isolated_progress, monkeypatch):  # noqa: F811
+    """The display-projection duty coalesces: one publication carries every observation made before it, one
+    made while it writes stays pending for the next pass, and a pass with nothing newer reads nothing."""
+    _restart_requested_attempt()
+    _next_server(isolated_progress, monkeypatch)
+    _boot(monkeypatch, _seen("applied"))
+    real_store, reads = progress._store, []
+
+    def store(mutate):
+        facts.observe_duty_overrun("late")  # found by the watchdog while this publication writes
+        monkeypatch.setattr(progress, "_store", real_store)
+        return real_store(mutate)
+
+    monkeypatch.setattr(progress, "_store", store)
+    facts.observe_duty_overrun("custody")
+    facts.observe_duty_overrun("custody")
+    facts.publish_pending()
+    assert isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"]["duty_overruns"] == {"custody": 2}
+    assert facts.pending()
+    facts.publish_pending()
+    after = isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"]
+    assert after["duty_overruns"] == {"custody": 2, "late": 1} and not facts.pending()
+    real_read = progress._read_saved
+    monkeypatch.setattr(progress, "_read_saved", lambda: reads.append(1) or real_read())
+    facts.publish_pending()
+    assert reads == []
 
 
 @pytest.mark.parametrize("outcome,bootstrap", [("not_applied", True), ("rolled_back", True), ("applied", False)])
@@ -135,7 +173,7 @@ def test_refusal_or_unconfirmed_boot_does_not_claim_an_after_sample(isolated_pro
     _next_server(isolated_progress, monkeypatch)
     _boot(monkeypatch, _seen(outcome), bootstrap_ok=bootstrap)
     facts.observe_direct_dispatch(task_id="unconfirmed", accepted_at=1, dispatched_at=2)
-    facts.publish_pending_dispatch()
+    facts.publish_pending()
     assert isolated_progress.saved[progress.STATE_KEY]["generation_facts"]["after"] is None
 
 
@@ -146,7 +184,7 @@ def test_record_reaches_panel_api_and_real_context_builder_without_chat(isolated
     _next_server(isolated_progress, monkeypatch)
     _boot(monkeypatch, _seen("applied"))
     facts.observe_direct_dispatch(task_id="visible-task", accepted_at=1, dispatched_at=4)
-    facts.publish_pending_dispatch()
+    facts.publish_pending()
     state_file = tmp_path / "state" / "state.json"
     atomic_write_json(state_file, isolated_progress.saved)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)

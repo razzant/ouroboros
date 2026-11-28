@@ -8,6 +8,7 @@ inherits a handler or a hook from these checks.
 from __future__ import annotations
 
 import ast
+import gc
 import json
 import logging
 import os
@@ -15,7 +16,10 @@ import pathlib
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 import traceback
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -422,3 +426,180 @@ def test_the_bootstrap_is_inert_inside_the_pytest_process(tmp_path):
     configure_process_logging(drive_logs=tmp_path / "logs")
     assert (list(root.handlers), root.level, threading.excepthook, sys.excepthook) == before
     assert not (tmp_path / "logs").exists()
+
+
+class _HeldSink(logging.Handler):
+    """A log sink that waits for its ``gate`` before every write, as a stalled disk would. The event is not
+    named ``release``: that would shadow ``logging.Handler.release``, leave the handler lock held after a write and
+    hang the interpreter's exit when a test fails."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        self.entered, self.gate = threading.Event(), threading.Event()
+        self.records: list[logging.LogRecord] = []
+        self.lines: list[str] = []
+
+    def emit(self, record):
+        self.entered.set()
+        assert self.gate.wait(10), "the test never released the sink"
+        self.records.append(record)
+        self.lines.append(self.format(record))
+
+
+def _held_logger(name: str):
+    from ouroboros import process_logging
+
+    logger, sink = logging.getLogger(name), _HeldSink()
+    logger.addHandler(sink)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    return process_logging, logger, sink
+
+
+def _settled(predicate, budget: float = 5.0) -> None:
+    end = time.monotonic() + budget
+    while not predicate():
+        assert time.monotonic() < end, "timed out"
+        time.sleep(0.005)
+
+
+def test_a_record_handoff_never_waits_for_its_sink_and_keeps_order_time_thread_and_traceback():
+    process_logging, logger, sink = _held_logger("tests.record_handoff.order")
+    handoff = process_logging.RecordHandoff("test-record-handoff")
+    try:
+        handoff.log(logger, logging.INFO, "first %d", 1)
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            handoff.log(logger, logging.WARNING, "second", exc_info=True)
+        handoff.log(logger, logging.DEBUG, "below the level: never made")
+        handoff.log(logger, logging.INFO, "third")
+        returned = time.time()
+        assert sink.entered.wait(5) and sink.records == [], "the caller went on while the sink was held"
+        sink.gate.set()
+        _settled(lambda: len(sink.records) == 3 and handoff.thread is None)
+    finally:
+        sink.gate.set()
+        logger.removeHandler(sink)
+    assert [record.getMessage() for record in sink.records] == ["first 1", "second", "third"]
+    assert all(record.created <= returned for record in sink.records), "each keeps its own creation time"
+    assert {record.threadName for record in sink.records} == {threading.current_thread().name}
+    assert sink.records[1].exc_info is None, "the exception travels as text, never the live object"
+    assert "ValueError: boom" in sink.lines[1] and "in test_a_record_handoff_never_waits" in sink.lines[1]
+
+
+def test_records_past_the_bound_are_counted_and_said_once_at_their_place():
+    process_logging, logger, sink = _held_logger("tests.record_handoff.bound")
+    handoff = process_logging.RecordHandoff("test-record-handoff-bound", max_bytes=10)
+    try:
+        handoff.log(logger, logging.INFO, "aaaa")
+        assert sink.entered.wait(5), "the writer holds the first record at the sink"
+        for message in ("bbbb", "cccc", "dddd", "eeee", "ff"):  # 4 + 4 fit, 4 and 4 do not, then 2 fit
+            handoff.log(logger, logging.INFO, message)
+        sink.gate.set()
+        _settled(lambda: len(sink.records) == 5 and handoff.thread is None)
+    finally:
+        sink.gate.set()
+        logger.removeHandler(sink)
+    assert [record.getMessage() for record in sink.records] == [
+        "aaaa", "bbbb", "cccc",
+        "2 log records of test-record-handoff-bound were dropped while the log sink did not keep up", "ff"]
+    assert sink.records[3].levelno == logging.WARNING
+
+
+class _Held:
+    """What a failed socket frame's locals can hold while its log line waits: an outbox, a buffer."""
+
+    def __init__(self) -> None:
+        self.data = bytearray(1024 * 1024)
+
+
+def test_a_queued_record_holds_text_never_the_exception_its_traceback_or_its_arguments():
+    """While the sink waits, a queued record holds its message and its exception as text: the large object behind
+    the failed frame can be collected before the sink is released. The line still says the message, the exception
+    and its chain, and each frame as file, line and function; no source line is read for it."""
+    process_logging, logger, sink = _held_logger("tests.record_handoff.text")
+    handoff = process_logging.RecordHandoff("test-record-handoff-text")
+    held: list = []
+
+    def failing_send():
+        local = _Held()
+        held.append(weakref.ref(local))
+        try:
+            raise ConnectionResetError("peer gone")
+        except ConnectionResetError as exc:
+            raise RuntimeError("closed") from exc
+
+    try:
+        handoff.log(logger, logging.INFO, "first")
+        assert sink.entered.wait(5), "the writer holds the first record at the sink"
+        try:
+            failing_send()
+        except RuntimeError as exc:
+            handoff.log(logger, logging.WARNING, "WebSocket error: %s", exc)
+            handoff.log(logger, logging.WARNING, "send failed", exc_info=True)
+        handoff.log(logger, logging.INFO, "broken %d format", "text")
+        gc.collect()
+        assert held[0]() is None, "a queued record kept the failed frame's locals alive"
+        sink.gate.set()
+        _settled(lambda: len(sink.records) == 4 and handoff.thread is None)
+    finally:
+        sink.gate.set()
+        logger.removeHandler(sink)
+    assert all(record.args is None and record.exc_info is None for record in sink.records)
+    assert sink.lines[1] == "WARNING WebSocket error: closed"
+    text = sink.lines[2]
+    assert text.startswith("WARNING send failed\nTraceback (most recent call last):"), text
+    assert text.index("ConnectionResetError: peer gone") < text.index("direct cause") < text.index(
+        "RuntimeError: closed"), text
+    assert text.count(", in failing_send") == 2 and f'File "{__file__}", line ' in text, text
+    assert 'raise RuntimeError("closed")' not in text, "no source line is read for the record"
+    assert sink.lines[3] == "INFO broken %d format (log arguments not formatted: TypeError)"
+
+
+def test_an_exit_waits_for_the_queued_lines_inside_half_the_time_left_and_no_longer():
+    """``finish_record_handoffs`` (an ordinary exit's and the direct re-exec's, before the relay's handover): what a
+    handoff still holds, a line queued after an earlier wait included, reaches the sink before it returns; a sink
+    that stands is waited for until the deadline it gets at most, its door's share of the stop grace (half of the
+    time left, beside the display projections' last pass: here 1 s of 2); without a started grace nothing waits."""
+    process_logging, logger, sink = _held_logger("tests.record_handoff.exit")
+    handoff = process_logging.RecordHandoff("test-record-handoff-exit")
+    release = threading.Timer(0.3, sink.gate.set)
+    try:
+        handoff.log(logger, logging.INFO, "first")
+        handoff.log(logger, logging.INFO, "second")
+        assert sink.entered.wait(5)
+        started = time.monotonic()
+        process_logging.finish_record_handoffs(started + 1.0)
+        assert 0.9 <= time.monotonic() - started < 2.0 and sink.records == [], "until its deadline, no more"
+        started = time.monotonic()
+        process_logging.finish_record_handoffs(None)
+        assert time.monotonic() - started < 0.5 and sink.records == [], "no grace: no wait"
+        handoff.log(logger, logging.INFO, "third")
+        release.start()
+        process_logging.finish_record_handoffs(time.monotonic() + 20)
+        assert [record.getMessage() for record in sink.records] == ["first", "second", "third"]
+        assert handoff.thread is None
+    finally:
+        sink.gate.set()
+        release.cancel()
+        logger.removeHandler(sink)
+
+
+@pytest.mark.parametrize("panic", [False, True], ids=["exit", "panic"])
+def test_the_exit_hands_the_socket_lines_over_after_the_last_display_pass_and_before_the_relay(monkeypatch, panic):
+    """``exit_after_shutdown``: the display projections' last pass, the socket lines a handoff still holds, then the
+    output relay's handover, then the exit; an accepted Panic owns the exit and none of them is waited for."""
+    from ouroboros import display_projections, process_logging, server_control
+
+    calls = []
+    monkeypatch.setattr(display_projections, "drain", lambda _deadline: calls.append("display projections") or True)
+    monkeypatch.setattr(process_logging, "finish_record_handoffs", lambda _deadline: calls.append("socket lines"))
+    monkeypatch.setattr(process_logging, "finish_output_relay", lambda _deadline=None: calls.append("relay"))
+    monkeypatch.setattr(server_control, "os", SimpleNamespace(_exit=lambda code: calls.append(("exit", code))))
+    monkeypatch.setattr(server_control, "_restart_stop_requested", panic)
+    with monkeypatch.context() as patch:
+        patch.setattr(threading, "Event", lambda: SimpleNamespace(wait=lambda: calls.append("parked")))
+        server_control.exit_after_shutdown(7)
+    assert calls == (["parked"] if panic else ["display projections", "socket lines", "relay", ("exit", 7)])

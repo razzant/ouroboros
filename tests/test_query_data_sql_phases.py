@@ -64,12 +64,13 @@ def mature(ctx):
                 model,provider,category,cost_usd,cost_final,pricing_known,extra)
             SELECT 'fixture-'||x,1,x,x,'attempt','settled','caller','root','fixture','local','task',
                 '0.125',1,1,? FROM n""", (json.dumps({"fixture": "x" * 768}),))
-    path = Path(ctx.drive_root) / usage_store.STORE_REL
-    size = path.stat().st_size
     with usage_store.read(ctx.drive_root) as txn:
         # The independent expected value is derived from the fixture's literal
         # row count/cost, not another query through the code being checked.
         assert txn.conn.execute("SELECT count(*) FROM attempts").fetchone()[0] == 12000
+        # What the store holds, wherever its pages are: below the inline-checkpoint ceiling a WAL store keeps
+        # them in its log (store_checkpoint), so the database file alone does not measure it.
+        size = txn.conn.execute("PRAGMA page_count").fetchone()[0] * txn.conn.execute("PRAGMA page_size").fetchone()[0]
     print(f"MATURE_MONEY rows=12000 bytes={size} sqlite={sqlite3.sqlite_version}")
     assert size >= 8 * 1024 * 1024
 

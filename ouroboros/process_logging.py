@@ -29,6 +29,12 @@ whatever is written to descriptors 1 and 2 themselves (native code, ``sys.__stde
 ``.buffer``, children that inherit them), still goes straight to the launcher's pipe and can
 wait for it, as before; so no write that holds the GIL ever waits for the relay's thread.
 
+A thread that must not wait on a log sink hands its records to a ``RecordHandoff``: one
+ordered, bounded writer thread per handoff (the ASGI loop's socket lifecycle lines use one, a stop
+door's display-projection warnings another), whose queue an ordinary exit lets it finish inside the
+stop's deadline (``finish_record_handoffs``).
+Every other record still reaches the handlers on its own thread.
+
 The hooks route an unhandled exception of a thread, or of the main thread, into
 ``logging`` instead of the interpreter's raw stderr print, so it is formatted like
 every other record (its message passes the redaction filter; the traceback itself is
@@ -54,6 +60,7 @@ import stat
 import sys
 import threading
 import time
+import weakref
 from logging.handlers import RotatingFileHandler
 from typing import Any, Iterator
 
@@ -173,6 +180,156 @@ def _log_uncaught(message: str, exc_info: Any) -> bool:
     except Exception:
         return False
     return True
+
+
+_HANDOFFS: "weakref.WeakSet[RecordHandoff]" = weakref.WeakSet()  # every handoff of this process, for the exit
+
+_CHAIN_LINKS = ("The above exception was the direct cause of the following exception:",
+                "During handling of the above exception, another exception occurred:")
+
+
+def _code_only_traceback(exc: BaseException) -> str:
+    """``exc`` and its chain as the traceback module prints them, without source lines: each frame is its file,
+    line and function read from the code object, so nothing is read from the disk (``linecache`` could wait on it)
+    and the text keeps no frame, local or exception alive."""
+    chain, seen, link = [], set(), ""
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        chain.append((exc, link))  # ``link``: how this exception led to the one printed after it
+        if exc.__cause__ is not None:
+            exc, link = exc.__cause__, _CHAIN_LINKS[0]
+        elif exc.__context__ is not None and not exc.__suppress_context__:
+            exc, link = exc.__context__, _CHAIN_LINKS[1]
+        else:
+            exc = None
+    lines: list[str] = []
+    for exc, link in reversed(chain):
+        tb = exc.__traceback__
+        lines += ["Traceback (most recent call last):"] if tb is not None else []
+        while tb is not None:
+            code = tb.tb_frame.f_code
+            lines.append(f'  File "{code.co_filename}", line {tb.tb_lineno}, in {code.co_name}')
+            tb = tb.tb_next
+        kind = type(exc)
+        module = getattr(kind, "__module__", None)
+        name = kind.__qualname__ if module in (None, "builtins", "__main__") else f"{module}.{kind.__qualname__}"
+        try:
+            text = str(exc)
+        except Exception:
+            text = "<exception str() failed>"
+        lines.append(f"{name}: {text}" if text else name)
+        lines += ["", link, ""] if link else []
+    return "\n".join(lines)
+
+
+class RecordHandoff:
+    """One ordered, bounded handoff of log records from a thread that must not wait on a log sink (the ASGI loop's
+    socket lifecycle lines, ``gateway/ws.py``; a stop door's display-projection warnings, ``display_projections``) to
+    one writer thread.
+
+    ``log`` builds the record on the caller's thread, so its creation time and thread are the caller's, and keeps
+    it as text: the message formatted there (a format that fails keeps its template, so marked) and an exception
+    as its chain of code locations (``_code_only_traceback``), never the live arguments, exception or traceback,
+    whose frames could hold a socket or an outbox while the sink waits. It queues the record without waiting. The
+    writer, a daemon thread named ``name`` started by the first record and ending when the queue is empty (an idle
+    process keeps none), hands each record to its logger in queue order, where the handlers' redaction filter runs
+    on the message (an exception's text is not redacted, as everywhere). Text beyond ``max_bytes`` (message and
+    exception text; the output relay's budget for a reader that is not reading) is dropped and counted, and the
+    count reaches the log as one line at that place in the order once the writer gets there. A record whose writer
+    cannot start is handled on the caller's thread, as before. An ordinary exit and the direct re-exec wait for
+    the queue inside the stop's deadline (``finish``); what the writer has not handled by then, or at a kill or
+    Panic, is lost: a bounded tail of these lines only, where a handler for the whole process would lose every
+    thread's (``configure_process_logging`` keeps the synchronous handlers).
+    """
+
+    def __init__(self, name: str, max_bytes: int = OUTPUT_RELAY_MAX_BYTES) -> None:
+        self.name, self.max_bytes = name, max_bytes
+        self.lock = threading.Lock()  # producers append or count a drop; the writer takes; nobody waits under it
+        self.queue: collections.deque = collections.deque()  # (logger, record, bytes), and [logger, dropped] gaps
+        self.held = 0  # message bytes of the records queued
+        self.thread: threading.Thread | None = None
+        _HANDOFFS.add(self)
+
+    def log(self, logger: logging.Logger, level: int, msg: str, *args: Any, exc_info: Any = None) -> None:
+        if not logger.isEnabledFor(level):
+            return
+        if exc_info and not isinstance(exc_info, BaseException):
+            exc_info = exc_info[1] if isinstance(exc_info, tuple) else sys.exc_info()[1]
+        caller = sys._getframe(1)
+        record = logger.makeRecord(logger.name, level, caller.f_code.co_filename, caller.f_lineno, msg, args,
+                                   None, caller.f_code.co_name)
+        try:
+            record.msg = record.getMessage()
+        except Exception as exc:
+            record.msg = f"{msg} (log arguments not formatted: {type(exc).__name__})"
+        record.args = None
+        if isinstance(exc_info, BaseException):
+            record.exc_text = _code_only_traceback(exc_info)
+        size = sum(len(text.encode("utf-8", "replace")) for text in (record.msg, record.exc_text or ""))
+        with self.lock:
+            if self.thread is None:
+                try:
+                    thread = threading.Thread(target=self._run, name=self.name, daemon=True)
+                    thread.start()
+                except RuntimeError:  # no thread now (an exhausted process, an interpreter shutting down)
+                    thread = None
+                self.thread = thread
+            if self.thread is not None:
+                if self.held + size <= self.max_bytes:
+                    self.queue.append((logger, record, size))
+                    self.held += size
+                elif self.queue and isinstance(self.queue[-1], list):
+                    self.queue[-1][1] += 1
+                else:
+                    self.queue.append([logger, 1])
+                return
+        logger.handle(record)
+
+    def _run(self) -> None:
+        while True:
+            with self.lock:
+                if not self.queue:
+                    self.thread = None  # idle: the next record starts a writer again
+                    return
+                item = self.queue.popleft()
+                if isinstance(item, tuple):
+                    self.held -= item[2]
+            try:
+                if isinstance(item, tuple):
+                    item[0].handle(item[1])
+                else:
+                    item[0].warning("%d log records of %s were dropped while the log sink did not keep up",
+                                    item[1], self.name)
+            except Exception:  # a handler reports its own failure (Handler.handleError); the next record goes on
+                pass
+
+    def finish(self, deadline: float) -> bool:
+        """Wait until ``deadline`` (monotonic) for the writer to hand what is queued to the handlers, a writer the
+        records queued meanwhile started included. True when none is left running; never waits under the lock."""
+        while True:
+            with self.lock:
+                thread = self.thread
+            if thread is None:
+                return True
+            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive() or self.thread is thread:  # the deadline passed, or a writer died holding the queue
+                return False
+
+
+def finish_record_handoffs(deadline: float | None) -> None:
+    """At each door that ends this image's serving (``server_control.finish_display_and_socket_lines``: the lifespan
+    teardown, and an ordinary exit or the direct re-exec ahead of ``finish_output_relay``): each handoff's writer gets
+    until ``deadline`` (monotonic; the one share of the stop grace, half of what is left, that the door gives the
+    display projections' last pass and these lines together, so the owned stop and the relay's handover keep the
+    rest) to hand its queue to the handlers. Without a started grace nothing waits; never raises. Panic and the
+    backstops never call it."""
+    if deadline is None:
+        return
+    for handoff in list(_HANDOFFS):
+        try:
+            handoff.finish(deadline)
+        except Exception:
+            pass
 
 
 def copy_capped_output(stream: Any, path: pathlib.Path, *, report: logging.Logger,

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -608,3 +610,55 @@ def test_a_supplied_token_never_re_establishes_a_file_lease(env):
     for token in (lease['token'], 'A' * 43):
         assert leases.open(owner, NAME, 'main', fields['generation'], root, leases._password,
                            leases.admit(owner), 'files', token) is None
+
+
+def test_an_older_read_never_lands_after_a_newer_password_so_an_old_lease_cannot_outlive_it(env, monkeypatch):
+    """A scope's settings read is held; a later scope finds a new password in the environment. The gate applies
+    resolutions in arrival order (``NetworkAuthGate._resolve``): the new epoch lands last even though the older
+    read finishes after the newer scope arrived, so the lease minted under the old password stays ended, the old
+    credential is refused, and the new one works on its own admitted request."""
+    client, gate, _, _, _ = env
+    lease = open_lease(client)
+    key = server_auth.NETWORK_PASSWORD_KEY
+    monkeypatch.delenv(key, raising=False)
+    entered, release, newer_waits = threading.Event(), threading.Event(), threading.Event()
+
+    def resolve():  # the real order: a non-blank environment value, else a (held) settings read
+        if os.environ.get(key, "").strip():
+            return os.environ[key].strip()
+        entered.set()
+        assert release.wait(10), "the test never released the held read"
+        return "fixture-password"
+
+    monkeypatch.setattr(server_auth, "get_configured_network_password", resolve)
+    applied: list[str] = []
+    changed = gate.widget_assets.password_changed
+    monkeypatch.setattr(gate.widget_assets, "password_changed", lambda epoch: (applied.append(epoch), changed(epoch)))
+    epoch = {name: hashlib.sha256(name.encode()).hexdigest() for name in ("fixture-password", "rotated-password")}
+    with TestClient(gate, client=("192.0.2.8", 54321)) as other, ThreadPoolExecutor(max_workers=2) as pool:
+        older = pool.submit(other.get, "/api/widgets", headers={"x-ouroboros-password": "fixture-password"})
+        try:
+            assert entered.wait(10), "the older scope never reached its settings read"
+            [lock] = [lock for lock in gate._order.values() if lock.locked()]
+            acquire = lock.acquire
+
+            async def counted_acquire():
+                newer_waits.set()
+                return await acquire()
+
+            lock.acquire = counted_acquire
+            monkeypatch.setenv(key, "rotated-password")
+            newer = pool.submit(other.get, "/api/widgets", headers={"x-ouroboros-password": "rotated-password"})
+            assert newer_waits.wait(10), "the newer scope never reached the gate"
+            assert applied[-1:] != [epoch["rotated-password"]], "the newer scope waited for the older read"
+        finally:
+            release.set()
+        assert older.result(timeout=10).status_code == 200, "judged by the password its own read returned"
+        assert newer.result(timeout=10).status_code == 200
+    assert applied[-2:] == [epoch["fixture-password"], epoch["rotated-password"]], applied
+    assert gate.widget_assets._password == epoch["rotated-password"]
+    assert client.get(lease["base_url"] + "data.bin").status_code == 404, "the old lease stayed ended"
+    with TestClient(gate, client=("192.0.2.8", 12346)) as fresh:
+        assert fresh.get("/api/widgets", headers={"x-ouroboros-password": "fixture-password"}).status_code == 401
+        assert fresh.post("/auth/login", json={"password": "rotated-password"}).status_code == 200
+        assert client.get(open_lease(fresh)["base_url"] + "data.bin").status_code == 200

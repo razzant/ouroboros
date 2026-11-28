@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from ouroboros import store, task_store
+from ouroboros import store, store_checkpoint, task_store
 from ouroboros.task_results import load_task_result, write_task_result
 from tests._store_journal_shared import use_journal
 
@@ -26,7 +26,7 @@ def test_a_same_size_body_rewrite_journals_only_its_changed_pages(tmp_path, monk
     path = store.store_path(tmp_path)
     journal = path.with_name(path.name + "-journal")
     with store.open_store(tmp_path, write=False) as txn:
-        assert txn.conn.execute("PRAGMA journal_size_limit").fetchone()[0] == store.JOURNAL_SIZE_LIMIT == 64 << 20
+        assert txn.conn.execute("PRAGMA journal_size_limit").fetchone()[0] == store_checkpoint.JOURNAL_SIZE_LIMIT == 64 << 20
     before = journal.stat().st_size if mode == "PERSIST" else 0
     task_store.patch_document(tmp_path, "big", lambda document: {**document, "payload": "x" + document["payload"][1:]})
     assert load_task_result(tmp_path, "big")["payload"].startswith("xy")

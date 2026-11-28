@@ -7,6 +7,7 @@ import os
 import json
 import pathlib
 import sys
+import time
 from typing import Any
 
 from ouroboros.platform_layer import IS_WINDOWS
@@ -255,6 +256,9 @@ def restart_current_process(
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
         if _restart_stop_requested:
             return  # the watcher parks in exit_after_shutdown; Panic keeps its thread and writes
+        finish_display_and_socket_lines()  # the exec ends this image as an exit would, each wait bounded
+        if _restart_stop_requested:
+            return  # a Panic accepted during those waits owns the exit as well
         try:
             os.execvpe(sys.executable, argv, env)
             return  # exec does not return; only a test double of it reaches this line
@@ -351,10 +355,13 @@ def exit_after_shutdown(exit_code: int) -> None:
     interrupted capture stays owed to the next generation. An accepted Panic
     parks the caller until its own flag/control writes and exit finish; Panic
     never waits for this caller. Ordinary imported main()/ASGI shutdown returns.
-    Before the exit the output relay hands its queue to a reading launcher, bounded inside the
-    ordinary stop's own deadline (``finish_output_relay``); Panic and the backstops never do.
+    Before the exit the display projections' last pass, the socket lifecycle lines still queued and then
+    the output relay's handover to a reading launcher finish, each bounded inside the ordinary stop's own
+    deadline (``finish_display_and_socket_lines``, ``finish_output_relay``); Panic and the backstops never
+    wait for any of them.
     """
     if not _restart_stop_requested:
+        finish_display_and_socket_lines()
         try:
             from ouroboros.owned_shutdown import stop_deadline
             from ouroboros.process_logging import finish_output_relay
@@ -372,6 +379,58 @@ def exit_after_shutdown(exit_code: int) -> None:
 
 # Compatibility for existing restart callers.
 exit_after_restart = exit_after_shutdown
+
+
+def finish_display_and_socket_lines() -> None:
+    """An ordinary end of this image's serving, at each door that has one (the lifespan teardown right after its
+    terminal custody, the exit, the direct re-exec): the display projections' last pass (``drain_display_projections``),
+    then the lines the record handoffs still hold (the socket lifecycle lines, the drain's own warnings:
+    ``_finish_record_handoffs``), both inside ONE share of the stop grace taken here once, half of what is left, so
+    what follows the door keeps the larger part (the owned stop after the teardown's call, the output relay's handover
+    after the exit's). An accepted Panic owns the exit and waits for neither; it never raises."""
+    if not _restart_stop_requested:
+        try:
+            share = _half_of_the_grace_left()
+        except Exception:
+            share = None  # no grace known: neither waits
+        drain_display_projections(share)
+        _finish_record_handoffs(share)
+
+
+def drain_display_projections(share: float | None = None) -> bool:
+    """The display-projection duty's last pass of this lifespan (``display_projections.drain``) until ``share``, the one
+    its door took for the pass and the socket lines (``finish_display_and_socket_lines``), or else half of the stop
+    grace left at this call (the restart census before the store switch): the teardown takes the pass; a later call
+    waits for it and reads, and takes it only where no teardown did. True when no pass is left running; it never
+    raises, and an error reads as a pass still running, so the store switch refuses rather than run beside one."""
+    try:
+        from ouroboros.display_projections import drain
+
+        return drain(_half_of_the_grace_left() if share is None else share)
+    except Exception:
+        return False
+
+
+def _half_of_the_grace_left() -> float | None:
+    """The monotonic end of half of the ordinary stop's grace still left (``owned_shutdown.stop_deadline``; the bound
+    ``server_process.end_task_runs`` keeps, so the owned stop keeps the rest), or None before a door started that
+    grace: nothing waits then."""
+    from ouroboros.owned_shutdown import stop_deadline
+
+    deadline, now = stop_deadline(), time.monotonic()
+    return None if deadline is None else now + max(0.0, (deadline - now) / 2)
+
+
+def _finish_record_handoffs(deadline: float | None) -> None:
+    """What the record handoffs still hold (the socket lifecycle lines and the display projections' drain warnings:
+    ``process_logging.finish_record_handoffs``), until ``deadline`` at most; it never stands between this image and
+    its end."""
+    try:
+        from ouroboros.process_logging import finish_record_handoffs
+
+        finish_record_handoffs(deadline)
+    except Exception:
+        pass
 
 
 def execute_panic_stop(

@@ -6,20 +6,27 @@ share. A reading carries the host reserve (``config.HOST_MEMORY_RESERVE_FRACTION
 room above it; each caller keeps its decision. Only macOS's fixed physical total is cached per process.
 
 macOS: ``hw.memsize``, free + inactive + speculative pages from ``vm_stat``, and the kernel's
-pressure level, of which only critical counts (unreadable: unknown). Linux: ``/proc/meminfo`` within
+pressure level, of which only critical counts (unreadable: unknown). The same two reads also keep what
+else they say (``MemorySnapshot.vm``: ``DarwinVM``) for measurement only. Inactive pages include anonymous
+ones awaiting the compressor, so this estimate can overstate room on a host whose compressor holds much
+(issue #3397); but the bound without them is an upper bound, not a reclaimable amount, and a smaller
+estimate would also stop healthy test trees (``process_overload``) on small Macs. So no consumer decides
+on these figures: the pool's capacity observation publishes them for operators, and the rule changes only
+on their numbers. Linux: ``/proc/meminfo`` within
 every memory limit on this process's own cgroup path, v2 and v1 alike (inside a container MemTotal and
 MemAvailable are the host's). Windows: ``psutil``; Job object and commit limits are not read. ``None`` means
 unknown: an unsupported platform, a failed probe, or a limit that exists but cannot be read.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
-from typing import Optional, Sequence
+import time
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 _LINUX_ROOT = Path("/")  # where the Linux probe finds /proc and the cgroup mounts (a fake tree in tests)
 # Per cgroup version: the limit file, the usage file, and the memory.stat key of its inactive file pages.
@@ -28,6 +35,54 @@ _FILES = {2: ("memory.max", "memory.current", "inactive_file"),
 # v2 spells "no limit" as "max"; v1 as LONG_MAX rounded down to the kernel page (LONG_MAX itself
 # before Linux 3.19). No machine holds 4 EiB, so any limit from here up is that spelling.
 _UNLIMITED = 2 ** 62
+_LEVELS = {1: "normal", 2: "warn", 4: "critical"}  # kern.memorystatus_vm_pressure_level
+# vm_stat's paging counters, cumulative pages since boot, published as rates: paying for memory now,
+# as opposed to holding pages compressed or swapped long ago.
+_RATES = {"pageins": "Pageins", "swapins": "Swapins", "swapouts": "Swapouts",
+          "compressions": "Compressions", "decompressions": "Decompressions"}
+
+
+@dataclass(frozen=True)
+class DarwinVM:
+    """What macOS's ``vm_stat`` and pressure reads also say, kept for measurement only: no decision reads it."""
+
+    page_size: int
+    pages: Mapping[str, int]  # every vm_stat line by its label: pages now, or pages counted since boot
+    level: Optional[int]      # the kernel's pressure level (``_LEVELS``); None: unreadable
+    at: float                 # ``time.monotonic()`` when vm_stat answered
+
+    def measurement(self, previous: Optional["DarwinVM"] = None) -> Dict[str, Any]:
+        """The published figures, in bytes; None is unknown (a line this host did not print), never 0.
+
+        ``file_bounded_upper_bytes`` is free + speculative + min(inactive, file-backed): an upper bound on the
+        room reclaimable without compressing anonymous pages ("File-backed pages" counts active file pages
+        too), a comparison figure beside ``available_bytes``, which every consumer keeps using. Rates are per
+        second of ``rate_interval_sec`` since ``previous``, this process's earlier reading; a counter that went
+        down (a reset or wrap) or is missing on either side has no rate this interval, and no earlier reading,
+        or one stamped later, gives no interval."""
+        page, pages = self.page_size, self.pages
+        free, speculative, inactive, file_backed = (pages.get(name) for name in (
+            "Pages free", "Pages speculative", "Pages inactive", "File-backed pages"))
+        elapsed = None if previous is None or self.at <= previous.at else self.at - previous.at
+
+        def size(count: Optional[int]) -> Optional[int]:
+            return None if count is None else count * page
+
+        def rate(label: str) -> Optional[int]:
+            now, then = pages.get(label), previous and previous.pages.get(label)
+            usable = elapsed is not None and now is not None and then is not None and now >= then
+            return round((now - then) * page / elapsed) if usable else None
+
+        known = None not in (free, speculative, inactive, file_backed)
+        return {
+            "pressure_level": _LEVELS.get(self.level, "unknown" if self.level is None else f"level {self.level}"),
+            "file_bounded_upper_bytes": size(free + speculative + min(inactive, file_backed)) if known else None,
+            "file_backed_bytes": size(file_backed),
+            "compressor_occupied_bytes": size(pages.get("Pages occupied by compressor")),
+            "compressor_stored_bytes": size(pages.get("Pages stored in compressor")),
+            "rate_interval_sec": None if elapsed is None else round(elapsed, 3),
+            "rates_bytes_per_sec": {name: rate(label) for name, label in _RATES.items()},
+        }
 
 
 @dataclass(frozen=True)
@@ -37,6 +92,8 @@ class MemorySnapshot:
     # The macOS kernel's own verdict: True critical, False not (normal, warn; Linux and Windows read none),
     # None when the level could not be read: unknown, never normal, and no consumer reads it as critical.
     pressure: Optional[bool] = False
+    # macOS only (None elsewhere): the same reads' measurement-only figures, outside equality.
+    vm: Optional[DarwinVM] = field(default=None, compare=False)
 
     @property
     def reserve_bytes(self) -> int:
@@ -57,14 +114,14 @@ def _native_output(argv: Sequence[str]) -> str:
                           encoding="utf-8", timeout=2).stdout
 
 
-def _darwin_pressure() -> Optional[bool]:
-    """The kernel's own critical verdict (levels: 1 normal, 2 warn, 4 critical). Free + inactive
-    + speculative barely moves under pressure: XNU keeps refilling the inactive queue with
+def _darwin_level() -> Optional[int]:
+    """The kernel's own pressure level (1 normal, 2 warn, 4 critical), whose critical is the verdict. Free
+    + inactive + speculative barely moves under pressure: XNU keeps refilling the inactive queue with
     anonymous pages that it then compresses. Warn is routine on a busy 8 GB Mac running a
     healthy battery, so only critical counts. An unreadable level is None (unknown); the
     free-memory reading still applies."""
     try:
-        return int(_native_output(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).strip()) >= 4
+        return int(_native_output(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).strip())
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -144,6 +201,7 @@ def _cgroup_limits(root: Path) -> list:
 def physical_memory() -> Optional[MemorySnapshot]:
     """Read total and reclaimable physical memory using native OS facilities."""
     pressure: Optional[bool] = False
+    vm: Optional[DarwinVM] = None
     try:
         if sys.platform == "win32":
             import psutil  # The packaged Windows runtime includes psutil.
@@ -151,16 +209,19 @@ def physical_memory() -> Optional[MemorySnapshot]:
             total, available = memory.total, memory.available
         elif sys.platform == "darwin":
             total = _darwin_total()
-            vm = _native_output(["/usr/bin/vm_stat"])
-            page_size = int(re.search(r"page size of (\d+) bytes", vm).group(1))
+            text = _native_output(["/usr/bin/vm_stat"])
+            at = time.monotonic()
+            page_size = int(re.search(r"page size of (\d+) bytes", text).group(1))
             pages = {name.strip(): int(value.strip().rstrip("."))
-                     for name, value in (line.split(":", 1) for line in vm.splitlines()[1:] if ":" in line)}
+                     for name, value in (line.split(":", 1) for line in text.splitlines()[1:] if ":" in line)}
             # Admission counts inactive pages as room, anonymous ones included, which
             # overstates it under pressure, so every consumer also reads the kernel's
             # verdict. Purgeable is already inside active/inactive, so it is not added.
             available = page_size * sum(pages[name] for name in
                                         ("Pages free", "Pages inactive", "Pages speculative"))
-            pressure = _darwin_pressure()
+            level = _darwin_level()
+            pressure = None if level is None else level >= 4
+            vm = DarwinVM(page_size, pages, level, at)
         elif sys.platform.startswith("linux"):
             fields = {name: int(value.split()[0]) * 1024 for name, value in (line.split(":", 1) for line in (
                 _LINUX_ROOT / "proc/meminfo").read_text(encoding="utf-8").splitlines())}
@@ -171,6 +232,6 @@ def physical_memory() -> Optional[MemorySnapshot]:
             return None
         if total <= 0 or available < 0:
             return None
-        return MemorySnapshot(total, min(total, available), pressure)
+        return MemorySnapshot(total, min(total, available), pressure, vm)
     except (OSError, ValueError, LookupError, AttributeError, ImportError, subprocess.SubprocessError):
         return None

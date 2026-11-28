@@ -1,10 +1,12 @@
 """Before/after observations on the one retained managed-update attempt.
 
 Facts, never a verdict or chat notification. Samples run at update admission,
-confirmed boot adoption, duty overruns and supervisor dispatch-event handling.
-The turn's observer records memory only; no poller or history replay. Each side
-holds one sample and the latest observed direct turn. The next update replaces
-the record. Producer hooks never infer dispatch from an active heartbeat.
+confirmed boot adoption and when the display-projection duty publishes a newer
+observation (``publish_pending``): a duty overrun or an owner turn's first
+dispatch, which their observers record in memory only; no poller or history
+replay. Each side holds one sample and the latest observed direct turn. The next
+update replaces the record. Producer hooks never infer dispatch from an active
+heartbeat.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _duties: dict[str, int] | None = None
 _direct: dict | None = None
-_dispatch_pending = False
+_pending = False  # an observation newer than the last after-update publication
 _cpu_sample: tuple[float, float] | None = None
 
 
@@ -99,7 +101,7 @@ def _publish_after() -> None:
     from ouroboros.gateway import update_progress
 
     try:
-        # This is an event-side read, not a display mutation or an idle duty.
+        # The display-projection duty's read for a newer observation, never the supervisor loop's.
         status, record = update_progress._read_saved()
         if status != "valid" or record.get("outcome") != "applied":
             return
@@ -120,43 +122,49 @@ def _publish_after() -> None:
 
 
 def observe_duty_overrun(name: str) -> None:
-    """The duty owner calls once when its existing overrun observation is emitted."""
-    global _duties
+    """The duty watchdog calls once per journaled overrun, at detection on the supervisor loop: memory only."""
+    global _duties, _pending
     with _lock:
         if _duties is None:
             _duties = {}
         _duties[name] = _duties.get(name, 0) + 1
-    _publish_after()
+        _pending = True
 
 
 def observe_direct_dispatch(*, task_id: str, accepted_at: float, dispatched_at: float,
                             attempt_id: str = "") -> None:
     """The direct-turn owner calls at its first actual model dispatch, once per turn.
 
-    Memory only: the supervisor publishes on the queued main_llm_call_state frame.
-    Both stamps use the same clock. Unobserved admission or dispatch produces no
-    row; an unfinished turn remains unobserved rather than becoming zero latency.
+    Memory only: the display-projection duty publishes it, even after the observed
+    turn has left the registry. Both stamps use the same clock. Unobserved admission
+    or dispatch produces no row; an unfinished turn remains unobserved rather than
+    becoming zero latency.
     """
-    global _direct, _dispatch_pending
+    global _direct, _pending
     if dispatched_at < accepted_at:
         return
     with _lock:
         _direct = {"task_id": task_id, "attempt_id": attempt_id, "accepted_at": accepted_at,
                    "dispatched_at": dispatched_at, "seconds": dispatched_at - accepted_at}
-        _dispatch_pending = True
+        _pending = True
 
 
-def publish_pending_dispatch() -> None:
-    """Supervisor-side flush, even if the observed turn has already left the registry.
+def pending() -> bool:
+    """An observation newer than the last publication waits (the duty's due condition)."""
+    return _pending
 
-    Repeated frames and later rounds do no I/O without a new first-dispatch fact.
-    Only the latest observation is retained; the lock never spans sampling or I/O.
+
+def publish_pending() -> None:
+    """The display-projection duty's step, off the supervisor loop: the latest observations
+    replace this generation's after sample once. One that arrives during the write is
+    published by the next pass; passes with nothing new do no I/O. Only the latest
+    observation is retained; the lock never spans sampling or I/O.
     """
-    global _dispatch_pending
+    global _pending
     with _lock:
-        if not _dispatch_pending:
+        if not _pending:
             return
-        _dispatch_pending = False
+        _pending = False
     _publish_after()
 
 

@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from ouroboros import store, store_import, store_switch, usage_store
+from ouroboros import store, store_checkpoint, store_import, store_switch, usage_store
 from tests.test_store import publish
 
 
@@ -159,7 +159,9 @@ def test_delete_and_persist_writers_interleave_with_full_durability(tmp_path, mo
                 assert txn.meta("number") == number
                 assert txn.conn.execute("PRAGMA journal_mode").fetchone()[0] == "persist"
                 assert txn.conn.execute("PRAGMA synchronous").fetchone()[0] == 2
-                assert txn.conn.execute("PRAGMA journal_size_limit").fetchone()[0] == store.JOURNAL_SIZE_LIMIT
+                assert txn.conn.execute("PRAGMA journal_size_limit").fetchone()[0] == store_checkpoint.JOURNAL_SIZE_LIMIT
+                # a rollback journal has no log: SQLite's own checkpoint threshold stays as it was (store_checkpoint)
+                assert txn.conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == store_checkpoint.inline_frames()
                 txn.set_meta("reply", number)
             if os.name == "nt":  # this body's turn ends as its exit ends it there: its handles let go
                 store.close_connections(path)

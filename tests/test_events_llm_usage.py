@@ -129,7 +129,7 @@ def test_llm_usage_defers_the_projection_write_and_keeps_paid_usage(tmp_path):
 
 
 def test_llm_usage_real_corrupt_ledger_keeps_the_projection_dirty_and_paid_event_survives(tmp_path):
-    from ouroboros.server_liveness import flush_budget_projection
+    from ouroboros.display_projections import project, take
     from supervisor import events as ev_module
     from supervisor import state
     from ouroboros.usage_ledger import LEDGER_REL
@@ -156,7 +156,7 @@ def test_llm_usage_real_corrupt_ledger_keeps_the_projection_dirty_and_paid_event
     written = json.loads((tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8"))
     assert written["projection_update_status"] == "deferred"
     assert written["cost"] == 0.5
-    flush_budget_projection(ctx)  # the one write of the turn: refused on a corrupt ledger
+    project(take(ctx))  # the turn's one write, off the loop: refused on a corrupt ledger
     assert state.load_state()["spent_usd"] == 1.25
     assert ctx.budget_projection_dirty is True and ctx.budget_projection_retry_at > 0
 

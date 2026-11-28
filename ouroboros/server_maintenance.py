@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple
 
 from ouroboros.server_process import DATA_DIR, _restart_requested, _supervisor_stop, log
+from ouroboros import display_projections
 from ouroboros.config import BODY_MAINTENANCE_INTERVAL_SEC
 from ouroboros.utils import utc_now_iso
 
@@ -44,6 +45,7 @@ _QUESTION_SWEEP_LOCK = threading.Lock()
 _PAUSE_NOTICE_SWEEP_LOCK = threading.Lock()
 _USAGE_SWEEP_LOCK = threading.Lock()
 _SYNTHESIS_SWEEP_LOCK = threading.Lock()
+_WAL_CHECKPOINT_LOOK_LOCK = threading.Lock()  # the checkpoint lane's look (``store_checkpoint``)
 _OWNER_PAUSE_SWEEP_LOCK = threading.Lock()
 _CONTINUATION_SWEEP_LOCK = threading.Lock()
 _COLD_CUSTODY_SWEEP_LOCK = threading.Lock()
@@ -212,6 +214,9 @@ def _run_terminal_duty(drive_root: pathlib.Path, step: str, latch: Any,
                 drive_root, REPO_DIR, startup=False, owner_liveness=queue.task_settlement_liveness,
                 claim_guard=queue.task_settlement_interlock, stop_requested=lambda: _stop_requested(stop_event),
                 event_queue=workers.get_event_q(create=False))
+        elif step == "wal_checkpoint_look":  # the lane's own look reads the WAL logs' backlog (store_checkpoint)
+            from ouroboros.maintenance import child
+            child.request(lane="checkpoint")
         else:
             raise ValueError(f"unknown terminal duty: {step}")
         _step_recovered(step)
@@ -267,8 +272,9 @@ def _step_recovered(step: str) -> None:
 
 # Memory only: each latched off-loop pass's thread, start and stall-journal flag.
 # After its own cadence from START, a held latch records host_duty_stall with the
-# duty and current stack line; completion records host_duty_stall_end. Neither the
-# loop deadline nor the previous completion marker measures this pass's duration.
+# duty and current stack line; completion records host_duty_stall_end; the display-projection
+# duty writes both, in order, and after its last pass a duty that ends writes its own (``display_projections``).
+# Neither the loop deadline nor the previous completion marker measures this pass's duration.
 _DUTIES: Dict[int, Dict[str, Any]] = {}
 
 
@@ -276,46 +282,21 @@ def _duty_busy(latch: Any, cadence_sec: float) -> None:
     duty = _DUTIES.get(id(latch))
     if duty is None or duty["alerted"] or time.time() - duty["since"] < cadence_sec:
         return
-    duty["alerted"] = True
     from ouroboros.server_liveness import _loop_thread_stack
-    from supervisor.state import append_jsonl
 
-    flags: Dict[str, Any] = {}
-    stack = _loop_thread_stack(duty["ident"], facts=flags)
-    running = round(time.time() - duty["since"], 1)
-    log.warning("Off-loop duty %s has run %.0fs, past its %.0fs cadence; its thread is at: %s",
-                duty["name"], running, cadence_sec, stack[-1] if stack else "(stack unavailable)")
-    try:
-        append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {
-            "ts": utc_now_iso(), "type": "host_duty_stall", "duty": duty["name"], "running_sec": running,
-            "cadence_sec": cadence_sec, **flags, **({"stack": stack} if stack else {})})
-    except Exception:
-        log.debug("host_duty_stall row failed", exc_info=True)
-    try:
-        from ouroboros.update_generation_facts import observe_duty_overrun
-
-        observe_duty_overrun(duty["name"])  # once per alerted pass: the after-update facts count it
-    except Exception:
-        log.debug("generation duty observation failed", exc_info=True)
+    flags: Dict[str, Any] = {}  # the stack at detection, read from memory: no disk on this loop
+    display_projections.journal_duty_stall(duty, cadence_sec, _loop_thread_stack(duty["ident"], facts=flags), flags)
 
 
 def _duty_ended(latch: Any, duty: Dict[str, Any]) -> None:
-    """Close THIS pass's duty. The pass released its latch before this runs, so the next pass
-    may already have registered its own entry: that one is put back, never dropped (it holds
-    the latch, so nothing registers again meanwhile)."""
+    """Close THIS pass's duty (the display projections' pass queued its closing row itself, still
+    holding its latch). The pass released its latch before this runs, so the next pass may already
+    have registered its own entry: that one is put back, never dropped (it holds the latch, so
+    nothing registers again meanwhile)."""
     current = _DUTIES.pop(id(latch), None)
     if current is not None and current is not duty:
         _DUTIES.setdefault(id(latch), current)
-    if not duty["alerted"]:
-        return
-    from supervisor.state import append_jsonl
-
-    try:
-        append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {
-            "ts": utc_now_iso(), "type": "host_duty_stall_end", "duty": duty["name"],
-            "running_sec": round(time.time() - duty["since"], 1)})
-    except Exception:
-        log.debug("host_duty_stall_end row failed", exc_info=True)
+    display_projections.journal_duty_stall_end(duty)
 
 
 def _start_maintenance_thread(latch: Any, name: str, target: Any, args: tuple) -> bool:
@@ -343,13 +324,13 @@ def _start_maintenance_thread(latch: Any, name: str, target: Any, args: tuple) -
 
 
 def _periodic_supervisor_maintenance(
-    last_custody_reap: list, last_review_reconcile: list, *, stop_event: Any = None,
+    last_custody_reap: list, last_review_reconcile: list, *, stop_event: Any = None, ctx: Any = None,
 ) -> None:
     """Throttled upkeep on the supervisor tick, nothing history-sized inline (INV-24).
     A tick starts the schedule duty when a pass is due (``schedule_time.pass_due``)
-    and its previous pass ended;
-    the 20 s cadence independently starts cancel, delivery, question, notice, usage and synthesis duties,
-    plus the held-Continue re-check while a pending Continue waits under its writer hold, and owes the
+    and its previous pass ended; the 20 s cadence independently starts cancel, delivery,
+    question, notice, usage and synthesis duties and the WAL checkpoint lane's look, plus the
+    held-Continue re-check while a pending Continue waits under its writer hold, and owes the
     owner-Pause look (started by the tick that finds it owed, or that a member transition marked); every 600 s
     the custody block (reaping, delegated runs, the engine's route-health facts, then the working copies'
     retirers); every 300 s the reconcile
@@ -358,7 +339,9 @@ def _periodic_supervisor_maintenance(
     whose latch is still held journals the duty's stall once, with its thread's stack (``_duty_busy``).
     ``stop_event`` is the loop's per-generation token: both long passes stop mutating
     once it closes. History-sized work is the maintenance child's (``ouroboros/maintenance.py``):
-    a process's first tick, or a job scheduled since (``owed``), reserves its slot here."""
+    a process's first tick, or a job scheduled since (``owed``), reserves its slot here. Last, the
+    display projections the loop's event context ``ctx`` marked, and the stall rows this tick queued,
+    go to their duty (``dispatch_display_projections``)."""
     if _stop_requested(stop_event):
         return
     now = time.time()
@@ -445,6 +428,14 @@ def _periodic_supervisor_maintenance(
                                   (stop_event, _SCHEDULE_SWEEP_LOCK))
     else:
         _duty_busy(_SCHEDULE_SWEEP_LOCK, BODY_MAINTENANCE_INTERVAL_SEC)
+    dispatch_display_projections(ctx)
+
+
+def dispatch_display_projections(ctx: Any = None) -> None:
+    """Start the display-projection pass when it has work (``display_projections.dispatch``): its snapshot
+    is taken on the calling thread, the loop's, at each tick's end (the exit's last pass: ``drain``); the
+    pass finds its watchdog entry here to queue its own closing row before it releases its latch."""
+    display_projections.dispatch(ctx, _start_maintenance_thread, _duty_busy, lambda latch: _DUTIES.get(id(latch)))
 
 
 def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> None:
@@ -1187,6 +1178,7 @@ HOST_DUTIES: Tuple[HostDuty, ...] = (
     HostDuty("pause_notice_replay", _PAUSE_NOTICE_SWEEP_LOCK, _run_terminal_duty),
     HostDuty("abandoned_usage_reconciliation", _USAGE_SWEEP_LOCK, _run_terminal_duty),
     HostDuty("post_task_synthesis_recovery", _SYNTHESIS_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("wal_checkpoint_look", _WAL_CHECKPOINT_LOOK_LOCK, _run_terminal_duty),
     HostDuty("held_continuation_recheck", _CONTINUATION_SWEEP_LOCK, _run_terminal_duty),
     HostDuty("owner_pause_settlement", _OWNER_PAUSE_SWEEP_LOCK, _run_terminal_duty),
     HostDuty("cold-custody", _COLD_CUSTODY_SWEEP_LOCK, _run_cold_custody),
@@ -1195,8 +1187,9 @@ HOST_DUTIES: Tuple[HostDuty, ...] = (
     HostDuty("maintenance-child", None, _tick_maintenance_child),
     HostDuty("schedule-admission", _SCHEDULE_SWEEP_LOCK, _run_schedule_duty),
     HostDuty("subscription-census", _CENSUS_SWEEP_LOCK, _run_census_duty),
+    HostDuty(display_projections.DUTY_NAME, display_projections.LATCH, display_projections.project),
 )
-TWENTY_SECOND_DUTIES = HOST_DUTIES[:6]  # the one cadence stamped by _LAST_CANCEL_INTENT_SWEEP
+TWENTY_SECOND_DUTIES = HOST_DUTIES[:7]  # the one cadence stamped by _LAST_CANCEL_INTENT_SWEEP
 
 
 def host_duty(name: str) -> HostDuty:

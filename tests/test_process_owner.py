@@ -413,6 +413,11 @@ def test_overload_stops_growth_only_under_machine_pressure(monkeypatch, slots, t
     reason = process_overload.stop_reason(int(tree * gib), memory, floor=watch.floor_bytes)
     assert bool(reason) is stops, reason
     assert not process_overload.stop_reason(int(tree * gib), None, floor=watch.floor_bytes)
+    # macOS's measurement-only figures stop nothing, however alarming (issue #3397: an upper estimate of 0, warn).
+    alarming = host_memory.DarwinVM(16384, dict.fromkeys(("Pages free", "Pages speculative", "Pages inactive",
+                                                          "File-backed pages"), 0), 2, 0.0)
+    measured = host_memory.MemorySnapshot(memory.total_bytes, memory.available_bytes, pressure, alarming)
+    assert process_overload.stop_reason(int(tree * gib), measured, floor=watch.floor_bytes) == reason
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows attribution is the held Job, not a POSIX token")

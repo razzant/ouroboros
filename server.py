@@ -23,8 +23,8 @@ from typing import Any, Dict, Optional
 from starlette.applications import Starlette
 from starlette.routing import Route
 import uvicorn
-from ouroboros.server_control import (PanicIngress, execute_panic_stop as _execute_panic_stop_impl,
-                                      exit_after_shutdown, panic_termination_requested,
+from ouroboros.server_control import (PanicIngress, drain_display_projections, execute_panic_stop as _execute_panic_stop_impl,
+                                      exit_after_shutdown, finish_display_and_socket_lines, panic_termination_requested,
                                       restart_current_process as _restart_current_process_impl)  # noqa: F401 — restart lifecycle binding
 from ouroboros.owned_shutdown import (begin_owned_stop, finish_unconfirmed_stops, start_inherited_import,
                                        stop_owned_work)
@@ -37,7 +37,7 @@ from ouroboros.server_entrypoint import (ResetLaunch, ServerAdmissionRefused, ad
                                          find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
                                          shorten_switch_interval, unisolated_test_root, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption, consciousness_clock, host_notice, places, process_scope, server_boot, store_switch
+from ouroboros import body_adoption, consciousness_clock, display_projections, host_notice, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
@@ -83,7 +83,7 @@ from ouroboros.server_liveness import (  # noqa: F401
     _chat_turn_wedged,
     _start_supervisor_liveness_watchdog,
     _supervisor_loop_stalled,
-    drain_worker_events, flush_budget_projection, publish_supervisor_load,
+    drain_worker_events, publish_supervisor_load,
 )
 from ouroboros.server_liveness import BOOT, start_boot_coordinator, wait_event
 from ouroboros.server_maintenance import (  # noqa: F401
@@ -808,6 +808,7 @@ def _run_supervisor(settings: dict) -> None:
     # The watchdog was started before startup recovery; never start another here.
     tick_publisher_started()  # queue marks publish on this loop's tick while it lives (queue_publication)
     start_queue_writer()  # ...and their documents are written on the publisher thread, never on this one
+    display_projections.bind(_event_ctx)  # the exit's last display pass takes a mark no tick took (drain)
     while not _restart_requested.is_set() and not _supervisor_stop.is_set() and not _exit_signalled.is_set():
         try:
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "events", new_tick=True), time.monotonic()
@@ -830,8 +831,7 @@ def _run_supervisor(settings: dict) -> None:
             )
 
             if _restart_requested.is_set():
-                flush_budget_projection(_event_ctx)  # this turn's drained llm_usage still reaches state.json
-                break
+                break  # this turn's drained llm_usage reaches state.json in the generation's last display pass (drain)
 
             # WS3: intake new bridge messages EARLY — before the heavy steps
             # (enforce_task_timeouts / assign_tasks / evolution) — so a later
@@ -839,13 +839,11 @@ def _run_supervisor(settings: dict) -> None:
             # where no task_received fired for hours until a full restart). A drain that stopped
             # at its bound only polls: the idle wait would steal its backlog's second.
             offset = _process_bridge_updates(bridge, offset, _event_ctx, timeout=0 if backlog else 1)
-            # The one budget-projection write of this turn (llm_usage events only mark it dirty).
-            flush_budget_projection(_event_ctx)
 
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "maintenance"), time.monotonic()
             enforce_due_task_timeouts(lambda: pending_idle_observations(get_event_q()))
-            _periodic_supervisor_maintenance(  # includes the off-loop schedule duty
-                _last_custody_reap, _last_review_job_reconcile, stop_event=_watchdog_stop,
+            _periodic_supervisor_maintenance(  # starts the off-loop duties, the turn's display projections last
+                _last_custody_reap, _last_review_job_reconcile, stop_event=_watchdog_stop, ctx=_event_ctx,
             )
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "assign"), time.monotonic()
             # The requester's finalization starts the drain; its accepted intent
@@ -1096,6 +1094,7 @@ async def lifespan(app):
     BOOT.reset()
     _extensions_ready.clear()  # this generation's extensions have not registered yet
     _supervisor_ready.clear()  # readiness is this generation's: its recovery or its supervisor proves it
+    display_projections.reopen()  # an earlier lifespan's end closed the display duty: this generation's opens it again
     _dialogue_bridge = None
     lifespan_drive_root = pathlib.Path(getattr(getattr(app, "state", None), "drive_root", DATA_DIR))
     pytest_default_real_data_dir = unisolated_test_root(lifespan_drive_root)
@@ -1292,6 +1291,7 @@ async def lifespan(app):
                 log.debug("Failed to record server_shutdown event", exc_info=True)
         except Exception:
             pass
+        finish_display_and_socket_lines()  # the last display pass, then the socket lines, while the grace is fresh
         if _restart_requested.is_set():
             try:
                 _stop_owned_daemon_for_new_pin()
@@ -1422,7 +1422,7 @@ def _emergency_process_cleanup() -> dict:
         panic_kill_all()
     except Exception:
         pass
-    return {"worker_exits": worker_exits, "owned_stop": owned_stop,
+    return {"worker_exits": worker_exits, "owned_stop": owned_stop, "display_pass_alive": not drain_display_projections(),
             "live_children": multiprocessing.active_children() + live_background_children(background)}
 
 def main() -> int:

@@ -7,7 +7,10 @@ import { documentScope, provenScope, dropPaintedPreviews } from './chat_preview.
  * 100; the oldest is dropped and announced as `outbound_dropped`) and flushed on
  * the next open; `send(..., {queue: false})` skips the queue. A watchdog checks
  * every 10 s and closes a socket that has delivered no inbound message for 45 s,
- * which enters the normal reconnect path.
+ * which enters the normal reconnect path. That close carries WATCHDOG_CLOSE_CODE
+ * and a reason the core records field by field (gateway/ws.py): the silence, the
+ * gap since the watchdog's previous tick (far above 10 s: this page's timers were
+ * suspended) and whether the page was hidden; nothing else.
  * Panic returns `intercepted`: an emergency control, never a sent chat or queued submission.
  *
  * A scoped document names its own profile on chat frames. Its current socket's first
@@ -30,6 +33,19 @@ export const SERVER_ANSWERS_EVENT = 'server_answers';
 // 1.5x per attempt up to the cap, the same curve the recovery probe uses.
 const POST_OPEN_RETRY_MS = 2000;
 const POST_OPEN_RETRY_MAX_MS = 30000;
+
+// The silence watchdog: its tick, the silence after which it closes (about three of the
+// core's 15 s heartbeats), and the application close code (RFC 6455 4000-4999) that tells
+// the core this page's own watchdog closed the socket.
+const WATCHDOG_TICK_MS = 10000;
+const WATCHDOG_SILENCE_MS = 45000;
+export const WATCHDOG_CLOSE_CODE = 4408;
+
+/** The watchdog's close reason: three bounded integers, well under the 123-byte limit. */
+export function watchdogCloseReason(silentMs, tickGapMs, hidden) {
+    return `silent_ms=${Math.max(0, Math.round(silentMs))} tick_gap_ms=${Math.max(0, Math.round(tickGapMs))} `
+        + `hidden=${hidden ? 1 : 0}`;
+}
 
 /**
  * SSOT for the served-SHA reload decision, shared by the post-open state
@@ -311,12 +327,24 @@ export class WS {
 
     _startWatchdog(socket) {
         this._clearWatchdogTimer();
+        let previousTick = Date.now();
         this._watchdogTimer = setInterval(() => {
+            const now = Date.now();
+            const tickGap = now - previousTick;
+            previousTick = now;
             if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
-            if (Date.now() - this._lastMessageAt < 45000) return;
+            const silent = now - this._lastMessageAt;
+            if (silent < WATCHDOG_SILENCE_MS) return;
             console.warn('WebSocket watchdog forcing reconnect after stale inbound stream');
-            try { socket.close(); } catch {}
-        }, 10000);
+            const doc = globalThis.document;
+            const hidden = doc?.hidden === true || doc?.visibilityState === 'hidden';
+            // A runtime that refuses the reason still sends the code; one that refuses both closes plainly.
+            try { socket.close(WATCHDOG_CLOSE_CODE, watchdogCloseReason(silent, tickGap, hidden)); } catch {
+                try { socket.close(WATCHDOG_CLOSE_CODE); } catch {
+                    try { socket.close(); } catch {}
+                }
+            }
+        }, WATCHDOG_TICK_MS);
     }
 
     _scheduleReconnect() {

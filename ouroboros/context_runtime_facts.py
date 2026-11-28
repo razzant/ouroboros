@@ -287,6 +287,11 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         # conversation lane's carriers are apart. A snapshot's max_workers is its writer's cap (null: none).
         fact["recorded_max_workers" if key == "max_workers" else key] = (
             snapshot.get(key) if observed == "observed" else None)
+    if isinstance(fact["memory_admission"], dict):
+        # A macOS reading's measurement-only figures (``pool_admission``; issue #3397) stay with operators in the queue
+        # documents: the mind sees the admission facts it always saw. A copy: the loaded document is the reader cache's.
+        fact["memory_admission"] = {name: value for name, value in fact["memory_admission"].items()
+                                    if name != "vm_measurement"}
     assignable = snapshot.get("assignable_idle_workers")
     if observed != "observed":
         fact["free_worker_slots"] = None

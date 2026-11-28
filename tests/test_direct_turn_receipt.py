@@ -29,7 +29,6 @@ def fresh_ring(monkeypatch):
     from ouroboros import update_generation_facts as facts
 
     monkeypatch.setattr(active_activity, "_DIRECT_TURNS", deque(maxlen=active_activity.DIRECT_TURNS_KEPT))
-    monkeypatch.setattr(facts, "publish_pending_dispatch", lambda: None)  # the after-update flush has its own test
     monkeypatch.setattr(facts, "_direct", None)
 
 

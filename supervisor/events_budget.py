@@ -105,14 +105,14 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     cost_known = resolved_cost is not None
     cost_invalid = not cost_known and bool(raw_cost is not None or usage.get("cost_invalid") or evt.get("cost_invalid"))
 
-    # One compatibility-projection write per supervisor loop turn: the event only
-    # marks the context dirty and the loop flushes it AFTER bridge intake
-    # (``server_liveness.flush_budget_projection``), so N events in one drain cost
-    # one ledger render and one STATE_LOCK acquisition, never N. The event row (and
-    # its live frame) therefore says ``deferred``, not the outcome of that write.
+    # One compatibility-projection write per marked turn, off the loop: the event only
+    # marks the context dirty and the display-projection duty writes it
+    # (``display_projections``), so N events in one drain cost one ledger render
+    # and one STATE_LOCK acquisition, never N. The event row (and its live frame)
+    # therefore says ``deferred``, not the outcome of that write.
     ctx.budget_projection_dirty = True
     projection_update_status = "deferred"
-    # The same flush re-reads this root's live heartbeat figure (``LIVE_ROOT_COSTS``).
+    # The same pass re-reads this root's live heartbeat figure (``LIVE_ROOT_COSTS``).
     from ouroboros.cost_projection import LIVE_ROOT_COSTS
     LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), evt.get("root_task_id") or _tid)
 

@@ -815,7 +815,9 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any, *, restart_drained
     """The seam at the restart exit. ``cleanup`` is ``server._emergency_process_cleanup``'s
     census: ``worker_exits`` the pool's kill census (``supervisor.workers.last_worker_exit_census``),
     ``live_children`` the handles still alive after it, ``owned_stop`` ``stop_owned_work``'s
-    outcome; an unconfirmed stop in any of them (a missing census included) is a blocker the
+    outcome; an unconfirmed stop in any of them (a missing census included), or ``display_pass_alive``
+    (a display-projection pass, a reader of the stores and writer of ``state.json``, still running past
+    its last pass's share of the grace: ``display_projections.drain``), is a blocker the
     seam refuses on, never a wait. After that stop the door owner's bounded Git runs as this
     exit's own finalization (``shell_process.exit_finalization``); Panic still ends it. Never raises."""
     root = pathlib.Path(root)
@@ -827,6 +829,7 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any, *, restart_drained
         ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
         ("child_processes_alive", bool(facts.get("live_children"))),
         ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
+        ("display_pass_alive", bool(facts.get("display_pass_alive"))),
     ) if blocked]
     from supervisor.state_initialization import hand_off_runtime_reset
 
