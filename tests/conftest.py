@@ -904,6 +904,7 @@ def _isolate_restart_generation(monkeypatch):
     monkeypatch.setattr(dispatch_choice, "_ADMITTED", {})
     monkeypatch.setattr(pool_admission, "_READY", {"seq": 0, "generation": None, "rss_bytes": None})
     monkeypatch.setattr(pool_admission, "_FACTS", {})  # the last reading and the last fresh size: this test's own
+    monkeypatch.setattr(pool_admission, "_VM", {})  # the last macOS VM sample, the base of the next reading's rates
 
 
 @pytest.fixture(autouse=True)
