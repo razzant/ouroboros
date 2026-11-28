@@ -107,6 +107,9 @@ class GhResult:
     failure: str
     # The exact branch's capture; None for the text transport and for every failure.
     capture: Optional[GhCapture] = None
+    # The OS refused to start gh itself (exec or its working directory, as subprocess reports it): this
+    # invocation sent nothing. False is no proof of a launch, only the absence of that evidence.
+    not_launched: bool = False
 
 
 @dataclass(frozen=True)
@@ -340,6 +343,7 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
     # invocation had no effect; after any launch it attests nothing.
     submitted = _SUBMITTED.get()
     first_submission = submitted is not None and not submitted[0]
+    launch: tuple = ()  # what subprocess names when it cannot start gh: the executable or the working directory
     if capture_to is not None and (input_data is not None or type(max_bytes) is not int or max_bytes <= 0):
         raise ValueError("an exact capture takes a positive max_bytes and no stdin")
     if repo is not _GENERIC_TRANSPORT and not isinstance(repo, str):
@@ -417,6 +421,7 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                     cmd.extend(["--repo", repo])
         if submitted is not None:
             submitted[0] = True
+        launch = (cmd[0], str(cwd))
         if capture_to is not None:
             capture, returncode, stderr, timed_out = _capture_stdout(cmd, cwd, env, timeout, capture_to, max_bytes)
             if timed_out:
@@ -446,12 +451,15 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                 ctx, "⚠️ GH_ERROR: `gh` CLI not found. Install GitHub CLI and ensure it is on PATH (https://cli.github.com/)",
                 "cli_missing", no_effect=first_submission)
         detail = truncate_within_limit(_redact_gh_diagnostic(str(e)), 600)
-        return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception")
+        return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception",
+                        not_launched=bool(launch) and str(missing) in launch)
     except subprocess.TimeoutExpired:
         return GhResult(False, f"⚠️ GH_TIMEOUT: exceeded {timeout}s.", None, None, "timeout")
     except Exception as e:
         detail = truncate_within_limit(_redact_gh_diagnostic(str(e)), 600)
-        return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception")
+        # subprocess raises a refused exec or chdir naming the executable or the directory; nothing else does.
+        unstarted = isinstance(e, OSError) and bool(launch) and str(getattr(e, "filename", "") or "") in launch
+        return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception", not_launched=unstarted)
 
 
 def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None,
@@ -695,8 +703,8 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
     if receipt.get("refused"):
         code = "TOOL_ARG_ERROR" if receipt["refused"] == "arguments" else "TOOL_ERROR"
         return _refuse(ctx, f"⚠️ PR_MERGE_REFUSED: {receipt['refused']} — {receipt.get('detail', '')}", code, no_effect=True)
-    from ouroboros.merge_receipts import (NOT_SUBMITTED, card_row_text, no_effect_request, queued_earlier_note,
-                                          read_only_lookup)
+    from ouroboros.merge_receipts import (card_row_text, merged_by, no_effect_request, queued_earlier_note,
+                                          read_only_lookup, request_reach)
 
     status = (receipt.get("outcome") or {}).get("status", "unknown")
     # The stored outcome is GitHub's readback; the receipt's own request may still be proven to have changed nothing.
@@ -708,30 +716,32 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
     held = bool(receipt.get("plain_held"))
     reads = read_only_lookup((receipt.get("repo") or {}).get("url"), receipt["number"], queue=bool(
         (receipt.get("observed_after") or {}).get("auto_merge"))) + " reads the PR without merging."
-    # A new decision follows a request whose effect is recorded and settled; an intent alone may still be sent.
-    after = ("GitHub shows the PR merged by another request." if status == "merged" else (
+    # A new decision follows a request whose effect is recorded and settled; an intent alone may still be sent. It is
+    # named only while a continuation would be claimed now (``continue_refused``), else the reason it would not.
+    decidable = (status in ("unknown", "refused") and effect and receipt.get("state") == "settled"
+                 and not effect.get("ok") and not receipt.get("continued_by"))
+    why_not = str(receipt.get("continue_refused") or "")
+    # Only a request proven to have changed nothing, or the sender's own proof, says whose merge GitHub shows.
+    shown = merged_by(receipt)
+    after = shown or ((
         "A new pr_merge call for the PR's current head may send one." if not held else
         "pr_merge reads back only as long as a receipt of this PR is still observed, then may send a new merge "
-        "request: call it only to merge." + (
+        "request: call it only to merge." + ((
             " To decide one new request for the same head and method, call pr_merge with "
-            f"continue_receipt_id='{receipt['receipt_id']}'." if status in ("unknown", "refused") and effect
-            and receipt.get("state") == "settled" and not effect.get("ok") and not receipt.get("continued_by")
-            else "")) + f" {reads}")
+            f"continue_receipt_id='{receipt['receipt_id']}'." if not why_not else
+            f" No new request can be decided for it now: {why_not}.") if decidable else "")) + f" {reads}")
     lines = [card_row_text(receipt, codes=True), f"receipt_id={receipt['receipt_id']} (task result: merge_receipts)"]
     if receipt.get("continues"):
-        lines.append(f"This request continues receipt {receipt['continues']}, whose own outcome stays as recorded"
-                     + ("; the merge GitHub shows is not attributed to either request." if status == "merged" else "."))
+        lines.append(f"This request continues receipt {receipt['continues']}, whose own outcome stays as recorded.")
     prior = receipt.get("prior_status", "unknown") if receipt.get("readback_only") else None
     if receipt.get("rejoined"):  # only the receipt's recorded effect says whether the decision's request went out
-        sent_as = ("already sent its request as this receipt" if effect and effect.get("failure") not in NOT_SUBMITTED
-                   else "already has this receipt, whose merge request "
-                   + ("never reached GitHub" if effect else "is not recorded as sent"))
+        sent_as = request_reach(receipt)
         since = f"Receipt {receipt['continued_by']} continued it since. " if receipt.get("continued_by") else ""
         lines.append(f"This decision {sent_as}, so this call only read GitHub back and sent no new merge request. "
                      + since + after)
     elif prior == "merged":
         lines.append("This PR's merge is already recorded in this receipt, so this call only read GitHub back "
-                     "and sent no new merge request.")
+                     f"and sent no new merge request. {shown}")
     elif prior == "":
         lines.append("An earlier or concurrent request for this PR holds its merge intent with no recorded outcome "
                      "yet, so this call only read GitHub back and sent no new merge request.")
@@ -740,17 +750,17 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
                      f"custody; this call only read GitHub back and sent no new merge request. {after}")
     elif prior is not None:
         lines.append("An earlier request for this PR had no confirmed outcome, so this call only read GitHub back "
-                     "and sent no new merge request. " + ("GitHub now shows the PR merged." if status == "merged"
-                                                         else after))
+                     "and sent no new merge request. " + after)
     elif ended and (status != "refused" or held):
         lines.append(f"This merge request was {ended} and changed nothing, so it holds no task custody. {after}")
-    if status != "merged" and not any(reads in line for line in lines):
-        lines.append(after)  # every answer short of a merge names the read that cannot merge
+    if not any((shown or reads) in line for line in lines):
+        lines.append(after)  # every answer names whose merge GitHub shows, or the read that cannot merge
     # The receipt's retained, already bounded and redacted gh facts belong in this local
     # response (#1555); the public PR-body block never carries them.
     if effect and not effect.get("ok"):
         facts = ", ".join([f"failure={effect.get('failure') or 'unknown'}"] + [
-            f"{key}={effect[key]}" for key in ("exit_code", "http_status") if effect.get(key) is not None])
+            f"{key}={effect[key]}" for key in ("exit_code", "http_status") if effect.get(key) is not None] + (
+            ["gh could not be started, so it was not sent"] if effect.get("not_launched") else []))
         output = str(effect.get("output") or "").strip()
         lines.append(("Earlier merge request: " if receipt.get("readback_only") else "Merge request: ")
                      + facts + (f": {output}" if output else ""))
@@ -775,8 +785,13 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
     stale = "; it may still show the earlier outcome, and a new pr_merge call may send a new merge request."
     retry = ("; a later pr_merge call retries it only if it still reads this receipt back, and is otherwise a new "
              "merge request: call it only to merge.")
+    body_read = receipt.get("body_read") or {}
     if (owed or publication) and (publication.get("body") or {}).get("status") != "published":
         lines.append("⚠️ The PR-body receipt block was not confirmed" + (retry if owed or held else stale))
+    elif publication and not body_read.get("read"):  # a retained confirmation is a past observation, not this call's
+        lines.append("⚠️ The PR-body receipt block was last confirmed by an earlier read; " + (
+            f"this call's confirmation read of it failed ({body_read['unread']})" if body_read.get("unread")
+            else "this call made no confirmation read of it") + ", so this call does not confirm it is still there.")
     card = publication.get("card") or {}
     if (owed or publication) and card.get("status") not in ("owed", "delivered"):
         lines.append("⚠️ The task-card receipt is not confirmed: " + str(card.get("reason") or "publication unknown")
