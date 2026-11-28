@@ -100,4 +100,4 @@ export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.12.2-alpha.0';
+export const GATEWAY_CONTRACT_VERSION = '7.13.1-alpha.0';

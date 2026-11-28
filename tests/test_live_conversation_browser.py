@@ -555,7 +555,8 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
         f"Default ({grok_model['thinking_default'] or grok_model['thinking_levels'][0]})")
     expect(form).not_to_contain_text('Google does not offer Gemini Live in Russia or Belarus.')
     form.locator('[name="provider"]').select_option('openai_realtime:openai')
-    expect(form.locator('[data-call-memory]')).to_contain_text('not yet measured')
+    openai = by_id['openai_realtime:openai']  # its window is measured now (516830f85): the panel reads the catalogue's own facts
+    assert_catalog_model(openai, next(model for model in openai['models'] if model['default']))
     form.locator('[name="instructions"]').fill('Speak briefly in this synthetic call.')
     form.locator('[data-call-device="mic"]').select_option('test-mic')
     form.locator('[data-call-processing="echoCancellation"]').uncheck()
