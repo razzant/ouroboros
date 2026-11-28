@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import deque
+from contextlib import ExitStack
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.deadline_utils import physical_dispatch_timeout
@@ -26,6 +27,7 @@ from ouroboros.llm_attempt import (
     _candidate_before_dispatch,
     _execute_candidate,
     _finalized_physical_candidate,
+    _physical_candidate,
     is_size_refusal,
 )
 from ouroboros.usage_accounting import UsageAccountingError
@@ -190,15 +192,7 @@ class _LocalLaneMixin:
         ``base_url`` names the endpoint the SDK will actually reach. When given, the
         candidate's serving facts are bound to that endpoint: a count from a manager
         listening elsewhere stays uncertain rather than describing another server."""
-        messages = self._normalize_system_message_placement(messages)
-        clean_messages = self._strip_openrouter_roundtrip_metadata(
-            self._copy_messages_with_cache_policy(
-                messages, allow_message_cache_control=False, flatten_tool_content_blocks=True,
-            )
-        )
-        # Our llama.cpp lane is launched without a vision handler: keep base64 out
-        # of the text prompt and name the lane, never the model.
-        clean_messages = self._replace_image_blocks_with_placeholder(clean_messages, "local llama.cpp")
+        clean_messages = self._local_text_messages(messages)
         from ouroboros.local_model import get_manager
         manager = get_manager()
         expected_port = _endpoint_port(base_url)
@@ -209,14 +203,6 @@ class _LocalLaneMixin:
         else:
             evidence = manager.serving_context_evidence() or {}
         _ctx_len, local_max = local_context_limits(max_tokens, evidence)
-        for msg in clean_messages:
-            content = msg.get("content")
-            if content is None and msg.get("role") == "assistant":
-                msg["content"] = ""
-            if isinstance(content, list):
-                msg["content"] = "\n\n".join(
-                    b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-                )
         clean_tools = None
         if tools:
             clean_tools = [{k: v for k, v in t.items() if k != "cache_control"} for t in tools]
@@ -236,6 +222,21 @@ class _LocalLaneMixin:
         if base_url:
             target["local_dispatch_base_url"] = str(base_url)
         return target, kwargs
+
+    def _local_text_messages(self, messages):
+        """One projection for generation, lookahead and count-only comparisons."""
+        clean = self._strip_openrouter_roundtrip_metadata(self._copy_messages_with_cache_policy(
+            self._normalize_system_message_placement(messages), allow_message_cache_control=False,
+            flatten_tool_content_blocks=True))
+        clean = self._replace_image_blocks_with_placeholder(clean, "local llama.cpp")
+        for row in clean:
+            content = row.get("content")
+            if content is None and row.get("role") == "assistant":
+                row["content"] = ""
+            elif isinstance(content, list):
+                row["content"] = "\n\n".join(
+                    part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
+        return clean
 
     def _finalize_local_candidate(self, target: Dict[str, Any], payload: Dict[str, Any],
                                   *, measure: bool = True) -> Dict[str, Any]:
@@ -286,6 +287,7 @@ class _LocalLaneMixin:
         holds it no connection opens and the candidate keeps its estimate, so a price that is advice never stands
         in line behind the work it prices."""
         from ouroboros.send_clock import stamp_clock_note
+        from ouroboros.usage_accounting import current_physical_attempt_context
 
         if base_url is None and not queued:
             # The lookahead owns no SDK client: snapshot the built-in route URL from one port read, so the
@@ -301,7 +303,115 @@ class _LocalLaneMixin:
         target["requested_reasoning_effort"] = reasoning_effort
         # The clock line is sealed after the wait, and a count the server's one slot declined opens no connection.
         with measurement_slot(target, wait=queued) as admitted:
-            return target, self._finalize_local_candidate(target, stamp_clock_note(payload), measure=admitted)
+            stamped = stamp_clock_note(payload)
+            candidate = self._finalize_local_candidate(target, stamped, measure=admitted)
+            physical = current_physical_attempt_context() if queued else None
+            if getattr(physical, "nano_floor_plan", None):
+                from ouroboros.nano_minimum import measure_minimum, observation_failed
+                from ouroboros.response_limits import response_limit_for_target
+
+                try:
+                    prepare, count = self._local_floor_io(target, candidate, stamped)
+                    target["nano_floor_evidence"] = measure_minimum(physical, messages, candidate,
+                        target.get("local_input_measurement") or {"reason": "exact_measurement_unavailable"},
+                        response_limit_for_target(target).ceiling(payload["max_tokens"]), prepare, count)
+                except UsageAccountingError:
+                    raise
+                except Exception as error:
+                    log.warning("Optional Nano floor observation failed: %s", type(error).__name__)
+                    target["nano_floor_evidence"] = observation_failed(physical, candidate, error)
+                target["nano_floor_evidence"]["port"] = _endpoint_port(target.get("local_dispatch_base_url"))
+            return target, candidate
+
+    def _local_floor_io(self, target, candidate, stamped):
+        """The identical projection for both the dispatched witness and a publication probe."""
+        from ouroboros.local_model import get_manager
+        from ouroboros.send_clock import split_clock_note
+
+        note, _ = split_clock_note(stamped)
+        port = _endpoint_port(target.get("local_dispatch_base_url"))
+
+        def prepare(rows):
+            cleaned = self._local_text_messages(rows)
+            if note:
+                cleaned.append({"role": "user", "content": note})
+            return _physical_candidate({**candidate, "messages": cleaned})
+
+        return prepare, lambda body: get_manager().measure_prepared_input(body, expected_port=port)
+
+    def _local_count_io(self, rows, tools, caller_max, *, clock_at=None, wait=False):
+        """Prepare one built-in local count envelope without opening a generation client."""
+        from ouroboros._usage_wait import retry_presend
+        from ouroboros.local_model import local_dispatch_port
+        from ouroboros.model_concurrency import built_in_route
+        from ouroboros.response_limits import response_limit_for_target
+        from ouroboros.send_clock import MainSendClock, SendClockPolicy, stamp_clock_note
+
+        url = built_in_route(local_dispatch_port())["base_url"]
+        target, payload = self._build_local_candidate(rows, tools, caller_max, "auto", base_url=url)
+        with MainSendClock(SendClockPolicy()).bound():
+            stamped = stamp_clock_note(payload, clock_at=clock_at)
+            actual = _finalized_physical_candidate(target, stamped, "chat.completions")
+            prepare, count = self._local_floor_io(target, actual, stamped)
+
+        def measure(body):
+            # Only slot entry retries: it unwinds its ticket before waiting on controls. Never retry the count.
+            with ExitStack() as slot:
+                def enter():
+                    return slot.enter_context(measurement_slot(target, wait=wait))
+
+                admitted = retry_presend(enter, check=False, before_task_start=True) if wait else enter()
+                return count(body) if admitted else {"supported": False, "reason": "counter_busy"}
+
+        return actual, response_limit_for_target(target).ceiling(payload["max_tokens"]), prepare, measure
+
+    def _local_publication_floor(self, plan, caller_max, *, clock_at=None, reference=None):
+        """Prepare a prospective full root, opening only the owned count endpoint and never dispatching it."""
+        from ouroboros.nano_publication import NanoPublicationRefused, RootFloor
+
+        tools = plan.start_tool_schemas("nano")
+        if plan.provider != "local" or tools is None or plan.nano_projection is None:
+            raise NanoPublicationRefused("unavailable", "no built-in Nano root and tool envelope to count")
+        rows = plan.messages_for("nano")
+        if reference is not None:
+            if tools != reference.plan.start_tool_schemas("nano"):
+                raise NanoPublicationRefused("unavailable", "the comparison did not retain one tool envelope")
+            return RootFloor(plan, rows, reference.prepare(rows), reference.caller_max,
+                             reference.prepare, reference.measure)
+        actual, ceiling, prepare, measure = self._local_count_io(rows, tools, caller_max, clock_at=clock_at, wait=False)
+        return RootFloor(plan, rows, actual, ceiling, prepare, measure)
+
+    def recount_with(self, messages, tools, rewrite, *, refusal) -> Optional[Tuple[int, Optional[int]]]:
+        """Count the refused input and its rewrite on the same measured formatter and window, without a send."""
+        from ouroboros.local_model import get_manager, local_dispatch_port
+        from ouroboros.local_model_server import input_fingerprint
+        from ouroboros.model_concurrency import built_in_route
+        from ouroboros.nano_minimum import _binding, _sample
+
+        port = refusal["port"]
+        if local_dispatch_port() != port:
+            return None
+        target, payload = self._build_local_candidate(
+            messages, tools, refusal["reply_floor_tokens"], "auto", base_url=built_in_route(port)["base_url"])
+        if note := refusal["clock_note"]:
+            payload["messages"].append({"role": "user", "content": note})
+        body = _finalized_physical_candidate(target, payload, "chat.completions")
+        if input_fingerprint(body) != refusal["sample"]["native_input_sha256"]:
+            return None
+        other = rewrite(body["messages"])
+
+        def exact(candidate):
+            observed = get_manager().measure_prepared_input(candidate, expected_port=port)
+            if (_binding(observed) != refusal["binding"] or observed.get("output_limit_enforced") is not True
+                    or observed.get("reasoning_included_in_limit") is not True):
+                return None
+            return _sample(candidate, observed)
+
+        with measurement_slot(target, wait=False) as admitted:
+            if not admitted or exact(body) != refusal["sample"]:
+                return None
+            second = exact({**body, "messages": other}) if other is not None else None
+            return refusal["sample"]["input_tokens"], second["input_tokens"] if second else None
 
     def _chat_local(
         self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
@@ -327,7 +437,16 @@ class _LocalLaneMixin:
         # owns the decision (``loop_llm_call.call_llm_with_retry``), which counts
         # the attempts it authorises.
         try:
-            request = _attempt_request(local_target, candidate, source="llm.local")
+            if evidence := local_target.get("nano_floor_evidence"):
+                from ouroboros.nano_minimum import bound_evidence
+                from ouroboros.usage_accounting import (bind_physical_attempt_context, current_physical_attempt_context,
+                                                       current_physical_attempt_predicate)
+
+                with bind_physical_attempt_context(bound_evidence(current_physical_attempt_context(), evidence),
+                                                   candidate_predicate=current_physical_attempt_predicate()):
+                    request = _attempt_request(local_target, candidate, source="llm.local")
+            else:
+                request = _attempt_request(local_target, candidate, source="llm.local")
             before = _candidate_before_dispatch(candidate, request)
 
             def check_instance(reservation):

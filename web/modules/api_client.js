@@ -56,6 +56,21 @@ export function withinRequestLifetime(read, { signal = null, lifetimeMs = STATE_
 // fields without the map riding along; the map's own reader (state_snapshots.js) names the revision of the map it
 // holds in its own path. This is the server's token, not a kept answer: an outdated one costs one whole map.
 let bindingsSeen = '';
+// The works the page's accepted state showed held because their saved work does not fit the model's window (a census
+// row's `stop.rail`): their Resume asks the owner which of that hold's steps to take (task_control_menu.js). Only a
+// body its reader accepted for painting says so (`state_snapshots.js` `apply`, past its generation check): one that
+// answers behind a newer body is discarded there, and it changes nothing here either. A reader that paints its own
+// cards from its own accepted census asks that census instead (`windowHeldIn`; Activity).
+let windowHolds = new Set();
+const windowHeld = (row) => row?.stop?.rail === 'context_window';
+export const heldOnWindow = (taskId) => windowHolds.has(String(taskId || '').trim());
+export const windowHeldIn = (census, taskId) => Array.isArray(census?.active_chat_activities)
+    && census.active_chat_activities.some((row) => windowHeld(row) && String(row.activity_id || '') === String(taskId || '').trim());
+export function noteWindowHolds(state) {
+    if (Array.isArray(state?.active_chat_activities)) {
+        windowHolds = new Set(state.active_chat_activities.filter(windowHeld).map((row) => String(row.activity_id || '')));
+    }
+}
 const noteBindings = (state) => {
     if (state && typeof state === 'object') {
         bindingsSeen = typeof state.task_bindings_revision === 'string' ? state.task_bindings_revision : '';

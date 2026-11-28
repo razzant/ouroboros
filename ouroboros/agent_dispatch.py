@@ -266,6 +266,50 @@ def _start_refusal_terminal(refusal: Any) -> Tuple[str, Dict[str, Any], Dict[str
     return _context_capacity_terminal(refusal)
 
 
+def _worker_immediate_stop(error: BaseException, waiter: Any) -> bool:
+    """An owner's immediate Stop that ended a worker task: no worker-authored terminal before its
+    confirmed death; the supervisor's cancellation kills and settles the task (``_handle_task_scoped``)."""
+    from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
+
+    if getattr(error, "control_reason", None) != "cancelled" or waiter is None or not waiter.worker_slot_held:
+        return False
+    intent = active_intent(waiter.canonical_root, waiter.task_id)
+    return isinstance(intent, dict) and stop_policy(intent) == STOP_POLICY_IMMEDIATE
+
+
+def _settle_nano_start_control(task, control, finished):
+    """A control ended the Nano root's exact count (queued, or my human's direct turn) before its loop was admitted.
+
+    A turn on an inline executor reports its own before-start end, as its start refusal does."""
+    from ouroboros.budget_pause import prestart_pause_event
+    from ouroboros.model_wait import current_model_wait
+    from ouroboros.task_carrier import inline_execution
+
+    waiter = current_model_wait()
+    if not getattr(control, "before_task_start", False) or waiter is None:
+        raise control
+    if _worker_immediate_stop(control, waiter):
+        return []  # settlement still belongs to the supervisor
+    if event := prestart_pause_event(task, control, waiter):
+        return [event]  # Resume builds the original input; no preview was checkpointed
+    if inline_execution(task):
+        raise control
+    task["_skip_post_task_synthesis"] = True
+    return finished(*_start_control_terminal(control.control_reason), None)
+
+
+def _start_control_terminal(reason: str) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """No model answer or saved preview exists at the interrupted prestart count."""
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+
+    if reason in {"deadline", "execution_deadline", "absolute_ceiling"}:
+        return _unstarted_terminal("The task's time limit ended before its first model request.", "deadline_local", {})
+    if reason == "finalize_requested":
+        return _unstarted_terminal("Wrap up arrived before the first model request. There is no answer to summarize.",
+                                   REASON_OWNER_REQUESTED_FINALIZATION, {})
+    return _unstarted_terminal("The task was interrupted before its first model request.", reason, {})
+
+
 def _persist_early_origin_stub(drive_root: Any, task: Dict[str, Any]) -> None:
     _persist_early_origin_stub_impl(drive_root, task, write_result=_agent().write_task_result)
 

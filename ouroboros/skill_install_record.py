@@ -25,6 +25,7 @@ import logging
 import pathlib
 import re
 import shutil
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from ouroboros.skill_loader import skill_state_dir, skill_state_dir_path
@@ -152,6 +153,21 @@ def update_backup_path(drive_root: pathlib.Path, name: str) -> pathlib.Path:
     return skill_state_dir_path(drive_root, name) / "update_backup.json"
 
 
+def note_rejection_reason(drive_root: pathlib.Path, name: str, digest: str, reason: str) -> None:
+    """Name why the kept update of ``digest`` will be restored, before settlement reads its generic reason.
+
+    A review that finished but could not be activated (Nano capacity) is not "review unfinished".
+    Only the pending update of exactly these bytes, and only while nothing was restored yet.
+    """
+    data = read_json_dict(update_backup_path(drive_root, name)) or {}
+    pending = data.get("pending_update")
+    if (not isinstance(pending, dict) or pending.get("digest") != digest or data.get("restore_started")
+            or data.get("rejection_reason")):
+        return
+    data["rejection_reason"] = reason
+    atomic_write_json(update_backup_path(drive_root, name), data)
+
+
 def retain_update_snapshot(snapshot: Any, record: Dict[str, Any]) -> None:
     """Persist the existing rollback handle BEFORE a review-basis update replaces any bytes.
 
@@ -225,26 +241,50 @@ def discard_update_snapshot(drive_root: pathlib.Path, name: str) -> None:
 
 def restore_update_snapshot(drive_root: pathlib.Path, name: str, reason: str) -> bool:
     """Restore once, retry state-only failures, and retain evidence on an ambiguous partial restore."""
+    return _restore_update_snapshot(drive_root, name, reason) == "restored"
+
+
+def _restore_update_snapshot(drive_root: pathlib.Path, name: str, reason: str, *, unload: bool = False,
+                             refuse_live_call: bool = False) -> str:
+    from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
     from ouroboros.marketplace.install import restore_payload_state
+    from ouroboros.nano_activation import catalogue_write_fence
 
     snapshot, data = read_update_snapshot(drive_root, name)
     if snapshot is None:
-        return False
+        return "restore_failed"
     if data.get("restore_started") and not snapshot.payload_restored:
         log.error("Update restore for %s was interrupted; kept evidence at %s; payload will not be replaced again",
                   name, update_backup_path(drive_root, name))
-        return False
+        return "restore_failed"
     restored_at = data.get("restored_at") if data.get("restore_started") and snapshot.payload_restored else ""
-    data.update(restore_started=True, rejection_reason=data.get("rejection_reason") or reason)
+    rejection = data.get("rejection_reason") or reason
     path = update_backup_path(drive_root, name)
-    if not restored_at:
-        atomic_write_json(path, data)
+    started = False
     try:
-        if not restored_at:
-            restore_payload_state(snapshot, restore_state_provenance=True)
-            restored_at = utc_now_iso()
-            data.update(payload_restored=snapshot.payload_restored, restored_at=restored_at)
-            atomic_write_json(path, data)
+        # The catalogue fence precedes lifecycle, as it does for Enable. A failure to enter
+        # must leave the extension registered and the payload attempt unstarted.
+        with (nullcontext() if restored_at else catalogue_write_fence(drive_root)), _lifecycle_lock_for(name):
+            if refuse_live_call and (refusal := realtime_load_refusal(name)):
+                return refusal
+            if not restored_at:
+                data.update(restore_started=True, rejection_reason=rejection)
+                atomic_write_json(path, data)
+                started = True
+                if unload:
+                    try:
+                        from ouroboros.extension_loader import unload_extension
+
+                        unload_extension(name)
+                    except Exception:
+                        log.debug("unload before restoring %s failed", name, exc_info=True)
+                restore_payload_state(snapshot, restore_state_provenance=True)
+                restored_at = utc_now_iso()
+                data.update(payload_restored=snapshot.payload_restored, restored_at=restored_at)
+                atomic_write_json(path, data)
+            else:
+                started = True
+                data["rejection_reason"] = rejection
         pending = data["pending_update"]
         rejected = {"version": pending["version"], "digest": pending["digest"],
                     "reason": data["rejection_reason"], "at": restored_at}
@@ -252,18 +292,24 @@ def restore_update_snapshot(drive_root: pathlib.Path, name: str, reason: str) ->
         if record is not None and ("pending_update" in record or record.get("update_rejected") != rejected):
             update_install_record(drive_root, name, pending_update=None, update_rejected=rejected)
     except Exception:
-        data["payload_restored"] = snapshot.payload_restored
-        atomic_write_json(path, data)
+        if started:
+            data["payload_restored"] = snapshot.payload_restored
+            atomic_write_json(path, data)
+        elif data.get("rejection_reason") != rejection:
+            try:
+                atomic_write_json(path, {**data, "rejection_reason": rejection})
+            except OSError:
+                pass
         log.exception("Update restore failed for %s; kept payload and state evidence at %s", name, path)
-        return False
+        return "restore_failed"
     # The restore rewrote the record before ``write_install_record`` could compare landings: the rejected landing's
     # receipt and a consent waiting for its files end here, said as a rollback (``skill_grant_follow``).
     from ouroboros.skill_grant_follow import end_receipt
 
     if not end_receipt(drive_root, name, reason="update_rolled_back", restored_payload=snapshot.target_dir):
-        return False
+        return "restore_failed"
     path.unlink()
-    return True
+    return "restored"
 
 
 def keep_previous_payload(path: Optional[pathlib.Path], name: str) -> None:
@@ -280,7 +326,8 @@ def keep_previous_payload(path: Optional[pathlib.Path], name: str) -> None:
 
 
 def settle_pending_update(drive_root: pathlib.Path, name: str, *, expected_digest: str = "",
-                          force: bool = False, landing_failed: bool = False) -> Dict[str, Any]:
+                          force: bool = False, landing_failed: bool = False,
+                          refuse_live_call: bool = False) -> Dict[str, Any]:
     """Settle the kept update snapshot inside the existing lifecycle lane, regardless of review caller."""
     from ouroboros.config import get_skills_repo_path, load_settings
     from ouroboros.skill_loader import find_skill
@@ -326,6 +373,7 @@ def settle_pending_update(drive_root: pathlib.Path, name: str, *, expected_diges
             reason = "preflight_failed"
         elif loaded.review.status == "blockers":
             reason = "review_blockers"
+    reason = data.get("rejection_reason") or reason  # the same cause that survives in update_rejected
     from ouroboros.deployment_extensions import change_refusal
 
     if managed := change_refusal(name, "rollback"):  # before the unload and the restore: the pinned bytes stay
@@ -337,21 +385,17 @@ def settle_pending_update(drive_root: pathlib.Path, name: str, *, expected_diges
         except Exception:
             log.warning("Kept update of %s needs extension reconciliation", name, exc_info=True)
         return {"status": "refused", "reason": reason, "code": "managed_by_deployment", "error": managed}
-    try:
-        from ouroboros.extension_loader import unload_extension
-
-        unload_extension(name)
-    except Exception:
-        log.debug("unload before restoring %s failed", name, exc_info=True)
-    restored = restore_update_snapshot(drive_root, name, reason)
-    if restored:
+    status = _restore_update_snapshot(drive_root, name, reason, unload=True, refuse_live_call=refuse_live_call)
+    if status not in {"restored", "restore_failed"}:
+        return {"status": "refused", "reason": reason, "code": status}
+    if status == "restored":
         try:
             from ouroboros.extension_loader import reconcile_extension
 
             reconcile_extension(name, drive_root, load_settings)
         except Exception:
             log.warning("Restored update of %s needs extension reconciliation", name, exc_info=True)
-    return {"status": "restored" if restored else "restore_failed", "reason": reason}
+    return {"status": status, "reason": reason}
 
 
 def _legacy_hub_source(catalog_url: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:

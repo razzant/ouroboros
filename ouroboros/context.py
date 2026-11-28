@@ -712,7 +712,8 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
 
 
 def _fresh_reply_owner(task: dict, metadata: dict, root: Any) -> Any:
-    """Only a direct turn's accepted source row can supply a new owner selection of a late letter."""
+    """A direct turn's accepted source row, resolved by its whole identity: the only row that can supply a new owner
+    selection of a late letter, and the one a Send's room may say once (``memory_view_work.mark_turn_input``)."""
     from ouroboros.dialogue_provenance import admission_note
     from ouroboros.owner_relay import quotable_owner_row
     from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
@@ -748,7 +749,8 @@ def _warn_if_over_budget(name: str, content: str) -> None:
         log.warning("Context section '%s' exceeds budget: %d chars > %d", name, len(content), budget)
 
 
-def _scratchpad_for_context(memory: "Memory", ctx: Any = None) -> Tuple[str, str]:
+def _scratchpad_for_context(memory: "Memory", ctx: Any = None, *,
+                            read_failures: Optional[List[str]] = None) -> Tuple[str, str]:
     """``(source, body)``: the whole working memory, rendered from its canonical blocks.
 
     The scratchpad is tier-0 core (``context_layout.TIER0_ALWAYS_FULL``): no build drops a
@@ -758,15 +760,28 @@ def _scratchpad_for_context(memory: "Memory", ctx: Any = None) -> Tuple[str, str
     (none yet, or a flat pre-block scratchpad) the file itself is the section. The fold
     journal's reader is qualified for ``ctx``, the focus reading this section.
     """
-    blocks = memory.load_scratchpad_blocks()
+    from ouroboros.nano_publication import prospective_text
+
+    bp = memory.scratchpad_blocks_path()
+    raw = prospective_text(bp)
+    if raw is not None:
+        blocks = json.loads(raw)
+        if not isinstance(blocks, list) or not blocks or not all(isinstance(item, dict) for item in blocks):
+            raise ValueError("The prospective scratchpad does not name active blocks")
+    else:
+        reader = getattr(memory, "read_scratchpad_blocks", None)
+        blocks, ok = reader() if callable(reader) else (memory.load_scratchpad_blocks(), True)
+        if not ok and read_failures is not None:
+            read_failures.append("scratchpad")
     if not blocks:
         return "memory/scratchpad.md", memory.load_scratchpad()
     return "memory/scratchpad_blocks.json", render_scratchpad_markdown(
-        blocks, journal_pointer=memory.journal_path().exists(), journal_reader=memory.scratchpad_journal_reader(ctx))
+        blocks, journal_pointer=memory.scratchpad_journal_visible(), journal_reader=memory.scratchpad_journal_reader(ctx))
 
 
 def build_memory_sections(memory: Memory, partition: str = "all", *, include_scratchpad: bool = True,
-                          ctx: Any = None) -> List[str]:
+                          ctx: Any = None, read_failures: Optional[List[str]] = None,
+                          include_world: bool = True) -> List[str]:
     """Identity and WORLD (stable), the scratchpad (volatile); my story and rooms are ``memory_view``'s."""
     sections = []
 
@@ -774,24 +789,26 @@ def build_memory_sections(memory: Memory, partition: str = "all", *, include_scr
     include_volatile = partition in {"all", "volatile"}
 
     if include_volatile and include_scratchpad:
-        source, scratchpad_body = _scratchpad_for_context(memory, ctx)
+        source, scratchpad_body = _scratchpad_for_context(memory, ctx, read_failures=read_failures)
         _warn_if_over_budget("scratchpad", scratchpad_body)  # a log line only: the section is never cut
         sections.append(HostSection("scratchpad", f"## Scratchpad (from `{source}` — already loaded; do not re-read via "
                         "read_file(root='runtime_data', path='memory/scratchpad.md'))\n\n" + scratchpad_body))
 
     if include_stable:
-        identity_raw = memory.load_identity()  # one byte capture: the text shown and its revision
+        from ouroboros.nano_publication import prospective_text
+
+        preview = prospective_text(memory.identity_path())
+        identity_raw = preview.decode("utf-8") if preview is not None else memory.load_identity()
+        if read_failures is not None and not identity_raw.strip():
+            read_failures.append("identity")
         _warn_if_over_budget("identity", identity_raw)
         reader = _canonical_runtime_reader(ctx, memory.drive_root, "memory/identity.md")
         sections.append(HostSection("identity", f"## Identity (already loaded from `{memory.identity_path()}`; the "
                                    "revision under it is update_identity's expected_revision)\n"
                                    f"Source reader: {reader}\n\n" + identity_raw + revision_line(
                                        "identity", identity_raw, sha256_text(identity_raw))))
-        world_file = memory.load_world_profile()
-        if world_file.strip():
-            # The map loads whole; oversize is the mind's to compact (detail to knowledge).
-            _warn_if_over_budget("world", world_file)
-            sections.append(_world_section(world_file))
+        if include_world and (world := _world_for_context(memory)):
+            sections.append(world)
 
     if partition == "all":
         registry_path = memory.drive_root / "memory" / "registry.md"
@@ -802,6 +819,14 @@ def build_memory_sections(memory: Memory, partition: str = "all", *, include_scr
                 sections.append("## Memory Registry\n\n" + registry_text)
 
     return sections
+
+
+def _world_for_context(memory: Memory) -> Optional[HostSection]:
+    world_file = memory.load_world_profile()
+    if not world_file.strip():
+        return None
+    _warn_if_over_budget("world", world_file)  # the map loads whole; oversize is the mind's to compact
+    return _world_section(world_file)
 
 
 def _world_section(world_file: str) -> HostSection:
@@ -859,21 +884,24 @@ def _section_root_for(env: Any, ctx: Any) -> str:
     return str(env.drive_root)
 
 
-def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
-    """This actor's connections map (``tool_connections``): Low/Max form, then Nano form."""
+def _connections(tool_registry: Any, task: Dict[str, Any], *,
+                 read_failures: Optional[List[str]] = None, allow_extension_tool_reader: bool = False):
+    """The Connections forms and the optional separately sized extension listing."""
     if tool_registry is None:
-        return "", ""
+        return ("", ""), None
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     helper = str(task.get("delegation_role") or metadata.get("delegation_role") or "") == "subagent"
     try:
-        from ouroboros.tool_connections import connection_views
+        from ouroboros.tool_connections import connection_sections
 
-        return connection_views(tool_registry, helper=helper)
+        return connection_sections(tool_registry, helper=helper, allow_extension_tool_reader=allow_extension_tool_reader)
     except Exception as exc:
+        if read_failures is not None:
+            read_failures.append("connections")
         log.warning("Failed to build the connections map", exc_info=True)
         text = (f"## Connections\n\nThe connections map could not be built ({type(exc).__name__}; its cause is in "
                 "the log); list_available_tools lists every tool I can call.")
-        return text, text
+        return (text, text), None
 
 
 _BASE_PROMPT_PATH = "prompts/SYSTEM.md"
@@ -920,24 +948,14 @@ def _canonical_memory(env: Any, memory: Memory, task: Dict[str, Any]) -> Tuple[p
     return canonical_root, context_memory
 
 
-def _capture_context_core(
-    env: Any,
-    memory: Memory,
-    task: Dict[str, Any],
-    review_context_builder: Optional[Any],
-    ctx: Any,
-    tool_registry: Any = None,
-    connections: Optional[Tuple[str, str]] = None,
-) -> _ContextCore:
-    """Read each context source once before producing route-specific views (``connections``: already read)."""
-    declared = task_input_sources(task) == "declared"
-    connections = _connections(tool_registry, task) if connections is None else connections
-    if declared:
-        _validate_declared_input_task(task)
-    captured_at = utc_now_iso()  # one capture instant for the runtime fact and every snapshot label
-    supplementary_messages: List[Dict[str, Any]] = []
-    base_prompt, base_prompt_source = _read_governance_source(env, _BASE_PROMPT_PATH, _BASE_PROMPT_FALLBACK)
+def _capture_governance_sources(env: Any, read_failures: List[str]):
+    base_prompt, base_prompt_source = _read_governance_source(
+        env, _BASE_PROMPT_PATH, "You are Ouroboros. Your base prompt could not be loaded.")
+    if base_prompt_source is None:
+        read_failures.append("base_prompt")
     bible_md, bible_source = _read_governance_source(env, "BIBLE.md")
+    if bible_source is None:
+        read_failures.append("bible")
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
 
     books, book_text, book_errors = [], {}, []
@@ -950,6 +968,45 @@ def _capture_context_core(
             log.warning("Reference book unavailable (%s): %s", entrypoint, exc)
             book_errors.append(f"Reference book source unavailable: {entrypoint}. {exc}. Full context is not established.")
             book_text[book_id] = ""
+    if book_errors:
+        read_failures.append("reference_books")
+    return base_prompt, base_prompt_source, bible_md, bible_source, books, book_text, book_errors
+
+
+def _capture_runtime(env, task, ctx, captured_at):
+    supplementary = []
+    text = build_runtime_section(env, task, ctx=ctx, captured_at=captured_at,
+                                 supplementary_messages_out=supplementary)
+    return text, supplementary
+
+
+def _capture_context_core(
+    env: Any,
+    memory: Memory,
+    task: Dict[str, Any],
+    review_context_builder: Optional[Any],
+    ctx: Any,
+    tool_registry: Any = None, *, allow_extension_tool_reader: bool = False,
+    connection_sources: Optional[Tuple[Tuple[str, str], Optional[HostSection]]] = None,
+    connection_failures: Tuple[str, ...] = (),
+    read_memory: Optional[Any] = None, memory_read_failures: Optional[List[str]] = None,
+) -> _ContextCore:
+    """Read each context source once before producing route-specific views."""
+    from ouroboros.chronicle_publication import proposed_transaction
+    from ouroboros.nano_publication import publication_background
+
+    declared = task_input_sources(task) == "declared"
+    read_failures = list(connection_failures)
+    if connection_sources is None:
+        connection_sources = _connections(tool_registry, task, read_failures=read_failures,
+                                          allow_extension_tool_reader=allow_extension_tool_reader)
+    connections, extension_tools = connection_sources
+    if declared:
+        _validate_declared_input_task(task)
+    captured_at = publication_background("clock", utc_now_iso)
+    base_prompt, base_prompt_source, bible_md, bible_source, books, book_text, book_errors = (
+        _capture_governance_sources(env, read_failures)
+    )
     from ouroboros.context_layout import task_design_navigation
 
     # DESIGN follows the selected body, not document names or task prose. Capture its
@@ -989,8 +1046,10 @@ def _capture_context_core(
     if not is_child:  # where this view begins to be told later (``return_facts``): read before the view itself
         from ouroboros.return_facts import reach
 
-        seen = reach(canonical_root)
-    view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx, declared=declared)
+        seen = publication_background("return_facts", lambda: reach(canonical_root))
+    capture_view = lambda: _capture_memory_view(task, canonical_root, ctx, declared=declared)  # noqa: E731
+    view_spec, view, view_json = (capture_view() if proposed_transaction(canonical_root) is not None else
+                                 publication_background("memory_view", capture_view))
 
     # Max keeps the full capability/WHY map even for external work: binding a
     # folder changes tools' default target, not the mind's knowledge of its body.
@@ -1004,26 +1063,39 @@ def _capture_context_core(
     try:
         from ouroboros.subagent_runtime import current_model_visible_subagent_catalog, subagent_catalog_section
 
-        subagent_catalog = current_model_visible_subagent_catalog()
+        subagent_catalog = publication_background("subagent_catalog", current_model_visible_subagent_catalog)
         if subagent_catalog:
             semi_stable_parts.append(subagent_catalog_section(subagent_catalog))
     except Exception:
+        read_failures.append("subagent_catalog")
         log.debug("Failed to build Available subagents catalog", exc_info=True)
-    review_activity: List[str] = []  # each seat's price and last review: the changing part's, never B's
     try:
         from ouroboros.subagent_runtime import review_facts_block
 
-        semi_stable_parts.append(timed("review_facts", review_facts_block, activity_out=review_activity))
+        def read_review_facts():
+            activity = []
+            return timed("review_facts", review_facts_block, activity_out=activity), activity
+
+        review_facts, review_activity = publication_background("review_facts", read_review_facts)
+        semi_stable_parts.append(review_facts)
     except Exception:
+        review_activity = []
+        read_failures.append("review_facts")
         log.warning("Failed to build the Review block", exc_info=True)
     if not declared:
-        semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable", ctx=ctx))
+        if read_memory is None:
+            semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable", ctx=ctx,
+                                                           read_failures=read_failures))
+        else:
+            semi_stable_parts.extend(read_memory("stable", True))
+            if world := _world_for_context(context_memory):
+                semi_stable_parts.append(world)
     from ouroboros.skill_catalogue import always_in_context_section, discover_context_skills
     skills = [] if declared else timed("installed_skills", discover_context_skills, canonical_root)  # and the catalog below
     if always_on := always_in_context_section(skills or []):  # a failure (empty, or None) is no skills here
         semi_stable_parts.append(HostSection("always_on_skills", always_on))  # skills the request carries (max_room_fact)
-    from ouroboros.safety_config import owner_rules_section
-    semi_stable_parts.append(owner_rules_section())  # the Supervisor's read, for every focus and child
+    from ouroboros.safety_config import owner_rule_sections
+    semi_stable_parts.extend(owner_rule_sections(read_failures=read_failures))  # the Supervisor's read, with distinct authors
     # Knowledge leads the changing block (its edits never cost the cached story) and rides whole
     # only where the view holds it; a child or nanny starts with its outline (every note by address
     # and title) and meets the whole index with its first accepted delegation (delegation_knowledge_index).
@@ -1037,15 +1109,17 @@ def _capture_context_core(
     names = (carried_names(task) or ()) if helper else situation_names(task, view_spec.room_id)
     global_knowledge = {"bodies": {}, "names": names} if held_resume is None and not declared else {}
     head_parts = (build_knowledge_sections(context_env, project_id=project_id, global_capture=global_knowledge,
-                                           held_capture=held_resume)
+                                           held_capture=held_resume, read_failures=read_failures)
                   if view_spec.knowledge else
-                  helper_navigation_sections(canonical_root, project_id, global_capture=global_knowledge))
+                  helper_navigation_sections(canonical_root, project_id, global_capture=global_knowledge,
+                                             read_failures=read_failures))
     if design_nav:
         head_parts.append(design_nav)
 
     if not is_child:
         deep_review = _deep_review_pointer(context_env.drive_path("memory/deep_review.md"),
-                                           lambda: _canonical_runtime_reader(ctx, canonical_root, "memory/deep_review.md"))
+                                           lambda: _canonical_runtime_reader(ctx, canonical_root, "memory/deep_review.md"),
+                                           read_failures=read_failures)
         if deep_review:
             semi_stable_parts.append(deep_review)
 
@@ -1056,8 +1130,8 @@ def _capture_context_core(
     # Same attempt normalization as terminal-wake acknowledgement.
     from ouroboros.delegate_supervision import _attempt_key
     attempt_key = _attempt_key(ctx if ctx is not None else SimpleNamespace(task_attempt=task.get("_attempt")))
-    health_section = "" if declared else build_health_invariants(
-        context_env, task_id=str(task.get("id") or ""), active_root=active_root, attempt_key=attempt_key)
+    health_section = "" if declared else publication_background("health", lambda: build_health_invariants(
+        context_env, task_id=str(task.get("id") or ""), active_root=active_root, attempt_key=attempt_key))
     from ouroboros import held_notes
 
     # A shelf that could not be listed names no omission (its outline names the gap); it is never listed twice.
@@ -1067,31 +1141,44 @@ def _capture_context_core(
     try:
         from ouroboros.subagent_runtime import review_records_block, subagent_supervision_fact_line
         from ouroboros.subagent_metrics import fact_line
-        dynamic_parts.extend(filter(None, (
+        dynamic_parts.extend(filter(None, publication_background("review_records", lambda: (
             timed("review_records", review_records_block, drive_root=canonical_root, task_id=str(task.get("id") or "")),
             subagent_supervision_fact_line(task, ctx=ctx, catalog=subagent_catalog),
             fact_line(task, drive_root=canonical_root),
-        )))
+        ))))
     except Exception:
+        read_failures.append("review_records")
         log.warning("Failed to build the Review records block", exc_info=True)
     if not declared:
-        dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile",
-                                                   include_scratchpad=not is_child, ctx=ctx))
-    registry = "" if declared else _build_registry_section(context_env)
+        if read_memory is None:
+            dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile",
+                                                       include_scratchpad=not is_child, ctx=ctx,
+                                                       read_failures=read_failures))
+        else:
+            dynamic_parts.extend(read_memory("volatile", not is_child))
+            read_failures.extend(memory_read_failures or ())
+    registry = "" if declared else _build_registry_section(context_env, read_failures=read_failures)
     if registry:
         dynamic_parts.append(registry)
     from ouroboros.contracts.task_constraint import normalize_task_constraint
 
     bound = normalize_task_constraint(task.get("task_constraint") or getattr(ctx, "task_constraint", None))
     installed_skills = "" if declared else _build_installed_skills_section(
-        context_env, skills=skills, first_view=ctx, selected_skill=bound.skill_name if bound and bound.has_selected_skill else "")
+        context_env, skills=skills, first_view=ctx,
+        selected_skill=bound.skill_name if bound and bound.has_selected_skill else "",
+        read_failures=read_failures, separate_extension_tools=extension_tools is not None)
+    if extension_tools is not None:
+        dynamic_parts.append(extension_tools)
     if installed_skills:
         dynamic_parts.append(installed_skills)
+    drive_section = [] if declared else [labelled_section(
+        publication_background("drive", lambda: _drive_state_section(context_env)),
+        lambda text: snapshot_labelled(text, captured_at))]
+    runtime_section, supplementary_messages = publication_background(
+        "runtime", lambda: _capture_runtime(env, task, ctx, captured_at))
     dynamic_parts.extend([
-        *([] if declared else [labelled_section(_drive_state_section(context_env),
-                                                lambda text: snapshot_labelled(text, captured_at))]),
-        build_runtime_section(env, task, ctx=ctx, captured_at=captured_at,
-                              supplementary_messages_out=supplementary_messages),
+        *drive_section,
+        runtime_section,
         (
             "## Task Contract Discipline\n\n"
             "For non-trivial work, state your success criteria early in your plan or reasoning, "
@@ -1120,15 +1207,16 @@ def _capture_context_core(
         try:
             from ouroboros.context_sections import review_status_host_section
             from ouroboros.review_state import load_state, make_repo_key
-            advisory_state = load_state(canonical_root)
-            if advisory_state.latest_attempt() or advisory_state.earlier_open_obligations(
-                    make_repo_key(pathlib.Path(env.repo_dir))):
-                advisory_section = review_status_host_section(
-                    advisory_state,
-                    repo_dir=pathlib.Path(env.repo_dir), drive_root=canonical_root,
-                )
-                if advisory_section:
-                    dynamic_parts.append(advisory_section)
+            def read_advisory():
+                advisory_state = load_state(canonical_root)
+                if advisory_state.latest_attempt() or advisory_state.earlier_open_obligations(
+                        make_repo_key(pathlib.Path(env.repo_dir))):
+                    return review_status_host_section(advisory_state,
+                        repo_dir=pathlib.Path(env.repo_dir), drive_root=canonical_root)
+                return ""
+
+            if advisory_section := publication_background("review_continuity", read_advisory):
+                dynamic_parts.append(advisory_section)
         except Exception:
             log.debug("Failed to build advisory review status section", exc_info=True)
 
@@ -1142,35 +1230,13 @@ def _capture_context_core(
         own_drive = memory if context_memory is not memory else None
         recent = context_memory.recent_activity_sections(str(task.get("id") or ""), own_drive=own_drive)
     else:
-        recent = build_recent_sections(context_memory, env, task_id=task.get("id", ""))
+        recent = publication_background("recent", lambda: build_recent_sections(
+            context_memory, env, task_id=task.get("id", "")))
     dynamic_parts.extend(labelled_section(section, lambda text: snapshot_labelled(text, captured_at))
                          if isinstance(section, HostSection) else snapshot_labelled(section, captured_at)
                          for section in recent)
-    try:
-        from ouroboros.consciousness_authority import is_focus_wake
-        from ouroboros.place_reply import place_state_now, records_only, reply_carrier, speak_line
-        from ouroboros.presence_context import build_presence_context_section
-
-        inline = bool(task.get("_presence_turn")) or is_focus_wake(task_metadata)
-        scheduled = bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn")
-        # The same carrier that speaks this root's final names its audience; where its connector declares a door
-        # the finish is a record and the doors are named instead (FOCUS does both inline).
-        spoken = not inline and not scheduled and bool(reply_carrier(task_metadata))
-        records = spoken and records_only(task_metadata)
-        presence_section = build_presence_context_section(
-            pathlib.Path(env.drive_root),
-            task_metadata.get("presence"),
-            str(task.get("id") or ""),
-            status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
-            scheduled=scheduled,
-            answers_conversation=spoken and not records,
-            record_line=speak_line(task_metadata, state=place_state_now(canonical_root, task_metadata)) if records else "",
-            inline=inline,
-        )
-        if presence_section:
-            dynamic_parts.append(presence_section)
-    except Exception:
-        log.debug("Failed to inject presence context", exc_info=True)
+    if presence_section := _presence_context_for_turn(env, task, task_metadata, canonical_root):
+        dynamic_parts.append(presence_section)
     if not is_child:  # the facts beside my human's word that started this turn (``return_facts``), else nothing
         from ouroboros.own_time_seed import offer_section  # and, once, the seed an older install never wrote
         from ouroboros.return_facts import heard_word, turn_sections
@@ -1183,13 +1249,10 @@ def _capture_context_core(
 
     attachment_facts: dict = {}
     return _ContextCore(
-        base_prompt=base_prompt,
-        base_prompt_source=base_prompt_source,
+        base_prompt=base_prompt, base_prompt_source=base_prompt_source,
         bible_source=bible_source, bible_md=bible_md,
-        architecture_md=book_text["architecture"],
-        development_md=book_text["development"],
-        semi_stable_text=semi_stable_text,
-        dynamic_text="\n\n".join(dynamic_parts),
+        architecture_md=book_text["architecture"], development_md=book_text["development"],
+        semi_stable_text=semi_stable_text, dynamic_text="\n\n".join(dynamic_parts),
         semi_stable_sections=capture_sections(semi_stable_parts, prefix="stable"),
         dynamic_head_sections=capture_sections(head_parts, prefix="head"),
         dynamic_sections=capture_sections(dynamic_parts, prefix="dynamic"),
@@ -1198,19 +1261,46 @@ def _capture_context_core(
                                      ensure_ascii=False, sort_keys=True),
         initial_attachment_facts=attachment_facts,
         docs_need_development=docs_need_development, development_required=required,
-        reference_books=tuple(books),
-        reference_book_errors=tuple(book_errors),
-        compact_reference_docs=is_child,
-        dynamic_head_text="\n\n".join(head_parts),
+        reference_books=tuple(books), reference_book_errors=tuple(book_errors),
+        compact_reference_docs=is_child, dynamic_head_text="\n\n".join(head_parts),
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
         opening_program_address=admission_note(task).get("row_address", ""),
-        connections=connections,
-        held_note_resume=held_resume,
+        connections=connections, held_note_resume=held_resume,
+        read_failures=tuple(dict.fromkeys(read_failures)),
     )
 
 
-def _deep_review_pointer(path: pathlib.Path, reader: Callable[[], str]) -> str:
+def _presence_context_for_turn(env, task, task_metadata, canonical_root):
+    """Determine how this focus may finish before rendering its place context."""
+    try:
+        from ouroboros.consciousness_authority import is_focus_wake
+        from ouroboros.place_reply import place_state_now, records_only, reply_carrier, speak_line
+        from ouroboros.presence_context import build_presence_context_section
+
+        inline = bool(task.get("_presence_turn")) or is_focus_wake(task_metadata)
+        scheduled = bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn")
+        # The same carrier that speaks this root's final names its audience; where its connector declares a door
+        # the finish is a record and the doors are named instead (FOCUS does both inline).
+        spoken = not inline and not scheduled and bool(reply_carrier(task_metadata))
+        records = spoken and records_only(task_metadata)
+        return build_presence_context_section(
+            pathlib.Path(env.drive_root),
+            task_metadata.get("presence"),
+            str(task.get("id") or ""),
+            status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
+            scheduled=scheduled,
+            answers_conversation=spoken and not records,
+            record_line=speak_line(task_metadata, state=place_state_now(canonical_root, task_metadata)) if records else "",
+            inline=inline,
+        )
+    except Exception:
+        log.debug("Failed to inject presence context", exc_info=True)
+        return None
+
+
+def _deep_review_pointer(path: pathlib.Path, reader: Callable[[], str], *,
+                         read_failures: Optional[List[str]] = None) -> str:
     """The last deep self-review as a source pointer, from the report's own bytes only.
 
     Its provenance header names ``generated_at`` and ``source_revision``; a report
@@ -1222,6 +1312,8 @@ def _deep_review_pointer(path: pathlib.Path, reader: Callable[[], str]) -> str:
     except FileNotFoundError:
         return ""
     except OSError as exc:
+        if read_failures is not None:
+            read_failures.append("deep_review")
         return f"## Last Deep Self-Review\n\nReport source unavailable ({type(exc).__name__}): {reader()}."
     text = raw.decode("utf-8", errors="replace")
     if not text.strip():
@@ -1246,13 +1338,18 @@ def _capture_memory_view(task: Dict[str, Any], canonical_root: pathlib.Path, ctx
                          declared: bool = False) -> Tuple[Any, Any, str]:
     """``(ViewSpec, MemoryViewSnapshot, its canonical JSON)``, captured once from the canonical root.
 
-    A declared request's spec is the role's with its omissions (``_declared_omissions``)."""
-    from ouroboros.memory_view import capture_memory_view, snapshot_json
+    A declared request's spec is the role's with its omissions (``_declared_omissions``). A direct turn in Main names
+    the plain row its Send kept, resolved by that row's whole identity (``memory_view_work.mark_turn_input``)."""
+    from ouroboros.memory_view import MAIN_ROOM, capture_memory_view, snapshot_json
+    from ouroboros.memory_view_work import mark_turn_input
 
     spec = _view_spec(task, canonical_root, ctx)
     if declared:
         spec = _declared_omissions(task, spec)
     snapshot = capture_memory_view(canonical_root, task, spec)
+    if task.get("_is_direct_chat") and str(spec.room_id) == MAIN_ROOM:
+        meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        snapshot = mark_turn_input(snapshot, task, _fresh_reply_owner(task, meta, canonical_root))
     return spec, snapshot, snapshot_json(snapshot)
 
 
@@ -1263,7 +1360,8 @@ def _view_spec(task: Dict[str, Any], canonical_root: pathlib.Path, ctx: Any) -> 
     return view_spec_for_task(task, canonical_root, ctx=ctx if isinstance(getattr(ctx, "task_metadata", None), dict) else None)
 
 
-def _start_frame_texts(env: Any, memory: Memory, ctx: Any, spec: Any, connections: Tuple[str, str]) -> List[Tuple[str, str]]:
+def _start_frame_texts(env: Any, memory: Memory, spec: Any, connections: Tuple[str, str],
+                       read_memory: Any) -> List[Tuple[str, str]]:
     """The named texts an undeclared, non-child start's every request holds whole (the start bound's reads).
 
     Each is read by its own producer, as the capture reads it: SYSTEM and BIBLE; the tier-0 sections (identity, the
@@ -1279,7 +1377,7 @@ def _start_frame_texts(env: Any, memory: Memory, ctx: Any, spec: Any, connection
     root = memory.drive_root
     texts = [("system prompt", _read_governance_source(env, _BASE_PROMPT_PATH, _BASE_PROMPT_FALLBACK)[0]),
              ("constitution", "## BIBLE.md\n\n" + _read_governance_source(env, "BIBLE.md")[0])]
-    sections = [*build_memory_sections(memory, partition="stable", ctx=ctx), *build_memory_sections(memory, partition="volatile", ctx=ctx)]
+    sections = [*read_memory("stable", True), *read_memory("volatile", True)]
     if spec.knowledge:
         sections.append(_shared_understanding(resolve_knowledge_address(root, OVERVIEW_TOPIC, "global"))[0])
     names = {"shared_understanding": "overview"}
@@ -1317,20 +1415,36 @@ def build_context_fit_plan(
     tool_registry: Any = None,
     reasoning_effort: str = "",
     nano_base: Optional[Tuple[str, ...]] = None,
+    count_only: bool = False,
 ) -> ContextFitPlan:
-    """Compatibility wrapper over the cohesive context-fit implementation; a start whose always-whole core cannot fit
-    its known window is refused before the capture (``context_start_bound``)."""
+    """Build a complete fit after checking the whole-core lower bound (``context_start_bound``)."""
     from ouroboros import context_start_bound
+    from ouroboros.nano_host_publication import main_extension_tool_reader
 
     preferred = str(preferred_mode or get_context_mode() or "max")
-    connections = _connections(tool_registry, task)
     canonical_root, context_memory = _canonical_memory(env, memory, task)
-    timed("start_bound", context_start_bound.refuse_before_capture, task, ctx,
-          spec=lambda: _view_spec(task, canonical_root, ctx),
-          frame_texts=lambda spec: _start_frame_texts(env, context_memory, ctx, spec, connections),
-          route_resolver=route_resolver or _context_fit_route, tool_schemas=tool_schemas, nano_base=nano_base,
-          reasoning_effort=reasoning_effort, preferred=preferred)
-    core = _capture_context_core(env, memory, task, review_context_builder, ctx, tool_registry, connections=connections)
+    connection_failures: List[str] = []
+    connection_sources = _connections(tool_registry, task, read_failures=connection_failures,
+        allow_extension_tool_reader=(tool_registry is not None and main_extension_tool_reader(canonical_root, task, preferred)))
+    # Reuse the exact tier-0 reads (and their failures). WORLD is read only after normal bootstrap.
+    base_memory, memory_failures = {}, []
+
+    def read_memory(partition: str, include_scratchpad: bool):
+        key = partition, include_scratchpad
+        if key not in base_memory:
+            base_memory[key] = build_memory_sections(context_memory, partition=partition,
+                include_scratchpad=include_scratchpad, ctx=ctx, read_failures=memory_failures, include_world=False)
+        return base_memory[key]
+
+    if not count_only:
+        timed("start_bound", context_start_bound.refuse_before_capture, task, ctx,
+              spec=lambda: _view_spec(task, canonical_root, ctx),
+              frame_texts=lambda spec: _start_frame_texts(env, context_memory, spec, connection_sources[0], read_memory),
+              route_resolver=route_resolver or _context_fit_route, tool_schemas=tool_schemas, nano_base=nano_base,
+              reasoning_effort=reasoning_effort, preferred=preferred)
+    core = _capture_context_core(env, memory, task, review_context_builder, ctx, tool_registry,
+                                 connection_sources=connection_sources, connection_failures=tuple(connection_failures),
+                                 read_memory=read_memory, memory_read_failures=memory_failures)
     return _build_context_fit_plan(
         env,
         core,
@@ -1340,6 +1454,7 @@ def build_context_fit_plan(
         tool_schemas=tool_schemas,
         reasoning_effort=reasoning_effort,
         nano_base=nano_base,
+        **({"count_only": True} if count_only else {}),
     )
 
 
@@ -1416,6 +1531,7 @@ def build_llm_messages(
         "initial_mode": plan.initial_mode,
         "route_fp": plan.route_fp,
         "evidence_status": plan.status,
+        **({"counter_status": plan.counter_status} if plan.counter_status else {}),
         "evidence_stale": plan.stale,
         "window_tokens": plan.window_tokens,
         "max_estimated_tokens": plan.max_projection.estimated_tokens,

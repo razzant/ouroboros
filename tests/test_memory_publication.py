@@ -96,6 +96,42 @@ def test_registry_read_revision_and_cas_use_shared_canonical_root(tmp_path):
     assert len(rows) == 2 and rows[-1]["focus"]["room_id"] == "444"
 
 
+def test_registry_refusal_exposes_the_private_proposal_reference(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from ouroboros import nano_publication
+    from ouroboros.tools.tool_result import (_install_tool_result_sidecar, _published_tool_result,
+                                             _restore_tool_result_sidecar)
+
+    ctx = _ctx(tmp_path)
+    source = {"kind": "task_source", "root": "artifact_store", "path": "nano-proposed-memory.json",
+              "sha256": "a" * 64, "size": 19, "task_id": "fixture"}
+
+    class Refusing:
+        @contextmanager
+        def ordinary(self):
+            yield False
+
+        @contextmanager
+        def publication(self, change):
+            assert b"Proposed coverage." in change.after
+            raise nano_publication.NanoPublicationRefused("incomplete", "Synthetic read failed", source_ref=source)
+            yield
+
+    monkeypatch.setattr(nano_publication, "admission_for", lambda *_: Refusing())
+    sentinel = object()
+    token = _install_tool_result_sidecar(ctx, sentinel)
+    try:
+        text = _memory_update_registry(ctx, "fixture", "Proposed coverage.", "")
+        result = _published_tool_result(ctx, sentinel)
+    finally:
+        _restore_tool_result_sidecar(token)
+    assert (result.status, result.code, result.text) == ("blocked", "RESOURCE_CONSTRAINT_BLOCKED", text)
+    assert "nano_incomplete" in text and result.meta["nano_proposal_source"] == source
+    assert not (tmp_path / "memory/registry.md").exists()
+    assert not (tmp_path / "memory/registry_history.jsonl").exists()
+
+
 def test_plain_knowledge_cas_and_scratchpad_origin(tmp_path):
     from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note, read_knowledge_note
 

@@ -718,24 +718,19 @@ def _earlier_feedback(drive_root: pathlib.Path, skill_name: str, review_state: A
 
 
 def _author_finish_existing_skill_review(
-    ctx: ToolContext,
-    binding: ResolvedResourceBinding,
-    skill_name: str,
-    *,
-    disposition: str,
-    rationale: str,
-    review_reference: Optional[Dict[str, Any]] = None,
+    ctx: ToolContext, binding: ResolvedResourceBinding, skill_name: str, *,
+    disposition: str, rationale: str, review_reference: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Record author finish without buying a new panel.
+    """Record author finish over earlier feedback or a terminal no-verdict reference and current preflight.
 
-    Outside Cyber Pro it needs earlier feedback (a verdict in review.json or a settled skill record with findings)
-    or a returned terminal reference of a review that formed no verdict, plus a passing current preflight;
-    Cyber may continue with either missing or failed. Critic facts stay intact; only the author record
-    binds the newly accepted bytes.
+    Cyber Pro may accept unavailable or failed evidence; only the author record binds the newly accepted bytes.
     """
+    from dataclasses import replace
+
+    from ouroboros.nano_publication import NanoPublicationRefused
     from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, build_author_disposition
-    from ouroboros.skill_loader import load_review_state, save_review_state
-    from ouroboros.skill_review import _run_deterministic_preflight
+    from ouroboros.skill_loader import load_review_state
+    from ouroboros.skill_review import _run_deterministic_preflight, save_accepted_review
     from ouroboros.tools.review_helpers import cyber_review_authority
 
     cyber = cyber_review_authority()
@@ -775,8 +770,12 @@ def _author_finish_existing_skill_review(
         })
     basis["preflight"] = {"content_hash": current_hash, "status": "failed" if preflight_facts is not None else "pass"}
     author_record["review_reference"] = basis
-    review_state.author_disposition = author_record
-    save_review_state(drive_root, skill_name, review_state)
+    review_state = replace(review_state, author_disposition=author_record)
+    try:
+        save_accepted_review(drive_root, loaded, review_state)
+    except NanoPublicationRefused as exc:
+        code = "RESOURCE_CONSTRAINT_BLOCKED" if exc.reason == "over_capacity" else "TOOL_REPORTED_FAILURE"
+        return {"error": _skill_review_refusal(ctx, code, f"SKILL_REVIEW_ERROR: {exc.tool_detail()}")}
     from ouroboros.review_overrides import note_skill_over_review
     from ouroboros.skill_dependencies import ensure_skill_dependencies
     from ouroboros.skill_lifecycle_actions import grant_consent_on_admission  # the secret form's waiting allow

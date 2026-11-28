@@ -5,7 +5,7 @@
 // lifecycle button NAMES its action to the one audited server seam, so the owner's
 // buttons and the agent's tool mean exactly the same thing.
 
-import { fetchJson, isStoreMigrating, readStateJson } from './api_client.js';
+import { fetchJson, isStoreMigrating, readStateJson, windowHeldIn } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
 import { errorWords, escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { fmt, tr } from './i18n.js';
@@ -510,6 +510,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     // The state read the last refresh performed: the ONE accepted state. A Resume settles against this very
     // read — the same one its repaint draws from — never a second GET of its own.
     let stateRead = Promise.resolve(null);
+    const heldHere = (taskId) => windowHeldIn(lastCensus, taskId);  // these rows are painted from this census
     const phaseSlot = (view) => `<span class="activity-phase" data-i18n-skip><span data-activity-phase="${
         phaseViews.push(view) - 1}"></span><span class="chat-live-phase-secondary" hidden></span></span>`;
     // A group of one list by its records' state (paused work, finished schedules): its label and count from the caller.
@@ -866,7 +867,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                     return !destroyed && mount.isConnected !== false && stillOffered(action,
                         current?.work_id && current.work_id === work.work_id ? workControls(current) : null);
                 };
-                openWorkControls(btn, work, { cancelPending, withResume: true, canAct, afterAction: afterTaskControl });
+                openWorkControls(btn, work, { cancelPending, withResume: true, canAct, afterAction: afterTaskControl, held: heldHere });
                 return;
             }
             if (tail) return; // A vanished tail never falls back to the generic live-task menu.
@@ -890,7 +891,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                         if (action === ACTION_RESUME) {
                             // The task stays pending until its own bounded read has settled (the request owner holds it);
                             // the full repaint runs beside it, never inside the confirmation.
-                            await resumeTaskAction(id, { settle: resumeSettled });
+                            await resumeTaskAction(id, { settle: resumeSettled, held: heldHere });
                             reread = true;
                             return;
                         }

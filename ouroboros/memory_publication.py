@@ -11,7 +11,7 @@ file untouched. ``publish_memory_file`` keeps the registry's whole-file rows;
 from __future__ import annotations
 
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -35,6 +35,7 @@ class Publication:
     delta: dict[str, Any] | None = None  # what the write changed, as its row records it
     detail: str = ""  # a refusal's own words
     not_text: int = 0  # the size of current bytes that are not UTF-8 text (nothing shows, edits or keeps them)
+    proposal_source: dict[str, Any] | None = None  # the refused input, never an active revision
 
 
 class Refused(ValueError):
@@ -58,40 +59,96 @@ def _publication_lock(path: Path) -> Iterator[None]:
 
 
 def publish_memory_file(path: Path, expected_revision: str | None, render: Callable[[str], str],
-                        *, journal: Path, author: dict[str, Any], source_type: str) -> Publication:
+                        *, journal: Path, author: dict[str, Any], source_type: str,
+                        nano_admission: Any = None) -> Publication:
     """A missing file accepts None/empty; an existing file requires its byte revision.
 
     A read error is never treated as an empty source. Conflicts publish neither
     source nor journal. Successful history retains both versions and origin; the
     row precedes the replacement and its append is checked (``history_unavailable``
     publishes nothing). A row whose replacement then fails names a version that
-    never landed, as a knowledge capture does.
+    never landed, as a knowledge capture does. ``nano_admission`` counts the new
+    bytes off both locks first (the registry a fresh root shows); a refusal publishes nothing.
     """
-    with _publication_lock(path):
-        raw = path.read_bytes() if path.exists() else None
-        revision = sha256(raw).hexdigest() if raw is not None else ""
-        old = raw.decode("utf-8") if raw is not None else ""
-        if raw is not None and expected_revision is None:
-            return Publication(False, "revision_required", revision, old, old)
-        if (expected_revision or "") != revision:
-            return Publication(False, "revision_conflict", revision, old, old)
-        content = render(old)
-        new_raw = content.encode("utf-8")
-        new_revision = sha256(new_raw).hexdigest()
-        if not append_jsonl(journal, {
-            "ts": utc_now_iso(), "task_id": author["task_id"], "source_type": source_type,
-            "focus": author["focus"], "route": author["route"],
-            "old_len": len(old), "new_len": len(content),
-            "old_sha256": revision, "new_sha256": new_revision,
-            "old_content": old, "new_content": content,
-            "old_preview": old[:500], "new_preview": content[:500],
-        }, ensure_record_boundary=True, require_lock=True):
-            return Publication(False, "history_unavailable", revision, old, old)
-        write_bytes_atomic(path, new_raw)
-        return Publication(True, "saved", new_revision, old, content)
+    from ouroboros.nano_publication import MemoryChange, NanoPublicationRefused, source_bytes
+
+    try:
+        with ExitStack() as lock:
+            checked = nano_admission is not None and not lock.enter_context(nano_admission.ordinary())
+            lock.enter_context(_publication_lock(path))
+            raw = path.read_bytes() if path.exists() else None
+            revision = sha256(raw).hexdigest() if raw is not None else ""
+            old = raw.decode("utf-8") if raw is not None else ""
+            if raw is not None and expected_revision is None:
+                return Publication(False, "revision_required", revision, old, old)
+            if (expected_revision or "") != revision:
+                return Publication(False, "revision_conflict", revision, old, old)
+            content = render(old)
+            new_raw = content.encode("utf-8")
+            if checked and new_raw != raw:
+                lock.pop_all().close()  # no source or publication lock during a serving count
+                lock.enter_context(nano_admission.publication(MemoryChange(path, raw, new_raw)))
+                lock.enter_context(_publication_lock(path))
+                if source_bytes(path) != raw:
+                    raise NanoPublicationRefused("stale", f"{path.name} changed before replacement")
+            return _land_memory_file(path, journal, raw, revision, old, content, new_raw, author, source_type)
+    except NanoPublicationRefused as exc:
+        return Publication(False, f"nano_{exc.reason}", "", "", "", detail=exc.tool_detail(),
+                           proposal_source=getattr(exc, "source_ref", None))
+
+
+def _land_memory_file(path, journal, raw, revision, old, content, new_raw, author, source_type) -> Publication:
+    """The row, then the replacement, under the caller's source lock."""
+    new_revision = sha256(new_raw).hexdigest()
+    if not append_jsonl(journal, {
+        "ts": utc_now_iso(), "task_id": author["task_id"], "source_type": source_type,
+        "focus": author["focus"], "route": author["route"],
+        "old_len": len(old), "new_len": len(content),
+        "old_sha256": revision, "new_sha256": new_revision,
+        "old_content": old, "new_content": content,
+        "old_preview": old[:500], "new_preview": content[:500],
+    }, ensure_record_boundary=True, require_lock=True):
+        return Publication(False, "history_unavailable", revision, old, old)
+    write_bytes_atomic(path, new_raw)
+    return Publication(True, "saved", new_revision, old, content)
+
+
+def publish_scratchpad_blocks(memory, mutator, *, before_write=None, nano_admission=None):
+    """Keep the block source, its fold journal and derived Markdown under the same publication order."""
+    from ouroboros.memory import ScratchpadProjectionStale
+    from ouroboros.nano_publication import MemoryChange, NanoPublicationRefused, publication_fence, source_bytes
+    from ouroboros.utils import atomic_write_json, machine_json
+
+    path = memory.scratchpad_blocks_path()
+    with ExitStack() as lock:
+        checked = nano_admission is not None and not lock.enter_context(nano_admission.ordinary())
+        if nano_admission is None:
+            lock.enter_context(publication_fence(memory.drive_root))
+        lock.enter_context(_publication_lock(path))
+        raw = source_bytes(path) if checked else None
+        updated = mutator(memory._read_scratchpad_blocks_unlocked(path))
+        if not isinstance(updated, list):
+            raise ValueError("scratchpad block mutator must return a list")
+        if checked:
+            change = MemoryChange(path, raw, machine_json(updated).encode("utf-8"))
+            lock.pop_all().close()
+            lock.enter_context(nano_admission.publication(change))
+            lock.enter_context(_publication_lock(path))
+            if source_bytes(path) != raw:
+                raise NanoPublicationRefused("stale", "the scratchpad changed before replacement")
+        if before_write is not None:
+            before_write()
+        atomic_write_json(path, updated)
+        try:
+            memory._write_scratchpad_markdown(updated)
+        except Exception as error:
+            raise ScratchpadProjectionStale(updated, error) from error  # the block source is already saved
+        return updated
 
 
 def publication_refusal(result: Publication, path: str) -> str:
+    if result.reason.startswith("nano_"):
+        return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {result.reason}; {path} was not changed.\n{result.detail}"
     if result.reason == "history_unavailable":
         return (f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: history_unavailable; current_revision={result.revision!r}. "
                 f"Its history journal could not record this version, so {path} was not changed; "
@@ -139,7 +196,23 @@ def text_delta(old: str | None, new: str, change: list) -> dict[str, Any]:
 
 
 def publish_text(source: Any, expected_revision: str | None, prepare: Callable[[str], str], *, author: dict[str, Any],
-                 source_type: str, mode: str, reason: str = "", reverted_from: str | None = None) -> Publication:
+                 source_type: str, mode: str, reason: str = "", reverted_from: str | None = None,
+                 nano_admission: Any = None) -> Publication:
+    """Keep the existing text publisher; a qualified Nano profile counts a prospective identity or map."""
+    from ouroboros.nano_publication import NanoPublicationRefused
+
+    try:
+        return _publish_text(source, expected_revision, prepare, author=author, source_type=source_type,
+                             mode=mode, reason=reason, reverted_from=reverted_from,
+                             admission=nano_admission if source.name in ("identity", "world") else None)
+    except NanoPublicationRefused as exc:
+        # The refused source has its own retained address; do not promote it into
+        # the version journal or present stale bytes as the current active edit.
+        return Publication(False, f"nano_{exc.reason}", "", "", "", detail=exc.tool_detail(),
+                           proposal_source=getattr(exc, "source_ref", None))
+
+
+def _publish_text(source, expected_revision, prepare, *, author, source_type, mode, reason, reverted_from, admission):
     """One write of a plain memory text (``memory_texts.TextSource``) in one critical section.
 
     Under the per-file lock the host's startup refresh of the map also takes: read the current bytes;
@@ -159,10 +232,15 @@ def publish_text(source: Any, expected_revision: str | None, prepare: Callable[[
     kept, since a row holds text.
     """
     from ouroboros import knowledge_rows, knowledge_versions, text_change
+    from ouroboros.nano_publication import MemoryChange, NanoPublicationRefused, publication_fence, source_bytes
 
     path, journal = Path(source.path), Path(source.journal)
-    with _publication_lock(path):
-        raw = path.read_bytes() if path.exists() else None
+    with ExitStack() as lock:
+        checked = admission is not None and not lock.enter_context(admission.ordinary())
+        if source.name in ("identity", "world") and admission is None:
+            lock.enter_context(publication_fence(path.parent.parent))
+        lock.enter_context(_publication_lock(path))
+        raw = source_bytes(path)
         revision = sha256(raw).hexdigest() if raw is not None else ""
         try:
             old, not_text = (raw.decode("utf-8") if raw is not None else ""), 0
@@ -187,6 +265,12 @@ def publish_text(source: Any, expected_revision: str | None, prepare: Callable[[
         new_raw = content.encode("utf-8")
         if raw is not None and new_raw == raw:
             return Publication(True, "unchanged", revision, old, old)
+        if checked:
+            lock.pop_all().close()  # no source or publication lock during a serving count
+            lock.enter_context(admission.publication(MemoryChange(path, raw, new_raw)))
+            lock.enter_context(_publication_lock(path))
+            if source_bytes(path) != raw:  # e.g. the host's startup refresh of the map's measured block
+                raise NanoPublicationRefused("stale", f"the {source.noun} changed before replacement")
         rows = list(knowledge_versions.tail_rows(journal, source, _TAIL_BYTES)) if existed else []
         writer = next((row for _offset, row in rows if row.get("new_sha256") == revision), None)
         if not_text:  # nothing of the replaced bytes is text: their facts, and the new text whole

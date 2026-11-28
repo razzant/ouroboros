@@ -458,11 +458,17 @@ def mode_cause(plan: Any, rendered_mode: str) -> str:
     return cause if rendered_mode == started and cause else "after_start"
 
 
-def _physical_context_for_fit(disposition: MainFitDisposition, plan: Any = None) -> PhysicalAttemptContext:
-    """Carry the measured candidate's facts to the physical attempt; dispatch still binds the actual scope."""
+def _physical_context_for_fit(disposition: MainFitDisposition, plan: Any = None, *, nano_episode="",
+                              nano_return: bool = False) -> PhysicalAttemptContext:
+    """Carry the measured candidate's facts to the physical attempt; dispatch still binds the actual scope.
+
+    ``nano_episode`` names the entry round whose request the Nano floor is observed on; ``nano_return`` a later round
+    of a returned root nothing was sent for (``cold_return.unsent_return``), which asks for no observation."""
     from ouroboros.usage_accounting import PhysicalAttemptContext
 
     measurement = disposition.measurement
+    nano_local = (getattr(plan, "preferred_mode", "") == "nano" and getattr(plan, "provider", "") == "local"
+                  and measurement.rendered_mode == "nano")
     projection_for = getattr(plan, "projection", None)
     projection = projection_for(measurement.rendered_mode) if callable(projection_for) else None
     return PhysicalAttemptContext(
@@ -488,6 +494,8 @@ def _physical_context_for_fit(disposition: MainFitDisposition, plan: Any = None)
         base_prompt_source=getattr(getattr(plan, "core", None), "base_prompt_source", None),
         bible_source=getattr(getattr(plan, "core", None), "bible_source", None),
         assembly_witnesses=getattr(projection, "assembly_witnesses", ()),
+        nano_floor_plan=(plan, nano_episode) if nano_episode and nano_local else None,
+        nano_floor_return=bool(nano_return and nano_local),
         first_contact_plan=((plan.first_contact, plan.first_contact_normal is not None)
                             if getattr(plan, "first_contact", "") else None),
     )

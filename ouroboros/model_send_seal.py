@@ -279,6 +279,13 @@ def persist_physical_candidate(
         **persisted["manifest_ref"], "model_send_seal_version": SEAL_VERSION,
         "chronicle_lead_rule": lead_rule,
     }
+    if floor := facts.get("nano_minimum"):
+        from ouroboros.nano_publication import NanoPublicationRefused, record_root_sample
+
+        try:
+            record_root_sample(drive_root, floor)
+        except (OSError, ValueError, NanoPublicationRefused):
+            log.warning("Could not publish the Nano measurement summary", exc_info=True)
     return persisted
 
 

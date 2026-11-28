@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, read_text, short, utc_now_iso, write_text
 from ouroboros.platform_layer import (
-    file_lock_exclusive as _lock_ex,
     file_lock_shared as _lock_sh,
     file_unlock as _unlock,
 )
@@ -267,21 +266,37 @@ class Memory:
         write_text(path, default)
         return default
 
-    def load_scratchpad_blocks(self) -> List[Dict[str, Any]]:
+    def read_scratchpad_blocks(self, *, create_lock=True, on_unavailable=None) -> Tuple[List[Dict[str, Any]], bool]:
         # Lock the STABLE sidecar (not the data fd): writers atomically replace
         # the data file via rename, so an fd-lock on the data inode would
         # synchronize against an orphaned inode after a swap.
         bp = self.scratchpad_blocks_path()
         if not bp.exists():
-            return []
+            return [], True
         fd = None
         try:
-            fd = os.open(str(bp) + ".lock", os.O_RDONLY | os.O_CREAT, 0o644)
-            _lock_sh(fd)
-            return self._read_scratchpad_blocks_unlocked(bp)
-        except Exception:
+            try:
+                fd = os.open(str(bp) + ".lock", os.O_RDONLY | (os.O_CREAT if create_lock else 0), 0o644)
+            except FileNotFoundError:
+                if create_lock:
+                    raise
+                # The publication preview never creates an inode. Read the
+                # atomically replaced source once; its commit rechecks revision.
+            if fd is not None:
+                _lock_sh(fd)
+            try:
+                data = bp.read_text(encoding="utf-8") if bp.exists() else ""
+                parsed = json.loads(data) if data.strip() else []
+            except ValueError:  # UnicodeError and JSONDecodeError both carry this classification
+                log.debug("Invalid scratchpad blocks", exc_info=True)
+                return [], False
+            ok = isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed)
+            return (parsed if ok else []), ok
+        except Exception as exc:
+            if on_unavailable is not None:
+                on_unavailable(exc)
             log.debug("Failed to load scratchpad blocks", exc_info=True)
-            return []
+            return [], False
         finally:
             if fd is not None:
                 try:
@@ -289,6 +304,12 @@ class Memory:
                     os.close(fd)
                 except OSError:
                     pass
+
+    def load_scratchpad_blocks(self) -> List[Dict[str, Any]]:
+        return self.read_scratchpad_blocks()[0]
+
+    def scratchpad_journal_visible(self) -> bool:
+        return self.journal_path().exists()
 
     def _refuse_retired_flat_scratchpad(self) -> None:
         """A flat pre-block ``scratchpad.md`` without ``scratchpad_blocks.json`` is never written over."""
@@ -307,7 +328,8 @@ class Memory:
             "Move preserved notes manually before appending new scratchpad blocks."
         )
 
-    def append_scratchpad_block(self, content: str, source: str = "task", metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def append_scratchpad_block(self, content: str, source: str = "task", metadata: Optional[Dict[str, Any]] = None,
+                                *, nano_admission: Any = None) -> Dict[str, Any]:
         """Append one block. Nothing leaves the active list here: no count, size or age rotation
         (#918); a block leaves only through ``fold_scratchpad_blocks``."""
         self.scratchpad_blocks_path().parent.mkdir(parents=True, exist_ok=True)
@@ -317,7 +339,7 @@ class Memory:
             new_block["metadata"] = dict(metadata)
         stale: Optional[ScratchpadProjectionStale] = None
         try:
-            self.mutate_scratchpad_blocks(lambda blocks: [*blocks, new_block])
+            self.mutate_scratchpad_blocks(lambda blocks: [*blocks, new_block], nano_admission=nano_admission)
         except ScratchpadProjectionStale as error:
             stale = error  # the block is in the canonical list; only its projection is behind
         except Exception:
@@ -346,7 +368,8 @@ class Memory:
         return new_block
 
     def fold_scratchpad_blocks(self, content: str, replaces: List[str], *,
-                               metadata: Optional[Dict[str, Any]] = None, draft_source: str = "") -> Dict[str, Any]:
+                               metadata: Optional[Dict[str, Any]] = None, draft_source: str = "",
+                               nano_admission: Any = None) -> Dict[str, Any]:
         """Put one accepted text in place of exactly the named active blocks (#918).
 
         ``replaces`` holds each block's ``scratchpad_block_sha256`` as its reader saw it; a
@@ -390,19 +413,24 @@ class Memory:
             state.update(entry_id=entry_id, sources=sources, sha256=[digests[index] for index in chosen],
                          blocks_before=len(blocks), blocks_after=len(updated),
                          content_len=sum(len(str(block.get("content", ""))) for block in updated))
+            return updated
+
+        def _preserve():
             if not append_jsonl(self.journal_path(), {
-                    "ts": utc_now_iso(), "type": "fold_sources_preserved", "entry_id": entry_id,
-                    "source_blocks": sources, "source_sha256": state["sha256"], "fold_block": fold,
+                    "ts": utc_now_iso(), "type": "fold_sources_preserved", "entry_id": state["entry_id"],
+                    "source_blocks": state["sources"], "source_sha256": state["sha256"], "fold_block": fold,
                     "source_ref": fold["metadata"]["source_ref"]}, ensure_record_boundary=True):
                 raise ScratchpadFoldFailed("journal_unavailable", "the exact source blocks could not be journaled")
             state["preserved"] = True
-            return updated
 
+        from ouroboros.nano_publication import NanoPublicationRefused
         stale: Optional[ScratchpadProjectionStale] = None
         try:
-            self.mutate_scratchpad_blocks(_fold)
+            self.mutate_scratchpad_blocks(_fold, before_write=_preserve, nano_admission=nano_admission)
         except ScratchpadProjectionStale as error:
             stale = error  # the canonical fold stands; only its projection is behind
+        except NanoPublicationRefused:
+            raise  # the attempted source is retained by the publication check
         except ScratchpadFoldFailed as refused:
             selection = refused.kind in ("not_active", "ambiguous")
             append_jsonl(self.journal_path(), {
@@ -431,33 +459,12 @@ class Memory:
             raise stale
         return result
 
-    def mutate_scratchpad_blocks(self, mutator: Any) -> List[Dict[str, Any]]:
-        """Mutate block source and regenerate its markdown under one sidecar lock. The canonical
-        ``scratchpad_blocks.json`` is replaced atomically (a raise leaves the old file); a failed
-        ``scratchpad.md`` regeneration after it raises ``ScratchpadProjectionStale``: the change stands."""
-        bp = self.scratchpad_blocks_path()
-        bp.parent.mkdir(parents=True, exist_ok=True)
-        fd = None
-        try:
-            fd = os.open(str(bp) + ".lock", os.O_RDWR | os.O_CREAT, 0o644)
-            _lock_ex(fd)
-            blocks = self._read_scratchpad_blocks_unlocked(bp)
-            updated = mutator(blocks)
-            if not isinstance(updated, list):
-                raise ValueError("scratchpad block mutator must return a list")
-            atomic_write_json(bp, updated)
-            try:
-                self._write_scratchpad_markdown(updated)
-            except Exception as error:
-                raise ScratchpadProjectionStale(updated, error) from error
-            return updated
-        finally:
-            if fd is not None:
-                try:
-                    _unlock(fd)
-                    os.close(fd)
-                except OSError:
-                    pass
+    def mutate_scratchpad_blocks(self, mutator: Any, *, before_write: Any = None,
+                                 nano_admission: Any = None) -> List[Dict[str, Any]]:
+        """Replace block sources atomically, then regenerate their derived Markdown."""
+        from ouroboros.memory_publication import publish_scratchpad_blocks
+
+        return publish_scratchpad_blocks(self, mutator, before_write=before_write, nano_admission=nano_admission)
 
     @staticmethod
     def _read_scratchpad_blocks_unlocked(bp: pathlib.Path) -> List[Dict[str, Any]]:

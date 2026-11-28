@@ -377,7 +377,15 @@ test('Your rules: its own Save, the server\'s refusal on the page with the text 
     assert.equal(result.dataset.tone, 'danger');
     assert.equal(field.value, 'Ask before paying.\nNever email my clients.', 'the refused text stays in the field');
     assert.equal(page.server.values.OUROBOROS_SAFETY_OWNER_RULES, 'Ask before paying.');
-    // A refused text survives leaving the page, and says it is not saved.
+    const draft = field.value;
+    page.server.refuse.set('/api/owner/safety-rules', [{ error: 'The local counter is busy. Try again when it is free.',
+        saved: false, code: 'nano_publication_busy', proposed_rules: draft, nano_reason: 'Fixture counter busy.' }, 409]);
+    await save.fire('click', { target: save });
+    await settle();
+    assert.equal(result.textContent, 'Not saved. The local counter is busy. Try again when it is free.');
+    assert.equal(field.value, draft);
+    assert.equal(page.server.values.OUROBOROS_SAFETY_OWNER_RULES, 'Ask before paying.');
+    // A refused text survives switching pages in this window, and says it is not saved.
     page.handle.unmount();
     const again = new NodeStub();
     const handle = await settingsPageFor('rules').mount(again, { path: 'rules', row: '', ctx: { readSettings } });
