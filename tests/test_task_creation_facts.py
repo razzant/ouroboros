@@ -1,6 +1,8 @@
 """Only host allocation establishes a task birth fact for archive read floors."""
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from ouroboros.task_results import load_task_result, write_task_result
@@ -22,7 +24,7 @@ def assert_lifecycle_keeps_creation(data, task_id):
 
 
 @pytest.mark.parametrize("supplied_id", [False, True])
-def test_api_only_stamps_its_own_new_uuid_before_preparation(admission, monkeypatch, supplied_id):
+def test_api_only_stamps_its_own_new_task_id_before_preparation(admission, monkeypatch, supplied_id):
     from ouroboros.gateway import tasks
 
     client, data, captured, _broadcasts = admission
@@ -35,15 +37,17 @@ def test_api_only_stamps_its_own_new_uuid_before_preparation(admission, monkeypa
     monkeypatch.setattr(tasks, "prepare_task_drive", prepare_after_allocation)
     body = {"description": "Inspect a local task"}
     if supplied_id:
-        body["task_id"] = "supplied-task"
+        body["task_id"] = "a1b2c3d4"
     response = client.post("/api/tasks", json=body)
     assert response.status_code == 200, response.text
     task_id = response.json()["task_id"]
     initial = load_task_result(data, task_id)
     assert initial["status"] == "scheduled"
     if supplied_id:
+        assert task_id == body["task_id"] == captured[0]["id"]
         assert "created_at" not in initial and "created_at" not in captured[0]
     else:
+        assert re.fullmatch(r"[0-9a-f]{16}", task_id)
         assert initial["created_at"] == captured[0]["created_at"] == CREATED
         assert_lifecycle_keeps_creation(data, task_id)
 
@@ -71,6 +75,7 @@ def test_tool_subagent_birth_precedes_drive_preparation(tmp_path, monkeypatch):
     )
     assert ctx.pending_events, result
     task_id = ctx.pending_events[0]["task_id"]
+    assert re.fullmatch(r"[0-9a-f]{16}", task_id)
     initial = load_task_result(data, task_id)
     assert initial["status"] == "requested" and initial["created_at"] == CREATED
     assert_lifecycle_keeps_creation(data, task_id)

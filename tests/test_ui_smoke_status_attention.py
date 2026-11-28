@@ -566,9 +566,12 @@ def test_history_replay_keeps_finalizing_and_finishes_bare_final(
             try:
                 page.route(
                     "**/api/chat/history*",
+                    # The page reads only history that names its document's data profile (api_client.js
+                    # `chatHistory`): the serving host's own answer to this read says which.
                     lambda route: route.fulfill(
                         content_type="application/json",
-                        body=json.dumps({"messages": messages}),
+                        body=json.dumps({"messages": messages,
+                                         "profile_scope": route.fetch().json().get("profile_scope", "")}),
                     ),
                 )
                 page.goto(

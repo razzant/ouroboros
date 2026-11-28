@@ -200,7 +200,8 @@ def test_overflowing_shade_fades_contents_without_revealing_backdrop(room_ui, sh
                  "started_at": "2026-11-22T12:30:00Z"} for n in range(6)]}))
         page.locator("#page-chat .cx-chip").click()
         sheet = page.locator("#page-chat .cx-shade")
-        assert sheet.locator(".cx-wakes li").count() == 6
+        # The wakes are drawn when the consciousness read lands: wait for them, never count at the click.
+        page.wait_for_function("el => el.querySelectorAll('.cx-wakes li').length === 6", arg=sheet.element_handle())
     port = sheet.locator("xpath=descendant-or-self::*[contains(concat(' ', normalize-space(@class), ' '), ' scroll-fade-y ')]")
     page.wait_for_function("el => el.hasAttribute('data-scroll-below')", arg=port.element_handle())
     assert port.evaluate("el => el.scrollHeight > el.clientHeight && getComputedStyle(el).maskImage.includes('linear-gradient')")

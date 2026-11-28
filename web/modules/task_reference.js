@@ -19,11 +19,16 @@ export function taskReferenceHtml(taskId, chatId = MAIN_CHAT_ID) {
     return `<button type="button" class="consciousness-inline-link ui-hit-area" data-open-task="${escapeHtml(taskId)}">${escapeHtml(tr('consciousness.open_main', 'Open in Main'))} ↗</button>`;
 }
 
+/** Open an identified task's card in its room (Main by default): what a door does, for a row that is the door itself. */
+export function openTask(taskId, chatId = MAIN_CHAT_ID) {
+    const room = Number(chatId);
+    if (taskId && Number.isSafeInteger(room) && room >= MAIN_CHAT_ID) window.dispatchEvent(new CustomEvent('ouro:open-task', { detail: { task_id: String(taskId), chat_id: room } }));
+}
+
 /** A click handler for a region holding doors: a press on one opens its task. True when it was a door's. */
 export function openTaskReference(event) {
     const door = event?.target?.closest?.('[data-open-task]');
     if (!door) return false;
-    const chatId = Number(door.dataset.taskChat ?? MAIN_CHAT_ID);
-    if (Number.isSafeInteger(chatId) && chatId >= MAIN_CHAT_ID) window.dispatchEvent(new CustomEvent('ouro:open-task', { detail: { task_id: door.dataset.openTask, chat_id: chatId } }));
+    openTask(door.dataset.openTask, door.dataset.taskChat ?? MAIN_CHAT_ID);
     return true;
 }

@@ -6,6 +6,10 @@ import pytest
 from ouroboros import place_guard as _place_guard
 from ouroboros import tool_effects as _tool_effects
 from tests._safety_fixtures import supervisor as supervisor_fixture
+from tests._telegram_private_reply import (
+    confirmed_private_place as confirmed_private_place,
+    unreadable_private_bridge,
+)
 from tests.test_tool_effects import published_tool as _published_tool
 supervisor, published_tool = supervisor_fixture, _published_tool
 REAL_CALL_PLACE_FACTS = _place_guard.call_place_facts  # bound before the fixture stubs it
@@ -183,3 +187,109 @@ def test_a_circle_call_is_judged_with_the_circle_it_changes(supervisor, monkeypa
     data = bundle(h, "configure_presence", {"action": "set_circle", "place_id": other.place_id,
                                            "circle_id": circle["circle_id"]})
     assert data["subject"]["place"]["place_id"] == other.place_id and data["subject"]["place"]["circle"]["name"] == "Friends"
+
+
+@pytest.mark.parametrize("case", [
+    "matching", "omitted-account", "undeclared", "string-opt-in", "contextless", "topic", "media",
+    "other-hash", "bridge-owner", "bridge-unknown", "unconfirmed", "other-account", "selection-lost", "note-changed",
+])
+def test_private_reply_safety_evidence_requires_same_selected_place(
+        supervisor, monkeypatch, confirmed_private_place, case):
+    from types import SimpleNamespace
+
+    from ouroboros import extension_registry_state as registry, places, telegram_owner_bot
+    from ouroboros.extension_surface_names import extension_surface_name
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_context import focus_metadata
+    from ouroboros.presence_events import PresenceTurnEvent
+
+    fixture = confirmed_private_place
+    root, target = fixture.root, fixture.target
+    # Stub only this unit's provenance read; there is no installed package or grant.
+    monkeypatch.setattr(telegram_owner_bot, "official_connector",
+                        lambda read_root, *, content_hash=None: read_root == root and content_hash == fixture.digest)
+    selected = places.edit_place(root, fixture.place.place_id, "add_note",
+                                 author="owner", text="The selected Place's note.")
+    competing = places.connect_place(root, connector=fixture.connector, provider=target["provider"],
+                                    account_id="4503599627370503", conversation_id=target["conversation_id"],
+                                    scope="conversation", state="paused", first={"note": "The other account's note."})
+    if case == "unconfirmed":
+        selected = places.edit_place(root, selected.place_id, "revoke_owner_account", author="owner",
+                                     platform_actor_id=target["conversation_id"], account_id=target["account_id"])
+    key = conversation_key(**target)
+    event = PresenceTurnEvent(
+        "fixture-event", target["provider"], target["account_id"], target["conversation_id"], target["thread_id"], key,
+        {"platform_actor_id": target["conversation_id"], "is_bot": False, "authenticated": True},
+        {"chat_type": "private", "bot_account_id": target["account_id"], "chat_id": target["conversation_id"]},
+        {"message_id": "fixture-message"}, "A test reply, please.", facts=(places.FACT_DIRECT_MESSAGE,),
+    )
+    admission = SimpleNamespace(place=selected, binding_id=selected.place_id, allowance={}, circle=None)
+    h = supervisor
+    h.ctx.current_task_type = "presence"
+    h.ctx.drive_root, h.ctx.budget_drive_root = root / "execution", str(root)
+    h.ctx.task_metadata = focus_metadata(admission, event, h.ctx.task_id, 7, root)
+    h.ctx.task_metadata.update(source="presence", presence={
+        "transport_skill": fixture.connector, "place_id": selected.place_id, "place": places.place_summary(selected),
+        "event": {**target, "conversation_key": key, "actor": event.actor, "conversation": event.conversation,
+                  "message": event.message, "facts": list(event.facts)},
+    })
+    name = extension_surface_name(fixture.connector, "telegram_send")
+    row = {"name": "telegram_send", "effect": "message", "target": ["account_id", "chat_id"],
+           "conversation": "chat_id", "thread": "topic_id"}
+    if case != "undeclared":
+        row["owner_dm"] = "true" if case == "string-opt-in" else True
+    manifest = SimpleNamespace(raw_extra={"tools": [row]}, plugin_api={"version": "2.0"})
+    publication = registry._ExtensionRegistrations(
+        generation_digest="fixture-generation", loaded_skill=SimpleNamespace(manifest=manifest))
+    publication.contributions = [{"provides": "place", "id": "place"}]
+    monkeypatch.setitem(registry._extensions, fixture.connector, publication)
+    monkeypatch.setitem(registry._tools, name, {
+        "skill": fixture.connector, "extension_generation": "fixture-generation",
+        "content_hash": "sha256:" + "e" * 64 if case == "other-hash" else fixture.digest,
+        "wants_ctx": case != "contextless",
+    })
+    descriptor = registry.get_tool_stamped(name)
+    assert descriptor is not None
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    if case == "bridge-owner":
+        monkeypatch.setattr(telegram_owner_bot, "owner_bridge_bot_id", lambda *_a, **_k: target["account_id"])
+    elif case == "bridge-unknown":
+        monkeypatch.setattr(telegram_owner_bot, "owner_bridge_bot_id", unreadable_private_bridge)
+    args = {"kind": "message", "chat_id": target["conversation_id"], "text": "A test reply."}
+    if case != "omitted-account":
+        args["account_id"] = competing.account_id if case == "other-account" else target["account_id"]
+    if case == "topic":
+        args["topic_id"] = "1"
+    elif case == "media":
+        args["kind"] = "photo"
+    with _place_guard.owner_dm_call(h.ctx):
+        _place_guard.bind_owner_dm_call(h.ctx, name, descriptor, args, root)
+        if case in ("selection-lost", "note-changed"):
+            assert _place_guard.owner_dm_condition(h.ctx) is not None
+            if case == "selection-lost":
+                places.edit_place(root, selected.place_id, "disconnect", author="owner")
+            else:
+                places.edit_place(root, selected.place_id, "add_note", author="owner",
+                                  text="The note saved after capture.")
+        prompt = h.module._build_check_prompt(name, args, ctx=h.ctx, ext_tool=descriptor)
+    _, wire = prompt.split("Host evidence (provenance is not consent):\n", 1)
+    bundled, call = wire.split("\nProposed tool call:", 1)
+    data = json.loads(bundled)
+    facts = data["subject"]["place"]
+    notes = data["standing_delegation"]["place_notes"]
+    if case in ("matching", "omitted-account"):
+        assert facts["owner_dm"] == {
+            "audience": "owner_only", "condition": "same_confirmed_recipient_at_delivery", **target,
+        }
+        assert [(p["place_id"], p["conversation_key"]) for p in facts["places"]] == [(selected.place_id, key)]
+        assert [(n["place_id"], n["text"]) for n in notes] == [(selected.place_id, "The selected Place's note.")]
+    else:
+        assert "owner_dm" not in facts
+        if case == "selection-lost":
+            assert all(n["place_id"] != selected.place_id for n in notes)
+        elif case == "note-changed":
+            assert any(n["place_id"] == selected.place_id and n["text"] == "The note saved after capture." for n in notes)
+    if case == "omitted-account":
+        assert "account_id" not in args and "account_id" not in json.loads(call.split("\nArguments:\n", 1)[1].split("\nIs this safe?", 1)[0])
+    assert _place_guard.owner_dm_condition(h.ctx) is None

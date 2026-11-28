@@ -19,14 +19,12 @@ import os
 from pathlib import Path
 
 import pytest
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.testclient import TestClient
 
-from ouroboros.gateway.history import make_chat_history_endpoint
+from tests._room_browser_shared import history_client
 from tests.test_delegated_activity import Daemon, _gateway, _harness, _run_event
 from tests.test_delegated_activity_browser import ROOT, SNAPSHOT, Producer, _evidence
 from tests.test_delegated_activity_browser import engine_ui as engine_ui
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, PROFILE_FRAME
 from tests.test_delegated_activity_speech import (
     K1,
     K2,
@@ -109,7 +107,7 @@ def test_one_keyed_utterance_live_reconnect_reload_with_updated_abandoned_and_an
     page.emulate_media(color_scheme="light")         # the client's System theme falls back to dark
     data = tmp_path / "data"
     producer = Producer(data, monkeypatch)
-    history = TestClient(Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))]))
+    history = history_client(data, PREVIEW_SCOPE)
     ui["backend"]["task_gateway"] = _client(data)
     served, sockets, frames = [], [], []
 
@@ -121,6 +119,7 @@ def test_one_keyed_utterance_live_reconnect_reload_with_updated_abandoned_and_an
 
     def socket_route(ws):
         sockets.append(ws)
+        ws.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({"type": "heartbeat"}))
 
     page.route("**/api/state", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
@@ -255,7 +254,7 @@ def test_the_engines_four_journals_in_one_served_card_cut_into_polls(engine_ui, 
     page.emulate_media(color_scheme="light")
     data = tmp_path / "data"
     producer = Producer(data, monkeypatch)
-    history = TestClient(Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))]))
+    history = history_client(data, PREVIEW_SCOPE)
     ui["backend"]["task_gateway"] = _client(data)
     served, sockets, frames = [], [], []
 
@@ -267,6 +266,7 @@ def test_the_engines_four_journals_in_one_served_card_cut_into_polls(engine_ui, 
 
     def socket_route(ws):
         sockets.append(ws)
+        ws.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({"type": "heartbeat"}))
 
     page.route("**/api/state", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
@@ -363,12 +363,13 @@ def test_words_lost_between_one_keys_fragments_stay_apart_in_the_served_card(eng
     page.emulate_media(color_scheme="light")
     data = tmp_path / "data"
     producer = Producer(data, monkeypatch)
-    history = TestClient(Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))]))
+    history = history_client(data, PREVIEW_SCOPE)
     ui["backend"]["task_gateway"] = _client(data)
     sockets, frames = [], []
 
     def socket_route(ws):
         sockets.append(ws)
+        ws.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({"type": "heartbeat"}))
 
     page.route("**/api/state", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
@@ -423,12 +424,13 @@ def test_a_poll_holding_only_the_space_between_words_keeps_it_in_the_served_card
     page.emulate_media(color_scheme="light")
     data = tmp_path / "data"
     producer = Producer(data, monkeypatch)
-    history = TestClient(Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))]))
+    history = history_client(data, PREVIEW_SCOPE)
     ui["backend"]["task_gateway"] = _client(data)
     sockets, frames = [], []
 
     def socket_route(ws):
         sockets.append(ws)
+        ws.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({"type": "heartbeat"}))
 
     page.route("**/api/state", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
@@ -481,12 +483,13 @@ def test_a_keyed_piece_a_preview_left_out_is_never_joined_across_in_the_served_c
     page.emulate_media(color_scheme="light")
     data = tmp_path / "data"
     producer = Producer(data, monkeypatch)
-    history = TestClient(Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))]))
+    history = history_client(data, PREVIEW_SCOPE)
     ui["backend"]["task_gateway"] = _client(data)
     sockets, frames = [], []
 
     def socket_route(ws):
         sockets.append(ws)
+        ws.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         ws.send(json.dumps({"type": "heartbeat"}))
 
     page.route("**/api/state", lambda route: route.fulfill(content_type="application/json", body=json.dumps(

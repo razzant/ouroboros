@@ -127,6 +127,9 @@ test('the words of a fact follow its basis; a follower says nothing beside its m
     const words = (basis, extra) => leadView(lead(GLM, basis, extra)).why;
     assert.equal(words('main'), '');
     assert.equal(words('room'), 'this room\'s model');
+    // A room's model nobody chose there (a new room copies the Main chat's) is told apart from a choice made in it.
+    assert.equal(words('room', { copied: true }), 'copied from Main');
+    assert.equal(words('owner', { copied: true }), words('owner'), 'only a room\'s model is a copy');
     assert.equal(words('owner'), 'you chose it');
     assert.equal(words('owner_words'), 'you asked for it');
     assert.equal(words('owner_press'), 'you pressed this option');
@@ -1256,6 +1259,29 @@ test('the server-resolved fallback tier drives both the card and its open footer
         processing: { choice: 'standard', resolved: 'standard', source: 'owner' } });
     assert.equal(c.said('tier'), '');
     assert.match(c.tierView().scope, /^Standard ·/);
+    closeCardModel();
+});
+
+test('a tier confirmed for another model or account than the work is on reads Default, and the strip says why', async () => {
+    const c = card();
+    // The work carries the Main chat's Ultrafast, confirmed for Main's model and profile; its calls now go to a
+    // fallback, so the server withholds it there (`processing.withheld`) and resolves what those calls take. The
+    // same fact stands for an Auto or keyed route whose confirmation the chat no longer holds.
+    const fallback = { ...lead(GLM, 'fallback'), role: 'fallback:0', primary: lead(ASTRA, 'main') };
+    c.paint({ lead: fallback, tiers: { main: 'fast', default: 'standard' }, processing: { choice: '', withheld: 'ultrafast', resolved: 'fast' } });
+    assert.equal(c.said('tier'), '· Fast', 'the card names the tier these calls take, never the one withheld');
+    c.fact().click();
+    await flush();
+    assert.deepEqual([c.tierView().checked, c.tierView().ring], [[], ['fast']], 'no tier of its own stands here');
+    assert.equal(c.tierView().scope, 'Default · Fast · Ultrafast from the Main chat is not confirmed now for the model, profile and connection this work is on, so its calls take Default; a tier chosen here is this work’s own');
+    // Back on the confirmed model and account it is the work's tier again, for those calls alone (`bound`): its
+    // subagents and its calls elsewhere take Default, and the strip says that instead of the ordinary words.
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: 'fast', default: 'standard' }, processing: { choice: 'ultrafast', source: 'room', bound: true, resolved: 'ultrafast' } });
+    assert.equal(c.said('tier'), 'Ultrafast');
+    assert.equal(c.tierView().scope, 'Ultrafast · from the Main chat, for this work’s own calls where it was confirmed (that model, profile or connection); its subagents and calls elsewhere take Default, and a tier chosen here is this work’s own');
+    // The owner's own Ultrafast on the card is this work's everywhere, with the ordinary words.
+    c.paint({ lead: lead(ASTRA, 'main'), tiers: { main: 'fast', default: 'standard' }, processing: { choice: 'ultrafast', source: 'owner', resolved: 'ultrafast' } });
+    assert.match(c.tierView().scope, /^Ultrafast · for this work from its next call and its new subagents/);
     closeCardModel();
 });
 

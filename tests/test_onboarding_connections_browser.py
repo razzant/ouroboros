@@ -71,6 +71,16 @@ def _frame(page, evidence, name):
             .map(el => ({tag: el.tagName, id: el.id, right: el.getBoundingClientRect().right}))})""")
 
 
+def _open_compatible_card(page):
+    """With settings.json gone the wizard's own read finds no route (#4149: the process mirror of the deleted document no
+    longer poses as launch environment), so "API keys and local models" and its compatible card start closed: open them as an
+    owner would."""
+    page.locator("[data-collapse='api-access'] > summary").click()
+    toggle = page.locator('[data-provider-card="compatible"] [data-provider-toggle]')
+    if toggle.get_attribute("aria-expanded") != "true":
+        toggle.click()
+
+
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_server_with_data, tmp_path, engine):
     from playwright.sync_api import expect, sync_playwright
@@ -88,16 +98,21 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
         errors, failed = record_console_errors(page), record_failed_loads(page)
         # These are deliberate no-engine fixture reads; retain all raw diagnostics below.
         page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
+        _open_compatible_card(page)
         expect(page.locator('[data-connection-add="openai-compatible"]')).to_be_visible()
         # The card's shared renderer resolves assets beside its own builtin module,
         # independently of the main interface's selected /static tree.
         icon = page.locator('[data-provider-card="compatible"] .settings-provider-icon')
         expect(icon).to_have_attribute('src', ui["url"] + '/onboarding/static/providers/openai-compatible.svg')
         assert icon.evaluate('(img) => img.complete && img.naturalWidth > 0')
-        page.locator('#s-openai-compatible-base-url').fill('')
-        page.locator('#s-openai-compatible-key').fill('')
         default = page.locator('[data-connection-row][data-kind="openai-compatible"][data-builtin="1"]')
+        expect(default.locator('[data-connection-status]')).to_have_text('No key')  # a first install starts with no route
+        page.locator('#s-openai-compatible-base-url').fill(alpha_url)  # the owner types one: an unsaved draft
+        page.locator('#s-openai-compatible-key').fill('typed')
         expect(default.locator('[data-connection-status]')).to_have_text('Not saved')
+        page.locator('#s-openai-compatible-base-url').fill('')  # and takes it back: the baseline again
+        page.locator('#s-openai-compatible-key').fill('')
+        expect(default.locator('[data-connection-status]')).to_have_text('No key')
         report['cleared_default'] = {
             'base_url': default.locator('[data-connection-field="base_url"]').input_value(),
             'status': default.locator('[data-connection-status]').inner_text(),
@@ -269,14 +284,16 @@ def test_undo_named_server_edits_restores_the_current_wizard_draft(direct_server
         page = browser.new_page(viewport={"width": 1360, "height": 900})
         errors, failed = record_console_errors(page), record_failed_loads(page)
         page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
+        _open_compatible_card(page)
         default = page.locator('[data-connection-row][data-kind="openai-compatible"][data-builtin="1"]')
         base = default.locator('[data-connection-field="base_url"]')
         initial_url = base.input_value()
-        expect(default.locator('[data-connection-status]')).to_have_text('Ready')
-        page.locator('#s-openai-compatible-base-url').fill('')
+        assert initial_url == '', "first install: no route is configured until the owner adds one"
+        expect(default.locator('[data-connection-status]')).to_have_text('No key')
+        page.locator('#s-openai-compatible-base-url').fill(url)
         expect(default.locator('[data-connection-status]')).to_have_text('Not saved')
         base.fill(initial_url)
-        expect(default.locator('[data-connection-status]')).to_have_text('Ready')
+        expect(default.locator('[data-connection-status]')).to_have_text('No key')
         base.fill('')
         page.locator('#s-openai-compatible-key').fill('')
         page.locator('[data-connection-add="openai-compatible"]').click()

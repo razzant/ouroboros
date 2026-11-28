@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import copy
 import json
+from typing import Mapping
 
 from ouroboros.settings_defaults import SETTINGS_DEFAULTS
 from ouroboros.settings_integrity import runtime_setting
@@ -235,14 +236,17 @@ def route_binding(model: str, use_local: bool, role: str, *,
     return model, use_local, str(account or "").strip()
 
 
-def task_processing_preference(task: dict, *, model_role: str = "",
-                              override: str | None = None) -> str:
+def task_processing_preference(task: dict, *, model_role: str = "", override: str | None = None,
+                              route: object = None) -> str:
     """Capture the actor's intent; an unconfigured fallback keeps it (a lead uses the default, never Main's).
 
     A root's own tier (``metadata.processing``: its room's, or the owner's card act) answers for its own
     calls on any route, a fallback row's included, so its card's promise holds. A nanny's frozen cognition
     and a configured row keep theirs. Without one (none, or the decided Default) the default resolution
-    stands: an authored fallback tier, else the tier of the work's primary role."""
+    stands: an authored fallback tier, else the tier of the work's primary role. A tier confirmed for one
+    destination answers only for a send bound to it: ``route`` names that send's destination
+    (``route_choice.task_processing``, which also holds what a destination without a named profile still needs;
+    ``send_processing_preference`` passes it), and a reader that names none takes the default resolution."""
     if override is not None:
         return resolve_processing_preference(override=override)
     from ouroboros.route_choice import task_processing
@@ -258,7 +262,7 @@ def task_processing_preference(task: dict, *, model_role: str = "",
     if role.startswith("fallback:"):
         frozen_role = supervisor_role or (f"subagent:{actor_id}" if actor_id and (actor.get("route") or {}).get("kind") == "api_model" else "")
         # A root's explicit work choice outranks the fallback row; a configured child keeps its frozen binding.
-        explicit = ("" if frozen_role else task_processing(metadata)) or model_role_option(MODEL_PROCESSING_PREFERENCES_KEY, role)
+        explicit = ("" if frozen_role else task_processing(metadata, route)) or model_role_option(MODEL_PROCESSING_PREFERENCES_KEY, role)
         if explicit:
             return resolve_processing_preference(override=str(explicit))
         # The acting fallback is not the admitted role. A wake still follows Consciousness, for example.
@@ -273,7 +277,51 @@ def task_processing_preference(task: dict, *, model_role: str = "",
         from ouroboros.subagent_runtime import run_processing
 
         return resolve_processing_preference(override=run_processing(actor))
-    return task_processing(metadata) or resolve_processing_preference(role)
+    return task_processing(metadata, route) or resolve_processing_preference(role)
+
+
+def send_processing_preference(task_metadata: object, model: str, use_local: bool, role: str, *,
+                               overrides: dict | None = None) -> str:
+    """The tier one send of this work asks: its resolution (``task_processing_preference``) for the destination that
+    send is bound to (``route_binding``: model, locality and account, as the send itself resolves them). The round's
+    own call, its wrap-up and a letter's candidate all ask through here, so a tier confirmed for one destination is
+    asked of that one alone."""
+    return task_processing_preference(
+        {"task_metadata": task_metadata}, model_role=role,
+        route=lambda: route_binding(str(model or ""), bool(use_local), role, overrides=overrides))
+
+
+def send_processing_options(task_metadata: object, model: str, use_local: bool, role: str, *,
+                            overrides: dict | None = None) -> dict:
+    """Request options for one send. The API condition is checked on the exact target, not one resolved earlier."""
+    from ouroboros.route_choice import PROCESSING_KEY, processing_snapshot
+
+    tier = send_processing_preference(task_metadata, model, use_local, role, overrides=overrides)
+    options = {"processing_preference": tier}
+    if tier == "ultrafast" and isinstance(task_metadata, dict):
+        carrier = processing_snapshot(task_metadata.get(PROCESSING_KEY)) or {}
+        if carrier.get("connection"):
+            ordinary = task_processing_preference({"task_metadata": task_metadata}, model_role=role)
+            options["processing_connection"] = (carrier["connection"], ordinary)
+    return options
+
+
+def processing_on_target(target: Mapping, tier: str | None, connection: tuple[str, str] | None) -> str | None:
+    """A carried API tier must not follow the chip or move to a different resolved connection."""
+    if connection and tier == "ultrafast" and target.get("dispatch_account") != connection[0]:
+        return connection[1]
+    return tier
+
+
+def moved_send_processing_options(task_metadata: object, captured: object, model: str, use_local: bool, role: str, *,
+                                  overrides: dict | None = None) -> dict:
+    """Keep the captured tier unless the wait card moved a destination-bound send: then resolve for its new route."""
+    from ouroboros.route_choice import PROCESSING_KEY, processing_snapshot
+
+    carrier = processing_snapshot(task_metadata.get(PROCESSING_KEY)) if isinstance(task_metadata, dict) else None
+    if not carrier or "route" not in carrier:
+        return {"processing_preference": captured}
+    return send_processing_options(task_metadata, model, use_local, role, overrides=overrides)
 
 
 def _persisted_role(role: str) -> tuple[str, str]:

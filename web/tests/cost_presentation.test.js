@@ -9,7 +9,7 @@ import {
     taskCostProjection,
 } from '../modules/chat_activity.js';
 import { costPresentationDetail, costPresentationMeta, renderLiveCardMeta } from '../modules/chat_activity.js';
-import { TABLES, allowancePresentation, breakdownRowName, costBucketPresentation, costDashboardPresentation, initCosts,
+import { TABLES, allowancePresentation, breakdownRowName, costBucketPresentation, costDashboardPresentation, initCosts, totalBudgetHoldLine,
     roomTimeText } from '../modules/costs.js';
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { summarizeLogEvent } from '../modules/log_events.js';
@@ -843,9 +843,27 @@ test('a wake held at the allowance it started with is said apart from room retur
         [{ wake: 'wake-1', tone: 'muted', text: 'The consciousness wake-up is paused at the spending limit it started with; its card shows why.' }]);
     assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause: 'owner', ceiling_usd: null } }), { now }).lines,
         [{ wake: 'wake-1', tone: 'muted', text: 'The consciousness wake-up is on an explicit pause; its card shows who paused it and how to continue.' }]);
-    for (const cause of ['sleep', 'technical', 'total_budget', 'per_task_fence', '']) {
+    assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause: 'per_task_fence', ceiling_usd: null } }), { now }).lines,
+        [{ wake: 'wake-1', tone: 'muted', text: 'The consciousness wake-up is paused at a spending limit of its own work; its card shows which.' }]);
+    // The total budget's hold is said under the Total budget card (totalBudgetHoldLine), never among the allowance's.
+    for (const cause of ['sleep', 'technical', 'queued', 'total_budget', '']) {
         assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause, ceiling_usd: null } }), { now }).lines, [], cause);
     }
+});
+
+test('a wake held by the total budget is said under that card: raising it alone resumes nothing, its card has Resume', () => {
+    const line = { wake: 'wake-1', tone: 'warn', text: 'The consciousness wake-up stopped when the total budget was spent.',
+        note: 'Raising Total budget alone does not resume it; Resume or Stop now on its card.' };
+    // One neutral sentence, true whatever the budget holds now: the meter above it says what is left, and the block and
+    // Main's card (whose room comes from the same state body) say whether Resume can continue it.
+    assert.deepEqual(totalBudgetHoldLine(state({ ...HELD, live_wake_hold: { cause: 'total_budget', ceiling_usd: null } })), line);
+    // Only that proven cause, only while consciousness is on and the wake is held; an unread snapshot says nothing.
+    for (const bg of [HELD, { ...HELD, live_wake_hold: { cause: 'per_task_fence', ceiling_usd: null } },
+        { ...HELD, enabled: false, live_wake_hold: { cause: 'total_budget', ceiling_usd: null } },
+        { ...HELD, live_wake_held: false, live_wake_hold: { cause: 'total_budget', ceiling_usd: null } }]) {
+        assert.equal(totalBudgetHoldLine(state(bg)), null, JSON.stringify(bg.live_wake_hold));
+    }
+    assert.equal(totalBudgetHoldLine(null), null);
 });
 
 test('a held wake says what Resume on its card may add only as the host says it', () => {
@@ -922,4 +940,54 @@ test('the Total budget card paints the spend, its limit and what is left in whol
         ['$29,439', 'of $29,800', '$361 left']);
     assert.equal(mount.querySelector('#cost-spend-bar').getAttribute('style'), '--spend-share: 98.8%');
     assert.equal(mount.querySelector('#cost-open').hidden, true, 'nothing is left out, so nothing is said of it');
+});
+
+test('the Total budget card says its own wake held by that budget, read again when the budget is saved', async (t) => {
+    const { mount, routes, window, calls } = setup(t);
+    const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+    routes.set('/api/cost-breakdown', response({ total_calls: 1, by_model: {}, accounting: {
+        available: true, cost_final: true, non_final_rows: 0, unknown_unmetered: 0, confirmed_usd: 62621, estimated_usd: 0,
+        reserved_usd: 0, unresolved_upper_bound_usd: 0, settled_usd: 62621, limit_usd: 62700, remaining_known_usd: 79 } }));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 62700 }));
+    const heldBy = (cause) => ({ enabled: true, ...HELD, live_wake_hold: { cause, ceiling_usd: null } });
+    let consciousness = heldBy('total_budget');
+    routes.set('/api/consciousness', () => response(consciousness));
+    routes.set('/api/state', response({ error: 'busy' }, 503));
+    initCosts({ mount, state: { activePage: 'dashboard' }, openDashboardTab: async () => {} });
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+    const settle = async () => { for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    await settle();
+    const said = () => mount.querySelector('#cost-total-state').textContent.replace(/\s+/g, ' ').trim();
+    // The stub writes a node's own words before its children's: the sentence, its note, then its card's door.
+    const LINE = 'The consciousness wake-up stopped when the total budget was spent. Raising Total budget alone does not '
+        + 'resume it; Resume or Stop now on its card.Open in Main ↗';
+    assert.equal(said(), LINE, 'read-only: its card holds Resume and Stop now');
+    const door = () => mount.querySelector('#cost-total-state').querySelector('[data-open-task]');
+    assert.equal(door()?.getAttribute('data-open-task'), HELD.live_wake_task_id);
+    assert.doesNotMatch(mount.querySelector('#costs-allowance-state').textContent, /total budget/, 'said once, on its own card');
+    // Saving Total budget reads the wake's state again with the spend: the line stands while the wake waits. Spent to the
+    // limit, with the spend's reply arriving late: the same one line, and the same door node (a reader's focus stays).
+    const reads = () => calls.filter((url) => url === '/api/consciousness').length;
+    const focused = door();
+    let answerSpend = () => {};
+    routes.set('/api/cost-breakdown', () => new Promise((resolve) => { answerSpend = resolve; }));
+    window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { source: 'settings-row', page: 'dashboard:costs', row: 'TOTAL_BUDGET' } }));
+    await settle();
+    assert.deepEqual([said(), door() === focused], [LINE, true], 'the wake\'s state read again keeps its door');
+    answerSpend(response({ total_calls: 1, by_model: {}, accounting: {
+        available: true, cost_final: true, non_final_rows: 0, unknown_unmetered: 0, confirmed_usd: 62700, estimated_usd: 0,
+        reserved_usd: 0, unresolved_upper_bound_usd: 0, settled_usd: 62700, limit_usd: 62700, remaining_known_usd: 0 } }));
+    await settle();
+    assert.deepEqual([said(), door() === focused], [LINE, true], 'a late spend reply touches neither its words nor its door');
+    // A failed spend read: still the one line.
+    routes.set('/api/cost-breakdown', response({ error: 'busy' }, 503));
+    window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { source: 'settings-row', page: 'dashboard:costs', row: 'TOTAL_BUDGET' } }));
+    await settle();
+    assert.deepEqual([said(), door() === focused], [LINE, true]);
+    const before = reads();
+    consciousness = heldBy('owner');
+    window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { source: 'settings-row', page: 'dashboard:costs', row: 'TOTAL_BUDGET' } }));
+    await settle();
+    assert.equal(reads(), before + 1);
+    assert.equal(said(), '', 'what holds the wake now is not the total budget');
 });

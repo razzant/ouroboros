@@ -481,13 +481,16 @@ def _revision_record() -> dict:
 
 def _saved_fields(document: Mapping[str, Any], route: RouteParts) -> Any:
     """What ``document`` itself saves for one connection, compared in memory and never kept: a named connection's row,
-    a built-in one's non-blank flat settings with its override row; None when it saves none of its own."""
+    a built-in one's non-blank flat settings with its override row; None when it saves none of its own.
+    A display label is not part of the transport or its payer."""
     rows = connection_rows(document.get(CONNECTIONS_KEY))
+    row = find_row(rows, route.kind, route.connection or BUILTIN_CONNECTION)
+    fields = {key: value for key, value in row.items() if key != "label"} if row else None
     if route.connection:
-        return find_row(rows, route.kind, route.connection)
+        return fields
     saved = {key: document[key] for key in PROVIDER_CREDENTIAL_GROUPS[route.kind]
              if document.get(key) not in (None, "")}
-    return (saved, find_row(rows, route.kind, BUILTIN_CONNECTION)) if saved else None
+    return (saved, fields) if saved else None
 
 
 def connection_dispatch_account(route: RouteParts, snapshot: tuple) -> str:
@@ -513,12 +516,49 @@ def connection_dispatch_account(route: RouteParts, snapshot: tuple) -> str:
     return f"api:{name}#{revision}" if isinstance(revision, str) and _REVISION.fullmatch(revision) else ""
 
 
-def record_connection_revisions(read: tuple | None, before: Mapping[str, Any], written: Mapping[str, Any]) -> None:
-    """The settings writer, under its lock once its bytes ``written`` landed: name this document and give each
-    connection it saves a revision. A connection keeps the one it had only when the replaced document (``before``,
-    read at snapshot ``read``) is the one the record named and that connection's saved fields are unchanged; every
-    other connection, all of them after an unnamed document or a read that may straddle another write (``read``
-    None), takes a new random one. Never raises: a record left naming an older document names nothing in this one."""
+def api_connection_for_model(model: str, use_local: bool) -> str:
+    """The model's API connection picker id, or empty for a local or subscription model."""
+    route = parse_model_route(model)
+    return connection_id(route.kind, route.connection) if (
+        not use_local and route.valid and not route.local and route.kind in PROVIDER_KINDS) else ""
+
+
+def live_connection_account(model: str) -> str:
+    """A saved API connection's non-secret revision, or empty when its identity is unproven."""
+    snapshot = settings_snapshot()
+    if snapshot is None:
+        return ""
+    account = connection_dispatch_account(parse_model_route(model), snapshot)
+    return account if settings_snapshot() == snapshot else ""
+
+
+def connection_account_matches(account: Any, model: str, use_local: bool) -> bool:
+    name = api_connection_for_model(model, use_local)
+    prefix = f"api:{name}#"
+    return bool(name and isinstance(account, str) and account.startswith(prefix) and _REVISION.fullmatch(account[len(prefix):]))
+
+
+def plan_connection_revisions(read: tuple | None, before: Mapping[str, Any], proposed: Mapping[str, Any]) -> dict:
+    """The locked writer plans revisions before publishing, so consent can name the same random identity the
+    dispatch reader will see. Only unchanged fields of a witnessed document keep an earlier revision."""
+    from ouroboros import config
+
+    prior = _revision_record() if read is not None else {}
+    earlier = prior["revisions"] if read is not None and prior.get("document") == list(read) else {}
+    old, new = config.coerce_settings_raw(before), config.coerce_settings_raw(proposed)
+    revisions = {}
+    for route in connection_routes(connection_rows(new.get(CONNECTIONS_KEY))):
+        fields = _saved_fields(new, route)
+        if fields is None:
+            continue
+        name = connection_id(route.kind, route.connection)
+        kept = earlier.get(name) if _saved_fields(old, route) == fields else None
+        revisions[name] = kept if isinstance(kept, str) and _REVISION.fullmatch(kept) else uuid.uuid4().hex
+    return {"before": earlier, "after": revisions}
+
+
+def record_connection_revisions(written: Mapping[str, Any], revisions: dict) -> None:
+    """Publish the planned revisions under the writer lock, only for this exact saved document. Never raises."""
     from ouroboros import config
     from ouroboros.utils import atomic_write_json
 
@@ -527,17 +567,6 @@ def record_connection_revisions(read: tuple | None, before: Mapping[str, Any], w
         payload = config.serialize_settings(dict(written)).encode("utf-8")
         if snapshot is None or config.SETTINGS_PATH.read_bytes() != payload or settings_snapshot() != snapshot:
             return  # another write already replaced these bytes
-        prior = _revision_record() if read is not None else {}
-        earlier = prior["revisions"] if read is not None and prior.get("document") == list(read) else {}
-        old, new = config.coerce_settings_raw(before), config.coerce_settings_raw(written)
-        revisions = {}
-        for route in connection_routes(connection_rows(new.get(CONNECTIONS_KEY))):
-            fields = _saved_fields(new, route)
-            if fields is None:
-                continue
-            name = connection_id(route.kind, route.connection)
-            kept = earlier.get(name) if _saved_fields(old, route) == fields else None
-            revisions[name] = kept if isinstance(kept, str) and _REVISION.fullmatch(kept) else uuid.uuid4().hex
         path = _revisions_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(path, {"version": _REVISION_RECORD_VERSION, "document": list(snapshot),

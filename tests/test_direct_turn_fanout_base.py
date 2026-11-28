@@ -66,7 +66,7 @@ def _public_entry(lane, monkeypatch, actor, *, minted=True):
     the dispatched task with ``actor``; ``None`` when the door admitted nothing to a carrier."""
     from supervisor import worker_chat_lane
 
-    monkeypatch.setattr(worker_chat_lane, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="S")))
+    monkeypatch.setattr("ouroboros.task_results.new_task_id", lambda: "S")
     monkeypatch.setattr(worker_chat_lane, "owner_conversation_admitted", lambda *_a: True)
 
     def enter(text="keep this input", *, between=None):

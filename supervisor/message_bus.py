@@ -389,6 +389,8 @@ class LocalChatBridge:
         received_at = str(received_at or (surface or {}).get("received_at") or "") or utc_now_iso()
         if surface is not None and not surface.get("received_at"):
             task_metadata = {**(task_metadata or {}), "client_surface": {**surface, "received_at": received_at}}
+        if source != "web" and "new_work" in (task_metadata or {}):  # only the web acceptance's own answer rides on
+            task_metadata = {key: value for key, value in task_metadata.items() if key != "new_work"}
         # Invariant: the default chat/user id is the web owner (1). External
         # transports (source != "web") MUST pass explicit ids — the Host Service
         # injects 0 for unidentified senders so they can never bind/own the web

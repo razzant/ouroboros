@@ -1201,7 +1201,11 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     extensions.locator(f'[data-browse-board] .marketplace-card[data-item="builtin/{skill}"] '
                                        '[data-browse-action="install"]').click()
                 # Browse's Install turns the skill on once ready: the end of that job is all that reaches the open board.
-                assert asked.value.post_data_json == {"id": f"builtin/{skill}", "turn_on_when_ready": True}
+                # It installs the exact source and files its card showed (skill_browse.js), nothing a later read found.
+                shown = extensions.request.get(f"{url}/api/skill-catalog/item/builtin/{skill}").json()["item"]
+                assert asked.value.post_data_json == {"id": f"builtin/{skill}", "turn_on_when_ready": True,
+                                                      "expected_source_key": shown["source_key"],
+                                                      "expected_digest": shown["digest"]}
                 expect(card).to_be_visible(timeout=30_000)  # on the board that never reloaded
                 assert page.evaluate("() => window.__boardKept === true")
                 assert "widgets-card-span-2" in (card.get_attribute("class") or "")

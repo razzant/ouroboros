@@ -8,6 +8,11 @@ from starlette.testclient import TestClient
 
 from ouroboros import places, place_guard
 from ouroboros.gateway import host_service
+from tests._telegram_private_reply import (
+    confirmed_private_condition as confirmed_private_condition,
+    confirmed_private_place as confirmed_private_place,
+    unreadable_private_bridge,
+)
 from tests.test_tool_effects import published_tool as published_tool
 
 
@@ -332,3 +337,68 @@ def test_an_exact_binding_rechecks_its_place_by_the_exact_predicate(client, tmp_
 def test_an_unknown_mode_or_an_exact_one_without_its_conversation_is_rejected(client, values):
     response = bind(client, **values)
     assert response.status_code == 400 and response.json()["code"] == "place_binding_invalid"
+
+
+@pytest.mark.parametrize(("change", "reply"), [
+    ("paused", (200, "paused", "place_paused")),
+    ("revoked-while-active", (200, "changed", "owner_dm_confirmation_changed")),
+    ("revoked-while-paused", (200, "changed", "owner_dm_confirmation_changed")),
+    ("disconnected", (200, "disconnected", "place_disconnected")),
+    ("revision-regressed", (503, "unknown", "places_unavailable")),
+    ("bridge-unknown", (503, "unknown", "places_unavailable")),
+    ("different-connector", (400, "unknown", "place_binding_invalid")),
+    ("query", (400, "unknown", "place_binding_invalid")),
+    ("oversize", (413, "unknown", "place_binding_invalid")),
+    ("malformed", (400, "unknown", "place_binding_invalid")),
+])
+def test_private_reply_post_rechecks_captured_condition(client, monkeypatch, confirmed_private_place,
+                                                        confirmed_private_condition, change, reply):
+    from ouroboros import telegram_owner_bot
+
+    fixture = confirmed_private_place
+    condition = confirmed_private_condition
+    caller = fixture.connector
+
+    async def fixture_auth(_ctx, header, permission):
+        assert header == "" and permission == "presence"
+        return caller, {}
+
+    monkeypatch.setattr(host_service, "_authenticated", fixture_auth)
+    body = {"operation": "check_owner_dm", "binding": condition}
+    baseline = client.post("/presence/place", json=body)
+    assert baseline.status_code == 200
+    assert baseline.json() == {
+        "ok": True, "allowed": True, "owner_dm_checked": True, "state": "active", "code": "place_active",
+    }
+    if change in ("paused", "revoked-while-paused"):
+        places.edit_place(fixture.root, fixture.place.place_id, "set_state", author="owner", state="paused")
+    if change in ("revoked-while-active", "revoked-while-paused"):
+        revoked = places.edit_place(fixture.root, fixture.place.place_id, "revoke_owner_account", author="owner",
+                                    platform_actor_id=fixture.target["conversation_id"],
+                                    account_id=fixture.target["account_id"])
+        expected_state = places.STATE_ACTIVE if change == "revoked-while-active" else places.STATE_PAUSED
+        assert revoked is not None and revoked.state == expected_state
+        assert revoked.connected_revision == fixture.place.connected_revision
+    elif change == "disconnected":
+        places.edit_place(fixture.root, fixture.place.place_id, "disconnect", author="owner")
+    elif change == "revision-regressed":
+        records = places.place_records(fixture.root, persist_import=False)
+        monkeypatch.setattr(places, "place_records", lambda *_a, **_k: replace(
+            records, revision=condition["observed_revision"] - 1))
+    elif change == "bridge-unknown":
+        monkeypatch.setattr(telegram_owner_bot, "owner_bridge_bot_id", unreadable_private_bridge)
+    elif change == "different-connector":
+        caller = "fixture-other-connector"
+    if change == "query":
+        response = client.post("/presence/place", params={"fixture": "1"}, json=body)
+    elif change == "oversize":
+        response = client.post("/presence/place", content=b" " * (16 * 1024 + 1))
+    elif change == "malformed":
+        response = client.post("/presence/place", content=b"{")
+    else:
+        response = client.post("/presence/place", json=body)
+    status, state, code = reply
+    assert response.status_code == status
+    assert response.json() == {
+        "ok": status == 200, "allowed": False, "owner_dm_checked": False, "state": state, "code": code,
+    }

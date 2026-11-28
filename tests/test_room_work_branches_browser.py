@@ -916,6 +916,11 @@ def test_failed_census_reads_while_the_socket_stays_open(branch_ui, failure):
     out["cardless_press"] = {"menu": menu_items(page), "toasts": rw.toasts(page)}
     if menu_items(page):
         page.keyboard.press("Escape")
+    if out["cardless_press"]["toasts"]:
+        # The failed read's notice stands in the page's stack, where taller fonts (Linux) lay it over the list's top row;
+        # a hovered notice keeps its time, so the reader takes the pointer off it and waits it out before the next press.
+        page.mouse.move(1, 1)
+        page.locator("#toast-stack .toast").first.wait_for(state="detached", timeout=10_000)
     page.locator("#page-chat .rw-row[data-id='rw-live'] .rw-more").click() if rw.row(rw.facts(page), "rw-live")["more"] else None
     page.wait_for_timeout(500)
     out["card_press"] = {"menu": menu_items(page)}

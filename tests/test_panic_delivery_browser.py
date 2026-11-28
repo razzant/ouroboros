@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
-from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, PROFILE_FRAME, subscription_ui  # noqa: F401
 
 pytestmark = [pytest.mark.ui_browser]
 FAILURE = 'Panic was not confirmed. Check Ouroboros on the host computer.'
@@ -74,6 +74,7 @@ def test_real_controls_bridge_first_offline_failure_and_no_successor_replay(pani
     def connected(socket):
         generation = len(generations)
         generations.append(socket)
+        socket.send(PROFILE_FRAME)  # the serving socket proves the document's profile first (gateway/ws.py)
         socket.send(json.dumps({'type': 'heartbeat'}))
         def received(raw):
             msg = json.loads(raw)
@@ -84,7 +85,7 @@ def test_real_controls_bridge_first_offline_failure_and_no_successor_replay(pani
     page.route('**/api/state', lambda r: r.fulfill(json={
         'supervisor_ready': True, 'active_chat_activities': [], 'projects': [], 'sha': ''}))
     page.route('**/api/chat/history*', lambda r: r.fulfill(json={
-        'messages': [], 'progress': [], 'has_more': False, 'page_cursor': 'panic-fixture',
+        'profile_scope': PREVIEW_SCOPE, 'messages': [], 'progress': [], 'has_more': False, 'page_cursor': 'panic-fixture',
         'coverage': {'v': 1, 'view': 'panic-fixture', 'upper': {'chat': 0, 'progress': 0},
                      'spans': {key: {'from': 0, 'to': 0, 'chain': 'empty', 'gaps': []}
                                for key in ('chat', 'progress')}}}))

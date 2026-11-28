@@ -31,6 +31,17 @@ class MockLLMServer:
         self._server.server_close()
 
 
+def send_props(handler) -> None:
+    """Answer ``/props`` with the document that names llama.cpp. A test that replaces the handler's ``do_GET`` to
+    serve its own routes calls this for ``/props`` so its loopback server still names its program."""
+    data = json.dumps({"default_generation_settings": {"n_ctx": 2_000_000}, "total_slots": 1}).encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib callback name
         # Names its program, as llama.cpp's own document does (``server_window.PROGRAM_DOCUMENTS``): a private
@@ -38,12 +49,7 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/props":
             self.send_error(404)
             return
-        data = json.dumps({"default_generation_settings": {"n_ctx": 2_000_000}, "total_slots": 1}).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        send_props(self)
 
     def do_POST(self):  # noqa: N802 - stdlib callback name
         if self.path != "/v1/chat/completions":

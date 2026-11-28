@@ -26,6 +26,10 @@ from ouroboros.extension_surface_names import extension_surface_name
 from ouroboros.tools.registry import ToolContext
 from tests._extension_loader_shared import _add_fake_native_dep, _mark_isolated_deps_installed, _prepare_extension
 from tests._extension_loader_shared import _clear_loader_state as _clear_loader_state  # autouse loader isolation
+from tests._telegram_private_reply import (
+    confirmed_private_condition as confirmed_private_condition,
+    confirmed_private_place as confirmed_private_place,
+)
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SKILL = "stopper"
@@ -233,6 +237,40 @@ def test_missing_task_id_keeps_its_lifecycle_binding_across_tool_transport(tmp_p
     child = runner._apply_tool_context_payload(ToolContext(repo_dir=tmp_path, drive_root=tmp_path), wire)
     assert child.task_lifecycle_bound is managed
     assert plugin_api._read_call_stop(ctx) == plugin_api._read_call_stop(child) == reason
+
+
+@pytest.mark.parametrize("wants_ctx", [True, False], ids=["context-aware", "contextless"])
+def test_child_preserves_captured_private_reply_condition_or_refuses_handler(
+        tmp_path, monkeypatch, confirmed_private_condition, wants_ctx):
+    from ouroboros import extension_loader, extension_process_runner as runner
+
+    condition = confirmed_private_condition
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    source = runner._apply_tool_context_payload(ctx, {"owner_dm_condition": condition})
+    wire = json.loads(json.dumps(runner._tool_context_payload(source)))
+    child = runner._apply_tool_context_payload(ToolContext(repo_dir=tmp_path, drive_root=tmp_path), wire)
+    assert child.owner_dm_condition == condition
+    detached = child.owner_dm_condition
+    detached.clear()
+    assert child.owner_dm_condition == condition
+    seen = []
+
+    def aware(ctx):
+        seen.append(ctx.owner_dm_condition)
+        return "fixture result"
+
+    def plain():
+        seen.append("called without context")
+
+    descriptor = {"handler": aware if wants_ctx else plain, "wants_ctx": wants_ctx}
+    monkeypatch.setattr(extension_loader, "get_tool", lambda _surface: descriptor)
+    if wants_ctx:
+        assert asyncio.run(runner._call_tool(NAME, {}, child)) == "fixture result"
+        assert seen == [condition]
+    else:
+        with pytest.raises(runner.ExtensionProcessError, match="requires a context-aware handler"):
+            asyncio.run(runner._call_tool(NAME, {}, child))
+        assert seen == []
 
 
 @pytest.mark.parametrize("fault", ["projection", "busy row"])

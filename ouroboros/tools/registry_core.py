@@ -1357,7 +1357,7 @@ class ToolRegistry:
                 return extension_dispatch._dispatch_extension_tool_result(self._ctx, name, ext_tool, args, handoff=handoff)
             return self._name_miss_result(name, extension_unavailable=extension_unavailable)
         args, interpreter_resolution, interpreter_block = tool_resolution._resolve_python_predispatch(
-            self, name, args, _runtime_mode, effective_constraint, resolved_binding,
+            self, name, args, _runtime_mode, effective_constraint, resolved_binding, targets_system_repo,
         )
         if interpreter_block is not None:
             return interpreter_block

@@ -80,10 +80,11 @@ def test_the_tier_contracts_name_ultrafast_where_a_room_a_work_or_a_call_holds_i
                        (OwnerChatProcessingResponse, "previous_processing_choice"), (ProjectEntry, "processing_choice"),
                        (TaskModelRequest, "processing"), (WorkProcessing, "choice")):
         assert _literal(get_type_hints(cls, include_extras=True)[field]) == calls, (cls.__name__, field)
-    response = get_type_hints(OwnerChatProcessingResponse, include_extras=True)
+    # Main the role's own tier and the default are the state's (``processing_tiers``): the chat writer answers
+    # for its room alone, the Main chat included.
     tiers = get_type_hints(ProcessingTiers)
-    assert _literal(response["main_processing"]) == _literal(response["previous_main_processing"]) == _literal(tiers["main"]) == calls
-    assert _literal(response["processing_default"]) == _literal(tiers["default"]) == settings
+    assert _literal(tiers["main"]) == calls and _literal(tiers["default"]) == settings
+    assert set(get_type_hints(OwnerChatProcessingResponse)) == {"ok", "project_id", "processing_choice", "previous_processing_choice"}
 
 
 def test_a_carrier_on_ultrafast_answers_for_the_roots_own_calls_and_says_so():
@@ -394,6 +395,115 @@ def test_a_round_on_a_fallback_row_sends_the_works_own_tier_over_the_rows(setup,
     [(payload, _key)] = gateway.uploads
     assert payload["options"]["processingPreference"] == expected
     assert ledger(root)[-1]["processing_preference"] == expected
+
+
+# --- A tier confirmed for one model and profile reaches the engine on that destination alone ------------------------
+
+
+def _round_sent(setup, metadata, *, role="main", model=MODEL, answered=None, usage=None) -> dict:  # noqa: F811
+    """One round of a work carrying ``metadata``, through the loop's own dispatch to the engine double: what the
+    engine was sent (the model, the account the send names and the tier). ``role``: the role serving the round;
+    ``answered``: the route the engine names in its answer; ``usage``: what the work's earlier calls left."""
+    from ouroboros.loop_model_call import _RoundModelCallContext, _call_round_model
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.registry import ToolRegistry
+
+    root, gateway, client = setup
+    write_task_result(root, "task-one", "running", root_task_id="task-one", _attempt=1)
+    served = result(route=answered)
+    before = len(gateway.uploads)
+    gateway.results, gateway.dispatch = [*gateway.results[:before], served], [*gateway.dispatch[:before], "response_received"]
+    tools = ToolRegistry(repo_dir=root.parent, drive_root=root)
+    tools._ctx.task_metadata = metadata
+    tools._ctx.active_model = model
+    # The role's row serves this round, on the route the engine names: nothing is rebound after the answer.
+    tools._ctx.context_fit_plan = SimpleNamespace(model_role=role, model_route=copy.deepcopy(served["route"]))
+    logs = root / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    _call_round_model(_RoundModelCallContext(
+        llm=client, messages=[{"role": "system", "content": "Own SYSTEM"}, {"role": "user", "content": "go on"}],
+        tools=tools, context_fit_plan=None, active_model=model, tool_schemas=[], active_effort="high", max_retries=1,
+        drive_logs=logs, task_id="task-one", round_idx=before + 1, event_queue=None, accumulated_usage=dict(usage or {}),
+        task_type="task", active_use_local=False, active_context_mode="max", drive_root=root, attempt_cap=1))
+    assert len(gateway.uploads) == before + 1
+    payload = gateway.uploads[-1][0]
+    return {"model": payload["model"], "account": payload["account"], "tier": payload["options"].get("processingPreference")}
+
+
+def test_work_admitted_on_the_main_chats_ultrafast_sends_it_to_that_model_and_profile_alone_from_its_first_round(setup, monkeypatch):  # noqa: F811
+    """What the engine double receives round by round. A work was admitted on the Main chat's Ultrafast for Main's
+    model on the profile ``account-a`` and carries that destination by name. Every send pinned to that model and
+    profile asks Ultrafast, the first one included and the ones after another account signed in to the profile; a
+    send to another profile, another model or a fallback row asks what it would without that choice."""
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
+    from tests.test_llm_claudexor import ROUTE
+
+    _advertise(monkeypatch, "standard", "fast", "economy", "ultrafast")
+    monkeypatch.setenv(GLOBAL, "")
+    monkeypatch.setenv(ROLES, json.dumps({"main": "standard", "fallback": ["fast"]}))
+
+    def pin(profile):  # Main's pinned profile, as Settings holds it now
+        monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": profile, "fallback": ["account-f"]}))
+
+    pin("account-a")
+    work = {"lead": {"source": "main"}, "processing": {"source": "room", "tier": "ultrafast", "route": [MODEL, False, "account-a"]}}
+    on_profile = {"model": "exact-model", "account": {"mode": "pin", "profileId": "account-a"}, "tier": "ultrafast"}
+    # The first round: the work holds no receipt, no account record and no reading of who is signed in.
+    assert _round_sent(setup, work) == on_profile
+    # A new sign-in to the same profile: the engine's answers now name another account behind it. The profile's
+    # name is what was confirmed, so the later rounds ask the same.
+    relogged = {**ROUTE, "accountFingerprint": "fingerprint-after-a-new-sign-in"}
+    assert _round_sent(setup, work, answered=relogged, usage={"_model_route": relogged}) == on_profile
+    # Main's pin moves to another profile under the running work: that profile pays Main's own tier.
+    pin("account-b")
+    other = {**ROUTE, "credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"}
+    assert _round_sent(setup, work, answered=other) == {
+        "model": "exact-model", "account": {"mode": "pin", "profileId": "account-b"}, "tier": "standard"}
+    pin("account-a")
+    assert _round_sent(setup, work) == on_profile  # back on the profile it was confirmed for, by the same name
+    # A fallback row and another model given to the work are other destinations.
+    row = {**ROUTE, "credentialProfileId": "account-f", "accountFingerprint": "fingerprint-f"}
+    assert _round_sent(setup, work, role="fallback:0", answered=row) == {
+        "model": "exact-model", "account": {"mode": "pin", "profileId": "account-f"}, "tier": "fast"}
+    another = "claudexor::codex=another-model"
+    assert _round_sent(setup, work, model=another, answered={**ROUTE, "model": "another-model"}) == {
+        "model": "another-model", "account": {"mode": "pin", "profileId": "account-a"}, "tier": "standard"}
+    # No settings document exists on this stand, so no choice of the Main chat stands at all, as after any later
+    # choice there: the profile's work carried its own answer through every round above.
+
+
+def test_work_admitted_on_auto_keeps_the_main_chats_ultrafast_for_the_pool_whatever_the_chat_chooses_later(setup, monkeypatch):  # noqa: F811
+    """Auto is its source's pool: the send names no account, and no profile was confirmed for it. Work carries its
+    answer from admission (``route_choice.task_processing``): it asks Ultrafast on the pool for as long as it runs,
+    whatever tier the Main chat takes afterwards (a later chip change never reprices started work). The tier is
+    the pool's alone: a send that Main's pin binds to a named profile is another destination and asks the default."""
+    from ouroboros import config
+    from ouroboros.composer_cognition import chat_consent_word
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
+
+    root, _gateway, _client = setup
+    _advertise(monkeypatch, "standard", "fast", "economy", "ultrafast")
+    root.mkdir(parents=True, exist_ok=True)
+    document = root / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", document)
+
+    def chat(tier, accounts="{}"):  # the settings document as it stands: Main on Auto, the Main chat's own model and tier
+        document.write_text(json.dumps({"OUROBOROS_MODEL": MODEL, MODEL_ACCOUNTS_KEY: accounts, ROLES: "{}", GLOBAL: "economy",
+                                        "OUROBOROS_MAIN_CHAT_MODEL": MODEL, "OUROBOROS_MAIN_CHAT_PROCESSING": tier}), encoding="utf-8")
+
+    chat("ultrafast@" + chat_consent_word([MODEL, False, ""]))
+    auto = {"lead": {"source": "room", "model": MODEL, "use_local": False},
+            "processing": {"source": "room", "tier": "ultrafast", "route": [MODEL, False, ""]}}
+    pool = {"model": "exact-model", "account": {"mode": "auto"}}  # no account is named, and none is assumed
+    assert _round_sent(setup, auto, role="lead") == {**pool, "tier": "ultrafast"}
+    chat("fast")  # another tier chosen in the chat afterwards: the started work keeps what it was admitted on
+    assert _round_sent(setup, auto, role="lead") == {**pool, "tier": "ultrafast"}
+    chat("ultrafast@" + chat_consent_word([MODEL, False, "account-a"]))  # a choice for a profile changes nothing either
+    assert _round_sent(setup, auto, role="lead") == {**pool, "tier": "ultrafast"}
+    # The other direction: a send bound to a named profile is not the pool the tier was confirmed for.
+    chat("fast", json.dumps({"main": "account-a"}))
+    pinned = _round_sent(setup, auto, role="main")
+    assert pinned["account"] == {"mode": "pin", "profileId": "account-a"} and pinned["tier"] == "economy"
 
 
 # --- A helper's tier ------------------------------------------------------------------------------------------------

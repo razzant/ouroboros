@@ -1,12 +1,13 @@
 """After Panic only my human's own action resumes operation (BIBLE, Emergency Stop Invariant). Their press in the
-app's list returns one work (``gateway.tasks.api_task_resume``). This module owns their desktop confirmation for
-consciousness after Panic: turning consciousness back on, or—when consciousness is already on in a later run while
-Panic-stopped work still waits—handing its choice to this run's wakes without toggling consciousness off and on.
+app's list returns one work (``gateway.tasks.api_task_resume``); their ``/bg start`` from any owner door turns
+consciousness back on and hands over no choice (the owner 27.11, as in 7.12.1). This module owns their desktop
+confirmation that also hands this run's wakes the choice of Panic-stopped work: at that Turn on, or—when
+consciousness is already on in a later run while Panic-stopped work still waits—without toggling it off and on.
 
-**The stop stands** while consciousness is off by Panic, or off in a way the state cannot say (``start_needs_proof``;
-a later Off keeps that reason, ``consciousness._persist_stop``). Then no ``/bg start`` turns it on by itself: the one
-decision is in the enabling write (``consciousness._persist_start``), which enables only with ``confirm_start``'s
-answer, so the background stays off and every hold stays until it has one.
+**The stop's reason** while consciousness is off by Panic, or off in a way the state cannot say
+(``start_needs_proof``; a later Off keeps that reason, ``consciousness._persist_stop``), is what the confirmation is
+about. The mind's own Start never lifts it (``consciousness._persist_start``); the owner's plain Start lifts it with
+no choice, and every hold stays until the owner's Resume or a choice confirmed here.
 
 **Where the press comes from.** The press is accepted only over the desktop shell's closed private control pipe:
 ``launcher.MainApi.request_panic_consciousness_start`` -> ``launcher_background.request_panic_consciousness_start``
@@ -57,10 +58,8 @@ log = logging.getLogger(__name__)
 
 SWITCH_CONTROL = "consciousness_toggle"  # the app's one switch (web/modules/consciousness_switch.js)
 NOT_APPLIED = "This Turn on was not applied: "
-STOP_STANDS = NOT_APPLIED + ("Panic stopped consciousness, or how it was stopped could not be read. Turn it on from "
-                             "the desktop app's switch (Dashboard › Consciousness); individual tasks can still be "
-                             "resumed manually.")
-NOT_AS_SHOWN = NOT_APPLIED + "it did not match what the switch last showed. Open Turn on again in the desktop app."
+NOT_AS_SHOWN = NOT_APPLIED + ("it did not match what the switch last showed. Look at the switch again: it shows what "
+                              "stands now.")
 CHANGED = {"ok": False, "error": "panic_selection_changed"}
 
 _PROCESS_NONCE = secrets.token_hex(16)
@@ -152,9 +151,9 @@ def worker_view() -> dict | None:
 
 
 def start_needs_proof(state: Any) -> str:
-    """Why an owner's Start needs the switch's confirmed press, over one state view (a projection or the live write):
-    ``"panic"`` (Panic turned consciousness off), ``"unknown"`` (it is not known on and who stopped it cannot be
-    read), else ``""`` (on, or off by a known ordinary stop: the ordinary Start)."""
+    """Why a stop is more than an ordinary one, over one state view (a projection or the live write): ``"panic"``
+    (Panic turned consciousness off), ``"unknown"`` (it is not known on and who stopped it cannot be read), else
+    ``""`` (on, or off by a known ordinary stop). The desktop confirmation is about it; a later Off keeps it."""
     from supervisor.state import control_value
 
     known, enabled = control_value(state, "bg_consciousness_enabled")
@@ -213,7 +212,7 @@ def _unchosen_holds(panic: int | None, holds: dict | None) -> bool:
 
 
 def standing(root: Any) -> dict:
-    """What an owner's desktop confirmation would be about now: ``{}`` when ordinary Start applies, else
+    """What an owner's desktop confirmation would be about now: ``{}`` when there is nothing for it to add, else
     ``{"why", "panic", "holds", "choice"}`` where ``why`` is ``"panic"``, ``"unknown"`` or ``"held"`` (consciousness is
     already on, and Panic-stopped work not yet handed over in this run still waits)."""
     from ouroboros.runtime_limits import get_consciousness_autonomy, get_consciousness_daily_usd
@@ -277,7 +276,7 @@ def standing_basis(shown: Any, *, epoch: int | None = None) -> str:
 
 
 def preview_start(root: Any) -> dict:
-    """Passive post-Panic preview facts for ``GET /api/consciousness?switch=on``: ``{}`` when ordinary Start applies,
+    """Passive post-Panic preview facts for ``GET /api/consciousness?switch=on``: ``{}`` when ``standing`` is empty,
     else ``{"why", "choice", "held", "basis"}`` (``basis == ""`` when state could not be read: fails closed)."""
     with _LOCK:
         ep = _EPOCH[0]

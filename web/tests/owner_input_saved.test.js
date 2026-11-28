@@ -870,6 +870,74 @@ test('only the core\'s word that this room is still one of the page profile\'s o
     ]) assert.equal(ordinaryUnavailability(error, chatId, scope), false, why);
 });
 
+// A message sent as new work on a model choice that changed elsewhere was not saved (`model_choice_changed`). Its copy
+// stops naming that choice, so no Send again repeats the refused intent; plain words return to a free composer.
+test('a copy refused because the model changed elsewhere never names that choice again', () => {
+    const env = installDom();
+    try {
+        const root = document.createElement('div');
+        root.isConnected = true;
+        const copy = (id) => {
+            const bubble = document.createElement('div');
+            bubble.className = 'chat-bubble user';
+            bubble.dataset.clientMessageId = id;
+            root.appendChild(bubble);
+            return bubble;
+        };
+        const kept = new Map();
+        const sends = [];
+        const composed = [];
+        const free = { value: true };
+        const unconfirmed = createUnconfirmedSends({ send: (frame) => { sends.push(frame); return { status: 'sent' }; },
+            root: () => root, onDomWrite: (fn) => fn(), showToast: () => {},
+            compose: (words, quote, options) => { composed.push([words, quote, options]); return free.value; },
+            storage: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value), removeItem: (key) => kept.delete(key) },
+            storageKey: 'k' });
+        const refuse = (id, extra = { reason_code: 'model_choice_changed' }) => unconfirmed.refused({ client_message_id: id, ...extra });
+        const keptFrames = () => JSON.parse(kept.get('k') || '[]').map((entry) => entry.frame);
+        const actions = (bubble) => (bubble.children[0]?.children || []).map((node) => node.textContent).filter(Boolean);
+
+        // Plain words go back to a free composer, unasked and quietly, and their copy leaves the feed and the tab.
+        const plain = copy('cm-1');
+        unconfirmed.track({ type: 'chat', content: 'compare the drafts', client_message_id: 'cm-1', chat_id: 7, new_work: 'token-sol' });
+        assert.equal(keptFrames()[0].new_work, 'token-sol', 'a reload keeps the choice an unanswered frame named');
+        refuse('cm-1');
+        assert.deepEqual(composed, [['compare the drafts', null, { quiet: true }]]);
+        assert.deepEqual([root.children.includes(plain), unconfirmed.count, keptFrames()], [false, 0, []]);
+
+        // Files stay with their copy: it is offered as before, and its Send again is an ordinary message of the same id.
+        const files = copy('cm-2');
+        unconfirmed.track({ type: 'chat', content: 'read this', client_message_id: 'cm-2', chat_id: 7, new_work: 'token-sol',
+            attachments: [{ filename: 'f', display_name: 'n', mime: 'm' }] });
+        refuse('cm-2');
+        assert.deepEqual([composed.length, root.children.includes(files), actions(files)], [1, true, ['Send again', 'Discard']]);
+        assert.equal('new_work' in keptFrames()[0], false, 'the kept copy no longer names the choice either');
+        files.children[0].children.find((node) => node.textContent === 'Send again').click();
+        assert.deepEqual(sends, [{ type: 'chat', content: 'read this', client_message_id: 'cm-2', chat_id: 7,
+            attachments: [{ filename: 'f', display_name: 'n', mime: 'm' }] }]);
+
+        // A composer that holds another draft takes nothing: the copy stays, without the choice.
+        free.value = false;
+        const waiting = copy('cm-3');
+        unconfirmed.track({ type: 'chat', content: 'later words', client_message_id: 'cm-3', chat_id: 7, new_work: 'token-sol' });
+        refuse('cm-3');
+        assert.deepEqual([composed.length, root.children.includes(waiting), actions(waiting)], [2, true, ['Send again', 'Discard']]);
+        waiting.children[0].children.find((node) => node.textContent === 'Send again').click();
+        assert.deepEqual(sends.at(-1), { type: 'chat', content: 'later words', client_message_id: 'cm-3', chat_id: 7 });
+
+        // Any other refusal leaves the frame as it was sent: the host may still judge that same choice.
+        free.value = true;
+        const busy = copy('cm-4');
+        unconfirmed.track({ type: 'chat', content: 'again', client_message_id: 'cm-4', chat_id: 7, new_work: 'token-sol' });
+        refuse('cm-4', {});
+        assert.deepEqual([composed.length, root.children.includes(busy)], [2, true]);
+        assert.equal(keptFrames().find((frame) => frame.client_message_id === 'cm-4').new_work, 'token-sol');
+        unconfirmed.release();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
 test('a tab that cannot keep the copy says so, and Send again still works until a reload', () => {
     const env = installDom();
     try {
@@ -1293,6 +1361,36 @@ test('the host\'s dispatch fact takes a delivery doubt, a Not confirmed note and
         unconfirmed.settle({ ...saved, ingress_dispatched: true });
         assert.deepEqual(buttons(), [], 'a pending note keeps its tick and loses its actions');
         assert.equal(notes().length, 1);
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('a copy given up names its message to the room: Discard, and Send as new once the composer took its words', () => {
+    const env = installDom();
+    try {
+        const root = document.createElement('div');
+        root.isConnected = true;
+        const doubted = bubbleIn(root, 'cm-7'), unsaved = bubbleIn(root, 'cm-8');
+        const given = [];
+        let takes = false;
+        const unconfirmed = createUnconfirmedSends({ send: () => ({ status: 'sent' }), root: () => root, onDomWrite: (fn) => fn(),
+            showToast() {}, compose: () => takes, onGivenUp: (id) => given.push(id) });
+        const press = (bubble, kind) => bubble.querySelectorAll('[data-unconfirmed-action]').find((node) => node.dataset.unconfirmedAction === kind).click();
+        unconfirmed.track({ type: 'chat', content: 'words', client_message_id: 'cm-7', new_work: 'token' });
+        unconfirmed.settle({ role: 'user', client_message_id: 'cm-7', ingress_accepted: true });  // a row of an ended host
+        press(doubted, 'send_as_new');
+        assert.deepEqual(given, [], 'a composer busy with another draft took nothing: the copy is still the message');
+        takes = true;
+        press(doubted, 'send_as_new');
+        assert.deepEqual(given, ['cm-7'], 'its words are the owner\'s next message now');
+        unconfirmed.track({ type: 'chat', content: 'again', client_message_id: 'cm-8', new_work: 'token' });
+        unconfirmed.unsettle(['cm-8']);  // the socket closed before its row
+        press(unsaved, 'retry');
+        assert.deepEqual(given, ['cm-7'], 'Send again gives nothing up: the same message goes once more');
+        unconfirmed.unsettle(['cm-8']);
+        press(unsaved, 'discard');
+        assert.deepEqual(given, ['cm-7', 'cm-8']);
     } finally {
         restoreDom(env.prior);
     }

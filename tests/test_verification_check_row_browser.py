@@ -232,7 +232,7 @@ CHILD_MARKER = "CHECK-CHILD-1585"
 CHILD_RESULT = "CHILD_RESULT_CHECK_1585"
 ROOT_FINAL = "ROOT_FINAL_CHECK_1585"
 CHILD_SLUG = "check-child"
-_CHILD_ID = re.compile(r"Subagent request queued ([0-9a-f]{8})")
+_CHILD_ID = re.compile(r"Subagent request queued ([0-9a-f]{16})")
 _CHILD_SHA = re.compile(r"child_result_sha256[\"'=:\s]+([0-9a-f]{64})")
 
 

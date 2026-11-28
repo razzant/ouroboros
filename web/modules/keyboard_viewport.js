@@ -115,6 +115,29 @@ export function bindKeyboardViewport({ shownRoom = () => null } = {}) {
         }
     }
 
+    // A keyboard that closes while the room keeps its height (a pinch) leaves the feed's box as it was, and WebKit's
+    // native scroll anchoring answers the bar's reserve coming back to the feed's top with a move of its own after the
+    // reading owner's correction (chat_reading_position.js), which then takes it for the reader's scroll. For the two
+    // frames that relayout takes the shown feed's place is the app's alone; an inline value it had comes back after.
+    let releaseFeedAnchor = null;
+    function closeKeyboardInPlace() {
+        releaseFeedAnchor?.();
+        const style = shownRoom()?.page?.querySelector?.('#chat-messages, .chat-messages')?.style;
+        if (style) {
+            const value = style.getPropertyValue('overflow-anchor'), priority = style.getPropertyPriority('overflow-anchor');
+            let frame = 0;
+            const release = releaseFeedAnchor = () => {
+                cancelAnimationFrame(frame);
+                releaseFeedAnchor = null;
+                if (value) style.setProperty('overflow-anchor', value, priority);
+                else style.removeProperty('overflow-anchor');
+            };
+            style.setProperty('overflow-anchor', 'none');
+            frame = requestAnimationFrame(() => { frame = requestAnimationFrame(release); });
+        }
+        commitRoomChange(() => applyKeyboardState(false));
+    }
+
     function updateVvh(event) {
         const h = viewportHeight();
         const layoutHeight = window.innerHeight || h;
@@ -140,7 +163,7 @@ export function bindKeyboardViewport({ shownRoom = () => null } = {}) {
             if (h) cancelScheduled();
             if (!focused) {
                 focusHeight = heldFloor = 0;
-                if (keyboardOpen) commitRoomChange(() => applyKeyboardState(false));
+                if (keyboardOpen) closeKeyboardInPlace();
             }
             return false;
         }
@@ -256,6 +279,7 @@ export function bindKeyboardViewport({ shownRoom = () => null } = {}) {
 
     function dispose() {
         cancelChecks();
+        releaseFeedAnchor?.();
         applyKeyboardState(false);
         syncShortRoom(shownRoom()?.page);
         document.removeEventListener('focusin', onFocusIn);

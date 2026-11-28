@@ -135,6 +135,25 @@ test('a terminal cause keeps the collapsed line while saved newer narration name
     assert.equal(f.card().dataset.finished, '1');
 });
 
+// A saved ending can reach the page before the narration it followed: the card is then built from the ending
+// alone (no work, so no name) and the late live narration is its first row of work. Either way round, the
+// name comes from that narration and the collapsed line names the held cause, never the narration again.
+for (const order of ['saved ending first', 'live narration first']) test(`a held cause shows once narration names the closed card: ${order}`, async t => {
+    const f = fixture(t);
+    const ending = { ...warned, history_id: 'chat:40', history_position: { source: 'chat', offset: 40 } };
+    if (order === 'saved ending first') {
+        await f.read([ending]);
+        f.emit(older);
+    } else {
+        f.emit(older);
+        await f.read([ending]);
+    }
+    assert.equal(f.card().dataset.finished, '1');
+    assert.equal(f.card().querySelector('[data-live-phase]').dataset.phase, 'warn');
+    assert.equal(f.title(), older.text);
+    assert.equal(f.activity(), cause, 'the collapsed line is the held cause in both arrival orders');
+});
+
 // Promoted from the independent review's probe: equal words are not equal ownership.
 test('a terminal cause that repeats earlier narration still owns the collapsed line', async t => {
     const f = fixture(t);

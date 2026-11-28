@@ -371,6 +371,19 @@ test('a wake held at its daily share says what its Resume may add beside it; not
     const off = held({ resume_additional_usd: 5 });
     main.waiting.snapshot({ ...off, bg_consciousness_enabled: false });
     assert.equal(reason('wake-held'), budget, 'consciousness off: nothing promised');
+    // Held by the total budget, its card names that budget as a past stop and, from the same body's budget, whether
+    // raising it is still the step (its pause keeps the rail after a raise); another task keeps the general words.
+    const budgetNow = (left) => ({ ...held({ cause: 'total_budget', ceiling_usd: null }),
+        accounting: { available: true, limit_usd: 62700, remaining_known_usd: left } });
+    main.waiting.snapshot(budgetNow(0));
+    assert.equal(reason('wake-held'), 'Paused when the total budget was spent. The total budget has nothing left now: raise it in Costs, then Resume.');
+    assert.equal(reason('other-task'), budget);
+    main.waiting.snapshot(budgetNow(120.4));
+    assert.equal(reason('wake-held'), 'Paused when the total budget was spent. The total budget has $120 left now: Resume continues it.');
+    main.waiting.snapshot(held({ cause: 'total_budget', ceiling_usd: null }));
+    assert.equal(reason('wake-held'), 'Paused when the total budget was spent.', 'a body that does not say the budget claims neither');
+    main.waiting.snapshot({ ...held({ cause: 'total_budget', ceiling_usd: null }), bg_consciousness_enabled: false });
+    assert.equal(reason('wake-held'), budget, 'consciousness off: no wake is proven held');
 });
 
 test('the reason names what the task needs from the owner', t => {

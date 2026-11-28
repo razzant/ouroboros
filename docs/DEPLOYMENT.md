@@ -88,7 +88,7 @@ coverage.
 
 ## Unknown model role at startup
 
-**Main Ultrafast.** Confirm a move in Main or Settings → Models. For one waiting task, leave “Also save this role” off.
+**Main Ultrafast.** Confirm a move in Settings → Models. For one waiting task, leave “Also save this role” off.
 Before rollback save Standard or Default. Older readers reject the whole settings file with `"main":"ultrafast"` in `OUROBOROS_MODEL_PROCESSING_PREFERENCES`.
 After an unexpected rollback, back up, restore a compatible reader and change the tier.
 

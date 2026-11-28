@@ -1145,12 +1145,20 @@ def test_program_inspection_left_mid_read_is_replaced_on_return(resources_ui):
     page = ui["page"]
     entry = {**_inventory_row("claude"), "updateAvailable": "yes",
              "newest": {"status": "available", "version": "2.1.0", "observedAt": "2026-11-14T12:00:00Z"}}
-    inspections, held = [], []
+    passive, inspections, held = [], [], []
 
     def maintenance(route):
         if not urlparse(route.request.url).path.endswith("/harnesses"):
             return route.fulfill(status=404, json={"error": "fixture: no operation"})
-        inspections.append(parse_qs(urlparse(route.request.url).query))
+        query = parse_qs(urlparse(route.request.url).query)
+        if not query:
+            # #4359: opening Accounts first reads the installable inventory without a query; it is answered at once
+            # and is not the owner-requested inspection this test holds.
+            # It answers the plain installed row (newest not read, update undecided), so "2.1.0 available" below can
+            # only come from the explicit checkLatest inspection the reopened page asks for.
+            passive.append(query)
+            return route.fulfill(json={"harnesses": [_inventory_row("claude")]})
+        inspections.append(query)
         if len(inspections) == 1:
             held.append(route)  # still inspecting when the owner leaves
         else:
@@ -1164,6 +1172,7 @@ def test_program_inspection_left_mid_read_is_replaced_on_return(resources_ui):
             break
         page.wait_for_timeout(10)
     assert inspections == [{"fresh": ["true"], "checkLatest": ["true"]}]
+    assert passive, "Accounts' passive inventory read never happened"
 
     def leave():
         # A wide Settings home restores its last page: choose Ouroboros so Accounts really unmounts.

@@ -13,7 +13,7 @@ import { ORIGIN_ADDRESSED_NOTICE_TYPES, lineReplyFields, childRowPlacement, plac
 import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
 import { createTaskEpisodes } from './task_episodes.js';
-import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
+import { syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createEarlyTextBubbles, createTextBubbles } from './chat_text_bubble.js';
@@ -22,6 +22,7 @@ import { noticeLine } from './host_notice_text.js';
 import { createCatchUp, createWindowReturn } from './room_retire.js';
 import { createChatPreview, createRoomProfileLifecycle } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
+import { createOwnerSendReceipts } from './chat_send_receipts.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
 import { SERVER_ANSWERS_EVENT } from './ws.js';
@@ -39,7 +40,7 @@ import { onRefit } from './text_fit.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
 import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset, readBand } from './project_read_state.js';
 import { createSharedReadTracker } from './read_ahead.js';
-import { createReplayKeys, findPriorBubble, messageIdentity, priorHistoryBubble, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
+import { createReplayKeys, findPriorBubble, messageIdentity, priorHistoryBubble, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
 import { apiClient, apiFetch, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
@@ -136,7 +137,6 @@ import {
     isForegroundLiveCard,
     isReplayEvidenceRow,
     isTerminalTaskPhase,
-    markIngressSaved,
     bindLiveCardTimeline,
     subagentIdentityTitle,
     subagentTwin,
@@ -297,6 +297,7 @@ export function createChatInstance({
     // Sent attachment messages not yet confirmed saved: "Send again" with one id, kept by this tab across a reload.
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
         root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: (...args) => composer?.prepareNewMessage(...args),
+        onGivenUp: (id) => composer?.releaseNewWork(id),
         // A shown copy whose word lapsed leaves the feed; its key goes with it, so a later word draws it again.
         release: node => withStableViewport(() => (seenMessageKeys.delete(node.dataset.messageKey), releaseMessageNode(node), true),
             { excludeAnchorNode: node }),
@@ -477,7 +478,7 @@ export function createChatInstance({
     // A return's or reconnect's read: status once out past its bound, ↓ Retry once it ends unconfirmed (shown only,
     // as a hidden feed reads as at its end).
     const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); }, 300, pendingSubmissions,
-        () => ({ chatId, sessionId: chatSessionId, localOwnerRow }));
+        () => ({ chatId, sessionId: chatSessionId, localOwnerRow: ownerSends.local }));
     let pendingRestartNotice = '';
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
@@ -794,7 +795,11 @@ export function createChatInstance({
         const work = !record.isSubagent && blockHasWork(record);
         // The first row of work lands after the title writers ran for its frame: an empty title
         // takes a name here (Working is the chip's word, #1369); the writers own it from then on.
-        if ((work || isPortal(record)) && !record.titleEl.textContent) record.titleEl.textContent = cardTitle(record, true);
+        // A work card is named by the headline writer, so a held cause the empty name hid is drawn too.
+        if (!record.titleEl.textContent) {
+            if (work) syncCardHeadline(record);
+            else if (isPortal(record)) record.titleEl.textContent = cardTitle(record, true);
+        }
         portals.syncConvert(record, isMain && work && !isPortal(record) && !(window.__ouroTaskBindings || {})[record.groupId]);
     }
 
@@ -2055,15 +2060,7 @@ export function createChatInstance({
         }
     }
 
-    const localOwnerRow = row => !row.origin_projected && ownerRowRoom(row, chatId) === chatId;
-    const ownerIds = rows => rows.filter((m) => m.role === 'user' && m.client_message_id && localOwnerRow(m)).map((m) => String(m.client_message_id));
-
-    function confirmOwnerRow(row) {
-        const bubble = ownerMessageBubble(messagesDiv, row, chatId);
-        const changed = markIngressSaved(messagesDiv, row, bubble) | markSwarmLabel(messagesDiv, row, bubble) | replies.adopt(row);
-        if (localOwnerRow(row)) unconfirmed.settle(row);
-        return changed;
-    }
+    const ownerSends = createOwnerSendReceipts({ feed: messagesDiv, chatId, unconfirmed, replies, composer: () => composer });
 
     function markPendingDelivered(clientMessageId, dropped = false) {
         const bubble = pendingUserBubbles.get(clientMessageId || '');
@@ -2141,7 +2138,7 @@ export function createChatInstance({
                     return true;
                 });
                 // Retire only local echoes this source snapshot confirms.
-                const localEcho = partitionLocalEchoJournal(localEchoJournal, new Set(ownerIds(messages)));
+                const localEcho = partitionLocalEchoJournal(localEchoJournal, new Set(ownerSends.ids(messages)));
                 for (const entry of localEcho.confirmed) {
                     localEchoJournal.delete(entry.clientMessageId);
                 }
@@ -2264,7 +2261,7 @@ export function createChatInstance({
                         if (child) continue;
                     }
                     // A durable routing receipt retires Sending like its live frame.
-                    if (msg.chat_annotation && localOwnerRow(msg) && msg.client_message_id &&
+                    if (msg.chat_annotation && ownerSends.local(msg) && msg.client_message_id &&
                             (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {
                         pendingSubmissions.delete(String(msg.client_message_id));
                     }
@@ -2279,7 +2276,7 @@ export function createChatInstance({
                             ? { skill: msg.skill, jobId: msg.job_id, ...(msg.record_id ? { recordId: msg.record_id } : {}) }
                             : null,
                     });
-                    if (msg.role === 'user') confirmOwnerRow(msg);
+                    if (msg.role === 'user') ownerSends.confirm(msg);
                 }
                 earlyRows.clear(sourceRows, false);
                 _historyRow = null;
@@ -3103,6 +3100,8 @@ export function createChatInstance({
         const address = msg.role === 'assistant' && !msg.is_progress && msg.row_address;
         if (earlyRows.get(address)) return;  // its words are already shown, not confirmed by history
         if (msg.system_type === 'initialization_notice') {
+            // The model it was sent on is no longer the room's: the pick made in this window does not stand either.
+            if (msg.reason_code === 'model_choice_changed') composer.refuseNewWork(msg.client_message_id);
             unconfirmed.refused(msg);  // its typed cause decides a copy's word (chat_attachments.js)
             if (leaving) return;
         }
@@ -3112,8 +3111,7 @@ export function createChatInstance({
             const senderSessionId = msg.sender_session_id || '';
             // 2A: user echo is receipt of user ROW, not turn start: settles bubble but must NOT retire the
             // `Sending...` submission (linked typing frame, snapshot turn, routing receipt or conclusion does).
-            const local = localOwnerRow(msg);
-            const own = local && senderSessionId === chatSessionId && clientMessageId;
+            const own = ownerSends.local(msg) && senderSessionId === chatSessionId && clientMessageId;
             if (own) {
                 markPendingDelivered(clientMessageId);
                 const pending = pendingSubmissions.get(clientMessageId);
@@ -3121,8 +3119,8 @@ export function createChatInstance({
             }
             // The custody listener can settle this room's send while away; another client's echo waits for history.
             if (leaving) {
-                if (own) markIngressSaved(messagesDiv, msg, ownerMessageBubble(messagesDiv, msg, chatId));
-                if (local) unconfirmed.settle(msg);
+                if (own) ownerSends.mark(msg);
+                ownerSends.settle(msg);
                 return;
             }
             if (!own) withRemoteActivity(() => addMessage(
@@ -3136,7 +3134,7 @@ export function createChatInstance({
                 textPlaceholder: msg.text_placeholder === true, reply: msg,
                 },
             ));
-            withStableViewport(() => confirmOwnerRow(msg));
+            withStableViewport(() => ownerSends.confirm(msg));
             syncChatStatus();
             return;
         }
@@ -3379,6 +3377,7 @@ export function createChatInstance({
     // Main's bar: Restart, Panic, the budget and the consciousness chip; a Project's bar is app.js's.
     header = asPanel ? null : createRoomHeader({ bar: pageHeader, ws, shade: roomWork, openDashboardTab,
         refreshState: refreshHeaderControlState });
+    header?.followState(stateSnapshots);  // a retired body withdraws the chip's controls too, not only a failed read
 
     return self = {
         page,

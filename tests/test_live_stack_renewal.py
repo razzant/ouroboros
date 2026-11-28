@@ -52,7 +52,8 @@ def test_full_stack_host_window_renews_with_pending_canonical_facts(host_world, 
 def test_full_stack_unfit_room_mail_ends_typed_instead_of_silently_waiting(host_world, monkeypatch, engine):
     async def scenario():
         async with stack(host_world, monkeypatch, engine) as run:
-            text = 'Synthetic pending room evidence. ' * 30000
+            phrase = 'Synthetic pending room evidence. '
+            text = phrase * (4 * run.host.model.facts.conversation_window_tokens // len(phrase) + 1)  # past the window
             run.mail.put({'text': text, 'msg_id': 'physical-overflow'})
             await run.wait(run.running.done)
         assert run.result[1]['reason_code'] == 'context_capacity', run.result

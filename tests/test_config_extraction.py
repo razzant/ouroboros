@@ -120,6 +120,12 @@ _ADDED_OWNERS = {
     "PROCESSING_PREFERENCE_KEY": model_slots,
     "PROCESSING_PREFERENCES": model_slots,
     "task_processing_preference": model_slots,
+    # One send's tier for the destination it is bound to, and a moved waiting send's: a tier confirmed for one
+    # destination (the Main chat's Ultrafast) is asked of that destination alone.
+    "send_processing_preference": model_slots,
+    "send_processing_options": model_slots,
+    "processing_on_target": model_slots,
+    "moved_send_processing_options": model_slots,
     "normalize_processing_preference": model_slots,
     "resolve_processing_preference": model_slots,
     # Main and call tiers, including Ultrafast, and their /api/state projection.

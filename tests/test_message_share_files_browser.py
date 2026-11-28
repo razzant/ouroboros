@@ -153,7 +153,7 @@ def history(cards, points=POINTS):
         {"role": "assistant", "text": points, "chat_id": 1, "ts": "2026-11-10T09:00:30Z", "history_id": "h-3",
          "row_address": "row:1@2026-11-10T09:00:30Z#dddddddddddd"},
         *(card_row(body, index + 1) for index, body in enumerate(cards)),
-    ], "progress": []}
+    ], "progress": [], "profile_scope": setup_browser.PREVIEW_SCOPE}  # the profile the document proves
 
 
 def evidence(name, data: bytes | str):
@@ -193,7 +193,8 @@ def open_app(ui, *, width, scheme, sockets=None, bodies=None, cards=(TRIP, RIVER
     page.route("**/api/chat/history*", lambda route: route.fulfill(content_type="application/json", body=json.dumps(rows)))
     page.route("**/api/cards/**", card)
     if sockets is not None:
-        page.route_web_socket("**/ws", lambda ws: (sockets.append(ws), ws.send(json.dumps({"type": "heartbeat"}))))
+        page.route_web_socket("**/ws", lambda ws: (sockets.append(ws), ws.send(setup_browser.PROFILE_FRAME),
+                                                   ws.send(json.dumps({"type": "heartbeat"}))))
     if before:
         before(page)
     page.set_viewport_size({"width": width, "height": 750 if width > 620 else 844})

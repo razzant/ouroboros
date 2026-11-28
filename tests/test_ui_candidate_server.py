@@ -97,7 +97,7 @@ def test_real_server_pool_runs_a_submitted_task_to_completion(tmp_path, ui_candi
     """
     from tests.system_e2e.harness import ScriptedStubModel, keyless_settings, write_settings_file
 
-    fixture = ui.direct_server_with_data.__wrapped__(tmp_path, ui_candidate_checkout)
+    fixture = ui.direct_server_with_data.__wrapped__(tmp_path, ui_candidate_checkout, SimpleNamespace())
     with ScriptedStubModel(final_answer="Pooled worker answer: OK.") as stub:
         try:
             running = next(fixture)
@@ -135,7 +135,7 @@ def test_real_server_pool_runs_a_submitted_task_to_completion(tmp_path, ui_candi
 @pytest.mark.parametrize("launcher", ["direct", "settings"])
 def test_real_server_uses_disposable_candidate_and_keeps_identity_through_restart(
         tmp_path, monkeypatch, launcher, ui_candidate_checkout):
-    fixture = ui.direct_server_with_data.__wrapped__(tmp_path, ui_candidate_checkout)
+    fixture = ui.direct_server_with_data.__wrapped__(tmp_path, ui_candidate_checkout, SimpleNamespace())
     try:
         if launcher == "settings":
             from tests.test_settings_restart_browser import settings_server
@@ -186,7 +186,7 @@ def test_concurrent_servers_keep_distinct_roots_and_owner_sentinels(tmp_path, mo
         root = tmp_path / f"run-{number}"
         # Each its own session-style copy, as separate xdist workers have.
         with candidate_checkout(Path(ui.REPO_ROOT), root / "candidate", origin_proof=True) as copy:
-            fixture = ui.direct_server_with_data.__wrapped__(root, copy)
+            fixture = ui.direct_server_with_data.__wrapped__(root, copy, SimpleNamespace())
             try:
                 running = next(fixture)
                 assert running["data_dir"].is_relative_to(root)

@@ -216,10 +216,10 @@ _SAFE_PYTHON_MODULE_ALIASES = {
 }
 
 
-def _split_shell_command(raw_cmd: Any) -> List[str]:
-    """Best-effort argv parser for safety whitelist classification."""
+def _split_shell_command(raw_cmd: Any, *, exact: bool = False) -> List[str]:
+    """Best-effort argv parser for safety whitelist classification; ``exact`` keeps every element of a list."""
     if isinstance(raw_cmd, list):
-        return [str(part) for part in raw_cmd if str(part).strip()]
+        return [str(part) for part in raw_cmd if exact or str(part).strip()]
     text = str(raw_cmd or "").strip()
     if not text:
         return []
@@ -251,9 +251,9 @@ def _is_explicit_python_interpreter(executable: str) -> bool:
     return bool(re.fullmatch(r"python\d+(?:\.\d+)?", token))
 
 
-def _normalize_safe_shell_subject(raw_cmd: Any) -> str:
+def _normalize_safe_shell_subject(raw_cmd: Any, *, exact: bool = False) -> str:
     """Return the canonical safe subject for shell allowlisting."""
-    argv = _split_shell_command(raw_cmd)
+    argv = _split_shell_command(raw_cmd, exact=exact)
     if not argv:
         return ""
 
@@ -279,7 +279,7 @@ def _normalize_safe_shell_subject(raw_cmd: Any) -> str:
     return ""
 
 
-def _normalize_resolved_python_subject(raw_cmd: Any, python_resolution: Any) -> str:
+def _normalize_resolved_python_subject(raw_cmd: Any, python_resolution: Any, *, exact: bool = False) -> str:
     """Reuse the literal-Python fast path only for resolver-attested argv.
 
     Arbitrary absolute executables remain ineligible.  The registry passes the
@@ -299,7 +299,7 @@ def _normalize_resolved_python_subject(raw_cmd: Any, python_resolution: Any) -> 
     requested = python_resolution.requested_interpreter
     if requested not in {"python", "python3"}:
         return ""
-    return _normalize_safe_shell_subject([requested, *argv[1:]])
+    return _normalize_safe_shell_subject([requested, *argv[1:]], exact=exact)
 
 
 # LLM check plumbing.
@@ -673,14 +673,14 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     """Fixed host evidence, with authorship separate from semantic authorization. ``evidence`` (a dict) receives
     the destinations and notes resolved here, so a refusal names them without resolving them again; an extension
     call's place facts come from the descriptor being dispatched (``ext_tool``), never a later publication."""
-    from ouroboros.place_guard import call_place_facts, place_evidence
+    from ouroboros.place_guard import place_evidence, safety_place_facts
     from ouroboros.tool_effects import mcp_sends_as
     from ouroboros.safety_evidence import checked_call_evidence, focus_event_source, with_author
 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
     focus = metadata.get("focus") or {}
-    place = dict(call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {})
+    place = safety_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool)
     place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
     said, link, letter = letter_evidence(ctx, metadata, place_ids)  # a linked Ouroboros occasioned it: who, link facts now
     # A focus occasions the work; it does not establish where this call lands.
@@ -1462,8 +1462,9 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
             # — force the full LLM review for string checks (no safe-subject bypass).
             check = arguments.get("check")
             raw_cmd = check if isinstance(check, (list, tuple)) else None
-        if _normalize_safe_shell_subject(raw_cmd) or _normalize_resolved_python_subject(
-            raw_cmd, python_resolution
+        exact = tool_name == "start_service"  # its child gets every element, so the reading drops none
+        if _normalize_safe_shell_subject(raw_cmd, exact=exact) or _normalize_resolved_python_subject(
+            raw_cmd, python_resolution, exact=exact
         ):
             # Whitelist-safe subject: FULL mode allows it without any LLM call,
             # so non-full modes wave nothing through here — no skip-audit event

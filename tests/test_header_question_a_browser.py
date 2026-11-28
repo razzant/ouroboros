@@ -58,7 +58,8 @@ def _seed(page):
         own = {'role': 'assistant', 'msg_type': 'quiz', 'task_id': 'task-sound', 'chat_id': 42, 'ts': BLOCK['asked_at'],
                'text': BLOCK['question'], 'quiz': {k: v for k, v in BLOCK.items() if k != 'question'}}
         rows = [own] if chat == '42' else [_pointer(BLOCK)]
-        route.fulfill(json={'messages': rows, 'progress': [], 'has_more': False, 'page_cursor': 'recent'})
+        route.fulfill(json={'messages': rows, 'progress': [], 'has_more': False, 'page_cursor': 'recent',
+                            'profile_scope': setup_browser.PREVIEW_SCOPE})
     page.route('**/api/chat/history*', history)
     page.route('**/api/tasks/task-sound', lambda r: r.fulfill(json={
         'task_id': 'task-sound', 'project_id': PROJECT['id'], 'owner_quiz': {BLOCK['quiz_id']: BLOCK},
@@ -222,7 +223,8 @@ def _seed_settled(page):
     """Main holds one question its own task asked, answered by the owner (history replays the settled card)."""
     _seed(page)
     page.unroute('**/api/chat/history*')
-    page.route('**/api/chat/history*', lambda r: r.fulfill(json={'progress': [], 'has_more': False, 'page_cursor': 'recent', 'messages': [{
+    page.route('**/api/chat/history*', lambda r: r.fulfill(json={'progress': [], 'has_more': False, 'page_cursor': 'recent',
+                                                               'profile_scope': setup_browser.PREVIEW_SCOPE, 'messages': [{
         'role': 'assistant', 'msg_type': 'quiz', 'task_id': 'task-settled', 'chat_id': 1, 'ts': SETTLED['asked_at'],
         'text': SETTLED['question'], 'quiz': {k: v for k, v in SETTLED.items() if k != 'question'}}]}))
 
@@ -848,7 +850,7 @@ def _seed_answered(page):
         'project_chat_ids': [], 'current_questions': [], 'current_questions_complete': True,
         'main_attention': [], 'main_attention_complete': True}))
     page.route('**/api/chat/history*', lambda r: r.fulfill(json={'messages': [row(ANSWERED), row(WORDS)], 'progress': [], 'has_more': False,
-                                                               'page_cursor': 'recent'}))
+                                                               'page_cursor': 'recent', 'profile_scope': setup_browser.PREVIEW_SCOPE}))
     page.route('**/api/tasks/task-sqlite', lambda r: r.fulfill(json={
         'task_id': 'task-sqlite', 'owner_quiz': {ANSWERED['quiz_id']: ANSWERED, WORDS['quiz_id']: WORDS}}))
 

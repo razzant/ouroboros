@@ -700,17 +700,27 @@ def test_a_legacy_child_final_after_the_root_answer_does_not_hold_the_room_unrea
 
 # What each Project history read the page received says about the newest message. A read's
 # cursor names it (``kind``): ``older`` walks the chain, ``after`` takes what arrived since the
-# newest read; a read without one (null) is the newest page.
+# newest read; a read without one (null) is the newest page. The cursor is the server's JSON in
+# base64url, deflated after a ``z`` when it names a window's held rows (``history_paging.encode_cursor``);
+# it is read beside the request, so an unreadable one is recorded as such and never fails the page's read.
 _RECORD_HISTORY = """() => {
     const original = window.fetch.bind(window);
     window.__historyReads = [];
+    const cursorKind = async cursor => {
+        if (!cursor) return null;
+        const packed = cursor.startsWith('z'), text = cursor.slice(packed ? 1 : 0).replace(/-/g, '+').replace(/_/g, '/');
+        const bytes = Uint8Array.from(atob(text + '='.repeat(-text.length & 3)), c => c.charCodeAt(0));
+        const json = packed ? await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'))).text()
+            : new TextDecoder().decode(bytes);
+        return JSON.parse(json).kind;
+    };
     window.fetch = async (input, init) => {
-        const response = await original(input, init);
         const url = new URL(typeof input === 'string' ? input : input.url, location.href);
-        if (url.pathname === '/api/chat/history' && url.searchParams.get('chat_id')) {
-            const cursor = url.searchParams.get('cursor');
-            const kind = cursor ? JSON.parse(atob(cursor.replace(/-/g, '+').replace(/_/g, '/'))).kind : null;
-            response.clone().json().then(data => window.__historyReads.push({
+        const recorded = url.pathname === '/api/chat/history' && url.searchParams.get('chat_id');
+        const kindOf = recorded ? cursorKind(url.searchParams.get('cursor')).catch(error => `undecodable: ${error}`) : null;
+        const response = await original(input, init);
+        if (recorded) {
+            Promise.all([kindOf, response.clone().json()]).then(([kind, data]) => window.__historyReads.push({
                 kind, older: kind === 'older', named: 'latest_message' in (data.window || {}),
                 latest: data.window?.latest_message ?? null, before: data.window?.latest_before ?? null,
                 absent: data.window?.latest_absent === true,

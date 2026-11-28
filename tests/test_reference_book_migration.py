@@ -132,8 +132,11 @@ def test_the_migration_commit_reconstructs_the_base_monolith_byte_for_byte(book_
 @pytest.mark.parametrize("book_id", sorted(BOOK_ENTRYPOINTS))
 def test_every_base_section_is_still_exactly_one_chapter(book_id):
     """The structural half, unbounded in time: the base's `##` titles are the
-    chapters' H1 titles, in order, one each. A later edit to a chapter body
-    cannot make this red, and a lost, merged or re-titled chapter still can."""
+    chapters' H1 titles, in order, one each, or one base chapter `N. Title` is a
+    consecutive run of subject files `N.1 Title — …`, `N.2 Title — …` (chapter 6's
+    split), or a base chapter is followed by a listing moved out of it as `N.1 Title`
+    (chapter 1's module directory). A later edit to a chapter body cannot make this red, and a lost,
+    merged or re-titled chapter still can."""
     old = _git("show", f"{MIGRATION_BASE}:{BOOK_ENTRYPOINTS[book_id]}")
     if old is None:
         pytest.skip(f"base commit {MIGRATION_BASE} is unreachable in this checkout")
@@ -148,7 +151,28 @@ def test_every_base_section_is_still_exactly_one_chapter(book_id):
 
     book = load_reference_book(REPO, book_id)
     chapter_titles = [chapter.headings[0].title for chapter in book.chapters]
-    assert chapter_titles == base_titles
+    regrouped, i = [], 0
+    for title in base_titles:
+        number, _, name = title.partition(" ")
+        run = []
+        while i < len(chapter_titles) and chapter_titles[i] != title and chapter_titles[i] == (
+                f"{number[:-1]}.{len(run) + 1} {name} — " + chapter_titles[i].partition(" — ")[2]):
+            run.append(chapter_titles[i])
+            i += 1
+        if run:
+            regrouped.append(title)
+            # A shortened run is a lost chapter: every split file on disk must be in it.
+            on_disk = sorted((REPO / "docs" / book_id).glob(f"{int(number[:-1]):02d}-[0-9]-*.md"))
+            assert len(run) == len(on_disk) and len(run) > 1, (title, run, on_disk)
+        elif i < len(chapter_titles):
+            regrouped.append(chapter_titles[i])
+            i += 1
+            # A listing moved out of the base chapter keeps the chapter and follows it as `N.1 Title`
+            # (chapter 1's module directory): one more chapter, never a lost one.
+            while i < len(chapter_titles) and number[:-1].isdigit() and chapter_titles[i].startswith(
+                    f"{number[:-1]}.") and " — " not in chapter_titles[i]:
+                i += 1
+    assert regrouped == base_titles and i == len(chapter_titles), chapter_titles
 
 
 @pytest.mark.parametrize("book_id", sorted(BOOK_ENTRYPOINTS))

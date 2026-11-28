@@ -802,7 +802,7 @@ def _admit_request(key: Dict[str, str], mode: str, admit: Callable[[str, str, Di
                    drive_root: Optional[pathlib.Path]) -> Dict[str, Any]:
     """Read task status outside the record lock. Decide against the text and revision inside it,
     then admit with that same record as the author's input."""
-    import uuid
+    from ouroboros.task_results import new_task_id
 
     with _REQUEST_FLIGHT:
         before = read_record(drive_root, strict=True) or {}
@@ -827,7 +827,7 @@ def _admit_request(key: Dict[str, str], mode: str, admit: Callable[[str, str, Di
             if prior and prior["status"] in _LIVE_TASK_STATUSES:
                 return {"outcome": "writing" if mode == "latest" else "in_flight",
                         "task_id": prior["current_task_id"], "status": prior["status"], "key": prior["key"]}
-            task_id = uuid.uuid4().hex[:8]
+            task_id = new_task_id()
             request = {"task_id": task_id, "mode": "write" if mode == "latest" else mode, "key": key,
                        "requested_at": utc_now_iso(), "revision_at_request": _revision(record)}
             atomic_write_json(record_path(drive_root), {**record, "request": request})
