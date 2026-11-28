@@ -210,6 +210,7 @@ def test_a_watchdog_close_logs_its_allowlisted_fields_and_drops_everything_else(
     (RuntimeError("receive failed"), " code=unknown "),
     (WebSocketDisconnect(1006, "silent_ms=5 hidden=1"), " code=1006 "),
     (WebSocketDisconnect(1005), " code=1005 "),
+    (WebSocketDisconnect(True), " code=unknown "),  # a flag is no close code
 ])
 def test_a_disconnect_without_our_code_logs_its_code_or_unknown_and_never_a_reason(isolated_registry, caplog,
                                                                                     ending, expected):
@@ -265,10 +266,20 @@ def test_a_writer_failure_and_the_servers_own_close_are_named_in_the_line(isolat
         await ws.close_all_ws()
 
     _serve(restarting, restart)
-    first, second = _disconnect_lines(caplog, 2)
+    closing = _EndpointSocket(WebSocketDisconnect(1012, "Server restarting"), fail=True)
+
+    async def close_then_fail(connection):
+        await ws.close_all_ws()
+        await ws.broadcast_ws({"type": "log"})  # a send after the server's own close fails
+        while ws._ws_clients:
+            await asyncio.sleep(0)
+
+    _serve(closing, close_then_fail)
+    first, second, third = _disconnect_lines(caplog, 3)
     assert " code=1006 " in first and first.endswith(" cause=write_error:RuntimeError"), first
     assert restarting.closed == [1012]
     assert " code=1012 " in second and second.endswith(" cause=server_close:1012"), second
+    assert third.endswith(" cause=server_close:1012"), "a later write error does not replace the server's close"
 
 
 def test_the_browser_watchdog_closes_with_the_code_and_fields_this_module_parses():

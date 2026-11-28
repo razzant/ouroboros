@@ -8,6 +8,7 @@ inherits a handler or a hook from these checks.
 from __future__ import annotations
 
 import ast
+import gc
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import textwrap
 import threading
 import time
 import traceback
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -481,7 +483,8 @@ def test_a_record_handoff_never_waits_for_its_sink_and_keeps_order_time_thread_a
     assert [record.getMessage() for record in sink.records] == ["first 1", "second", "third"]
     assert all(record.created <= returned for record in sink.records), "each keeps its own creation time"
     assert {record.threadName for record in sink.records} == {threading.current_thread().name}
-    assert sink.records[1].exc_info[0] is ValueError and "ValueError: boom" in sink.lines[1]
+    assert sink.records[1].exc_info is None, "the exception travels as text, never the live object"
+    assert "ValueError: boom" in sink.lines[1] and "in test_a_record_handoff_never_waits" in sink.lines[1]
 
 
 def test_records_past_the_bound_are_counted_and_said_once_at_their_place():
@@ -501,3 +504,53 @@ def test_records_past_the_bound_are_counted_and_said_once_at_their_place():
         "aaaa", "bbbb", "cccc",
         "2 log records of test-record-handoff-bound were dropped while the log sink did not keep up", "ff"]
     assert sink.records[3].levelno == logging.WARNING
+
+
+class _Held:
+    """What a failed socket frame's locals can hold while its log line waits: an outbox, a buffer."""
+
+    def __init__(self) -> None:
+        self.data = bytearray(1024 * 1024)
+
+
+def test_a_queued_record_holds_text_never_the_exception_its_traceback_or_its_arguments():
+    """While the sink waits, a queued record holds its message and its exception as text: the large object behind
+    the failed frame can be collected before the sink is released. The line still says the message, the exception
+    and its chain, and each frame as file, line and function; no source line is read for it."""
+    process_logging, logger, sink = _held_logger("tests.record_handoff.text")
+    handoff = process_logging.RecordHandoff("test-record-handoff-text")
+    held: list = []
+
+    def failing_send():
+        local = _Held()
+        held.append(weakref.ref(local))
+        try:
+            raise ConnectionResetError("peer gone")
+        except ConnectionResetError as exc:
+            raise RuntimeError("closed") from exc
+
+    try:
+        handoff.log(logger, logging.INFO, "first")
+        assert sink.entered.wait(5), "the writer holds the first record at the sink"
+        try:
+            failing_send()
+        except RuntimeError as exc:
+            handoff.log(logger, logging.WARNING, "WebSocket error: %s", exc)
+            handoff.log(logger, logging.WARNING, "send failed", exc_info=True)
+        handoff.log(logger, logging.INFO, "broken %d format", "text")
+        gc.collect()
+        assert held[0]() is None, "a queued record kept the failed frame's locals alive"
+        sink.release.set()
+        _settled(lambda: len(sink.records) == 4 and handoff.thread is None)
+    finally:
+        sink.release.set()
+        logger.removeHandler(sink)
+    assert all(record.args is None and record.exc_info is None for record in sink.records)
+    assert sink.lines[1] == "WARNING WebSocket error: closed"
+    text = sink.lines[2]
+    assert text.startswith("WARNING send failed\nTraceback (most recent call last):"), text
+    assert text.index("ConnectionResetError: peer gone") < text.index("direct cause") < text.index(
+        "RuntimeError: closed"), text
+    assert text.count(", in failing_send") == 2 and f'File "{__file__}", line ' in text, text
+    assert 'raise RuntimeError("closed")' not in text, "no source line is read for the record"
+    assert sink.lines[3] == "INFO broken %d format (log arguments not formatted: TypeError)"

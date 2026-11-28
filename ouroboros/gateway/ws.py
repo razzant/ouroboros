@@ -53,7 +53,7 @@ class _Connection:
     ``serial`` (this process's count), when it opened, when its writer last completed a send and
     of which kind (``heartbeat`` or ``other``), since when a send is being awaited, the largest
     ASGI loop lateness it lived through (``note_loop_lateness``) and a ``cause`` only the server
-    knows (its own close, a write error).
+    knows (its own close, a write error: the first one named stays).
     """
 
     __slots__ = ("ws", "outbox", "writer", "profile_scope", "serial", "opened", "sent", "sent_kind", "sending",
@@ -250,9 +250,11 @@ def _retire(connection: _Connection, msg_type: str, exc: BaseException) -> None:
     The ``broadcast_partial_failure`` row keeps its shape (one dead client per failed writer);
     it used to be appended synchronously inside the broadcast, a file lock and a write on the
     event loop. The default executor takes it now; a full executor only delays the row. The
-    connection's disconnect line, written when its receive loop ends, names the write error. The dead
+    connection's disconnect line, written when its receive loop ends, names the write error, unless
+    the server's own close was named first (a send failing after it does not replace it). The dead
     client leaves the registry before its line is logged, so the line's count is the new one."""
-    connection.cause = f"write_error:{type(exc).__name__[:64]}"
+    if not connection.cause:
+        connection.cause = f"write_error:{type(exc).__name__[:64]}"
     with _ws_lock:
         total_clients = len(_ws_clients)
         if connection in _ws_clients:
@@ -731,7 +733,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 except Exception:
                     await websocket.send_text(_initialization_notice(str(msg.get("client_message_id") or ""), thread_id))
     except WebSocketDisconnect as exc:
-        close_code, close_reason = (exc.code if isinstance(exc.code, int) else None), exc.reason
+        close_code, close_reason = (exc.code if type(exc.code) is int else None), exc.reason
     except Exception as exc:
         _LIFECYCLE_LOG.log(log, logging.WARNING, "WebSocket error: %s", exc)
     finally:

@@ -179,19 +179,60 @@ def _log_uncaught(message: str, exc_info: Any) -> bool:
     return True
 
 
+_CHAIN_LINKS = ("The above exception was the direct cause of the following exception:",
+                "During handling of the above exception, another exception occurred:")
+
+
+def _code_only_traceback(exc: BaseException) -> str:
+    """``exc`` and its chain as the traceback module prints them, without source lines: each frame is its file,
+    line and function read from the code object, so nothing is read from the disk (``linecache`` could wait on it)
+    and the text keeps no frame, local or exception alive."""
+    chain, seen, link = [], set(), ""
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        chain.append((exc, link))  # ``link``: how this exception led to the one printed after it
+        if exc.__cause__ is not None:
+            exc, link = exc.__cause__, _CHAIN_LINKS[0]
+        elif exc.__context__ is not None and not exc.__suppress_context__:
+            exc, link = exc.__context__, _CHAIN_LINKS[1]
+        else:
+            exc = None
+    lines: list[str] = []
+    for exc, link in reversed(chain):
+        tb = exc.__traceback__
+        lines += ["Traceback (most recent call last):"] if tb is not None else []
+        while tb is not None:
+            code = tb.tb_frame.f_code
+            lines.append(f'  File "{code.co_filename}", line {tb.tb_lineno}, in {code.co_name}')
+            tb = tb.tb_next
+        kind = type(exc)
+        module = getattr(kind, "__module__", None)
+        name = kind.__qualname__ if module in (None, "builtins", "__main__") else f"{module}.{kind.__qualname__}"
+        try:
+            text = str(exc)
+        except Exception:
+            text = "<exception str() failed>"
+        lines.append(f"{name}: {text}" if text else name)
+        lines += ["", link, ""] if link else []
+    return "\n".join(lines)
+
+
 class RecordHandoff:
     """One ordered, bounded handoff of log records from a thread that must not wait on a log sink (the ASGI loop's
     socket lifecycle lines, ``gateway/ws.py``) to one writer thread.
 
-    ``log`` builds the record on the caller's thread, so its creation time, thread, arguments and exception info
-    are the caller's, and queues it without waiting. The writer, a daemon thread named ``name`` started by the
-    first record and ending when the queue is empty (an idle process keeps none), hands each record to its
-    logger in queue order, where the handlers' redaction filter runs. Message text beyond ``max_bytes`` (the
-    output relay's budget for a reader that is not reading) is dropped and counted, and the count reaches the log
-    as one line at that place in the order once the writer gets there. A record whose writer cannot start is
-    handled on the caller's thread, as before. What the writer has not handled when the process ends (an exit, a
-    kill, Panic) is lost: a bounded tail of these lines only, where a handler for the whole process would lose
-    every thread's (``configure_process_logging`` keeps the synchronous handlers).
+    ``log`` builds the record on the caller's thread, so its creation time and thread are the caller's, and keeps
+    it as text: the message formatted there (a format that fails keeps its template, so marked) and an exception
+    as its chain of code locations (``_code_only_traceback``), never the live arguments, exception or traceback,
+    whose frames could hold a socket or an outbox while the sink waits. It queues the record without waiting. The
+    writer, a daemon thread named ``name`` started by the first record and ending when the queue is empty (an idle
+    process keeps none), hands each record to its logger in queue order, where the handlers' redaction filter runs
+    on the message (an exception's text is not redacted, as everywhere). Text beyond ``max_bytes`` (message and
+    exception text; the output relay's budget for a reader that is not reading) is dropped and counted, and the
+    count reaches the log as one line at that place in the order once the writer gets there. A record whose writer
+    cannot start is handled on the caller's thread, as before. What the writer has not handled when the process
+    ends (an exit, a kill, Panic) is lost: a bounded tail of these lines only, where a handler for the whole
+    process would lose every thread's (``configure_process_logging`` keeps the synchronous handlers).
     """
 
     def __init__(self, name: str, max_bytes: int = OUTPUT_RELAY_MAX_BYTES) -> None:
@@ -204,16 +245,19 @@ class RecordHandoff:
     def log(self, logger: logging.Logger, level: int, msg: str, *args: Any, exc_info: Any = None) -> None:
         if not logger.isEnabledFor(level):
             return
-        if exc_info and not isinstance(exc_info, tuple):
-            exc_info = ((type(exc_info), exc_info, exc_info.__traceback__) if isinstance(exc_info, BaseException)
-                        else sys.exc_info())
+        if exc_info and not isinstance(exc_info, BaseException):
+            exc_info = exc_info[1] if isinstance(exc_info, tuple) else sys.exc_info()[1]
         caller = sys._getframe(1)
         record = logger.makeRecord(logger.name, level, caller.f_code.co_filename, caller.f_lineno, msg, args,
-                                   exc_info or None, caller.f_code.co_name)
+                                   None, caller.f_code.co_name)
         try:
-            size = len(record.getMessage().encode("utf-8", "replace"))
-        except Exception:  # a broken format reaches its handler, as it would have
-            size = len(str(msg))
+            record.msg = record.getMessage()
+        except Exception as exc:
+            record.msg = f"{msg} (log arguments not formatted: {type(exc).__name__})"
+        record.args = None
+        if isinstance(exc_info, BaseException):
+            record.exc_text = _code_only_traceback(exc_info)
+        size = sum(len(text.encode("utf-8", "replace")) for text in (record.msg, record.exc_text or ""))
         with self.lock:
             if self.thread is None:
                 try:
