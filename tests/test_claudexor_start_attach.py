@@ -216,13 +216,18 @@ def test_the_re_probe_after_preparation_is_bounded_by_the_remainder_not_its_own_
         _manager(monkeypatch, tmp_path, server, "tok", silent_wait=0.5, startup_pids=_peer_appears_during_preparation())
         _preparation(monkeypatch, takes_sec=0.0)
         probes = _recorded_probes(monkeypatch)
-        deadline = monotonic_now() + 0.2
+        granted = monotonic_now()
+        deadline = granted + 0.2
         with execution_deadline_scope(deadline):
             with pytest.raises(ClaudexorUnavailable) as caught:
                 owned.ensure_owned_gateway()
         ended = time.monotonic()
         assert caught.value.code == "daemon_not_answering", "the typed custody of a live, late daemon"
-        assert len(probes) == 2 and probes[1][1] <= 0.2, f"the re-probe reads the remainder, not 5 s: {probes}"
+        # No remainder exceeds the allowance as granted on this clock. A coarse clock (Windows ticks every ~15.6 ms) may
+        # show no time spent, and then the remainder is the whole allowance in floating point: (t + 0.2) - t is
+        # 0.20000000000004547 at t = 1471.328. A nanosecond of slack is far below the claim, the remainder against 5 s.
+        assert len(probes) == 2 and probes[1][1] <= deadline - granted + 1e-9, \
+            f"the re-probe reads the remainder, not 5 s: {probes}"
         assert ended - deadline < 0.5, "the start ended at the allowance, not when the daemon chose to answer"
     finally:
         state["hold"].set()

@@ -57,7 +57,11 @@ test('the section owns the filter rail and Clear; the list has no sticky chrome'
     assert.match(css, /html\[data-layout="stack"\] #page-dashboard \.logs-kinds \{ grid-area: 2 \/ 1 \/ auto \/ -1; padding: var\(--space-2\) var\(--page-header-padding-x\);\s*margin: 0 calc\(-1 \* var\(--page-header-padding-x\)\); max-width: none; scroll-padding-inline: var\(--page-header-padding-x\); \}/,
         'a phone\'s rail runs to the page\'s edges, its chips starting at the column, so a hidden chip fades at the edge');
     const wide = css.indexOf('html[data-layout="stack"] #page-dashboard .logs-kinds { margin-block: calc(-1 * var(--space-2)) calc(-1 * var(--space-5)); }');
-    assert.ok(wide > 0 && wide < css.indexOf('@container sectionplace (max-width: calc(40rem - 0.02px))'),
+    // The phone rule is the one-column query that holds the rail's own phone placement: other places open the same
+    // query earlier in the sheet, so the first one found says nothing about the rail.
+    const phone = css.lastIndexOf('@container sectionplace (max-width: calc(40rem - 0.02px))',
+        css.indexOf('html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1;'));
+    assert.ok(wide > 0 && wide < phone,
         'two panes in a stack window keep the rail in the one row without its shadow room growing it; the phone rule comes after');
     assert.match(css, /html\[data-layout="stack"\] \.logs-card \{[^}]*background: none;[^}]*box-shadow: none;/);
     assert.ok(mount.querySelector('.logs-card').classList.contains('ui-card'), 'the desk retains the object');

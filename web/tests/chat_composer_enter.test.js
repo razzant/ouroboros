@@ -403,7 +403,11 @@ test('an accepted Panic during a batch upload starts no later file and cleans th
         assert.equal(releases.length, 1, 'no later file starts after the Panic attempt');
         assert.equal(f.frames.length, 0, 'no chat frame follows it');
         assert.deepEqual(f.deleted, [stored[0]], 'the completed upload is cleaned up, not orphaned');
-        assert.equal(document.body.children.length, 0, 'a Panic is not reported as an upload error');
+        // The fixture's room has no saved history to read, and its own notice says so when its read ends: before this
+        // line on a slow machine, after it on a fast one. Only a toast about the upload counts here.
+        const words = document.body.children.flatMap((stack) => stack.children).map((toast) => toast.children?.[0]?.textContent);
+        assert.deepEqual(words.filter((text) => text !== 'Some saved history could not be loaded.'), [],
+            'a Panic is not reported as an upload error');
         assert.equal(f.input.value, 'see the files', 'the draft stays for a new submission');
     } finally { f.close(); restoreBus(); }
 });

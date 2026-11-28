@@ -472,6 +472,29 @@ def test_an_empty_field_draws_no_scroll_bar_at_a_larger_size(size_ui, zoom):
         page.close()
 
 
+def test_an_author_rule_after_the_kit_keeps_its_sideways_scroll_on_an_empty_field(size_ui):
+    """The empty-field rule is the kit's default, not a lock: it has the specificity of a plain element rule, so an
+    author's later `textarea.notes { overflow-x: scroll }` (docs/development/11-design-system.md) still wins."""
+    page = seed_page(size_ui, 1280, 860)
+    try:
+        page.goto(size_ui['url'])
+        settle(page)
+        assert page.evaluate(EMPTY_FIELDS)
+        assert page.evaluate("""() => {
+            const style = document.createElement('style');
+            style.textContent = 'textarea.ui-control-author { overflow-x: scroll; }';
+            document.head.append(style);
+            document.querySelector('[data-field="plain"]').classList.add('ui-control-author');
+            return true;
+        }""")
+        settle(page)
+        fields = page.evaluate(BARS)
+        assert fields['plain']['sidewaysScroll'], (size_ui['engine'], fields)
+        assert not fields['words']['sidewaysScroll'], (size_ui['engine'], fields)
+    finally:
+        page.close()
+
+
 ARGS = """() => { const field = document.querySelector('[data-mcp-card] [data-mcp-field="args"]');
     const style = getComputedStyle(field), px = (value) => parseFloat(value) || 0;
     return {empty: field.matches(':placeholder-shown'), lines: field.placeholder.split('\\n').length, rows: field.rows,

@@ -979,6 +979,8 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
      work does, its hue whether the owner has a move. A surface changes its marks' ink only through --mark-ink, and
      its ok dot's only through --mark-ok (a settled question's recorded answer).
    - .muted — quiet words in the meta ink.
+   - textarea[placeholder] — a multiline field while it shows its example (a .ui-control or a page's own field): it
+     has nothing to scroll sideways at any Interface size; with words a wrapping field wraps, a code field scrolls.
    - svg[data-glyph="fluent"] — a glyph of the Fluent set (page_icons.js fillIcon, the shell's SHELL_ICONS): filled
      with the text colour and never stroked wherever it sits, so a selector that strokes hand-drawn icons never
      outlines it.
@@ -1621,7 +1623,7 @@ textarea.ui-control { resize: vertical; }
 /* An empty multiline field has nothing to scroll sideways. WebKit lays a textarea's placeholder out zoom times as wide as
    the field, so at an Interface size above 100 % (the window's page zoom) an empty field with a placeholder drew a
    sideways bar under it. With words in it the placeholder is gone: a wrapping field wraps, a code field scrolls. */
-textarea:placeholder-shown { overflow-x: hidden; }
+textarea[placeholder]:where(:placeholder-shown) { overflow-x: hidden; }
 /* A read-only multiline value (renderSafeField's output): the field's box keeps its border, fill and ring whole at every
    scroll state; the value's own body inside is the scrollport the shared fade masks, so a waiting edge fades text only.
    Selectable, in the value's ink; only a very long one scrolls, and its focus reaches that by keyboard. */

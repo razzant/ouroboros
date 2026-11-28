@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import time
 import json
 from types import SimpleNamespace
 
@@ -102,6 +103,24 @@ def test_operator_cli_resolves_exact_bundled_node_without_npm_or_install(tmp_pat
     (True, {"ok": True, "stopped": True, "outcome": "exited"}, 1, False),
 ])
 def test_operator_fixture_observes_receipt_and_always_cleans_up(tmp_path, monkeypatch, barrier, receipt, rc, passes):
+    world = _operator_fixture_world(tmp_path, monkeypatch, barrier, receipt, rc, passes)
+    facts, cleanup, cancelled, calls, asked = world
+    if passes:
+        smoke.verify_operator_stop_fixture(tmp_path, facts)
+        assert facts["operator_stop"]["pid_gone"] and facts["operator_stop"]["lease_released"]
+    else:
+        with pytest.raises(smoke.SmokeFailure, match="cooperative shutdown"):
+            smoke.verify_operator_stop_fixture(tmp_path, facts)
+    assert cleanup == [True] and bool(cancelled) is not passes
+    assert calls == [["node", "claudexor.bundle.cjs", "daemon", "stop", "--json"]]
+    # The fake-hang poll never asks for more than its 30 s window (the exact windows are the fake-clock cases below).
+    assert asked and all(0 < bound <= 30 for bound in asked), asked
+
+
+def _operator_fixture_world(tmp_path, monkeypatch, barrier, receipt, rc, passes, *, reads=None, times=None):
+    """Wire the operator-stop fixture's fakes. `reads` is a list of (seconds the read takes, whether the run is
+    already in its active wait) driven on a fake clock that replaces the driver's `time`; it returns the
+    (facts, cleanup, cancelled, calls, asked) the caller asserts on; `times` collects (start, granted timeout) per read."""
     from ouroboros import claudexor_daemon as d, claudexor_runtime as rt, config, process_custody as c, platform_layer as pl
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
@@ -119,14 +138,15 @@ def test_operator_fixture_observes_receipt_and_always_cleans_up(tmp_path, monkey
     events = run_dir / "events.jsonl"
     events.parent.mkdir(parents=True)
     events.write_text('{"seq":6,"type":"harness.event","payload":{"harness_id":"fake-hang","type":"thinking"}}\n{"partial":')
-    cleanup, cancelled, calls = [], [], []
+    cleanup, cancelled, calls, asked = [], [], [], []
     old = SimpleNamespace(wait=lambda **_kw: 0)
     proc = SimpleNamespace(pid=42, poll=lambda: None if not cleanup else 0, wait=lambda **_kw: 0)
     owner = SimpleNamespace(_proc=old, stop=lambda: cleanup.append(True))
     gateway = SimpleNamespace(
         engine_version="3.10.1", handshake=lambda: {"engine": {"sha": "a" * 40}},
         register_project=lambda _r: "project", start_run=lambda *_a, **_kw: {"runId": "run"},
-        get_run=lambda *_a, **_kw: {"summary": {"state": "running", "runDir": str(run_dir)}},
+        get_run=lambda _run, *, timeout_sec: asked.append(timeout_sec) or {
+            "summary": {"state": "running", "runDir": str(run_dir)}},
         cancel_run=lambda *_a, **_kw: cancelled.append(True), close=lambda: None,
     )
     def start():
@@ -156,15 +176,53 @@ def test_operator_fixture_observes_receipt_and_always_cleans_up(tmp_path, monkey
     monkeypatch.setattr(d, "OwnedClaudexorDaemon", lambda: SimpleNamespace(_proc=None, stop_outcome=stop))
     monkeypatch.setattr(pl, "pid_is_alive", lambda _pid: False)
     monkeypatch.setattr(smoke, "build_request", lambda *_a: {"harnesses": ["fake-hang"]})
-    facts = {}
-    if passes:
+    if reads is not None:
+        now = [0.0]
+        clock = SimpleNamespace(**{**vars(time), "monotonic": lambda: now[0],
+                                   "sleep": lambda seconds: now.__setitem__(0, now[0] + seconds)})
+        monkeypatch.setattr(smoke, "time", clock)
+        ready_answer = gateway.get_run
+
+        def timed_read(run_id, *, timeout_sec):
+            assert len(times) < len(reads), f"a read after the window: {now[0]}"
+            seconds, ready = reads[len(times)]
+            times.append((now[0], timeout_sec))
+            asked.append(timeout_sec)
+            now[0] += seconds
+            return ready_answer(run_id, timeout_sec=timeout_sec) if ready else {"summary": {"state": "queued"}}
+
+        gateway.get_run = timed_read
+    return {}, cleanup, cancelled, calls, asked
+
+
+# The 30 s window, exactly: (seconds a read takes, whether the run is in its active wait when it answers). A read that
+# starts at second 29 is granted the one second left, so a healthy answer at 29.75 s is admitted, while one that
+# is not there by second 30, or whose answer only returns after it, is the failure the smoke exists to name.
+# each read plus its 0.1 s pause: the next read starts at second 29
+_PREFIX = [(1.9, False)] * 14 + [(.9, False)]
+
+
+@pytest.mark.parametrize("reads,admitted,first,last", [
+    ([(3.0, True)], True, (0.0, 30.0), (0.0, 30.0)),
+    (_PREFIX + [(.75, True)], True, (0.0, 30.0), (29.0, 1.0)),
+    (_PREFIX + [(.9, False)], False, (0.0, 30.0), (29.0, 1.0)),
+    (_PREFIX + [(4.0, True)], False, (0.0, 30.0), (29.0, 1.0)),
+])
+def test_operator_fixture_admits_a_read_only_inside_its_thirty_second_window(
+        tmp_path, monkeypatch, reads, admitted, first, last):
+    times = []
+    receipt = {"ok": True, "stopped": True, "outcome": "exited"}
+    facts, cleanup, cancelled, calls, asked = _operator_fixture_world(
+        tmp_path, monkeypatch, False, receipt, 0, True, reads=reads, times=times)
+    if admitted:
         smoke.verify_operator_stop_fixture(tmp_path, facts)
-        assert facts["operator_stop"]["pid_gone"] and facts["operator_stop"]["lease_released"]
+        assert facts["operator_stop"]["pid_gone"]
     else:
-        with pytest.raises(smoke.SmokeFailure, match="cooperative shutdown"):
+        with pytest.raises(smoke.SmokeFailure) as excinfo:
             smoke.verify_operator_stop_fixture(tmp_path, facts)
-    assert cleanup == [True] and bool(cancelled) is not passes
-    assert calls == [["node", "claudexor.bundle.cjs", "daemon", "stop", "--json"]]
+        assert excinfo.value.code == "operator_fixture_not_running"
+        assert not calls  # no cooperative stop is claimed on a window the run never entered
+    assert times[0] == first and times[-1] == pytest.approx(last), times
 
 
 # -- the path-shape guard ------------------------------------------------------
