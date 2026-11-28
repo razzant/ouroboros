@@ -10,7 +10,7 @@ that frame already exceeds the route's known window no request of this start can
 capture (``context.build_context_fit_plan``), with no memory read.
 
 Everything else a request holds is left out, and each omission keeps this a lower bound: the assignment (priced as
-empty, so ``context_input_selection.rescued_start`` keeps its smaller inputs), book maps, the knowledge outline,
+empty, so ``context_input_selection.rescued_start`` keeps its smaller inputs), the Body Map, the knowledge outline,
 skills, helpers, runtime facts, memory beyond the marks, a call's session wrapper and call tools, separators and
 envelopes. The texts are priced as the fitter prices them (``memory_view.json_chars`` summed and floor-divided by
 four, plus ``tool_schema_tokens`` of the Nano selection ``context_fit._frame_choices`` makes), against the Nano reserve
