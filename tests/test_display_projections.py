@@ -983,3 +983,48 @@ def test_a_duty_that_ends_during_the_last_pass_waits_for_the_row_that_pass_is_wr
     assert [kind for kind, _thread in rows] == ["host_duty_stall", "host_duty_stall_end"]
     assert rows[0][1] == f"{display_projections.DUTY_NAME}-drain" and drained == [True]
     assert not display_projections._ROWS
+
+
+def test_an_alerted_display_pass_ending_after_the_close_writes_its_rows_with_its_latch_let_go(monkeypatch):
+    """The display duty's own pass, alerted as overrunning, outlives the teardown's share while its store work (here
+    the budget write) stands: a census read then finds a pass running, and a store switch refuses. It ends after the
+    close: it queues its closing row under its latch, as before, lets go of the latch, and only then writes the queue
+    on its own thread, so a census read while that append stands finds no pass and a ready switch is not refused for
+    a diagnostic; the rows land onset, then end. (Written under the latch, the append read as a pass running.)"""
+    from ouroboros import owned_shutdown, server_control
+
+    rows, entered, gate = [], threading.Event(), threading.Event()
+
+    def append(_path, row):  # the closing row's append stands, as on a slow disk
+        if row["type"] == "host_duty_stall_end":
+            entered.set()
+            assert gate.wait(10)
+        rows.append((row["type"], row["duty"], threading.current_thread().name))
+        return True
+
+    monkeypatch.setattr("supervisor.state.append_jsonl", append)
+    monkeypatch.setattr(update_generation_facts, "_duties", {})
+    monkeypatch.setattr(update_generation_facts, "_publish_after", lambda: None)
+    grace_end = time.monotonic() + 0.6
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: grace_end)
+    held, release, hold, _holding = _held_seam()
+    ctx = SimpleNamespace(DRIVE_ROOT=None, RUNNING={}, budget_projection_dirty=True,
+                          update_budget_from_usage=lambda usage: hold() or True)
+    server_maintenance.dispatch_display_projections(ctx)
+    try:
+        assert held.wait(10)  # the pass stands in its store work
+        server_maintenance._DUTIES[id(display_projections.LATCH)]["since"] -= 3600  # well past its cadence
+        server_maintenance._duty_busy(display_projections.LATCH, 60.0)  # the watchdog alerts the overrun
+        server_control.finish_display_and_socket_lines()  # the teardown: the pass outlives its share
+        assert display_projections._CLOSED.is_set()
+        assert server_control.drain_display_projections() is False, "a pass doing store work reads as running"
+        release.set()  # its store work ends after the close
+        assert entered.wait(10), "the pass writes its rows itself after the close"
+        assert server_control.drain_display_projections() is True, "no pass reads as running while that row is written"
+    finally:
+        release.set()
+        gate.set()
+    _pass_ended()
+    duty = display_projections.DUTY_NAME
+    assert rows == [("host_duty_stall", duty, duty), ("host_duty_stall_end", duty, duty)]
+    assert not display_projections._ROWS

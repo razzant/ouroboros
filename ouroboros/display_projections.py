@@ -170,7 +170,8 @@ def project(work: Optional[ProjectionWork], latch: Any = None,
     """ONE pass, off the loop: the queued rows, the due root figures, the budget write, then the after-update
     facts. A step that raises is logged and the next one still runs. Last, still holding its latch, a watched
     pass queues its own closing row (its watchdog entry, ``duty_of``), so the last pass, which reads the queued
-    rows under that latch (``drain``), finds it; then it releases the latch."""
+    rows under that latch (``drain``), finds it; then it releases the latch, and after the lifespan's last pass,
+    when no pass writes again, writes the queue itself on this thread: a census read meanwhile finds no pass."""
     from ouroboros import update_generation_facts
 
     steps: List[Tuple[str, Callable[[], None]]] = [("journal rows", _write_rows)]
@@ -186,12 +187,15 @@ def project(work: Optional[ProjectionWork], latch: Any = None,
             except Exception:
                 log.warning("Display projection step failed: %s", name, exc_info=True)
     finally:
+        queued = False
         try:
             if latch is not None and duty_of is not None and (duty := duty_of(latch)) is not None:
-                journal_duty_stall_end(duty)
+                queued = _queue_duty_stall_end(duty)
         finally:
             if latch is not None:
                 latch.release()
+        if queued and _CLOSED.is_set():
+            _write_rows()
 
 
 def journal_duty_stall(duty: Dict[str, Any], cadence_sec: float, stack: List[str], flags: Dict[str, Any]) -> None:
@@ -218,19 +222,24 @@ def journal_duty_stall(duty: Dict[str, Any], cadence_sec: float, stack: List[str
 
 
 def journal_duty_stall_end(duty: Dict[str, Any]) -> None:
-    """A pass ended (on its own thread, ``server_maintenance._duty_ended``; this duty's own pass before it releases
-    its latch, ``project``): an alerted one's closing row is queued behind its onset row, once. After the lifespan's
-    last pass (``drain``) no pass writes the queue again, so that thread writes it itself, its onset first, and never
-    takes the latch whose state a later drain reads (the restart census)."""
+    """A pass ended, on its own thread once its latch was released (``server_maintenance._duty_ended``): an alerted
+    one's closing row is queued behind its onset row, once. After the lifespan's last pass (``drain``) no pass writes
+    the queue again, so that thread writes it itself, its onset first, holding no latch a later drain reads (the
+    restart census); this duty's own pass does the same, queueing under its latch and writing after it (``project``)."""
+    if _queue_duty_stall_end(duty) and _CLOSED.is_set():
+        _write_rows()
+
+
+def _queue_duty_stall_end(duty: Dict[str, Any]) -> bool:
+    """An alerted pass's closing row, queued behind its onset row, once: True when this call queued it."""
     with _ROWS_LOCK:
         if duty.get("ended"):
-            return
+            return False
         duty["ended"] = True
         if duty["alerted"]:
             _ROWS.append((None, {"ts": utc_now_iso(), "type": "host_duty_stall_end", "duty": duty["name"],
                                  "running_sec": round(time.time() - duty["since"], 1)}))
-    if duty["alerted"] and _CLOSED.is_set():  # no onset is alerted once ended (``journal_duty_stall``)
-        _write_rows()
+        return duty["alerted"]
 
 
 def _rows_queued() -> bool:
