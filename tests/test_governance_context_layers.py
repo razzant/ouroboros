@@ -156,6 +156,23 @@ def _native_prompt(governance_root, *, layer: str, subject_root=None, explicit: 
 DELIVERIES = {"packet": _packet_prompt, "session": _session_prompt, "native": _native_prompt}
 
 
+def test_a_packet_is_the_same_bytes_wherever_its_governance_root_lies(governance_root, tmp_path, _wide_window):
+    """A tool-less seat opens no path: its DESIGN map names the document inside the repository, as its other
+    addresses do. So two checkouts of one body at different path lengths send the same packet, and a delivery
+    measured on one cannot turn red on a deeper one; a seat that reads with its own tools still gets the exact
+    file of its own root."""
+    import shutil
+
+    deeper = tmp_path / ("a_much_deeper_checkout_folder_" * 4) / "system_repo"
+    shutil.copytree(governance_root, deeper)
+    assert len(str(deeper)) - len(str(governance_root)) > 100
+    near, far = (_packet_prompt(root, layer="body") for root in (governance_root, deeper))
+    assert near == far and "Source: docs/DESIGN.md." in near
+    assert str(governance_root) not in near and str(deeper) not in far
+    for root in (governance_root, deeper):
+        assert f"Source: {root / 'docs' / 'DESIGN.md'}." in _native_prompt(root, layer="body")
+
+
 @pytest.mark.parametrize("layer", ["body", "core"])
 @pytest.mark.parametrize("delivery", sorted(DELIVERIES))
 def test_countercheck_reaches_each_layer_and_delivery_once(delivery, layer, governance_root, subject_root):

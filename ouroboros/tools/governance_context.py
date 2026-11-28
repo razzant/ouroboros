@@ -826,8 +826,10 @@ def governance_context(
     if DESIGN_PATH not in inline_texts:
         delivered = next((row["path"] for row in rows if row["disposition"] == "inline"
                           and row["path"] in (bible_path, principles_path)), DESIGN_PATH)
+        # A packet's seat opens no path: it names the document as its other addresses do, inside the repository
+        # (so the packet's size is no function of where the checkout lies); a retrieving seat gets the exact file.
         design_map = design_navigation(
-            None if design_missing else design_text, source=str(root / DESIGN_PATH),
+            None if design_missing else design_text, source=DESIGN_PATH if packet else str(root / DESIGN_PATH),
             disclosure=_DESIGN_REVIEW_MAP[delivered], compact=packet)
     nav_heading, nav_words = NAVIGATION_WORDS[BODY_LAYER][PACKET_DELIVERY if packet else RETRIEVING_DELIVERY]
     navigation = _join([
