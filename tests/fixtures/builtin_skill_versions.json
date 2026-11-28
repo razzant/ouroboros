@@ -12,16 +12,16 @@
   "version": "1.0.0"
  },
  "gemini_live": {
-  "content_hash": "25fd9e4c05d146e39749f3eb1b35dd9bf05b223a82aa251d8333813e7bbf5de3",
-  "version": "0.1.22"
+  "content_hash": "6aa132dd71065fb165897ab315d61081ffe85d785d48fa2a561be509afe2a9ae",
+  "version": "0.1.23"
  },
  "grok_realtime": {
   "content_hash": "3f5d4a37371d89c8f829f329bd54e7460d1c9888b06138b82688f820549b6a0e",
   "version": "0.1.17"
  },
  "live_conversation": {
-  "content_hash": "8e98de3db44850e0fc0ecb52258573b887ba589e7ca5cb205ab88fc3d4d5b250",
-  "version": "0.1.41"
+  "content_hash": "356b95e01f60059abaf52be8c450cde0377326d75809d3424a81962dad2416a6",
+  "version": "0.1.42"
  },
  "openai_realtime": {
   "content_hash": "28075eb7d62922b1c5a10bb9200f5fe432887d59857ae26adb6172f9922b8811",

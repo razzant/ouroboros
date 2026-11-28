@@ -1,7 +1,7 @@
 ---
 name: gemini_live
 description: Gemini native Live audio and image provider for Live Conversation.
-version: 0.1.22
+version: 0.1.23
 type: extension
 runtime: python3
 entry: plugin.py
@@ -46,7 +46,12 @@ final for the same item, including across resumption. A local schema change wake
 receiver without cancelling its socket read. Expiry with pending work ends
 explicitly; Stop retains any known unfinished text as a partial transcript.
 Call instructions follow the host system text. Language hints, voice, pauses,
-interruptions and optional Google search follow LiveOptions. Extended thinking
+interruptions and optional Google search follow LiveOptions. Recognition
+languages (`languageCodes`) are set only in a fresh session's setup: a list
+recorded during a call waits for the next fresh connection or call
+(`languages_take_effect`), with no renewal for it, and a resume keeps the list
+its session was created with (no document says a resumed session accepts a
+changed setup; read 2026-11-28). Extended thinking
 uses the selected level (low by default); the ordinary model has interleaved
 reasoning without a level control. Respond opens a host-labelled greeting fact.
 Silent tool results use native SILENT scheduling on the ordinary model; the

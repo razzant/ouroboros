@@ -204,6 +204,10 @@ def layout(selected, options):
 
 class GeminiSession(JsonSession):
     silent_context_updates = True
+    # Recognition languages live only in a fresh session's setup (languageCodes): the documented Live API offers no
+    # in-place change, and no document says a resumed session accepts a changed setup (read 2026-11-28). A newly
+    # recorded list waits for the next fresh connection or call; the driver asks for no renewal for it.
+    languages_take_effect = 'next_connection'
     def __init__(self, selected, options, *, connect, observe):
         super().__init__(selected, options, connect=connect, observe=observe)
         self.events = layout(selected, options)

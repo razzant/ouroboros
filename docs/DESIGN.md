@@ -2567,8 +2567,9 @@ successful Settings saves refresh it. There is no call time cap or separate
 per-call reserve; the ordinary shared spending limit applies. The feature's
 instructions keep the ordinary identity, memory and tools. It greets once per
 call, never on reconnect. `set_call_languages` records recognition languages for
-the owner or Presence binding; an engine that can takes them in place, else the
-next quiet renewal applies them;
+the owner or Presence binding; an engine that can takes them in place (a refusal
+renews at the next quiet moment), one that sets them only at setup takes them from
+its next fresh connection or call, never through a resume;
 `end_call` is silent and ends only after the goodbye has played.
 
 ### Conversation activity block

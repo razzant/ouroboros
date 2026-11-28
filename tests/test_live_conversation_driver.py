@@ -252,8 +252,14 @@ class InPlaceSession(Session):
         return self.answer(languages)
 
 
+class NextConnectionSession(Session):
+    """An engine that sets recognition only in a fresh connection's setup and says so."""
+    languages_take_effect = 'next_connection'
+
+
 @pytest.mark.parametrize('engine,languages,said,renews', [
     ('no method', ['ru-RU'], 'expects ru-RU after a short reconnection at the next pause', True),
+    ('next connection', ['ru-RU'], 'only when it starts a fresh connection for another reason, or on the next call', False),
     ('refuses', ['ru-RU'], 'expects ru-RU after a short reconnection at the next pause', True),
     ('takes', ['ru-RU'], 'now expects ru-RU, and later calls start with it', False),
     ('takes', ['ru-RU', 'en-US'], 'detects the language of each utterance itself', False),
@@ -269,7 +275,8 @@ def test_language_tool_takes_languages_in_place_or_renews_and_later_calls_start_
         if engine != 'no method':
             opened = host.session
             async def session(consume, options):
-                original, globals()['Session'] = Session, lambda: InPlaceSession(answers[engine])
+                made = NextConnectionSession if engine == 'next connection' else (lambda: InPlaceSession(answers[engine]))
+                original, globals()['Session'] = Session, made
                 try:
                     return await opened(consume, options)
                 finally:
@@ -1613,3 +1620,25 @@ def test_a_newer_transcript_landing_first_never_releases_an_older_answer(monkeyp
             host.hub.ended_by_owner = True
             await asyncio.wait_for(task, 2)
     asyncio.run(scenario())
+
+
+def test_a_resume_keeps_the_recognition_its_session_holds_and_a_list_change_spares_a_prepared_connection():
+    """#4426 Gemini: a resume sends the setup its session was created with; a prepared successor promised before a list
+    the serving connection did not take is still adopted, while one that would undo an in-place change is not."""
+    from skills.live_conversation.driver import _Call, session_options
+    host = Host()
+    host.model = replace(host.model, honours=frozenset({'languages'}))
+    call = _Call(host)
+    host.state.update(languages=(), recognition=())
+    call.preparing_options = session_options(host, '')
+    host.state['languages'] = ('ru-RU',)  # recorded on an engine that takes it only with a fresh connection
+    assert session_options(host, 'handle').languages == ()
+    assert 'no languages recorded' in session_options(host, 'handle').instructions
+    assert session_options(host, '').languages == ('ru-RU',)
+    assert call.promised('')
+    host.state['recognition'] = ('ru-RU',)  # taken in place: a successor promised the old list would undo it
+    assert not call.promised('')
+    call.preparing_options = session_options(host, '')
+    assert call.promised('')
+    host.config = replace(host.config, voice='other-voice')  # any other promise still counts
+    assert not call.promised('')

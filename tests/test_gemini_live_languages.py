@@ -1,4 +1,4 @@
-"""R1 G1: real host language batches through Gemini's fake wire and refit."""
+"""R1 G1: real host language batches through Gemini's fake wire; a recorded list waits for a fresh connection (#4426)."""
 from __future__ import annotations
 
 import asyncio
@@ -38,12 +38,16 @@ def language_host(host_world, gemini, tmp_path, *, extended):
 
 @pytest.mark.parametrize("extended", [True, False])
 @pytest.mark.parametrize("idle_before_result", [False, True])
-def test_language_batch_reaches_gemini_before_fresh_refit(host_world, gemini, tmp_path,
-                                                       extended, idle_before_result):
+def test_language_batch_reaches_gemini_and_waits_for_its_next_fresh_connection(host_world, gemini, tmp_path,
+                                                                              extended, idle_before_result):
+    from skills.live_conversation.driver import _Call
     host, wires = language_host(host_world, gemini, tmp_path, extended=extended)
+    call = _Call(host)  # publishes take_languages; no connection loop runs here
 
     async def consume(session):
         wire = wires[session]
+        call.session = session
+        call.connected.set()
         await session.receive()  # Ready after the real host's physical fit/open.
         await session.send(Respond(host.opening))
         await receive(session, wire, audio_content("Synthetic greeting."))
@@ -61,13 +65,15 @@ def test_language_batch_reaches_gemini_before_fresh_refit(host_world, gemini, tm
             "name": e.data["name"], "arguments": e.data["arguments"]}} for e in events if e.kind == "tool_call"]
         changes = await host.tool_batch(calls)
         assert changes.silent == ()  # recording languages leaves the turn open for the next words
-        assert host.state.get("refit_after_answer") and host.state["languages"] == ("ru-RU", "en-US")
-        assert not host.state.get("refit")  # The confirmation still belongs to the serving connection.
+        # No renewal for the list: it waits for this engine's next fresh connection or the next call.
+        assert not host.state.get("refit_after_answer") and host.state["languages"] == ("ru-RU", "en-US")
+        assert not host.state.get("refit")
         await session.send(ToolOutputs(tuple(changes), tuple(host.schemas), silent=changes.silent))
         responses = [event["toolResponse"]["functionResponses"] for event in wire.sent if "toolResponse" in event]
         assert len(responses) == 1
         assert responses[0][0]["name"] == "set_call_languages"
         assert "ru-RU, en-US" in responses[0][0]["response"]["output"]
+        assert "only when it starts a fresh connection" in responses[0][0]["response"]["output"]
         assert responses[0][0].get("scheduling") == (None if extended else "WHEN_IDLE")
         assert not session.calls
         assert session.renewal_ready is idle_before_result
@@ -93,10 +99,18 @@ def test_language_batch_reaches_gemini_before_fresh_refit(host_world, gemini, tm
         assert not session.pending
 
     async def run():
+        host.state["recognition"] = ()  # what the driver records for a fresh session opened with no list
         await host.session(consume, session_options(host))
         assert recorded_call_languages(tmp_path / "call-state") == ("ru-RU", "en-US")
-        host.state.pop("refit_after_answer")  # The driver clears this at the fresh connection boundary.
-        await host.session(refitted, session_options(host))
+        # A native resume keeps the setting its session was created with: no document says a resumed Gemini session
+        # accepts a changed setup, so its languageCodes stay what that session started with.
+        from ouroboros.contracts.realtime import RealtimeInput
+        selected = RealtimeInput(host.turn.native_model, json.dumps([{"role": "system", "content": "Host rules."}]),
+                                 "[]", 256, "nano", "core", "view")
+        resumed = gemini.layout(selected, session_options(host, "handle-1"))
+        assert resumed[0]["setup"]["inputAudioTranscription"] == {} and resumed[0]["setup"]["sessionResumption"] == {
+            "handle": "handle-1"}
+        await host.session(refitted, session_options(host))  # the next fresh connection carries the list
     asyncio.run(run())
 
 
@@ -156,24 +170,23 @@ def test_thinking_language_tool_through_driver_waits_for_playback_and_idle(host_
             assert "scheduling" not in response["functionResponses"][0]
             assert not call.quiet() and call.session is session
             wire.put({"serverContent": {"turnComplete": True, "interactionStatus": "IDLE"}})
-            stage = "fresh language refit"
+            stage = "no reconnection for the list"
+            assert "only when it starts a fresh connection" in response["functionResponses"][0]["response"]["output"]
+            await until(lambda: call.quiet())
+            await asyncio.sleep(.3)
+            assert call.session is session and not call.renewing
+            assert len([w for w in wires.values() if w.sent]) == 1, "one opened connection"
+            assert host.state["languages"] == ("ru-RU", "en-US") and not host.state.get("refit_after_answer")
+            # A native resume (goAway with a handle) keeps the setting its session was created with.
+            stage = "resume after the list changed"
+            wire.put({"sessionResumptionUpdate": {"newHandle": "synthetic-handle", "resumable": True}})
+            wire.put({"goAway": {"timeLeft": "5s"}})
             await until(lambda: call.session is not None and call.session is not session and call.connected.is_set())
             setup = wires[call.session].sent[0]["setup"]
-            assert setup["inputAudioTranscription"] == {"languageCodes": ["ru-RU", "en-US"]}
-            assert setup["sessionResumption"] == {}
+            assert setup["sessionResumption"] == {"handle": "synthetic-handle"}
+            assert setup["inputAudioTranscription"] == {} and setup["outputAudioTranscription"] == {}
             assert host.state["greeted"]
-            # The call's turn ended IDLE with no response begun after the result, so the successor owes it the one
-            # neutral continuation pointer: that is its only clientContent, and the opening is never sent again.
-            stage = "fresh language refit continuation"
-            successor = wires[call.session]
-            await until(lambda: any("clientContent" in event for event in successor.sent))
-            texts = [[part.get("text", "") for turn in event["clientContent"]["turns"] for part in turn["parts"]]
-                     for wire in wires.values() for event in wire.sent if "clientContent" in event]
-            continuation = [part.get("text", "") for event in successor.sent if "clientContent" in event
-                            for turn in event["clientContent"]["turns"] for part in turn["parts"]]
-            assert len(continuation) == 1 and "The requested tool batch returned" in continuation[0], continuation
-            assert sum(host.opening in text for parts in texts for text in parts) == 1  # the first connection's opening
-            assert host.opening not in continuation[0]
+            assert not any("clientContent" in event for event in wires[call.session].sent)  # no second greeting
         except Exception as exc:
             sent = [[list(event) for event in wire.sent] for wire in wires.values() if wire.sent]
             raise AssertionError(f"Gemini language scenario failed at {stage}; sent frame types={sent}") from exc

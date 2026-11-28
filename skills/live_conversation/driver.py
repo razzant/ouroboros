@@ -42,6 +42,8 @@ EMPTY_CALL_GRACE_S = 15
 # How long a recognition-language change waits for its engine's acknowledgement before the list goes the renewal way
 # (a transport bound on one echo, not a judgment).
 LANGUAGE_ECHO_S = 10
+# A session declaring ``languages_take_effect = NEXT_CONNECTION`` takes a new list only in a fresh connection's setup.
+NEXT_CONNECTION = "next_connection"
 
 CALL_INSTRUCTIONS = """## Live calls
 
@@ -153,8 +155,10 @@ def call_tools(state_dir):
         taken = await take(languages) if take is not None else None
         if taken is None:
             host.state["refit_after_answer"] = True
-        else:
-            host.state.pop("refit_after_answer", None)  # the serving connection holds the newest list
+        else:  # held in place, or left to the engine's next fresh connection: no renewal for this list
+            host.state.pop("refit_after_answer", None)
+            if taken != NEXT_CONNECTION:
+                host.state["recognition"] = languages
         return languages_result(languages, taken)
 
     return (
@@ -163,9 +167,10 @@ def call_tools(state_dir):
         CallTool("set_call_languages", "Record the languages speech recognition should expect in calls with these people, the most "
                  "spoken first, as BCP-47 tags such as ru-RU or en-US; an empty list lets recognition guess "
                  "each utterance again. Judge them from the correspondence and your memory, and add a language "
-                 "you hear someone use. Recognition takes the list at once where the engine can, otherwise after a "
-                 "short reconnection at the next pause, and later calls start with it. It never decides the "
-                 "language you answer in.",
+                 "you hear someone use. Recognition takes the list at once where the engine can; otherwise from "
+                 "its next fresh connection, which some engines open for it at the next pause and others only "
+                 "when they reconnect for another reason; the result says which. Later calls start with it. It "
+                 "never decides the language you answer in.",
                  {"type": "object", "properties": {"languages": {"type": "array", "items": {"type": "string"}}},
                   "required": ["languages"], "additionalProperties": False}, set_languages),
         attend_tool(),
@@ -178,6 +183,10 @@ def languages_result(languages, taken):
     listed = ", ".join(languages)
     if taken == "unchanged":
         return f"Recorded: unchanged ({listed or 'no languages'}); later calls start with it."
+    if taken == NEXT_CONNECTION:
+        return (f"Recorded: {listed or 'no languages'}. This engine takes the list only when it starts a fresh "
+                "connection for another reason, or on the next call; until then recognition keeps the setting this "
+                "connection started with.")
     if taken is None:
         return (f"Recorded: speech recognition expects {listed} after a short reconnection at the next pause, and "
                 "later calls start with it." if languages else "Recorded: no languages. Speech recognition guesses "
@@ -190,9 +199,14 @@ def languages_result(languages, taken):
     return f"Recorded {listed} for these calls. This engine's recognition {now}; later calls start with the list."
 
 
-def session_options(host, resume_handle=""):
+def session_options(host, resume_handle="", languages=None):
+    """A native resume keeps the recognition its session holds (``recognition``): no vendor documents a changed setup
+    on resume, so a newer recorded list waits for a fresh connection or the next call."""
     config, honours = host.config, host.model.honours
-    languages = tuple(host.state.get("languages", ()))
+    if languages is None:
+        key = "recognition" if resume_handle and "recognition" in host.state else "languages"
+        languages = host.state.get(key, ())
+    languages = tuple(languages)
     knobs = {key: getattr(config, key) for key in ("pause", "interruptions", "thinking", "search") if key in honours}
     if "thinking" in knobs and knobs["thinking"] not in host.model.thinking_levels:
         knobs["thinking"] = host.model.thinking_default or host.model.thinking_levels[0]
@@ -261,6 +275,7 @@ class _Call:
         self.session_ended = asyncio.Event()  # set when the current connection is gone
         self.preparing = None
         self.preparing_options = None
+        self.preparing_list = ()
         self.failed_preparation_revision = None
         # What waits for a connection, in order: one connection-owned worker sends it (delivery).
         self.deferred_tool_outputs = []
@@ -363,12 +378,13 @@ class _Call:
                     from ouroboros.realtime_session import transport_loss
                     if not transport_loss(exc):
                         raise RealtimeSetupError('provider_closed', 'provider refused the prepared connection') from exc
-            if lease is not None and self.preparing_options != session_options(self.host, handle):
+            if lease is not None and not self.promised(handle):
                 await lease.close()
                 lease = None  # promised options changed: one sequential fit with current values
             opening = self.session_ended
             try:
                 if lease is not None:
+                    self.host.state["recognition"] = self.preparing_list
                     try:
                         result = await lease.run(self.consume)
                         if result or self.preparing is None or not self.preparation_ready():
@@ -379,6 +395,8 @@ class _Call:
                             raise
                         lease = None
                 if lease is None:
+                    if not handle:  # a fresh session's recognition holds the recorded list it opens with
+                        self.host.state["recognition"] = tuple(self.host.state.get("languages", ()))
                     result = await self.host.session(self.consume, session_options(self.host, handle))
             except RealtimeSetupError as exc:
                 if exc.code != 'prepared_stale' or not handle:
@@ -602,6 +620,7 @@ class _Call:
                     and getattr(self.session, 'silent_context_updates', False)):
                 self.preparing_revision = getattr(self.host, "_history_version", 0)
                 self.preparing_options = session_options(self.host, '')
+                self.preparing_list = tuple(self.host.state.get("languages", ()))
                 self.preparing = asyncio.create_task(prepare(self.preparing_options))
         if within is not None:
             deadline = time.monotonic() + float(within)
@@ -612,8 +631,10 @@ class _Call:
         None leaves them to a renewal. The wait ends at its answer, the connection's end or LANGUAGE_ECHO_S."""
         session, ended = self.session, self.session_ended
         update = getattr(session, "update_languages", None)
-        if update is None or not self.connected.is_set():
+        if not self.connected.is_set():
             return None
+        if update is None:
+            return NEXT_CONNECTION if getattr(session, "languages_take_effect", None) == NEXT_CONNECTION else None
         asked, gone = asyncio.ensure_future(update(languages)), asyncio.ensure_future(ended.wait())
         try:
             await asyncio.wait((asked, gone), timeout=LANGUAGE_ECHO_S, return_when=asyncio.FIRST_COMPLETED)
@@ -624,6 +645,14 @@ class _Call:
         if asked.cancelled() or asked.exception() is not None or self.session is not session:
             return None  # a refused write is the reader's to classify; the list goes the renewal way
         return asked.result()
+
+    def promised(self, handle):
+        """A prepared connection keeps its promise if its options are the current ones, or those of the list the
+        serving recognition holds: a list recorded meanwhile that the serving connection did not take waits for a later
+        fresh connection instead of discarding this one; one it took in place must not be undone by this one."""
+        recognition = self.host.state.get("recognition", ())
+        return self.preparing_options in (session_options(self.host, handle),
+                                          session_options(self.host, handle, languages=recognition))
 
     def preparation_ready(self):
         return self.preparing is None or (self.preparing.done() and not self.preparing.cancelled()

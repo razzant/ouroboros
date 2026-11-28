@@ -49,31 +49,30 @@ def test_full_stack_host_window_renews_with_pending_canonical_facts(host_world, 
 
 
 @pytest.mark.parametrize('engine', ['openai', 'grok', 'gemini'])
-def test_first_call_recording_its_languages_keeps_one_connection_where_the_engine_takes_them_in_place(
-        host_world, monkeypatch, engine):
+def test_first_call_recording_its_languages_keeps_one_connection_on_every_engine(host_world, monkeypatch, engine):
     """#4426: a first call's set_call_languages renewed the whole connection on every engine. OpenAI and Grok now take
-    the list in place over the same socket; Gemini, which has no in-place path, still renews at the next quiet."""
+    the list in place over the same socket; Gemini, which sets languages only at setup, keeps it for its next fresh
+    connection or call (owner, 28.11.2026: «Да, убрать»)."""
     async def scenario():
         async with stack(host_world, monkeypatch, engine, languages=True) as run:
-            await run.wait(lambda: any('opening-language' in wire.outputs for wire in run.provider.connections)
-                           or engine == 'gemini' and len(run.provider.connections) > 1)
+            await run.wait(lambda: any('opening-language' in wire.outputs for wire in run.provider.connections))
             await run.quiet()
             run.provider.script.append(('say', 'Synthetic answer on the same connection.'))
             await run.owner_says('Synthetic first real turn.')
             await run.quiet()
             assert run.host.state['languages'] == ('en-US',)
-            if engine == 'gemini':  # today's renewal: a second connection carries the list
-                await run.wait(lambda: len(run.provider.connections) == 2)
-                await run.quiet()
-                assert not run.host.state.get('refit_after_answer')
-                return
             assert len(run.provider.connections) == 1 and not run.host.state.get('refit_after_answer')
+            result = run.wire.outputs['opening-language']
+            result = str(result.get('output', result) if isinstance(result, dict) else result)
+            if engine == 'gemini':
+                assert 'only when it starts a fresh connection' in result
+                assert run.wire.sent[0]['setup']['inputAudioTranscription'] == {}  # this connection's own setting
+                return
             updates = [event['session'] for event in run.wire.sent if event.get('type') == 'session.update'
                        and 'transcription' in event['session'].get('audio', {}).get('input', {})]
             hint = ({'model': 'gpt-4o-transcribe', 'language': 'en'} if engine == 'openai' else {'language_hint': 'en-US'})
             assert [update['audio']['input']['transcription'] for update in updates][-1] == hint
-            result = run.wire.outputs['opening-language']
-            assert 'now expects en-US' in (result['output'] if isinstance(result, dict) else result)
+            assert 'now expects en-US' in result
         assert run.result[1]['execution_status'] == 'ok', run.result
     asyncio.run(scenario())
 
