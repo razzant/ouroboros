@@ -587,6 +587,35 @@ def test_posix_transfer_observes_panic_accepted_during_its_last_log(monkeypatch,
     assert server_control._restart_stop_requested
 
 
+@pytest.mark.parametrize("panic_during_wait", [False, True], ids=["transfer", "panic-during-wait"])
+def test_posix_transfer_checks_panic_again_after_its_exit_waits(monkeypatch, tmp_path, panic_during_wait):
+    """Exec ends this image as an exit would: first the display projections' last pass, then the socket lines still
+    queued, each bounded inside the stop's deadline. A Panic accepted during those waits owns the exit (its thread
+    and writes would die with an exec), so nothing is exec'd and no fallback spawns; without one, one exec."""
+    from ouroboros import config, display_projections, process_custody, process_logging, server_control
+
+    execs, waits = [], []
+    monkeypatch.setattr(server_control, "_restart_stop_requested", False)
+    monkeypatch.setattr(server_control, "IS_WINDOWS", False)
+    monkeypatch.setattr(server_control, "os", SimpleNamespace(environ={}, execvpe=lambda *a: execs.append(a[1])))
+    monkeypatch.setattr(server_control, "sys", SimpleNamespace(executable="python", argv=["server.py"]))
+    monkeypatch.setattr(config, "load_settings", lambda: {})
+    monkeypatch.setattr(process_custody, "spawn_supervised", lambda *a, **kw: pytest.fail("no fallback was owed"))
+
+    def drain(_deadline):
+        waits.append("display projections")
+        if panic_during_wait:
+            server_control._restart_stop_requested = True  # Panic's claim, taken before any of its I/O
+        return True
+
+    monkeypatch.setattr(display_projections, "drain", drain)
+    monkeypatch.setattr(process_logging, "finish_record_handoffs", lambda _deadline: waits.append("socket lines"))
+    log = SimpleNamespace(info=lambda *a: None, exception=lambda *a: pytest.fail("the transfer did not fail"))
+    server_control.restart_current_process("127.0.0.1", 9123, repo_dir=tmp_path, log=log)
+    assert waits == ["display projections", "socket lines"]
+    assert execs == ([] if panic_during_wait else [["python", "server.py"]])
+
+
 @pytest.mark.parametrize("parent_exit", [42, 99, None], ids=["restart", "panic", "no-parent"])
 def test_a_restart_successor_observes_its_parent_before_data_admission(tmp_path, parent_exit):
     """A successor's real main() against a real parent holding the data root's kernel lock.

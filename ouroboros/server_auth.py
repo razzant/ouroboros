@@ -1,17 +1,31 @@
-"""Minimal auth gate for non-localhost browser/server access."""
+"""Minimal auth gate for non-localhost browser/server access.
+
+The gate runs on the ASGI loop for every HTTP and WebSocket scope, so nothing it does there waits for the disk: a
+password in the environment needs no read at all, a settings read, the first read or creation of the session key
+and the rendering of a sign-in page (a selected interface's own page, or the builtin form with its inlined assets
+and the installation's appearance scope) run on the gate's own reader thread (``_SettingsReader``), and each
+scope's fresh resolution takes effect in order (``NetworkAuthGate._resolve``). While such a read waits, open
+sockets, heartbeats and Panic go on.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import concurrent.futures
+import functools
 import hashlib
 import hmac
 import html
 import ipaddress
 import os
 import pathlib
+import queue
 import re
 import secrets
+import threading
 import time
+import weakref
 from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode
@@ -48,6 +62,50 @@ def resolve_network_password(env_value: str | None, settings_loader) -> str:
 
 def get_configured_network_password() -> str:
     return resolve_network_password(os.environ.get(NETWORK_PASSWORD_KEY, ""), load_settings)
+
+
+class _SettingsReader:
+    """The gate's own reader thread: the settings document and the session key are read (or the key created) and the
+    sign-in pages rendered here, one at a time in the order asked, never on the ASGI loop and never behind the loop's
+    shared handler pool. One daemon thread per process, started by the first read: an interpreter exit never waits
+    for it."""
+
+    def __init__(self) -> None:
+        self._jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, read) -> concurrent.futures.Future:
+        """Queue ``read``; RuntimeError when no thread can start (an exhausted process, an interpreter stopping)."""
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._lock:
+            if self._thread is None:
+                thread = threading.Thread(target=self._run, name="auth-gate-reader", daemon=True)
+                thread.start()
+                self._thread = thread
+        self._jobs.put((future, read))
+        return future
+
+    def _run(self) -> None:
+        while True:
+            future, read = self._jobs.get()
+            if future.set_running_or_notify_cancel():
+                try:
+                    future.set_result(read())
+                except BaseException as exc:  # one read's failure is its caller's; the reader goes on
+                    future.set_exception(exc)
+
+
+_READER = _SettingsReader()
+
+
+async def _off_loop(read):
+    """``read()`` on the gate's reader thread; where no thread can start, on the loop as it always was."""
+    try:
+        future = _READER.submit(read)
+    except RuntimeError:
+        return read()
+    return await asyncio.wrap_future(future)
 
 
 def is_loopback_host(host: str | None) -> bool:
@@ -141,6 +199,7 @@ def _headers_map(scope: Scope) -> dict[str, str]:
 # Sessions expire; a leaked cookie is no longer a permanent credential.
 _AUTH_SESSION_TTL_SEC = 30 * 24 * 3600
 _auth_secret_cache: bytes | None = None
+_auth_secret_lock = threading.Lock()
 
 
 def _auth_secret() -> bytes:
@@ -150,32 +209,44 @@ def _auth_secret() -> bytes:
     expiring, and forgeable by anyone who ever saw it. Sessions are now
     HMAC-signed with this key, so they cannot be minted without server state
     and they die with the key file (one re-login after key loss is accepted).
+    Concurrent first uses read or create ONE key; the gate brings it into
+    memory off the ASGI loop (``_session_key``) before a scope needs it.
     """
     global _auth_secret_cache
     if _auth_secret_cache:
         return _auth_secret_cache
-    try:
-        from ouroboros import config as _cfg
-
-        path = pathlib.Path(_cfg.DATA_DIR) / "state" / "auth_secret.key"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            text = path.read_text(encoding="utf-8").strip()
-            if text:
-                _auth_secret_cache = bytes.fromhex(text)
-                return _auth_secret_cache
-        secret = secrets.token_hex(32)
-        path.write_text(secret + "\n", encoding="utf-8")
+    with _auth_secret_lock:
+        if _auth_secret_cache:
+            return _auth_secret_cache
         try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        _auth_secret_cache = bytes.fromhex(secret)
-    except Exception:
-        # No durable key (read-only data dir): fall back to a process-lifetime
-        # key — sessions survive within the run and re-login after restart.
-        _auth_secret_cache = secrets.token_bytes(32)
-    return _auth_secret_cache
+            from ouroboros import config as _cfg
+
+            path = pathlib.Path(_cfg.DATA_DIR) / "state" / "auth_secret.key"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    _auth_secret_cache = bytes.fromhex(text)
+                    return _auth_secret_cache
+            secret = secrets.token_hex(32)
+            path.write_text(secret + "\n", encoding="utf-8")
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            _auth_secret_cache = bytes.fromhex(secret)
+        except Exception:
+            # No durable key (read-only data dir): fall back to a process-lifetime
+            # key — sessions survive within the run and re-login after restart.
+            _auth_secret_cache = secrets.token_bytes(32)
+        return _auth_secret_cache
+
+
+async def _session_key() -> None:
+    """Before a cookie is verified or a session minted: a key not yet in memory is read or created off the loop.
+    A scope without a cookie that could be a session (``_cookie_issued``) or a login never touches it."""
+    if not _auth_secret_cache:
+        await _off_loop(_auth_secret)
 
 
 def _session_value(password: str, issued_at: int | None = None) -> str:
@@ -187,18 +258,25 @@ def _session_value(password: str, issued_at: int | None = None) -> str:
     return f"{issued}.{signature}"
 
 
-def _cookie_session_valid(cookie_val: str, password: str) -> bool:
+def _cookie_issued(cookie_val: str) -> int | None:
+    """When a cookie whose shape and age could make it a session was issued, else None: the half of the check
+    that needs no key, so a malformed, expired or future cookie is refused without one."""
     issued_text, sep, _signature = (cookie_val or "").partition(".")
     if not sep:
-        return False
+        return None
     try:
         issued = int(issued_text)
     except (TypeError, ValueError):
-        return False
+        return None
     now = time.time()
     if issued > now + 300 or now - issued > _AUTH_SESSION_TTL_SEC:
-        return False
-    return hmac.compare_digest(cookie_val, _session_value(password, issued))
+        return None
+    return issued
+
+
+def _cookie_session_valid(cookie_val: str, password: str) -> bool:
+    issued = _cookie_issued(cookie_val)
+    return issued is not None and hmac.compare_digest(cookie_val, _session_value(password, issued))
 
 
 def _cookie_value(scope: Scope, cookie_name: str) -> str:
@@ -300,11 +378,6 @@ def _builtin_web_dir(served_ui: ServedUI | None) -> pathlib.Path:
     return resolve_web_dir(pathlib.Path(__file__).resolve().parents[1])
 
 
-def _appearance_meta(served_ui: ServedUI | None, request: Request) -> str:
-    """The form names the installation's appearance scope as the interface's own pages do."""
-    return served_ui.appearance_meta(request.headers) if served_ui is not None else ""
-
-
 # Every sign-out (GET or POST /auth/logout) and every ended or refused session reaches the builtin form before the
 # interface can run again: it takes this browser's saved conversation text, every key of web/modules/chat_preview.js
 # PREVIEW_FAMILY (its record PREVIEW_KEY first, as that module's own eraser does), and nothing else the browser keeps.
@@ -334,18 +407,26 @@ def _login_page(next_url: str, error: str = "", web_dir: pathlib.Path | None = N
     return themed_page(web_dir or _builtin_web_dir(None), "Ouroboros Login", form, _LOGIN_CSS, head)
 
 
+def _sign_in_page(served_ui: ServedUI | None, headers, next_url: str, error: str = "", *,
+                  selected: bool = True) -> tuple[str | None, str]:
+    """On the gate's reader (``_off_loop``): the selected interface's own sign-in page when ``selected`` asks for it
+    and one exists, else ``(None, form)``: the builtin form wearing the installation's appearance scope, which it
+    names as the interface's own pages do. Every file and identity read for the page happens here."""
+    page = served_ui.custom_page("auth/index.html") if selected and served_ui is not None else None
+    if page is not None:
+        return page, ""
+    head = served_ui.appearance_meta(headers) if served_ui is not None else ""
+    return None, _login_page(next_url, error, _builtin_web_dir(served_ui), head)
+
+
 async def _handle_login(scope: Scope, receive: Receive, send: Send, password: str,
                         served_ui: ServedUI | None = None) -> None:
     request = Request(scope, receive)
-    web_dir = _builtin_web_dir(served_ui)
-    head = _appearance_meta(served_ui, request)
     if request.method == "GET":
-        page = (served_ui.custom_page("auth/index.html")
-                if served_ui is not None and request.query_params.get("builtin") != "1" else None)
-        response = HTMLResponse(page if page is not None else _login_page(request.query_params.get("next", "/"),
-                                                                          web_dir=web_dir, head=head),
-                                headers=_NO_STORE)
-        await response(scope, receive, send)
+        page, form = await _off_loop(functools.partial(
+            _sign_in_page, served_ui, request.headers, request.query_params.get("next", "/"),
+            selected=request.query_params.get("builtin") != "1"))
+        await HTMLResponse(page if page is not None else form, headers=_NO_STORE)(scope, receive, send)
         return
     if request.method != "POST":
         response = JSONResponse({"error": "Method not allowed."}, status_code=405)
@@ -369,8 +450,9 @@ async def _handle_login(scope: Scope, receive: Receive, send: Send, password: st
         if is_json:
             response = JSONResponse({"error": "Invalid password."}, status_code=401)
         else:
-            response = HTMLResponse(_login_page(next_url, "Invalid password.", web_dir, head), status_code=401,
-                                    headers=_NO_STORE)
+            _page, form = await _off_loop(functools.partial(_sign_in_page, served_ui, request.headers, next_url,
+                                                             "Invalid password.", selected=False))
+            response = HTMLResponse(form, status_code=401, headers=_NO_STORE)
         await response(scope, receive, send)
         return
 
@@ -461,8 +543,6 @@ async def authenticate_peer_scope(
     requests carrying neither peer header return False for the normal owner flow, and peer headers
     require a direct local connection (``require_direct``).
     """
-    import asyncio
-
     from ouroboros import peer_links
 
     headers = _headers_map(scope)
@@ -546,21 +626,43 @@ class NetworkAuthGate:
         self.app = app
         self.served_ui = served_ui
         self.widget_assets = WidgetAssetLeases()
+        self._order: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()  # event loop -> its resolution lock
+
+    async def _resolve(self) -> tuple[str, str]:
+        """The password this scope is judged by and its widget-asset epoch, resolved fresh for every scope.
+
+        A non-blank environment value wins with no read (``resolve_network_password``), so nothing waits for it;
+        the environment is read once, so the value that chose this path is the one applied (a settings save that
+        clears it meanwhile cannot send a settings read onto the loop). Otherwise the settings document is read on
+        the gate's reader thread while the loop goes on serving. One resolution at a time takes effect, in arrival
+        order, under the serving loop's lock and together with the epoch it implies: an older read never lands
+        after a newer one, so the lease epoch never goes back."""
+        loop = asyncio.get_running_loop()
+        lock = self._order.get(loop)
+        if lock is None:
+            lock = self._order[loop] = asyncio.Lock()
+        async with lock:
+            env = os.environ.get(NETWORK_PASSWORD_KEY, "")
+            password = (resolve_network_password(env, load_settings) if env.strip()
+                        else await _off_loop(get_configured_network_password))
+            epoch = hashlib.sha256(password.encode()).hexdigest()
+            self.widget_assets.password_changed(epoch)
+        return password, epoch
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in {"http", "websocket"}:
             await self.app(scope, receive, send)
             return
 
-        password = get_configured_network_password()
+        password, epoch = await self._resolve()
         from ouroboros.gateway.widget_assets import (ASSET_PREFIX, RESOURCE_PREFIX, widget_asset_response,
                                                      widget_resource_response)
 
-        epoch = hashlib.sha256(password.encode()).hexdigest()
-        self.widget_assets.password_changed(epoch)
         scope["widget_asset_leases"] = self.widget_assets
         scope["widget_asset_epoch"] = epoch
         cookie = _cookie_value(scope, AUTH_COOKIE_NAME)
+        if cookie and _cookie_issued(cookie) is not None:
+            await _session_key()
         owner = cookie if cookie and _cookie_session_valid(cookie, password) else _candidate_password(scope) or "local"
         scope["widget_asset_owner"] = hashlib.sha256(owner.encode()).hexdigest()
         active = bool(password) and not is_loopback_host(_scope_client_host(scope))
@@ -591,6 +693,8 @@ class NetworkAuthGate:
             if not active:
                 await PlainTextResponse("Not Found", status_code=404)(scope, receive, send)
             elif path == "/auth/login":
+                if scope.get("method") == "POST":  # a right password mints a session
+                    await _session_key()
                 await _handle_login(scope, receive, send, password, self.served_ui)
             else:
                 self.widget_assets.revoke_owner(scope["widget_asset_owner"])
@@ -615,17 +719,16 @@ class NetworkAuthGate:
             return
 
         if _request_wants_html(scope):
-            builtin_setup = path == "/onboarding" and Request(scope).query_params.get("builtin") == "1"
-            custom = (self.served_ui.custom_page("auth/index.html")
-                      if self.served_ui is not None and not builtin_setup else None)
+            request = Request(scope)
+            builtin_setup = path == "/onboarding" and request.query_params.get("builtin") == "1"
             next_url = _sanitize_next_url(_build_next_url(scope))
+            custom, form = await _off_loop(functools.partial(_sign_in_page, self.served_ui, request.headers,
+                                                              next_url, selected=not builtin_setup))
             if custom is not None:
                 response = RedirectResponse("/auth/login?" + urlencode({"next": next_url}), status_code=303,
                                             headers=_NO_STORE)
             else:
-                response = HTMLResponse(_login_page(next_url, web_dir=_builtin_web_dir(self.served_ui),
-                                                    head=_appearance_meta(self.served_ui, Request(scope))),
-                                        status_code=401, headers=_NO_STORE)
+                response = HTMLResponse(form, status_code=401, headers=_NO_STORE)
         else:
             response = JSONResponse({"error": "Authentication required."}, status_code=401)
         await response(scope, receive, send)

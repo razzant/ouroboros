@@ -17,6 +17,44 @@ V2_MOUNT = "30 23 0:26 {root} {point} rw,nosuid,nodev,noexec,relatime shared:4 -
 V1_MEMORY = "35 30 0:31 {root} /sys/fs/cgroup/memory ro,nosuid,nodev,noexec,relatime master:16 - cgroup cgroup rw,memory"
 V1_CPU = "34 30 0:30 {root} /sys/fs/cgroup/cpu,cpuacct ro,nosuid,nodev,noexec,relatime master:15 - cgroup cgroup rw,cpu,cpuacct"
 HOST = MemorySnapshot(32 * GIB, 16 * GIB)  # the fake host's /proc/meminfo
+# One `vm_stat` on an Apple Silicon Mac (16 KiB pages, 128 GiB, kernel level 1), 2026-11-27T21:48:17Z, verbatim.
+VM_STAT_16K = """\
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                             1620420.
+Pages active:                           2869396.
+Pages inactive:                         2454324.
+Pages speculative:                       412516.
+Pages throttled:                              0.
+Pages wired down:                        402243.
+Pages purgeable:                          34142.
+"Translation faults":               26494222798.
+Pages copy-on-write:                 2480366299.
+Pages zero filled:                   8867459886.
+Pages reactivated:                   1317822813.
+Pages purged:                         205069859.
+File-backed pages:                      1968917.
+Anonymous pages:                        3767319.
+Pages stored in compressor:             1135366.
+Pages occupied by compressor:            523644.
+Decompressions:                       853873871.
+Compressions:                        1244157417.
+Pageins:                              547312593.
+Pageouts:                               5090585.
+Swapins:                                 729800.
+Swapouts:                               2020129.
+"""
+# A 4 KiB-page host (Intel Macs): vm_stat.c's labels, in its order and its "%-30s %16llu." lines. The counts are an
+# illustrative 8 GiB host, not a capture (no Intel Mac was at hand): little file cache beside many inactive pages.
+VM_STAT_4K = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n" + "".join(
+    f"{label + ':':<30} {count:>16}.\n" for label, count in (
+        ("Pages free", 13000), ("Pages active", 640000), ("Pages inactive", 610000), ("Pages speculative", 9000),
+        ("Pages throttled", 0), ("Pages wired down", 380000), ("Pages purgeable", 12000),
+        ('"Translation faults"', 912345678), ("Pages copy-on-write", 40123456), ("Pages zero filled", 400123456),
+        ("Pages reactivated", 30123456), ("Pages purged", 2345678), ("File-backed pages", 150000),
+        ("Anonymous pages", 1109000), ("Pages stored in compressor", 1100000),
+        ("Pages occupied by compressor", 420000), ("Decompressions", 60123456), ("Compressions", 90123456),
+        ("Pageins", 20123456), ("Pageouts", 345678), ("Swapins", 1234567), ("Swapouts", 2345678)))
+RATES = ("pageins", "swapins", "swapouts", "compressions", "decompressions")
 
 
 def _write(root, files):
@@ -88,11 +126,78 @@ def test_macos_reads_reclaimable_pages_and_only_the_kernels_critical_level(monke
     assert host_memory.physical_memory() is None
 
 
+@pytest.mark.parametrize("text, total, available, figures", [
+    (VM_STAT_16K, 128 * GIB, 16384 * (1620420 + 2454324 + 412516),
+     (16384 * (1620420 + 412516 + 1968917), 16384 * 1968917, 16384 * 523644, 16384 * 1135366)),
+    (VM_STAT_4K, 8 * GIB, 4096 * (13000 + 610000 + 9000),
+     (4096 * (13000 + 9000 + 150000), 4096 * 150000, 4096 * 420000, 4096 * 1100000)),
+], ids=["apple-silicon-16k-capture", "4k-pages"])
+def test_macos_keeps_measurement_figures_from_the_same_two_reads(monkeypatch, request, text, total, available,
+                                                                 figures):
+    """Issue #3397 is decided on numbers: the vm_stat and level reads the reading already makes also give, for
+    measurement only, the file-bounded upper estimate beside today's available (free + speculative + the smaller
+    of inactive and file-backed pages), file-backed pages, the compressor's occupancy and the level in words.
+    Nothing more is run. A line this host does not print, or an unreadable level, is unknown, never 0, and
+    today's reading stays what it was."""
+    answers = {"hw.memsize": f"{total}\n", "kern.memorystatus_vm_pressure_level": "2\n", "/usr/bin/vm_stat": text}
+    calls = []
+    host_memory._darwin_total.cache_clear()
+    request.addfinalizer(host_memory._darwin_total.cache_clear)
+
+    def native(argv):
+        calls.append(argv[-1])
+        if answers[argv[-1]] is None:
+            raise subprocess.CalledProcessError(1, argv)
+        return answers[argv[-1]]
+
+    monkeypatch.setattr(host_memory, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(host_memory, "_native_output", native)
+    memory = host_memory.physical_memory()
+    assert memory == MemorySnapshot(total, available, False), "today's reading: free + inactive + speculative"
+    assert calls == ["hw.memsize", "/usr/bin/vm_stat", "kern.memorystatus_vm_pressure_level"], "no extra probe"
+    assert memory.vm.measurement() == {
+        "pressure_level": "warn", "file_bounded_upper_bytes": figures[0], "file_backed_bytes": figures[1],
+        "compressor_occupied_bytes": figures[2], "compressor_stored_bytes": figures[3],
+        "rate_interval_sec": None, "rates_bytes_per_sec": dict.fromkeys(RATES)}
+    answers["/usr/bin/vm_stat"] = "".join(line + "\n" for line in text.splitlines() if not line.startswith((
+        "File-backed", "Pages stored", "Pages occupied", "Swapins")))
+    answers["kern.memorystatus_vm_pressure_level"] = None
+    older = host_memory.physical_memory()
+    assert older == MemorySnapshot(total, available, None)
+    unknown = older.vm.measurement(memory.vm)
+    assert (unknown["pressure_level"], unknown["rates_bytes_per_sec"]["swapins"]) == ("unknown", None)
+    assert [unknown[key] for key in ("file_bounded_upper_bytes", "file_backed_bytes", "compressor_occupied_bytes",
+                                     "compressor_stored_bytes")] == [None] * 4
+
+
+def test_rates_are_per_second_between_two_readings_and_a_counter_that_went_back_has_none():
+    """The paging counters are cumulative since boot: a rate is the bytes one moved per second of monotonic time
+    between two readings of one process. A counter that went down (a reset or wrap) or that one side does not
+    print has no rate this interval, never a negative or a huge one, while an unmoved one is a measured 0; no
+    earlier reading, or one stamped later, gives no interval. With fewer inactive than file-backed pages the
+    upper estimate takes the inactive ones."""
+    def vm(at, **counters):
+        pages = {"Pages free": 1, "Pages speculative": 2, "Pages inactive": 3, "File-backed pages": 5, **counters}
+        return host_memory.DarwinVM(4096, pages, 4, at)
+
+    before = vm(100.0, Pageins=100, Swapins=50, Swapouts=7, Compressions=1000, Decompressions=900)
+    after = vm(110.0, Pageins=120, Swapins=40, Compressions=1000, Decompressions=950)
+    figures = after.measurement(before)
+    assert (figures["pressure_level"], figures["file_bounded_upper_bytes"], figures["rate_interval_sec"]) == (
+        "critical", 4096 * (1 + 2 + 3), 10.0)
+    assert figures["rates_bytes_per_sec"] == {
+        "pageins": 2 * 4096, "swapins": None, "swapouts": None, "compressions": 0, "decompressions": 5 * 4096}
+    for earlier in (None, after):
+        figures = before.measurement(earlier)
+        assert (figures["rate_interval_sec"], figures["rates_bytes_per_sec"]) == (None, dict.fromkeys(RATES))
+
+
 def test_windows_reads_psutil_and_without_it_memory_is_unknown(monkeypatch):
     monkeypatch.setattr(host_memory, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(
         virtual_memory=lambda: SimpleNamespace(total=65536, available=24576)))
     assert host_memory.physical_memory() == MemorySnapshot(65536, 24576)
+    assert host_memory.physical_memory().vm is None, "macOS's measurement means nothing here: absent"
     monkeypatch.setitem(sys.modules, "psutil", None)  # the import fails
     assert host_memory.physical_memory() is None
 
@@ -107,6 +212,7 @@ def test_linux_reads_the_host_until_a_cgroup_on_its_path_sets_a_limit(linux):
                  **{f"sys/fs/cgroup/{path}/memory.max": "max\n" for path in (
                      "user.slice", "user.slice/user-1000.slice", "user.slice/user-1000.slice/session-2.scope")})
     assert host_memory.physical_memory() == HOST
+    assert host_memory.physical_memory().vm is None, "macOS's measurement means nothing here: absent"
     edit(**{"proc/self/cgroup": None})
     assert host_memory.physical_memory() == HOST
     edit(**{"proc/self/cgroup": "0::/user.slice/user-1000.slice/session-2.scope\n"},

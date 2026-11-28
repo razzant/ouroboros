@@ -167,7 +167,7 @@ def test_both_custody_surfaces_see_the_same_live_task_set(tmp_path, monkeypatch,
     try:
         sm._periodic_supervisor_maintenance([0.0], [time.time()])
         assert entered.wait(2)
-        assert [thread.name for thread in threads if thread.name not in {"cold-custody", "schedule-admission", "subscription-census"}] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "custody-maintenance"]
+        assert [thread.name for thread in threads if thread.name not in {"cold-custody", "schedule-admission", "subscription-census"}] == ["cancel_intent_sweep", "terminal_delivery_replay", "question_delivery_replay", "pause_notice_replay", "abandoned_usage_reconciliation", "post_task_synthesis_recovery", "wal_checkpoint_look", "custody-maintenance"]
         assert threads[0].is_alive(), "the 20 s sweep is still inside its delayed work"
         next(thread for thread in threads if thread.name == "custody-maintenance").join(5)
         assert seen["processes"] is seen["delegated"] is sm._live_task_ids

@@ -848,14 +848,18 @@ def test_browse_fades_only_clipped_prose_and_keeps_the_detail_door(skills_browse
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": 390, "height": 844})
+        # Synthetic copy above the 600 characters that make a card's purpose a preview, set in narrow letters so it
+        # takes 12 lines in the 390 px column and 7 in the 620 px one (measured on both engines): it stays clipped at
+        # the first width even 6 % narrower in the glyphs, and fits the 8-line fold at the second even 20 % wider (a
+        # Linux runner's fonts), so neither assertion stands on a font's exact advance widths.
         description = (
-            "Check the forecast before heading out. Compare the next few hours to find a dry stretch for a walk, "
-            "or look up the evening forecast in another town before catching a train. The daily view shows when "
-            "the chance of rain rises, while the hourly view helps decide whether to wait it out. See wind and "
-            "temperature alongside the rain forecast before heading to the coast. Ask for a second place to compare "
-            "conditions on either end of a longer trip. A morning summary puts the coldest hour and any change in "
-            "wind direction beside the day's high, so there's time to change plans before leaving the house. "
-            "Save those two places for the next trip."
+            'Rain, wind, sun and frost, in one list. Tilt it to see an hour, a day or a week. It will tell you if'
+            ' it will rain on a trip, a hill hike, a ride in, or a run. Add a few more towns to fill the list, '
+            'till all of it fits in a line. Fit it all in a tile: it is all in it, in a still, thin, tidy list. '
+            'It is fine to flit in and out: it still fills in a trice. Lift a line to see its fill, its lift, its'
+            ' tilt, its limit, its high and its low, hit it twice to list it. It will tell the first light, the '
+            'last light and the tide, till it is all in, it is all fit, it is all in line. It is fit to ride with'
+            ' a kit, a lid, a ribbon and a mitt.'
         )
         catalog = copy.deepcopy(CATALOG)
         catalog["starter"] = {}

@@ -182,11 +182,8 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         return
     if task_attempt < 1 or call_attempt < 1:
         return
-    # The turn's observer stamps dispatch on this frame or an earlier one (a send observed, or an
-    # unobserved call finished), so any frame of the call publishes what is pending; nothing pending is free.
-    from ouroboros.update_generation_facts import publish_pending_dispatch
-
-    publish_pending_dispatch()
+    # The turn's observer stamped its first dispatch in memory (update_generation_facts); the
+    # display-projection duty publishes it off this loop.
     receipt = evt.get("direct_turn")
     if isinstance(receipt, dict):  # the owner turn's receipt rides its first dispatch frame by value
         from supervisor.active_activity import record_direct_turn
@@ -226,7 +223,7 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     }
     if phase not in {"observed", "dispatched"}:
         # A call opened (its reservation is an open ledger row) or closed: the root's live cost figure is
-        # read again at the next flush, so the card says "up to" while the call is in flight (RV_MAIN M7).
+        # read again by the next projection pass, so the card says "up to" while the call is in flight (RV_MAIN M7).
         root_id = (meta.get("task") or {}).get("root_task_id") if isinstance(meta, dict) else None
         LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), root_id or evt.get("root_task_id") or task_id)
     in_call = isinstance(active, dict) and all(active.get(key) == value for key, value in identity.items())

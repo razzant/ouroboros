@@ -57,6 +57,7 @@ import time
 from typing import Any, Dict, Iterator, Optional, Tuple
 
 KINDS = {"current.sqlite": "current", "dialog.sqlite": "dialog", "usage.sqlite": "usage"}
+JOURNAL = "store_sites.jsonl"  # the ``logs/`` journal of the site tables (server_liveness) and checkpoint passes
 # The frames the site skips: the store transport, not the owner that opened the transaction.
 _STORE_FRAMES = frozenset({"store.py", "store_timing.py", "store_hot_facts.py", "store_task_cards.py", "task_store.py",
                            "dialogue_store.py", "usage_store.py", "store_capture.py", "contextlib.py"})

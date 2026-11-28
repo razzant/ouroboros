@@ -776,10 +776,21 @@ def test_a_recurring_step_failure_backs_off_to_powers_of_two_and_reports_recover
     assert all(r.exc_info for r in caplog.records if "failure" in r.getMessage() and "recovered" not in r.getMessage())
 
 
+def _rows_written(sm) -> None:
+    """The stall rows are captured on the tick and written by the display-projection pass that tick starts:
+    wait for that pass, then for the next tick's, which writes what a pass that ended meanwhile queued."""
+    from ouroboros import display_projections
+
+    _wait_until(lambda: not display_projections.LATCH.locked())
+    sm._periodic_supervisor_maintenance([time.time()], [time.time()])
+    _wait_until(lambda: not display_projections.LATCH.locked() and not sm._DUTIES)
+
+
 def test_a_due_cadence_finding_its_latch_held_journals_the_duty_stall_with_its_stack(monkeypatch, journal):
     """An off-loop pass that outlives its own cadence is a host duty stall: the next due tick
-    journals it once with the pass thread's stack (its threshold is the pass's cadence, never
-    the loop deadline), and the pass's end journals the closing row."""
+    captures it once with the pass thread's stack (its threshold is the pass's cadence, never
+    the loop deadline) and the display-projection pass writes it; the pass's end queues the
+    closing row behind it."""
     import ouroboros.server_maintenance as sm
     from ouroboros import update_generation_facts
 
@@ -805,11 +816,12 @@ def test_a_due_cadence_finding_its_latch_held_journals_the_duty_stall_with_its_s
         assert not journal and not observed, "...but the pass has not run a cadence yet: a due tick alone is no stall"
         sm._DUTIES[id(sm._CUSTODY_SWEEP_LOCK)]["since"] -= 601  # now it has outlived its cadence
         sm._periodic_supervisor_maintenance(last_custody, last_reconcile)
+        assert observed == ["custody-maintenance"], "counted at detection, on the tick"
         sm._periodic_supervisor_maintenance(last_custody, last_reconcile)  # journaled once, not per tick
     finally:
         release.set()
         _wait_until(lambda: not sm._CUSTODY_SWEEP_LOCK.locked())
-        _wait_until(lambda: any(row["type"] == "host_duty_stall_end" for _p, row in journal))
+        _rows_written(sm)
     kinds = [row["type"] for _p, row in journal]
     assert kinds == ["host_duty_stall", "host_duty_stall_end"], kinds
     stall = journal[0][1]
@@ -846,12 +858,14 @@ def test_a_reconcile_pass_just_started_after_an_old_end_stamp_is_not_a_stall(mon
         assert not journal, journal
         sm._DUTIES[id(sm._RECONCILE_SWEEP_LOCK)]["since"] -= 301
         sm._periodic_supervisor_maintenance(last_custody, last_reconcile)
+        _wait_until(lambda: journal)
         assert [row["type"] for _p, row in journal] == ["host_duty_stall"]
         assert journal[0][1]["duty"] == "reconcile-maintenance" and journal[0][1]["running_sec"] >= 300
     finally:
         release.set()
         _wait_until(lambda: not sm._RECONCILE_SWEEP_LOCK.locked())
-        _wait_until(lambda: any(row["type"] == "host_duty_stall_end" for _p, row in journal))
+        _rows_written(sm)
+    assert [row["type"] for _p, row in journal] == ["host_duty_stall", "host_duty_stall_end"]
 
 
 def test_a_finished_pass_never_drops_the_duty_its_successor_registered(monkeypatch, journal):
@@ -894,10 +908,12 @@ def test_a_finished_pass_never_drops_the_duty_its_successor_registered(monkeypat
         successor["since"] -= 601
         last_custody[0] = 0.0
         sm._periodic_supervisor_maintenance(last_custody, last_reconcile)
+        _wait_until(lambda: journal)
         assert [row["type"] for _p, row in journal] == ["host_duty_stall"]
     finally:
         first_may_return.set()
         second_release.set()
         _wait_until(lambda: not sm._CUSTODY_SWEEP_LOCK.locked())
-        _wait_until(lambda: any(row["type"] == "host_duty_stall_end" for _p, row in journal))
+        _rows_written(sm)
+    assert [row["type"] for _p, row in journal] == ["host_duty_stall", "host_duty_stall_end"]
     assert not sm._DUTIES, "the successor closed its own duty"

@@ -18,13 +18,13 @@ def _heartbeat_ctx(tmp_path, task):
 
 
 def _beat_flush_beat(handler, task_id, ctx, calls=None):
-    """A root's first heartbeat carries no figure and reads nothing; the turn's usage flush
+    """A root's first heartbeat carries no figure and reads nothing; the display-projection pass
     reads it once (``LIVE_ROOT_COSTS``); the next heartbeat carries it, reading nothing."""
-    from ouroboros.server_liveness import flush_budget_projection
+    from ouroboros.display_projections import project, take
 
     handler({"task_id": task_id, "phase": "running", "ts": _now_iso()}, ctx)
     assert calls is None or calls == [], "the heartbeat itself read the ledger"
-    flush_budget_projection(ctx)
+    project(take(ctx))
     handler({"task_id": task_id, "phase": "running", "ts": _now_iso()}, ctx)
 
 
@@ -110,9 +110,9 @@ def test_child_heartbeat_does_not_read_or_publish_live_cost(tmp_path, monkeypatc
         "parent_task_id": "root-hb", "delegation_role": "subagent",
     })
     _handle_task_heartbeat({"task_id": "child-hb", "phase": "running", "ts": _now_iso()}, ctx)
-    from ouroboros.server_liveness import flush_budget_projection
+    from ouroboros.display_projections import project, take
 
-    flush_budget_projection(ctx)  # a child marks no root: the flush reads nothing either
+    project(take(ctx))  # a child marks no root: the pass reads nothing either
     assert calls == []
     assert "cost_accounting_status" not in pushed[0]
     assert "accounted_upper_bound_usd_with_children" not in pushed[0]

@@ -30,7 +30,7 @@ log = logging.getLogger("ouroboros.delegate_custody")
 
 def _mark_root_cost(drive_root: Any, custody: Any) -> None:
     """A custody transition this process made (a run started or settled): the root's live cost
-    figure is read again at the next supervisor flush (RV_MAIN M7). In a worker the memo is idle."""
+    figure is read again by the next display-projection pass (RV_MAIN M7). In a worker the memo is idle."""
     from ouroboros.cost_projection import LIVE_ROOT_COSTS
 
     LIVE_ROOT_COSTS.mark(drive_root, getattr(custody, "root_task_id", "") or getattr(custody, "task_id", ""))

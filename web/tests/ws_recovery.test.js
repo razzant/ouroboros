@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { WS, decide, decideServedPage, pageOwnedByCore, RECOVERY_HEALTHY_PROBE_LIMIT, SERVER_ANSWERS_EVENT } from '../modules/ws.js';
+import {
+    WS, decide, decideServedPage, pageOwnedByCore, RECOVERY_HEALTHY_PROBE_LIMIT, SERVER_ANSWERS_EVENT,
+    WATCHDOG_CLOSE_CODE, watchdogCloseReason,
+} from '../modules/ws.js';
 
 // Behavior coverage for the served-SHA reconciliation contract (netres Lane B):
 // one SSOT decision drives both the post-open refresh and the socket-down
@@ -1261,4 +1264,106 @@ test('the replacement socket uses its own scope, not a late frame from the previ
         assert.equal(next.sent.length, 1);
         assert.equal(ws.canShowSavedProfile(), true, 'the current matching socket restores preview eligibility');
     } finally { await teardown(ws); }
+});
+
+// ---------------------------------------------------------------------------
+// The silence watchdog: its close names itself to the core (gateway/ws.py).
+// ---------------------------------------------------------------------------
+
+// A hand-driven watchdog: the interval callback and the clock are the test's, everything else is the real WS.
+function watchdogHarness({ hidden = false, refuse = 0 } = {}) {
+    const saved = { setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval, now: Date.now };
+    const clock = { now: 1_000_000 };
+    const ticks = [];
+    globalThis.setInterval = (fn, ms) => { ticks.push({ fn, ms }); return ticks.length; };
+    globalThis.clearInterval = () => {};
+    Date.now = () => clock.now;
+    globalThis.document = { getElementById: () => null, hidden, visibilityState: hidden ? 'hidden' : 'visible' };
+    const ws = new WS('ws://unused');
+    ws.connect();
+    const socket = FakeSocket.instances.at(-1);
+    socket.closes = [];
+    socket.close = (...args) => {
+        socket.closes.push(args);
+        if (socket.closes.length <= refuse) throw new SyntaxError('refused by this runtime');
+    };
+    socket.readyState = FakeSocket.OPEN;
+    socket.onopen();
+    const tick = (at) => { clock.now = at; ticks.at(-1).fn(); };
+    const restore = () => {
+        globalThis.setInterval = saved.setInterval;
+        globalThis.clearInterval = saved.clearInterval;
+        Date.now = saved.now;
+    };
+    return { ws, socket, clock, ticks, tick, restore };
+}
+
+function reasonFields(reason) {
+    return Object.fromEntries(reason.split(' ').map(token => token.split('=')));
+}
+
+test('the watchdog closes a silent socket with its code and a reason naming silence, tick gap and visibility', async () => {
+    installEnv([{ body: { sha: 'abc' } }]);
+    const h = watchdogHarness({ hidden: true });
+    const closes = [];
+    h.ws.on('close', () => closes.push(true));
+    try {
+        assert.equal(h.ticks.at(-1).ms, 10000);
+        h.tick(1_010_000);
+        h.tick(1_020_000);
+        assert.deepEqual(h.socket.closes, [], 'twenty silent seconds close nothing');
+        h.tick(1_110_000);  // the page's timers were suspended for 90 s
+        assert.equal(h.socket.closes.length, 1);
+        const [code, reason] = h.socket.closes[0];
+        assert.equal(code, WATCHDOG_CLOSE_CODE);
+        assert.equal(WATCHDOG_CLOSE_CODE, 4408);
+        assert.ok(new TextEncoder().encode(reason).length <= 123, reason);
+        assert.deepEqual(reasonFields(reason), { silent_ms: '110000', tick_gap_ms: '90000', hidden: '1' });
+        // Recovery is unchanged: the browser's close event enters the ordinary reconnect path.
+        h.socket.readyState = FakeSocket.CLOSED;
+        h.socket.onclose();
+        assert.deepEqual(closes, [true]);
+        assert.notEqual(h.ws._reconnectTimer, null, 'a reconnect is scheduled as before');
+        assert.equal(h.ws.reconnectDelay, 1500, 'with the same backoff');
+    } finally {
+        h.restore();
+        await teardown(h.ws);
+    }
+});
+
+test('a visible page reports hidden=0, and a runtime that refuses the reason still sends the code', async () => {
+    installEnv([{ body: { sha: 'abc' } }]);
+    const h = watchdogHarness({ hidden: false, refuse: 1 });
+    try {
+        h.tick(1_050_000);
+        assert.equal(h.socket.closes.length, 2);
+        assert.equal(reasonFields(h.socket.closes[0][1]).hidden, '0');
+        assert.deepEqual(h.socket.closes[1], [WATCHDOG_CLOSE_CODE], 'the code alone still names the watchdog');
+    } finally {
+        h.restore();
+        await teardown(h.ws);
+    }
+});
+
+test('a socket that keeps receiving frames is never closed by the watchdog', async () => {
+    installEnv([{ body: { sha: 'abc' } }]);
+    const h = watchdogHarness();
+    try {
+        for (let at = 1_000_000; at <= 1_600_000; at += 10_000) {
+            if (at % 30_000 === 0) {
+                h.clock.now = at;
+                h.socket.onmessage({ data: JSON.stringify({ type: 'heartbeat' }) });
+            }
+            h.tick(at);
+        }
+        assert.deepEqual(h.socket.closes, [], 'ten minutes of 30 s heartbeats: no close');
+    } finally {
+        h.restore();
+        await teardown(h.ws);
+    }
+});
+
+test('watchdogCloseReason clamps and rounds into three bounded integers', () => {
+    assert.equal(watchdogCloseReason(45000.6, -3, 0), 'silent_ms=45001 tick_gap_ms=0 hidden=0');
+    assert.equal(watchdogCloseReason(1e12, 1e12, true).length <= 123, true);
 });

@@ -888,8 +888,9 @@ def _launcher_no_real_network(request):
 @pytest.fixture(autouse=True)
 def _isolate_restart_generation(monkeypatch):
     """Panic and parent observation belong to one process generation, not later tests;
-    so do a returning stop's named queue, the launch/schedule process memory and a launcher's Quit."""
-    from ouroboros import delegate_recovery, launcher_bootstrap, launcher_server_reaper, server_control
+    so do a returning stop's named queue, the launch/schedule process memory, the WAL checkpoint
+    looks' memory and a launcher's Quit."""
+    from ouroboros import delegate_recovery, launcher_bootstrap, launcher_server_reaper, server_control, store_checkpoint
     from supervisor import dispatch_choice, pool_admission, queue, schedule_occurrence, worker_assignment
 
     monkeypatch.setattr(server_control, "_restart_successors", [])
@@ -904,6 +905,9 @@ def _isolate_restart_generation(monkeypatch):
     monkeypatch.setattr(dispatch_choice, "_ADMITTED", {})
     monkeypatch.setattr(pool_admission, "_READY", {"seq": 0, "generation": None, "rss_bytes": None})
     monkeypatch.setattr(pool_admission, "_FACTS", {})  # the last reading and the last fresh size: this test's own
+    monkeypatch.setattr(pool_admission, "_VM", {})  # the last macOS VM sample, the base of the next reading's rates
+    monkeypatch.setattr(store_checkpoint, "_LOOKS", {"looks": 0, "max": {}})  # the WAL looks' window: this test's own
+    monkeypatch.setattr(store_checkpoint, "_SEEN", {})  # the job row's baselines its looks read, per store path
 
 
 @pytest.fixture(autouse=True)
@@ -922,6 +926,25 @@ def _reset_custody_memo_between_tests():
     delegate_custody._CUSTODY.clear()
     delegate_activity.reset_process_memo()
     custody_owed._FACTS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_display_projection_memory_between_tests(monkeypatch):
+    """The display-projection duty's process memory belongs to the test that made it: the stall rows a
+    watchdog queued and an after-update observation not yet published (an owner turn's first dispatch).
+    Left behind, they make the next test's maintenance tick find that duty due and start a pass that
+    test never set up (``display_projections``); so do the loop context a supervisor run bound and the
+    close an exit's last pass made (a restart census), which would leave every later look starting
+    nothing. Read from ``sys.modules``: a test that never imported them has nothing to reset, and
+    importing them here would load the server's process facts."""
+    from collections import deque
+
+    if (projections := sys.modules.get("ouroboros.display_projections")) is not None:
+        monkeypatch.setattr(projections, "_ROWS", deque())
+        monkeypatch.setattr(projections, "_CONTEXT", None)
+        monkeypatch.setattr(projections, "_CLOSED", threading.Event())
+    if (facts := sys.modules.get("ouroboros.update_generation_facts")) is not None:
+        monkeypatch.setattr(facts, "_pending", False)
 
 
 @pytest.fixture(autouse=True)
@@ -1623,6 +1646,10 @@ _DETACHED_THREAD_NAME_PREFIXES = (
     # snapshot executor — kept process-global on purpose so a retried completion JOINS an
     # in-flight daemon read (issue #464) instead of starting a second blocked thread.
     "onboarding-snapshot",
+    # ouroboros/server_auth.py: the network gate's process-global reader thread, idle between
+    # reads — every scope's settings read and the first session-key read run there, in order,
+    # off the ASGI loop, and every later request reuses it.
+    "auth-gate-reader",
     # ouroboros/process_scope.py: the task-end cleanup a terminal result write starts
     # (``note_task_terminal_transition``) runs outside the store transaction and is never
     # joined by the writer; a test that must observe its outcome calls

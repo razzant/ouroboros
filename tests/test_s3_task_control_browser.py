@@ -470,14 +470,20 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 _scrolls_settled(page)
                 trigger.click()
                 menu.wait_for(state="visible", timeout=10_000)
+                # The menu's rows scroll inside its `.ui-popup-body` (ui_interactions.js popupScrollBody, #4177);
+                # the portal itself is the height-clamped box.
+                body = menu.locator(".ui-popup-body")
                 short_metrics = menu.evaluate(
                     """
-                    node => ({
-                        clientHeight: node.clientHeight,
-                        scrollHeight: node.scrollHeight,
-                        top: node.getBoundingClientRect().top,
-                        bottom: node.getBoundingClientRect().bottom,
-                    })
+                    node => {
+                        const body = node.querySelector('.ui-popup-body');
+                        return {
+                            clientHeight: body.clientHeight,
+                            scrollHeight: body.scrollHeight,
+                            top: node.getBoundingClientRect().top,
+                            bottom: node.getBoundingClientRect().bottom,
+                        };
+                    }
                     """,
                 )
                 assert short_metrics["scrollHeight"] > short_metrics["clientHeight"], short_metrics
@@ -485,7 +491,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 assert short_metrics["bottom"] <= 142.5, short_metrics
                 items = menu.locator(".task-control-item")
                 for index in range(items.count()):
-                    menu.evaluate(
+                    body.evaluate(
                         """
                         (node, itemIndex) => {
                             node.scrollTop = node.querySelectorAll('.task-control-item')[itemIndex]
@@ -509,7 +515,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                         }
                         """,
                     ) is True
-                assert menu.evaluate("node => node.scrollTop") > 0
+                assert body.evaluate("node => node.scrollTop") > 0
                 page.screenshot(
                     path=str(diagnostic_directory(data_dir.parent, "task-control", publish=True) / "s3-chat-control-short-scroll.png"),
                     full_page=False,

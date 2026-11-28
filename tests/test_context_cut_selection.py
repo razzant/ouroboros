@@ -36,7 +36,12 @@ def test_cut_any_kind_oldest_first_and_exact(tmp_path, shape):
     kept, receipt = physical_window_cut(rows, drive_root=tmp_path, task_id=shape, measure=measure, usable=usable)
     assert receipt and tokens(kept) <= usable
     positions = receipt['positions']
-    assert positions == list(range(2, max(positions)+1)), 'any kind leaves in strictly oldest order'
+    if shape == 'mixed':  # the mind's prose leaves first, oldest first; owner words and delivered rows only after it
+        prose = [i for i in range(2, len(rows) - 1) if rows[i]['role'] == 'assistant']
+        spent = [i for i in positions if rows[i]['role'] == 'assistant']
+        assert spent == prose[:len(spent)] and (spent == prose or all(rows[i]['role'] == 'assistant' for i in positions))
+    else:
+        assert positions == list(range(2, max(positions)+1)), 'one kind leaves in strictly oldest order'
     assert kept[:2] == rows[:2] and kept[-1] == rows[-1]
     assert json.loads(read_actor_source_bytes(tmp_path, shape, receipt['source'])) == original == rows
     assert len(calls) <= math.ceil(math.log2(len(rows))) + 2, f'{len(calls)} seals must be logarithmic'
@@ -143,7 +148,10 @@ def test_checkpoint_serializes_non_json_metadata_without_losing_whole_rows(tmp_p
 
 
 @pytest.mark.parametrize('shape', ['meeting', 'autonomous', 'chat'])
-def test_gemini_real_layout_continues_non_owner_bulk(host_world, packages, shape):
+def test_gemini_continues_non_owner_bulk(host_world, packages, shape):
+    """A Gemini call continues by moving old bulk to its exact reader. The replies here are untyped prose of the mind,
+    which leaves before the owner's questions; a call's completed spoken replies are typed outward dialogue
+    (``owner_dialogue``) and leave with the questions, oldest first, like any dialogue."""
     from ouroboros.realtime_setup import loaded_provider, session_candidate
     from ouroboros.contracts.live_conversation import LiveOptions
     host = host_world.host
@@ -165,11 +173,17 @@ def test_gemini_real_layout_continues_non_owner_bulk(host_world, packages, shape
     assert any(row['rung'] == 'physical_cut' for row in evidence['recovery']), evidence
     assert tail in host.messages
     remaining = [row for row in host.messages if row in old]
-    assert remaining == old[len(old)-len(remaining):]
+    for kind in ({'owner_words'}, {None}):  # within each kind the oldest leave first; replies before questions
+        rest, whole = ([r for r in rows if r.get('_host_context_kind') in kind] for rows in (remaining, old))
+        assert rest == whole[len(whole)-len(rest):]
+    replies = [r for r in old if r.get('_host_context_kind') is None]
+    assert len([r for r in remaining if r.get('_host_context_kind') == 'owner_words']) == len(old) - len(replies) or not any(
+        r in remaining for r in replies), 'an owner question leaves only after every reply has left'
+
 
 
 from dataclasses import replace
-from ouroboros.context_renewal import _position_runs
+from ouroboros.context_renewal import _position_runs, physical_cut_record
 from ouroboros.context_fit import estimate_context_prompt_tokens
 from ouroboros.contracts.live_conversation import LiveOptions
 
@@ -185,11 +199,7 @@ def test_smallest_cut_survives_image_batch_discontinuity(tmp_path, record_proper
     raw = json.dumps(rows, ensure_ascii=False, sort_keys=True, default=str).encode()
     source = actor_source_reference(category="context_checkpoints",source_id=sha256(raw).hexdigest(),data=raw,extension="json")
     def trial(positions):
-        address=bound_host_row("context_physical_cut", (
-            "[Host record: this window's physical cut, not a summary or an authored fold.] "
-            f"Oldest whole rows left the working view: zero-based positions {_position_runs(positions)}. "
-            "Newest owner turn, assignment, core, notes and current tail stay. "
-            f"Read the exact original rows in this checkpoint JSON array: {json.dumps(source, sort_keys=True)}."))
+        address=physical_cut_record(positions, set(), source)
         return [address if i==positions[0] else row for i,row in enumerate(rows) if i==positions[0] or i not in positions]
     def measure(view):
         return estimate_context_prompt_tokens(rows_for_engine(view,vision=True,fresh=True,owner_mode=mode))
@@ -231,11 +241,7 @@ def test_native_envelope_does_not_skip_smaller_fitting_image_cut(host_world, pac
     raw=json.dumps(rows,ensure_ascii=False,sort_keys=True,default=str).encode()
     source=actor_source_reference(category='context_checkpoints',source_id=sha256(raw).hexdigest(),data=raw,extension='json')
     def trial(positions):
-        address=bound_host_row('context_physical_cut', (
-            "[Host record: this window's physical cut, not a summary or an authored fold.] "
-            f'Oldest whole rows left the working view: zero-based positions {_position_runs(positions)}. '
-            'Newest owner turn, assignment, core, notes and current tail stay. '
-            f'Read the exact original rows in this checkpoint JSON array: {json.dumps(source,sort_keys=True)}.'))
+        address=physical_cut_record(positions, set(), source)
         return [address if i==positions[0] else row for i,row in enumerate(rows) if i==positions[0] or i not in positions]
     def measure(view):
         return measure_session_wire(host,host.plan,view,host.schemas,provider['session'],LiveOptions())[1].prompt_tokens_estimate
@@ -271,3 +277,25 @@ def test_superseded_feedback_leaves_but_current_notices_and_decisions_stay(tmp_p
 def test_position_runs_preserve_every_exact_index():
     assert _position_runs([2,3,4,7,9,10]) == '2-4, 7, 9-10'
     assert _position_runs(list(range(2,336))) == '2-335'
+
+
+def test_the_cut_record_names_the_order_and_costs_a_tight_window_no_more_than_before(tmp_path):
+    """Every candidate pays for the cut record's words, so they can decide admission at a tight window. With one
+    eligible row the cut is admitted at the budget the record allowed before it named the order (293 estimated tokens
+    on this fixture), and it still says the owner's words leave last."""
+    from hashlib import sha256
+    from ouroboros.artifacts import actor_source_reference
+    rows = [{'role': 'system', 'content': 'Core.'}, {'role': 'user', 'content': 'The assignment.'},
+            bound_host_row('owner_dialogue', 'Earlier outward response. ' * 700),
+            bound_host_row('owner_words', 'Newest correction.'), {'role': 'assistant', 'content': 'Current exchange.'}]
+    raw = json.dumps(rows, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')
+    source = actor_source_reference(category='context_checkpoints', source_id=sha256(raw).hexdigest(), data=raw,
+                                    extension='json')
+    earlier = ("[Host record: this window's physical cut, not a summary or an authored fold.] "
+               "Oldest whole rows left the working view: zero-based positions 2. "
+               "Newest owner turn, assignment, core, notes and current tail stay. "
+               f"Read the exact original rows in this checkpoint JSON array: {json.dumps(source, sort_keys=True)}.")
+    usable = tokens([*rows[:2], bound_host_row('context_physical_cut', earlier), *rows[3:]])
+    kept, receipt = physical_window_cut(rows, drive_root=tmp_path, task_id='tight', measure=tokens, usable=usable)
+    assert receipt and receipt['positions'] == [2] and tokens(kept) <= usable
+    assert "owner's words last" in kept[2]['content']

@@ -10,7 +10,6 @@ hidden room or a failed page ends that reach, and a later read never resumes it.
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import time
@@ -19,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from ouroboros.gateway.history_paging import _ARRIVAL_SEARCH_ROWS, _RECENT_WINDOW_ROWS
+from ouroboros.gateway.history_paging import _ARRIVAL_SEARCH_ROWS, _RECENT_WINDOW_ROWS, _unpack_cursor
 from tests.test_project_unread_read_band_browser import PANEL, _client, _unread, _wait_for
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES, _emit_ws_frame
@@ -61,13 +60,18 @@ def _buried_room(data, monkeypatch, project_id, children, chat_id=None):
     return chat_id, revision
 
 
+def _cursor(url):
+    """A history request's cursor as the server reads it back (``history_paging._unpack_cursor``: plain, or
+    deflated for an ``after`` cursor naming a window's held rows); None for a request without one."""
+    cursor = parse_qs(urlparse(url).query).get("cursor")
+    return _unpack_cursor(cursor[0]) if cursor else None
+
+
 def _cursor_kind(url):
     """The read a history request's cursor names: ``older`` walks a chain's pages, ``page`` reads one
     again, ``after`` takes what arrived since the window's newest read; None reads the newest page."""
-    cursor = parse_qs(urlparse(url).query).get("cursor")
-    if not cursor:
-        return None
-    return json.loads(base64.urlsafe_b64decode(cursor[0] + "=" * (-len(cursor[0]) % 4)))["kind"]
+    cursor = _cursor(url)
+    return cursor["kind"] if cursor else None
 
 
 class _Room:

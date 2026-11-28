@@ -992,8 +992,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
     persisted by the transport wrapper.  This prevents logical usage events,
     retries, and review aggregation from charging the same attempt twice.
     The persisted projection carries totals only; the per-root map is never written.
-    The ledger read is the writer's slim snapshot (``usage_writer_snapshot``): only what this
-    function persists is rendered; the loop's llm_usage path writes once per turn, direct callers on call.
+    The ledger read is the writer's slim snapshot (``usage_writer_snapshot``): only what this function
+    persists is rendered; the display-projection duty writes once per marked pass, direct callers on call.
 
     Writes are ordered by the ledger's ``(compaction_epoch, seq)`` marker, compared under STATE_LOCK:
     a lower epoch, or a same-epoch lower seq, is stale and skipped; an equal or higher marker writes.
@@ -1042,8 +1042,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
     # Ledger I/O is deliberately OUTSIDE STATE_LOCK: the lock stays
     # short-lived, and the validated-snapshot marker below preserves the old
     # serialization invariant without holding STATE_LOCK across a long read.
-    # A DISPLAY read (``allow_stale``: this runs on the supervisor loop once per turn with
-    # ``llm_usage`` events): a lagging snapshot carries its own lower marker, so it never regresses money.
+    # A DISPLAY read (``allow_stale``: the display-projection duty runs this off the loop, once per pass
+    # with a budget mark): a lagging snapshot carries its own lower marker, so it never regresses money.
     try:
         breakdown = usage_writer_snapshot(DRIVE_ROOT, allow_stale=True)
         total_limit = float(TOTAL_BUDGET_LIMIT or 0.0)
