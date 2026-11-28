@@ -28,7 +28,8 @@ clock alone. The look reads them before the job's row (``backlog``, ``maintenanc
 that many frames it opens no store, so a quiet install, or one whose stores keep a rollback journal, takes no store
 lock for it. The server's 20 s duty ``wal_checkpoint_look`` (``server_maintenance``) only asks the lane to look, and
 the lane looks again after each pass that left the job done (``maintenance._look_again``), spawning while it is due.
-A store a pass finds held (contention) keeps its last entry and so stays due; the pass says ``pending``.
+A store a pass finds held (contention, or SQLite's ``busy``: another checkpointer held the log) keeps its last entry
+and so stays due; the pass says ``pending``.
 
 A pass records, per store kind (``store_timing.KINDS``), SQLite's three numbers (``busy``; ``log``: frames in the
 log; ``checkpointed``: frames now in the database), the checkpoint's wall ``seconds`` and the ``wal`` it met
@@ -164,7 +165,9 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
     store's own connection (its tier, ``synchronous=FULL``); the row keeps per store the numbers and the log it saw.
     A store that cannot be opened or checkpointed keeps its error class there instead, at the log it met, so it is
     tried again when its log moves on, never on a clock. A store found held (contention, as ``maintenance._contention``
-    reads it) is no fault: it keeps the entry its last pass left, so it stays due, and the pass says ``pending``."""
+    reads it, or SQLite's ``busy``: another checkpointer held the log) is no fault: it keeps the entry its last pass
+    left, so it stays due, and the pass says ``pending``. The pass's row, SQLite's numbers included, is written before
+    the job's row, so a current store held past the wait (the job row's write refused) still leaves it."""
     from ouroboros import maintenance_jobs, store
     from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -183,6 +186,8 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
                 busy, frames, copied = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
                 facts = {"busy": busy, "log": frames, "checkpointed": copied,
                          "seconds": round(time.monotonic() - began, 3)}
+                if busy:  # another checkpointer (an inline one, a handoff) held the log: this pass copied nothing
+                    held.add(kind)
         except (sqlite3.Error, store.StoreError, OSError) as exc:
             facts = {"error": type(exc).__name__}
             if isinstance(exc, store.StoreBusy) or (isinstance(exc, sqlite3.Error) and store.busy(exc)):
@@ -191,11 +196,11 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
         if kind not in held:
             stores[kind] = {**facts, "wal": log, "at": utc_now_iso()}
     state = "pending" if held else "done"
-    if set(passed) - held:  # a held store alone changes no entry: nothing to write
-        maintenance_jobs.record(root, NAME, state=state, stores=stores)
-    if passed:  # the pass's own row, in the store-timing journal (module docstring)
+    if passed:  # the pass's own row (module docstring), before the job's row a held current store can refuse
         try:
             append_jsonl(root / "logs" / store_timing.JOURNAL, {"ts": utc_now_iso(), "type": NAME, "stores": passed})
         except OSError:
             logging.getLogger(__name__).warning("%s row not recorded", NAME, exc_info=True)
+    if set(passed) - held:  # a held store alone changes no entry: nothing to write
+        maintenance_jobs.record(root, NAME, state=state, stores=stores)
     return {"state": state, "items": len(passed)}

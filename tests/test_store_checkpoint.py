@@ -4,6 +4,7 @@ rests while nothing new was committed. The connection ceiling itself is held in 
 from __future__ import annotations
 
 import builtins
+import contextlib
 import io
 import json
 import os
@@ -58,6 +59,19 @@ def _passes(root):
     journal = root / "logs" / store_timing.JOURNAL
     lines = journal.read_text(encoding="utf-8").splitlines() if journal.exists() else []
     return [row for row in map(json.loads, lines) if row["type"] == store_checkpoint.NAME]
+
+
+def _dialog_writer(root):
+    """A connection to the dialog store held open, as the server holds one: no last close copies its log away."""
+    return store.connect(dialogue_store.path(root), dialogue_store.header_tier(root), wait_sec=5)
+
+
+def _commit(conn, frames=None, key="filler"):
+    """One commit through CONN leaving at least FRAMES (SQLite's own threshold) committed frames in its log."""
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                 (key, "x" * (4096 * (frames or store_checkpoint.inline_frames()))))
+    store.commit(conn)
 
 
 def test_a_backlog_past_sqlite_s_own_threshold_wakes_the_job_and_its_pass_copies_the_log(root):
@@ -191,6 +205,81 @@ def test_a_store_found_held_keeps_its_last_entry_and_stays_due(root, monkeypatch
     monkeypatch.setattr(store_journal, "root_stores", real)
     assert maintenance.run_job(root, store_checkpoint.NAME)["state"] == "done"
     assert _job(root)["stores"]["current"]["wal"] != before["stores"]["current"]["wal"]
+    assert not store_checkpoint.due(root, _job(root), {}, False)
+
+
+def test_a_log_another_checkpointer_holds_keeps_its_last_entry_and_stays_due(root):
+    """SQLite answers a PASSIVE checkpoint that meets another checkpointer (a commit's inline checkpoint, a handoff)
+    with ``busy`` 1 and -1 for both counts, raising nothing: it copied nothing. That store is held, as contention is:
+    it keeps the entry its last pass left, so it stays due, the pass says ``pending`` and its row carries SQLite's
+    numbers. The rival here is a real FULL checkpoint, which keeps the checkpoint lock while it waits for a reader
+    whose snapshot predates the backlog; once the reader lets go the rival copies the log and the next pass records
+    the store and rests. (A pass a reader leaves partial says ``busy`` 0 and is an ordinary pass: the reader test.)"""
+    path = dialogue_store.path(root)
+    rival_done = []
+
+    def rival():
+        with contextlib.closing(sqlite3.connect(path, isolation_level=None, timeout=60)) as conn:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:  # -1: the probe below held the checkpoint lock that instant
+                if conn.execute("PRAGMA wal_checkpoint(FULL)").fetchone()[1] != -1:
+                    rival_done.append(True)
+                    return
+
+    with contextlib.closing(_dialog_writer(root)) as writer, \
+            contextlib.closing(sqlite3.connect(path, isolation_level=None)) as reader, \
+            contextlib.closing(sqlite3.connect(path, isolation_level=None)) as probe:
+        _commit(writer, 8, key="before")
+        assert store_checkpoint.run(root, lambda: False)["state"] == "done"
+        before = _job(root)["stores"]["dialog"]
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM meta").fetchone()
+        _commit(writer)
+        seen = store.log_identity(path)[:2]
+        worker = threading.Thread(target=rival, daemon=True)
+        worker.start()
+        try:
+            deadline = time.monotonic() + 30
+            while probe.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()[0] != 1:
+                assert time.monotonic() < deadline and worker.is_alive(), "the rival never held the checkpoint lock"
+                time.sleep(0.01)
+            report = maintenance.run_job(root, store_checkpoint.NAME)
+        finally:
+            reader.execute("ROLLBACK")
+            worker.join(60)
+        assert rival_done and not worker.is_alive()
+        assert report["state"] == "pending" and _job(root)["stores"]["dialog"] == before
+        held = _passes(root)[-1]["stores"]["dialog"]
+        assert {key: held[key] for key in ("busy", "log", "checkpointed", "wal")} == {
+            "busy": 1, "log": -1, "checkpointed": -1, "wal": seen}, held
+        assert store_checkpoint.due(root, _job(root), {}, False), "the store another checkpointer held is due again"
+        assert maintenance.run_job(root, store_checkpoint.NAME)["state"] == "done"
+        dialog = _job(root)["stores"]["dialog"]
+        assert dialog["busy"] == 0 and dialog["wal"] == seen and dialog["checkpointed"] == dialog["log"] == seen[1]
+        assert not store_checkpoint.due(root, _job(root), {}, False)
+
+
+def test_a_pass_whose_job_row_write_is_refused_still_leaves_its_row_and_stays_due(root):
+    """The current store, which keeps the job's row, can be held past the child's wait (a long COMMIT) after the pass
+    copied the logs: the job-row write is refused (contention: ``pending``, the job stays due), and the pass's row of
+    the store-timing journal, written before it, stays. Once the store is free a healthy pass writes exactly one row
+    more and records the job, which rests."""
+    path = store.store_path(root)
+    _backlog(root)
+    seen = store.log_identity(path)[:2]
+    with contextlib.closing(sqlite3.connect(path, isolation_level=None)) as holder:
+        holder.execute("BEGIN IMMEDIATE")  # the job row's store, held
+        try:
+            with store.acquisition_budget(0):  # the refusal now, as the child's own wait would end in it
+                report = maintenance.run(root, lane="checkpoint")
+        finally:
+            holder.execute("ROLLBACK")
+    assert report["jobs"] == {store_checkpoint.NAME: {"state": "pending", "items": 0}}
+    rows = [row["stores"]["current"] for row in _passes(root)]
+    assert [row["wal"] for row in rows] == [seen] and rows[0]["checkpointed"] == rows[0]["log"] == seen[1], rows
+    assert _job(root) == {} and maintenance.due(root, lane="checkpoint") == [store_checkpoint.NAME]
+    assert maintenance.run(root, lane="checkpoint")["jobs"][store_checkpoint.NAME]["state"] == "done"
+    assert len(_passes(root)) == 2 and _job(root)["stores"]["current"]["wal"] == seen
     assert not store_checkpoint.due(root, _job(root), {}, False)
 
 
