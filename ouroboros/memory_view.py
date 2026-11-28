@@ -1083,14 +1083,20 @@ def _row_opening(item: Mapping[str, Any], what: str) -> str:
     return f"{item['head']} ({what}, {item['chars']} chars; opening, no retelling): " + " ".join(opening)[:160]
 
 
-def _rows_line(room: Mapping[str, Any], items: List[Dict[str, Any]]) -> str:
+def rows_span(items: List[Dict[str, Any]]) -> Tuple[Any, ...]:
+    """All a range line reads of its rows (``_rows_line``): how many, how many are my replies and reactions, and the
+    time and address of the first and the last by position; a price of the line is keyed by it."""
     first, last = min(items, key=lambda i: i['pos']), max(items, key=lambda i: i['pos'])
-    mine = sum(item['kind'] == 'ouroboros' for item in items)
-    reactions = sum(item['kind'] == 'place_fact' for item in items)
-    return (f"{len(items)} earlier rows, oldest first, by address ({mine} my replies, "
-            f"{len(items) - mine - reactions} people's words{f', {reactions} reactions' if reactions else ''}), "
-            f"{_minute(first['ts'])} → {_minute(last['ts'])}; "
-            f"memory_read(room_id='{room['room_id']}', rows=true, from='{first['address']}', to='{last['address']}'). "
+    return (len(items), sum(item['kind'] == 'ouroboros' for item in items),
+            sum(item['kind'] == 'place_fact' for item in items), first['ts'], first['address'], last['ts'], last['address'])
+
+
+def _rows_line(room: Mapping[str, Any], items: List[Dict[str, Any]]) -> str:
+    count, mine, reactions, first_ts, first, last_ts, last = rows_span(items)
+    return (f"{count} earlier rows, oldest first, by address ({mine} my replies, "
+            f"{count - mine - reactions} people's words{f', {reactions} reactions' if reactions else ''}), "
+            f"{_minute(first_ts)} → {_minute(last_ts)}; "
+            f"memory_read(room_id='{room['room_id']}', rows=true, from='{first}', to='{last}'). "
             "Verbatim rows within this range remain below in place.")
 
 
@@ -1365,9 +1371,8 @@ def _room_runs(room: Mapping[str, Any], gone: Mapping[str, Any], put: Callable[.
     if room["lane1"]:
         work_rows, folds = work_folds(works, gone)
         addressed = mine | people | work_rows
-        members = [n for n, item in enumerate(room['lane1']) if item['address'] in addressed
-                   and not item.get('immune')] if gone.get('F7a') else []
-        aggregate = [room['lane1'][n] for n in members]
+        aggregate = [item for item in room['lane1'] if item['address'] in addressed
+                     and not item.get('immune')] if gone.get('F7a') else []
         grouped = {item['address'] for item in aggregate}
         omitted = grouped | work_rows
         description = "people and my replies" if folds and not aggregate else "verbatim: people and my replies"
@@ -1378,7 +1383,7 @@ def _room_runs(room: Mapping[str, Any], gone: Mapping[str, Any], put: Callable[.
             put(("gists",), lambda: ["Completed work replies may stand as their gist. " + row_reader(room['room_id'])])
         for n, item in enumerate(room['lane1']):
             if aggregate and item is aggregate[0]:
-                put(("rows", tuple(members)), lambda: [_rows_line(room, aggregate)], "room_rows", aggregate, "count")
+                put(("rows", rows_span(aggregate)), lambda: [_rows_line(room, aggregate)], "room_rows", aggregate, "count")
             if item['address'] in folds and not aggregate:
                 key, final, taken = folds[item['address']]
                 put(("work", key, final), lambda: [work_line(taken)], "work", [item], "gist")

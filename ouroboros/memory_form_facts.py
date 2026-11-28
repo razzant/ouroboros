@@ -641,7 +641,7 @@ def _holding_room(snapshot, level):
     aggregate = [r for r in room.get("lane1", ()) if r["address"] in addressed and not r.get("immune")] if gone.get("F7a") else []
     if aggregate:
         hold("room ranges", "", _rows_reader(room["room_id"], aggregate), label=own_label,
-             tokens=held(("room range", tuple(map(id, aggregate))), lambda: mv._rows_line(room, aggregate)))
+             tokens=held(("room range", mv.rows_span(aggregate)), lambda: mv._rows_line(room, aggregate)))
     else:
         by_address = _kept(snapshot, ("work rows",), lambda: {r["address"]: (key, rows) for key, rows in listed for r in rows})
         for address, (fold, final, taken) in shown.items():
