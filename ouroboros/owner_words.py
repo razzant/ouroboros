@@ -1069,34 +1069,24 @@ def _absent(ctx: Any) -> str:
         {"type": getattr(ctx, "current_task_type", None), "metadata": dict(metadata)})
 
 
-def _in_context(row: Mapping[str, Any], went: str, address: str) -> Dict[str, Any]:
-    """``row`` as the host carries it to a work's members when only the work answering it owns it: its words, source,
-    time, citation and reply target as they are, carrier ``went to <task>`` as its carried copy says, files named, never
-    copied (``owner_relay.mark_context_files``); ``safety_sources`` reads it as context, never as a permission."""
-    from ouroboros.owner_relay import mark_context_files
-
-    files = [dict(ref) for ref in row.get("attachments") or []]
-    held = {**row, "carrier": f"went to {went}", "task_id": went, **({"attachments": files} if files else {})}
-    mark_context_files([({"row_sha256": row["row_sha256"], "msg_id": address}, held)], {})
-    return held
-
-
 def governing_words_for_schedule(ctx: Any, *, session: bool = False) -> Dict[str, Any]:
     """``{FIELD: rows}`` or ``{ABSENT_FIELD: marker}`` for the helper this run is about to schedule: the rows
     addressed to the tree, by value (``_tree_words``). My human's direct Reply to this work stands among them as the
-    host carries it to the members (``member_carriage``), context that went to the work answering it (``_in_context``),
-    and so does the passive copy a helper holds from its own tree (``passive_carriage``): a helper born now holds the
-    row as one running does, never as an order. The room, the origins and the marked rows are read at its own start.
-    ``session`` (the helper compiles an external work order): the rows ``_live_words`` reads at this handoff (the
-    bound room's rows, the Project's origin rows and the marked rows) ride beside them under ``ROOM_FIELD``, by
-    value (an empty list when none), so that work order stays a function of the helper's record; a store that
-    cannot be read gives the rows that could be, and its gap is logged. The schedule text the run holds rides beside
-    them under ``SCHEDULE_FIELD``, by value: the helper's assignment never drops its tree's conditions."""
-    from ouroboros.owner_mailbox import passive_carriage
+    host carries it to the members (``member_carriage``), context that went to the work answering it (``in_context_row``
+    of ``owner_mailbox``), and so does the passive copy a helper holds from its own tree (``passive_carriage``), with
+    the same writer's kind: a helper born now holds the row as one running does, never as an order. The room, the
+    origins and the marked rows are read at its own start. ``session`` (the helper compiles an external work order):
+    the rows ``_live_words`` reads at this handoff (the bound room's rows, the Project's origin rows and the marked
+    rows) ride beside them under ``ROOM_FIELD``, by value (an empty list when none), so that work order stays a
+    function of the helper's record; a store that cannot be read gives the rows that could be, and its gap is logged.
+    The schedule text the run holds rides beside them under ``SCHEDULE_FIELD``, by value: the helper's assignment
+    never drops its tree's conditions."""
+    from ouroboros.owner_mailbox import in_context_row, passive_carriage
 
-    passive = passive_carriage(ctx)
-    rows = [_in_context(row, *passive[row["row_sha256"]]) if row.get("row_sha256") in passive else row
-            for row in _tree_words(ctx, also={address for _went, address in passive.values()})[0]]
+    passive, held = passive_carriage(ctx), getattr(ctx, "_held_owner_messages", None)
+    tree, root, _accounts = _tree_words(ctx, also={address for _went, address in passive.values()})
+    rows = [in_context_row(row, *passive[row["row_sha256"]], held, root) if row.get("row_sha256") in passive else row
+            for row in tree]
     facts: Dict[str, Any] = {FIELD: rows} if rows else {ABSENT_FIELD: _absent(ctx)}
     if schedule := schedule_items(ctx):
         facts[SCHEDULE_FIELD] = schedule

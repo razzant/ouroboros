@@ -6,7 +6,7 @@ import { rowsOf } from './settings_rows.js';
 import { statusMarkHtml } from './status_mark.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
-import { allowanceHold, allowanceText, modelRouteWords, wakeResumeRoomWords } from './consciousness_words.js';
+import { allowanceHold, allowanceText, heldWake, modelRouteWords, wakeResumeRoomWords } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
 import { mountCostProjectDays } from './cost_project_days.js';
@@ -200,12 +200,26 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at the per-task cost cap it started with; its card shows why.' });
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'launch_ceiling') {
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at the spending limit it started with; its card shows why.' });
+    } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'per_task_fence') {
+        lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at a spending limit of its own work; its card shows which.' });
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'owner') {
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is on an explicit pause; its card shows who paused it and how to continue.' });
     }
     const model = modelRouteWords(snapshot.modelRoute);  // the words of the Consciousness tab's Model row
     if (model) lines.push({ tone: 'muted', text: `Model: ${model}.` });
     return { spend, lines, meter };
+}
+
+/** The Total budget card's line about its own wake held by that budget (its proven cause, consciousness_hold.hold_cause),
+ *  with its card's door, or null: raising the budget alone does not resume a paused wake, so the line says what does.
+ *  One neutral sentence, true whatever the budget holds now: the meter above it says what is left, and whether Resume
+ *  can continue it is said by the block and Main's card, from one state body. Read-only: Resume and Stop now stay on
+ *  its card and its block (consciousness_held_wake.js). */
+export function totalBudgetHoldLine(snapshot) {
+    const wake = snapshot ? heldWake(snapshot) : '';
+    return wake && snapshot.holdCause === 'total_budget' ? { wake, tone: 'warn',
+        text: 'The consciousness wake-up stopped when the total budget was spent.',
+        note: 'Raising Total budget alone does not resume it; Resume or Stop now on its card.' } : null;
 }
 
 /** The consciousness limit as a meter: its spend of the 24-hour limit in the limit's money, the share, what is left,
@@ -312,6 +326,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
                 <dl class="dashboard-facts" id="cost-facts"></dl>
                 <p class="costs-copy">The unresolved upper bound is calls in flight, or ended without a price, at their reserved ceiling: a worst case, not spending.</p>
             </details>
+            <div class="costs-allowance-state" id="cost-total-state" aria-live="polite"></div>
         </section>
         <section class="ui-card costs-meter" aria-labelledby="costs-meter-consciousness">
             <div class="costs-meter-head">
@@ -466,10 +481,16 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         const note = page.querySelector('#costs-allowance-spend');
         note.textContent = meter.spent ? meter.note : view.spend;  // unreadable or unknown: the sentence that says so
         note.hidden = !note.textContent;
-        page.querySelector('#costs-allowance-state').innerHTML = view.lines.map((line) => `<p class="ui-status costs-allowance-line" `
-            + `data-tone="${line.tone}">${escapeHtmlAttr(line.text)}`
+        const lineHtml = (line) => `<p class="ui-status costs-allowance-line" data-tone="${line.tone}">${escapeHtmlAttr(line.text)}`
             + `${line.note ? ` <span class="costs-allowance-note">${escapeHtmlAttr(line.note)}</span>` : ''}`
-            + `${line.wake ? ` ${taskReferenceHtml(line.wake)}` : ''}</p>`).join('');
+            + `${line.wake ? ` ${taskReferenceHtml(line.wake)}` : ''}</p>`;
+        page.querySelector('#costs-allowance-state').innerHTML = view.lines.map(lineHtml).join('');
+        // Its own wake held by the total budget is said under that budget's card, from this same snapshot. Its words are
+        // one sentence, so the same wake said again keeps the line and its door (a reader's focus stays on it).
+        const total = totalBudgetHoldLine(snapshot);
+        const totalState = page.querySelector('#cost-total-state');
+        const said = totalState.querySelector('[data-open-task]')?.getAttribute('data-open-task') || '';
+        if ((total?.wake || '') !== said) totalState.innerHTML = total ? lineHtml(total) : '';
     }
 
     async function loadAllowance() {
@@ -656,9 +677,10 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     listen('ouro:settings-updated', (event) => {
         const { source, page: home, row } = event.detail || {};
         if (source !== 'settings-row' || home !== LIMITS_PAGE) { refreshCostsPanel(); return; }
-        // One of this card's own rows was saved: read again only what that limit moves.
+        // One of this card's own rows was saved: read again only what that limit moves. The total budget moves its own
+        // wake's line too (a raise resumes nothing, so the line stays while the wake waits, read afresh).
         if (row === 'TOTAL_BUDGET') loadCosts();
-        if (row === ALLOWANCE_KEY) loadAllowance();
+        if (row === 'TOTAL_BUDGET' || row === ALLOWANCE_KEY) loadAllowance();
     });
     return { destroy() { offReconnect?.(); offNotes(); listeners.forEach(([type, handler]) => window.removeEventListener(type, handler)); clearTimeout(allowanceExpiry); leaveCosts(); placed.destroy(); } };
 }

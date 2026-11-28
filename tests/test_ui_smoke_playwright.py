@@ -386,6 +386,18 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout, request):
             stop_server()
 
 
+def settle_first_launch(server) -> None:
+    """Let the fixture's brand-new data folder complete its first launch before any page opens.
+
+    A brand-new data root's first server generation serves an isolated, in-memory data-profile scope (#4149); the
+    state it initializes and witnesses is proven from the next generation on, and a page open across that first
+    restart reloads once with the profile-change reason. A case about what a page keeps across a restart starts from
+    the ordinary second launch instead: one restart here, before the page opens, so the restart the case exercises
+    keeps the scope.
+    """
+    server["restart_server"]()
+
+
 @pytest.fixture()
 def direct_server(direct_server_with_data):
     return direct_server_with_data["url"]
@@ -1222,6 +1234,7 @@ def test_ui_smoke_chat_chronology_reconnect_and_plain_answer_marker(direct_serve
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
+    settle_first_launch(direct_server_with_data)  # the restart below is an ordinary one, not a new folder's first
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
     evidence_dir = pathlib.Path(
@@ -2673,8 +2686,8 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert abs(deep["mainTop"] - deep["sideTop"]) <= 1, wide_facts
 
                 # The 620-700px column (laptop with the project panel open): the root
-                # card takes up to 620px there.
-                wide.set_viewport_size({"width": 1004, "height": 750})
+                # card takes up to 620px there. The window is that column plus the sidebar with its outside rail.
+                wide.set_viewport_size({"width": 1040, "height": 750})
                 wide.wait_for_timeout(250)
                 owner_facts = wide.evaluate(
                     """() => {

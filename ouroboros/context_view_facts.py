@@ -3,7 +3,8 @@
 A window's source and date, reserve, disagreement and retired history are shared by facts rows, Settings and size
 failures (``window_projection``); a size failure names its round's own refused request (``remember_size_refusal``).
 An integrating start's facts row also names the gate's shortest telling by kind (``start_facts``), its draw kept on
-the captured core."""
+the captured core. The view's largest parts by producer kind and its largest single part are the facts row's, the size
+terminal's and the native room fact's one set of named sizes (``largest_parts``), said by ``largest_parts_text``."""
 from __future__ import annotations
 
 import pathlib
@@ -65,6 +66,91 @@ def block_label(message, index, block, plan):
     return "core and books" if index == 0 else "runtime facts"
 
 
+def _producer_kind(messages, index, first_user):
+    """Who produced a transcript row, the kind the size facts count: typed metadata its producer's binding still vouches
+    for, never the text. A typed host row is its producer's while bound to its exact text (``host_row_intact``) and a
+    recorded review dispute while its source binding verifies (``_review_source_ref``); the owner's and principals'
+    words and my outward replies keep their delivery type, bound or not. An old merge into a typed row or another row
+    no binding vouches for is an ordinary delivered row."""
+    from ouroboros.context_budget import OWNER_ROW_KINDS, OWNER_WORDS_KIND, host_row_intact
+    from ouroboros.context_compaction import _capsule_metadata, _review_source_ref
+    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, _review_index_identity
+
+    row = messages[index]
+    if _review_index_identity(row) is not None:
+        return "review decisions"
+    if _review_source_ref(row) is not None:
+        return "recorded review disputes"
+    meta = _capsule_metadata(row)[1]
+    if meta:
+        return "my notes" if meta.get("authorship") == "actor" else "recovery address records"
+    kind = row.get(HOST_CONTEXT_KIND_KEY)
+    if kind in OWNER_ROW_KINDS:
+        return "owner and principal words" if kind == OWNER_WORDS_KIND else "my outward replies"
+    if kind or row.get(REVIEW_HISTORY_MESSAGE_KEY):
+        return str(kind) if kind and host_row_intact(row) else "other delivered rows"
+    if row.get("role") == "tool" or row.get("tool_calls"):
+        return "tool calls and results"
+    if row.get("role") == "assistant":
+        return "my replies"
+    return "assignment" if index == first_user else "other delivered rows"
+
+
+LARGEST_SINGLE = "largest single "  # the label of the largest single part when its kind does not already name it
+
+
+def largest_parts(view, *, measured):
+    """The view's three largest parts by producer kind and its largest single part, as ``[label, tokens]`` pairs: the
+    named sizes the facts row, the size terminal and the native room fact each frame and calibrate as their own
+    (``measured``: the view's measured density, else raw estimates) in the request shape of the view's plan and
+    ``active_effort``. Kinds come from typed metadata its producer's binding vouches for (``_producer_kind``), system
+    blocks keep their block labels and the route's tool schemas are one part; ``kind ×N`` counts the transcript rows of
+    a kind that spans several. The single part is a unit's id (else its block or kind), said once: beside its kind when
+    it is that kind's only part, else as a last pair labelled ``LARGEST_SINGLE`` (pairs, the size terminal's stored form
+    that a same-task checkpoint carries across versions). Many small rows of one kind read as the one part they are, so
+    a resident kind that only grows is visible (BIBLE P1): facts, no advice (owner 09.10 5A)."""
+    from ouroboros.context_compaction import context_units
+    from ouroboros.context_measurement import estimate_context_prompt_tokens, tool_schema_tokens
+
+    density = float(view.accumulated_usage.get("_context_measurement_density") or 1.0) if measured else 1.0
+    messages, plan = view.messages, view.context_fit_plan
+    first_user = next((i for i, row in enumerate(messages) if row.get("role") == "user"), -1)
+    units = context_units(messages, scope="dialogue", measurement_density=density)
+    covered = {i for unit in units for i in range(unit.start, unit.end + 1)}
+    parts = [(_producer_kind(messages, unit.start, first_user), unit.unit_id, range(unit.start, unit.end + 1),
+              unit.context_size_tokens) for unit in units]  # (kind, its name, its rows, tokens)
+    for i, message in enumerate(messages):
+        if i in covered:
+            continue
+        content, system = message.get("content"), message.get("role") == "system"
+        for chunk in [{**message, "content": [block]} for block in content] if system and isinstance(content, list) else [message]:
+            block = chunk.get("content")
+            kind = (block_label(message, i, block[0] if isinstance(block, list) and block else block, plan) if system
+                    else _producer_kind(messages, i, first_user))
+            parts.append((kind, kind, (i,), int(estimate_context_prompt_tokens([chunk]) * density)))
+    parts.append(("tool schemas", "tool schemas", (), int(tool_schema_tokens(view.tool_schemas,
+        provider=getattr(plan, "provider", ""), reasoning_effort=getattr(view, "active_effort", "")) * density)))
+    kinds: Dict[str, list] = {}
+    for kind, _name, rows, tokens in parts:  # each kind's tokens, transcript rows and parts
+        total = kinds.setdefault(kind, [0, set(), 0])
+        total[0], total[2] = total[0] + tokens, total[2] + 1
+        total[1].update(rows)
+    top = sorted(kinds.items(), key=lambda item: item[1][0], reverse=True)[:3]
+    own_kind, name, _rows, tokens = max(parts, key=lambda part: part[3])
+    alone = kinds[own_kind][2] == 1 and own_kind in dict(top)  # the largest part is a named kind's only part
+    named = [[kind + (f" ×{len(rows)}" if len(rows) > 1 else "") + (f" ({name})" if alone and kind == own_kind != name else ""),
+              total] for kind, (total, rows, _parts) in top]
+    return named if alone else [*named, [LARGEST_SINGLE + name, tokens]]
+
+
+def largest_parts_text(pairs):
+    """``largest_parts`` (or an older writer's ``[label, tokens]`` pairs) as one clause: the kinds, then the largest
+    single part after a semicolon."""
+    said = [(str(label).startswith(LARGEST_SINGLE), f"{label} ~{int(tokens):,}") for label, tokens in pairs]
+    return "; ".join(filter(None, (", ".join(text for single, text in said if not single),
+                                   *(text for single, text in said if single))))
+
+
 def memory_facts(plan, mode, messages=()):
     """Captured memory facts of an integrating focus, absent from visible facts rows:
     on the owner's Max with a known window, the build's Max room (``memory_floor.measure_text``: the gate's need, the
@@ -103,8 +189,8 @@ def memory_facts(plan, mode, messages=()):
         form = "chapter maps" if preference == "maps" else "a smaller memory view"
         line += f"; first send chose {form} after a refusal on its planned connection; that refusal stated no window"
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
-    line += ((f"; shown only by address: {shown}" if shown else "") + held_heads_fact(plan, receipt)
-             + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
+    line += (resident_fact(plan, snapshot, receipt) + (f"; shown only by address: {shown}" if shown else "")
+             + held_heads_fact(plan, receipt) + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
     return "" if any(message.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME
                      and f" | {line} | " in f" | {message.get('content') or ''} | " for message in messages) else line
 
@@ -124,6 +210,71 @@ def held_heads_fact(plan, receipt):
     tokens = sum(floor.view_tokens(part.full_text) for part in plan.core.dynamic_sections
                  if isinstance(part, HeldNoteSection) and part.section_id not in stepped)
     return f"; held note heads: {tokens:,} tokens stand whole" if tokens else ""
+
+
+RESIDENT_BASIS = "estimator tokens, JSON characters / 4, of this view's own text; provider tokens not counted"
+
+
+def resident_fact(plan, snapshot, receipt):
+    """``; resident here, …``: what my own authored parts that stay in every request cost in this view as its fit drew
+    it (``memory_floor.kept_level``): the marks block, the selected accounts and this room's block, with the date this
+    captured view was first measured and the basis; a part the view does not draw is named, never printed as 0.
+    Facts only (owner 1A, 26.11.2026: marks stay whole and I tidy them myself): no advice and nothing acts on them.
+    Kept on the captured core per level, like ``start_facts``, so a facts row reprints nothing while they stand."""
+    held = vars(plan.core).setdefault("_resident_facts", {}) if hasattr(plan.core, "__dict__") else {}
+    level = floor.kept_level(snapshot, receipt)
+    if level.addressed not in held:
+        held[level.addressed] = _resident_text(snapshot, level)
+    return held[level.addressed]
+
+
+def _resident_text(snapshot, level):
+    if not snapshot.active:
+        return f"; resident parts not measured: my memory is not active ({snapshot.store_status.get('state')})"
+    gone, spec, sizes = dict(level.addressed), snapshot.spec, []
+    ordinary = [mark for mark in snapshot.marks if not mark.get("late_review")]
+    if ordinary:  # the same piece the view's room price keeps (``memory_view._room_parts``)
+        chars = snapshot.piece(("marks",), lambda: mv._marks_text(ordinary))
+        sizes.append(f"my marks block {floor.tokens_of(chars):,} ({len(ordinary)} marks)")
+    elif spec.marks != "none":
+        sizes.append("my marks none")
+    if spec.story:
+        told: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in snapshot.story:
+            if entry.get("told_by"):
+                told.setdefault(entry["told_by"], []).append(entry)
+        accounts = [entry for entry in snapshot.story if entry.get("kind") == "account" and not entry.get("told_by")]
+        chars = sum(mv.json_chars("\n".join(mv._page_lines(entry) + mv._told_lines(entry["id"], told))) for entry in accounts)
+        sizes.append(f"my selected accounts {floor.tokens_of(chars):,} ({len(accounts)})" if accounts else "my selected accounts none")
+    room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
+    if room:
+        steps = tuple((step, gone.get(step, ())) for step in mv._ROOM_STEPS)
+        sizes.append(f"this room's block {floor.tokens_of(snapshot.piece(('room', steps), lambda: mv._room_text(room, gone))):,}")
+    if not sizes:
+        return ""
+    return (f"; resident here, measured {utc_now_iso().replace('T', ' ')[:16]} UTC ({RESIDENT_BASIS}): "
+            + ", ".join(sizes))
+
+
+def resident_marks(root, plan) -> Dict[str, Any]:
+    """The ``memory_mark`` receipt's total: the marks block this focus's view draws (its captured spec, over the acting
+    marks as they stand after the change), the same text and price ``resident_fact`` reads at the next capture. A
+    focus without a captured view that keeps marks gets the fact that it was not measured, never a number; so does a
+    failed read of the store or of the captured view: the change is saved, only this total is unread."""
+    import sqlite3
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.store import StoreError
+
+    try:
+        snapshot = memory_snapshot(plan) if plan is not None else None
+        if snapshot is None or snapshot.spec.marks == "none":
+            return {"measured": False, "why": "this focus holds no captured view that keeps marks"}
+        marks = [mark for mark in mv._capture_marks(ChronicleStore(root), snapshot.spec, mv.room_labeler(root))
+                 if not mark.get("late_review")]
+    except (OSError, TimeoutError, ValueError, KeyError, TypeError, sqlite3.Error, StoreError) as exc:
+        return {"measured": False, "why": f"the marks could not be read: {type(exc).__name__}"}
+    chars = mv.json_chars(mv._marks_text(marks)) if marks else 0
+    return {"marks": len(marks), "tokens": floor.tokens_of(chars), "basis": RESIDENT_BASIS + ", read after this change"}
 
 
 _SHORT_BASIS = {"request": " with no memory", "route": " with no memory and no tool schemas"}  # ``lowered_need``
@@ -347,12 +498,13 @@ def _refused_request_text(slot):
 
 def refusal_frame_facts(usage, round_idx):
     """The size terminal's bracket: the smallest request the round's refusing model refused in this task (its own key,
-    never another model's) and the current view's largest parts, raw estimates (``context_renewal._cannot_help``)."""
+    never another model's) and the current view's largest parts by kind and its largest single part, raw estimates
+    (``largest_parts``, captured by ``context_renewal._cannot_help``)."""
     from ouroboros.context_anchor import REFUSED_INPUTS_KEY
 
     slot = size_refusal(usage, round_idx)
     refused = int((usage.get(REFUSED_INPUTS_KEY) or {}).get(slot.get("key") or "") or 0) if slot else 0
-    parts = ", ".join(f"{label} ~{int(tokens):,}" for label, tokens in usage.get("_context_refusal_frame") or [])
+    parts = largest_parts_text(usage.get("_context_refusal_frame") or ())
     return "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
                                        f"largest parts: {parts} by raw estimate of the current view" if parts else "") if fact)
 
@@ -417,6 +569,21 @@ def required_book_fact(usage, slot=None):
     return f"{named}; without it the input is ~{max(0, int(slot['tokens']) - book):,} against {usable:,} usable. {choices}"
 
 
+def refusal_route(unfit, route, record):
+    """Stamp on a start's refusal (``context_fit.MinimumViewUnfit``, raised by the fit or the early bound) what its
+    notices name of the route: the serving program (``agent_dispatch``'s guidance) and the window in effect with its
+    source, basis and date (``window_projection``; ``realtime_setup.capacity_notice`` credits it). Returns ``unfit``."""
+    unfit.server_program = ((route.get("_resolved_target") or {}).get("ollama_record") or {}).get("protocol")
+    unfit.window = window_projection(record)
+    return unfit
+
+
+# A window limit's source in a person's words (``window_projection``, the refusal's Details in ``realtime_setup``).
+WINDOW_SOURCES = {"user_setting": "set in Settings", "owner_ack": "owner confirmation",
+                  "provider_metadata": "server metadata", "local_health": "local serving window",
+                  "server_metadata": "the server's own window", "accepted": "an accepted request of that size"}
+
+
 def window_projection(record, *, under_way: bool = False):
     """Pure sourced projection shared by Main, Settings and terminal failures. ``under_way``: the reader is a Main
     work, whose requests after its start are read at ``admitted``; a single-shot caller sizes by ``usable`` alone.
@@ -428,9 +595,7 @@ def window_projection(record, *, under_way: bool = False):
     limit = record.limiting
     observed = limit.observed_at if limit else ""
     source = limit.source if limit else "unknown"
-    labels = {"user_setting": "set in Settings", "owner_ack": "owner confirmation",
-              "provider_metadata": "server metadata", "local_health": "local serving window",
-              "server_metadata": "the server's own window"}
+    labels = WINDOW_SOURCES
     label = labels.get(source, source)
     dated = f"{label} {observed.replace('T', ' ')[:16]}".strip()
     if source == "refusal":

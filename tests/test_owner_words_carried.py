@@ -363,7 +363,10 @@ def test_a_helper_hands_on_only_the_replys_passive_copy_its_own_trees_root_carri
     """The passive copy of a Reply that a helper holds is handed to its own helper as it is (``went to <work>``) when the
     host's stamp names the root of its tree: the teller (``from``), which a retry of that root keeps, or the work it went
     to. Nothing else is: another root's observer copy, a stamped copy of another tree, a row that merely went to its root
-    without the passive fact, nor one the room already answered."""
+    without the passive fact, nor one the room already answered. A handed copy keeps the writer's kind the root's record
+    holds of my human's chat row (``owner_text``); a copy no attested chat row of my human's proves is never typed: a
+    corpus rebuild is handed without a kind, another author's note is not handed at all."""
+    from ouroboros.dialogue_provenance import recorded_author
     from ouroboros.owner_mailbox import passive_carriage
     from ouroboros.owner_relay import ROUTED_BY_HEAD, owner_row_address
 
@@ -387,6 +390,15 @@ def test_a_helper_hands_on_only_the_replys_passive_copy_its_own_trees_root_carri
     assert [(row["text"], row["carrier"], row["task_id"]) for row in handed] == [
         ("words tree", "went to root-1", "root-1"), ("words retry", "went to root-1b", "root-1b"),
         ("words unstamped", "went to root-1", "root-1")], "each stands under the work its copy went to"
+    assert [row.get("mail_kind") for row in handed] == ["owner_text"] * 3, "the kind the root's record holds of the row"
+    unproved = {name: {**held[addresses["tree"]], "text": f"words {name}", "client_message_id": f"copy-{name}", **extra}
+                for name, extra in (("rebuilt", {"_owner_corpus_rebuilt": True}),
+                                    ("agent", {"declared_author": recorded_author("Build bot")}))}
+    helper._held_owner_messages = {**held, **{owner_row_address(row): row for row in unproved.values()}}
+    kinds = {row["text"]: row.get("mail_kind") for row in governing_words_for_schedule(helper)[FIELD]}
+    assert (kinds["words tree"], kinds["words rebuilt"], "words agent" in kinds) == ("owner_text", None, False), \
+        "only a chat row of my human's is typed: a rebuild stays untyped, another author's note is never handed"
+    helper._held_owner_messages = held
     helper.task_metadata["root_task_id"] = "other-root"  # the same copies held under another root: only its own stand
     assert {row["text"] for row in governing_words_for_schedule(helper)[FIELD]} == {"words observer", "words other-tree"}
     bare = SimpleNamespace(task_id="", task_metadata={}, _held_owner_messages=held)

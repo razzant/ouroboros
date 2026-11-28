@@ -1,12 +1,12 @@
 # 4. Server API Endpoints
 
-Browser/CLI routes: `gateway/router.py`; Host Service: §12. Tests check this table in both directions. Shapes: `GET /api/contract`.
+This part gives me every route my server answers. Browser/CLI routes: `gateway/router.py` collects them and `server.py` adds `/` and the static mounts; Host Service: §12. Tests check this table in both directions, so a new or changed route updates it in the same commit; an unchanged path's new behaviour still needs review. Shapes: `GET /api/contract`.
 
 `NetworkAuthGate` runs `browser_boundary.py` first: foreign/opaque pages get 403 (WS 4403), passive files pass (DEPLOYMENT). `OUROBOROS_NETWORK_PASSWORD` gates non-loopback via HMAC cookie (WS 4401); unset leaves remote open (CLIENT_CONTRACT §3). `X-Ouroboros-Link` reaches letter routes only (§12); on POSIX, `peer_door.py` (`door.sock`, peer-only) serves `/api/letters*`, `POST /api/letters/channel`, and `POST /api/peer-links/introduce`. Widget leases authenticate only their reads (§3).
 
 `server_web.ServedUI` (`server_web.py`) applies `OUROBOROS_UI_DIR` (§7) per generation to `/`, `/static/*`, `onboarding.html` and `auth/index.html`; one record feeds the auth gate, builtin index's response-only owner marker and `StateResponse.served_ui` (source, not digest). Builtin `/onboarding/static/*` and the author kit stay independent; builtin files revalidate `private` (ETag); Telegram phones keep only `GET /static/*`. `GzipText` gzips GET 200 text from 1 KiB (checked against declared `Content-Length`, else the first body chunk, so a stream without `Content-Length` whose first chunk is short passes uncompressed; weak ETag), excluding event streams, downloads and outside stored files (selection, `?builtin=1`, `/auth/*`, fallback: CLIENT_CONTRACT §2–4).
 
-Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity: §11) resolve inside the configured root: in-root symlinks work, while outside links may list (`is_symlink: true`) but are never read, written, downloaded, deleted or traversed. Chat downloads (`?upload=<id>`) use `chat_uploads.open_upload` in `data/uploads`, independent of the Files root. `gateway/host_service.py::create_host_service_app` builds the separate token-authenticated loopback Host Service, no public owner API.
+Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity: §11) resolve inside the configured root: in-root symlinks work, while outside links may list (`is_symlink: true`) but are never read, written, downloaded, deleted or traversed. Chat downloads (`?upload=<id>`) use `chat_uploads.open_upload` in `data/uploads`, independent of the Files root.
 
 | Method | Path | Note |
 |---|---|---|
@@ -241,6 +241,7 @@ Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity:
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/decision` | `task_decision.answer_decision` (transport skill); same `/api/decisions` answer, winner's Reply file kept; read via `rejoin_decision` |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/ui/language` | shares `ui_i18n.choose_language` |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/place` | connector place state |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/place` | DM recheck |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/turn` | capture before attention |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/delivery` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/history` | |

@@ -73,12 +73,71 @@ def test_assistant_caption_appends_deltas_and_replaces_full_transcripts(provider
 
 
 def test_owner_full_transcript_keeps_replacement_and_final_status(providers):
+    # in_progress is the October (R6) shape; an omitted status is the 28.11.2026 wire. Only an explicit other status
+    # keeps the owner's words open.
     adapter, _ = make(providers, "grok")
-    for status in ("in_progress", "completed"):
+    for status in ("in_progress", "completed", "absent"):
         caption, = adapter.convert({"type": "conversation.item.input_audio_transcription.completed",
-            "item_id": "owner", "transcript": "Owner words", "status": status})
+            "item_id": "owner", "transcript": "Owner words", **({} if status == "absent" else {"status": status})})
         assert caption.data["replace"] and caption.data["text"] == "Owner words"
-        assert caption.data["final"] is (status == "completed")
+        assert caption.data["final"] is (status != "in_progress")
+        assert adapter.input_pending is (status == "in_progress")
+
+
+# One owner utterance as xAI sent it on 28.11.2026 (invented test words), decoded raw fields of lines 497, 905, 981,
+# 982 and 984 of call-fit-20261125/proof/runs/D1-grok-fresh/evidence/eda4916dcfada412-conversation-wire.jsonl.
+RECORDED_OWNER_WORDS = ("Запомни, пожалуйста, во вторник в 19:15 у меня встреча в библиотеке, "
+                        "и я возьму с собой красный зонт.")
+RECORDED_OWNER_UTTERANCE = [
+    {"type": "input_audio_buffer.speech_started", "event_id": "e49efe14-770a-4218-bb55-5f64a5186f2b",
+     "item_id": "01552dfc-9a70-420c-8bf8-5d66f328b234", "audio_start_ms": 8480},
+    {"type": "input_audio_buffer.speech_stopped", "event_id": "9c002381-6457-4f7e-84a7-dc3fc1e5a0fd",
+     "item_id": "01552dfc-9a70-420c-8bf8-5d66f328b234", "audio_end_ms": 16280},
+    {"type": "input_audio_buffer.committed", "event_id": "d51c186d-9731-4263-97a6-d806a3ccdf54",
+     "previous_item_id": "e5a845b3-a552-4c23-8ed1-4e8b197772d2", "item_id": "01552dfc-9a70-420c-8bf8-5d66f328b234"},
+    {"type": "conversation.item.added", "event_id": "a88e16e8-905a-4b0c-bbfe-b9c80c11c232",
+     "previous_item_id": "e5a845b3-a552-4c23-8ed1-4e8b197772d2",
+     "item": {"type": "message", "id": "01552dfc-9a70-420c-8bf8-5d66f328b234", "status": "completed", "role": "user",
+              "content": [{"type": "input_audio", "transcript": RECORDED_OWNER_WORDS}]}},
+    {"type": "conversation.item.input_audio_transcription.completed", "event_id": "0dde9086-b468-4a52-95bc-3f7490811bf7",
+     "item_id": "01552dfc-9a70-420c-8bf8-5d66f328b234", "transcript": RECORDED_OWNER_WORDS, "content_index": 0},
+]
+
+
+def test_recorded_owner_transcript_without_status_closes_words_and_allows_renewal(providers, host_world):
+    """28.11.2026: an owner transcript with no status is final, so the owner's words close, a requested renewal can
+    switch once the answer ends, and the room keeps the whole words, not a teardown partial."""
+    from skills.live_conversation.driver import _Call
+
+    async def run():
+        adapter, _ = make(providers, 'grok')
+        host = host_world.host
+        call = _Call(host)
+        call.session = call.last_session = adapter
+        call.writer = asyncio.create_task(call.save_rows())
+        try:
+            await adapter.open()
+            await adapter.receive()
+            captions = []
+            for event in RECORDED_OWNER_UTTERANCE:
+                for converted in adapter.convert(event):
+                    if converted.kind == 'caption':
+                        captions.append(converted.data)
+                        await call.caption(converted.data)
+            assert captions == [{'speaker': 'owner', 'item_id': '01552dfc-9a70-420c-8bf8-5d66f328b234',
+                                 'text': RECORDED_OWNER_WORDS, 'final': True, 'replace': True}]
+            assert not adapter.input_pending and not call.input_open
+            assert not adapter.renewal_ready, "xAI's VAD answer is still owed"
+            # Synthetic answer receipt: the recorded answer carried a tool call, which has its own gate.
+            adapter.convert({'type': 'response.created', 'response': {'id': 'answer'}})
+            adapter.convert({'type': 'response.done', 'response': {'id': 'answer', 'status': 'completed'}})
+            assert adapter.renewal_ready
+            await adapter.close()
+            await call.finalize()
+            assert host.captioned[('owner', '01552dfc-9a70-420c-8bf8-5d66f328b234')]['text'] == RECORDED_OWNER_WORDS
+        finally:
+            await adapter.close()
+    asyncio.run(run())
 
 
 def test_grok_renewal_waits_for_vad_answer_and_late_transcripts(providers):

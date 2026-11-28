@@ -4,7 +4,9 @@
 // menu (Attach file first, then the sections later controls set), the voice and chips slots, the staged attachments with
 // their paste and drop routes, and the send path that turns the draft into the owner's frame. Skills' "+" items and
 // chips follow the live contributions (composer_plus.js, composer_chips.js). The room (chat.js) mounts the markup,
-// namespaces its ids and shows in its feed what was sent.
+// namespaces its ids and shows in its feed what was sent. After a pick of another model in this window the next
+// message goes as new work on it: Send and the empty field say so before the press (`syncSendWord`), and the frame
+// names the saved choice (`new_work`), never a model.
 import { bindComposerFileTargets, cleanupUploadedAttachments } from './chat_media.js';
 import { composerText, createComposerAttachments } from './chat_attachments.js';
 import { bindScrollFade } from './scroll_fade.js';
@@ -18,7 +20,7 @@ import { renderMobileNavToggle } from './page_header.js';
 import { createComposerOwnerControls } from './composer_owner_controls.js';
 import { attachChatInputSizing } from './chat_input_sizing.js';
 import { showToast } from './toast.js';
-import { tr } from './i18n.js';
+import { fmt, tr, translateString } from './i18n.js';
 import { bindComposerPlus } from './composer_plus.js';
 import { bindComposerChips } from './composer_chips.js';
 import { bindVoiceControls } from './voice_controls.js';
@@ -28,6 +30,9 @@ import { createSavedDraft } from './composer_draft.js';
 
 const CHAT_DRAFT_VERSION_KEY = 'ouro_chat_draft_version';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
+const MESSAGE_PLACEHOLDER = 'Message Ouroboros...';
+/** Said once when another window changed the room's model after a pick here: nothing goes out on either model. */
+export const NEW_WORK_CHANGED = 'The model here was changed in another window, so nothing was sent. Check the model, then send.';
 // The host icons a "+" item may name (`icon`); other names draw from the control glyphs a skill may name.
 const PLUS_ICONS = {
     attach: fluentIcon('attach', 16, 'regular'),
@@ -53,7 +58,7 @@ export function composerMarkup() {
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
                         </button>
                         <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
-                        <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="on" autocapitalize="sentences" spellcheck="true"></textarea>
+                        <textarea id="chat-input" placeholder="${MESSAGE_PLACEHOLDER}" rows="1" autocorrect="on" autocapitalize="sentences" spellcheck="true"></textarea>
                         <span class="chat-voice-slot" data-composer-voice hidden></span>
                         <div class="chat-send-group">
                             <button class="chat-send-inline ui-hit-area" id="chat-send" title="Send message">Send</button>
@@ -186,6 +191,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     const plusBtn = byId('plus');
     const fileInput = byId('file-input');
     let destroyed = false, cognitionRead = false;
+    let ownerControls = null;  // the room's capsules, made below: the Send word asks its Model before then too
     // A Panic attempt (chat_activity.js raises ouro:panic once its frame is sent) ends this page's own
     // work: an ordinary send or retry begun before it stops at its next await and never resumes,
     // whatever the socket does later. A Send the owner makes afterwards is a new submission. The
@@ -223,6 +229,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     function changeComposition() {
         savedDraft.fork(input.value);
         invalidateDraft();
+        syncSendWord();  // a staged or dropped Reply changes what Send would do
     }
 
     // Staged files, their thumbnails and object URLs, and the upload on Send ("+" waits while it runs).
@@ -338,6 +345,17 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         // Each await can be crossed by a Panic attempt or the room's end: the submitted message
         // stops before further sending, and the newer draft made meanwhile stays untouched.
         if (stopped()) return;
+        // A pick of another model in this window sends this message as new work on it: the frame names the saved
+        // choice and the host assigns the model. The same reading as the Send word (`newWorkFor`), from the Reply this
+        // submit took. Plain words wait when another window moved the room's model meanwhile; a Reply never does,
+        // because the host may give it to its work whatever the pick became.
+        const newWork = ownerControls.model?.newWork;
+        const picked = newWorkFor(text, reply?.reply_to);
+        if (picked?.changed && !picked.quoted) {  // the draft stays, nothing goes on either model
+            newWork.drop();
+            showToast(tr('chat.new_work_changed', NEW_WORK_CHANGED), 'info');
+            return;
+        }
         let uploadedAttachments = [];
         if (hasAttachments) {
             // Upload at Send; offline queuing orphans files.
@@ -373,6 +391,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             // Structured metadata rides the frame: model staging and native image blocks.
             ...(hasAttachments ? { attachments: uploadedAttachments.map(({ filename, display_name, mime }) => ({ filename, display_name, mime })) } : {}),
             ...staged,
+            ...(picked ? { new_work: picked.token } : {}),
             ...clientSurfaceField(),
         };
         const requireConnection = hasAttachments;
@@ -382,6 +401,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             showToast(requireConnection ? 'Connection lost before send. Reconnect and try again.' : 'Message not sent.', 'error');
             return;
         }
+        if (picked) newWork.sent(result.clientMessageId, picked.token);  // the host's word says whether it was spent
         // Fly from the sent draft, not the one that took its place during an await.
         const current = !destroyed && version === draftVersion && input.value === draftValue;
         const draft = current ? draftPlace(input.closest('.chat-field'), input) : null;
@@ -405,6 +425,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             attachments.keepUploads(files, uploadedAttachments);
             keepDraftVersion(true);
         }
+        syncSendWord();  // the emptied field (a command just sent, too) says what the next press does
         flySent({ from: draft, row: onSent({ text, frame, reply, result, views: uploadedAttachments.map((item) => item.view) }) });
     }
 
@@ -417,17 +438,60 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         if (busy) {
             sendBtn.textContent = label || 'Sending';
             sendBtn.title = label || 'Sending';
-        } else {
-            sendBtn.textContent = 'Send';
-            sendBtn.title = 'Send message';
-        }
+        } else syncSendWord(true);  // the busy word was this composer's own
     }
 
+    // What these words with this staged Reply are sent as, read one way for the Send word and for the send itself:
+    // null for an ordinary message, else the pick of another model made in this window. A slash command is never new
+    // work, and a Reply to a work's card or to a row inside it is that work's: it names no choice. Any other Reply is
+    // `quoted`: only the host knows whether its row belongs to a work (`message_ingress.new_work_choice`), so it
+    // names the choice and the host gives it to that work, or starts the new work when the row is a plain quote.
+    function newWorkFor(text, ref) {
+        const picked = ownerControls?.model?.newWork.armed() || null;
+        if (!picked || text.trimStart().startsWith('/')) return null;
+        if (!ref) return { ...picked, quoted: false };
+        return ref.task_id || String(ref.address || '').startsWith('task:') ? null : { ...picked, quoted: true };
+    }
+    // Send says `New task` only where that is certain; a Reply the host still has to place keeps `Send` and says both
+    // outcomes in the empty field and the button's name. A pick another window overtook promises nothing: the press
+    // says what happened (`NEW_WORK_CHANGED`).
+    // The button and the empty field are shared: a conversation feature dresses Send as its own entry (Talk) and a
+    // call writes its own words in the field. Their faces stand, title included; the composer writes over its own
+    // words only (`retake`: its busy word just ended) and says its word again when the button or the field is handed
+    // back as an ordinary one (`handedBack`). Its own words are read as written or as the page's language shows
+    // them (the overlay rewrites them in place, i18n.js), so a word already shown is never written again.
+    const SEND_WORDS = ['Send', 'New task'], FIELD_WORDS = [MESSAGE_PLACEHOLDER, 'New task...', 'Reply or new task...'];
+    const shows = (node, shown, word) => shown === word || shown === translateString(word, node);
+    function syncSendWord(retake = false) {
+        if (destroyed || sendBtn.disabled) return;  // a busy word stands until its work ends
+        const read = newWorkFor(input.value, replies.echoRow()?.reply_to);
+        const picked = read?.changed ? null : read;
+        const sure = Boolean(picked) && !picked.quoted;
+        const word = sure ? 'New task' : 'Send';
+        const face = sendBtn.textContent;
+        if (retake || !face || SEND_WORDS.some((own) => shows(sendBtn, face, own))) {
+            if (!shows(sendBtn, face, word)) sendBtn.textContent = word;
+            const title = sure ? fmt('Send as a new task on {model}', { model: picked.model })
+                : picked ? fmt('Send the Reply: its work takes it, or it starts a new task on {model}', { model: picked.model }) : 'Send message';
+            if (!shows(sendBtn, sendBtn.title, title)) sendBtn.title = title;
+        }
+        sendGroup.dataset.newWork = sure ? '1' : picked ? 'reply' : '0';
+        // No longer than the ordinary words, so no state grows the field by a wrapped line (the capsule above names
+        // the model; the button's name says it whole).
+        const placeholder = sure ? 'New task...' : picked ? 'Reply or new task...' : MESSAGE_PLACEHOLDER;
+        const field = input.placeholder;
+        if (!shows(input, field, placeholder) && (!field || FIELD_WORDS.some((own) => shows(input, field, own)))) input.placeholder = placeholder;
+    }
+    const handedBack = typeof MutationObserver === 'function' ? new MutationObserver(() => syncSendWord()) : null;
+    handedBack?.observe(sendBtn, { childList: true });
+    handedBack?.observe(input, { attributes: true, attributeFilter: ['placeholder'] });
+
     // Each composer owns its room's Model, Subagents, Context and Effort settings.
-    const ownerControls = createComposerOwnerControls({ row: page.querySelector('.chat-toolbar-row'), box: page, byId, apiFetch, showToast,
+    ownerControls = createComposerOwnerControls({ row: page.querySelector('.chat-toolbar-row'), box: page, byId, apiFetch, showToast,
         projectId, chatId, saveEffortRange: apiClient.ownerEffortRange,
         saveSubagentsMode: apiClient.ownerSubagentsMode, saveChatModel: apiClient.ownerChatModel,
-        openSettings: (tab) => openSettings?.(tab), refreshState, onLayout, readingBack });
+        openSettings: (tab) => openSettings?.(tab), refreshState, onLayout, readingBack,
+        modelDeps: { onNewWork: () => syncSendWord() } });
 
     // Rooms outside the bounded sidebar still read their settings.
     async function refreshProjectCognition() {
@@ -468,6 +532,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         savedDraft.save(input.value);
         invalidateDraft();
         if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
+        syncSendWord();  // a draft that begins a slash command is no new work
         resizeChatInput();
     }
     input.addEventListener('input', onInput);
@@ -483,16 +548,19 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         focus: () => input.focus({ preventScroll: true }),
         getDraft: () => input.value,
         invalidateDraft: changeComposition,
-        prepareNewMessage(words, ref) {
+        /** Whether the composer took the words. `quiet`: nobody pressed for it (a refused message's words coming
+         *  back), so only an empty composer takes them and one that cannot says nothing. */
+        prepareNewMessage(words, ref, { quiet = false } = {}) {
             // A delivery doubt never borrows a draft's quote or files, or appends typed words under its own quote.
-            if (sendBtn.disabled || attachments.count || replies.echoRow() || (ref?.excerpt && input.value)) {
-                showToast(tr('chat.send_as_new_draft', 'Finish or clear the current draft before using Send as new.'), 'info');
-                return;
+            if (sendBtn.disabled || attachments.count || replies.echoRow() || ((ref?.excerpt || quiet) && input.value)) {
+                if (!quiet) showToast(tr('chat.send_as_new_draft', 'Finish or clear the current draft before using Send as new.'), 'info');
+                return false;
             }
             if (ref?.excerpt) replies.start(ref);
             const draft = input.value.trimEnd();
             composer.setDraft(draft ? `${draft}\n\n${words}` : words);
             composer.focus();
+            return true;
         },
         /** Replace the draft (it is kept for the room like typed words). */
         setDraft(text) {
@@ -531,10 +599,26 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
                 field.removeEventListener('animationend', done);
             });
         },
+        /** The host's saved row of an owner message, read from its echo or from history when the echo never came:
+         *  taken as new work (`new_work`), the model choice its message named is spent; a Reply the host gave to its
+         *  work leaves it waiting. Taken as new work by a host process that has since ended (neither dispatch fact),
+         *  its delivery is not known: the choice stays with that message until its owner gives the copy up
+         *  (`releaseNewWork`, from "Send as new"). A row of any other message changes nothing. */
+        settleNewWorkRow(row) {
+            if (row?.ingress_accepted !== true || !row.client_message_id) return;
+            const spent = row.new_work === true;
+            if (spent && row.ingress_dispatched !== true && row.ingress_pending !== true) return;
+            ownerControls.model?.newWork.settled(row.client_message_id, spent);
+        },
+        /** The host refused message `id` because the model choice it named is no longer the room's. */
+        refuseNewWork(id) { ownerControls.model?.newWork.refused(id); },
+        /** The owner gave up that message's unconfirmed copy: the choice it named waits for a message again. */
+        releaseNewWork(id) { ownerControls.model?.newWork.released(id); },
         // Unsendable client-side state: staged File objects or an upload in flight.
         hasPendingWork: () => attachments.count > 0 || attachments.busy,
         destroy() {
             destroyed = true;
+            handedBack?.disconnect();
             globalThis.removeEventListener?.('ouro:panic', onPanicStop);
             for (const dispose of contributed) dispose();
             plusMenu.destroy();

@@ -1210,3 +1210,67 @@ def test_the_release_call_is_stated_once_and_every_mark_fact_is_recoverable():
         assert (following == f"{mv.INDENT}quote: {mark['quote']}") is bool(mark["quote"])
     same = [line for line in lines if "Check the release notes first." in line]
     assert len(same) == 2 and same[0] != same[1]
+
+
+def test_my_humans_words_of_other_rooms_as_addresses_state_their_reader_once(tmp_path):
+    """Both directions (K10b's lossless step, owner 2A): when Main shows my human's messages of other rooms by
+    address, each message keeps its own line with its date, size and address exactly as before, the reading
+    instruction stands once in the block instead of on every line, and each address opens its message by that
+    instruction; with the messages whole there are no address lines and no such sentence."""
+    from ouroboros import memory_view_conversation_forms as forms
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    root, repo = tmp_path / "data", tmp_path / "repo"
+    repo.mkdir(parents=True)
+    rooms = shared.projects(root)
+    said = {f"OWNER WORDS {room} {n}": room for room in (rooms["alpha"], rooms["beta"]) for n in range(3)}
+    shared.append(root / "logs" / "chat.jsonl", shared.msg(_ts(1), "main question", client_message_id="m-q"),
+                  *(shared.msg(_ts(2 + n), text, chat_id=room, client_message_id=f"w{n}")
+                    for n, (text, room) in enumerate(said.items())))
+    shared.import_all(root)
+    assert ChronicleStore(root).ensure_activated()["kind"] == "activation"
+    registry = ToolRegistry(repo_dir=repo, drive_root=root)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=root, task_id="reader", current_chat_id=1))
+    snapshot, whole = _view(root, MAIN_TASK)
+    owners = forms.owner_items(snapshot.conversations)
+    assert len(owners) == len(said) and forms.OWNER_ADDRESSES not in whole
+    addressed = mv.render_room(snapshot, mv.FloorLevel((("F7", tuple(owners)),)))
+    block = addressed[addressed.index("## Other conversations"):]
+    assert block.count(forms.OWNER_ADDRESSES) == 1 and "Read row addresses with memory_read(" in block
+    for ident, word in owners.items():
+        line = forms.owner_pointer(word)
+        before = mv._row_pointer(word, "words")  # the per-line form: the same date, size and address, and the instruction
+        assert before == line[:-1] + " — read by address)" and line.startswith(word["head"])
+        assert block.count(line + "\n") + block.endswith(line) == 1 and before not in block
+        room = ident.split(":", 1)[0]  # the room that shows it: the instruction's room, a single row its both endpoints
+        found, text = _returned(registry, room, word["address"], word["address"])
+        own = next(words for words in said if words in word["line"])
+        assert found == [word["address"]] and own in text and said[own] == int(room)
+
+
+def test_the_floors_estimate_of_my_humans_addressed_words_is_the_line_it_draws(tmp_path):
+    """The floor's "Holding the room" price (``memory_form_facts._hold_conversations``) of my human's messages of
+    another room shown by address equals the lines the view draws for them (``owner_pointer``), not the older
+    per-line form with its reading instruction; whole words are priced as their whole lines."""
+    from ouroboros import memory_view_conversation_forms as forms
+    from ouroboros.memory_floor import view_tokens
+    from ouroboros.memory_forms import holding_room
+
+    root = tmp_path / "data"
+    rooms = shared.projects(root)
+    shared.append(root / "logs" / "chat.jsonl", shared.msg(_ts(1), "main question", client_message_id="m-q"),
+                  *(shared.msg(_ts(2 + n), f"OWNER WORDS {n} " + "a longer message of mine " * (n + 2),
+                               chat_id=rooms["alpha"], client_message_id=f"w{n}") for n in range(4)))
+    shared.import_all(root)
+    assert ChronicleStore(root).ensure_activated()["kind"] == "activation"
+    snapshot, _whole = _view(root, MAIN_TASK)
+    owners = forms.owner_items(snapshot.conversations)
+    assert len(owners) == 4
+    for level in (mv.FloorLevel((("F7", tuple(owners)),)), mv.FULL_VIEW):
+        drawn = mv.render_room(snapshot, level)
+        lines = [line for line in drawn.splitlines() if any(line.startswith(word["head"]) for word in owners.values())]
+        assert len(lines) == 4
+        if level is not mv.FULL_VIEW:
+            assert lines == [forms.owner_pointer(word) for word in owners.values()]
+        held = holding_room(snapshot, level)["tokens"]
+        assert held["owner words in other rooms"] == view_tokens("\n".join(lines))

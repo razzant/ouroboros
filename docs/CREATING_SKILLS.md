@@ -1062,7 +1062,8 @@ Transport/control skills are first-class local-UI replacements: every owner comm
 polling and justified owner-event mirroring. Their review and runtime obligations belong to [CHECKLISTS](CHECKLISTS.md#transport-and-control-skills-are-first-class-binding-for-all-reviewers).
 
 `POST /chat/inject` treats text beginning with `/panic` (case-insensitive, surrounding whitespace ignored,
-trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop.
+trailing text included) as emergency intent. Only the positively bound owner/chat pair can stop, or, while no
+pair is bound yet (a slot read as positively free), a positive private sender: the bridge decides who that is.
 Unavailable or unauthorized Panic returns `503 {ok:false,error}` and never falls through to ordinary
 chat; this refusal of command-looking text is intentional. Accepted Panic returns `202 {ok:true,status:"accepted"}`,
 without a correlated operation or delivery replay, even with `client_message_id`. Telegram exposes owner
@@ -1173,6 +1174,15 @@ contributes:
   (the places they land in, else their audience), never through a group's write or read beside them; words with no
   such address, and a rich call declaring no `text`, keep their exact call. What a call ran with, not a later
   publication, decides what it did.
+- The stock Official `telegram-bot` release can opt in on its reviewed `telegram_send` row with `owner_dm: true`
+  and a context-taking handler. Only `kind: message` with a canonical positive string `chat_id`, no topic, and
+  `account_id` omitted or equal to the admitted event's bot qualifies. That Presence event is already bound to
+  the confirmed owner and keeps `direct_message`, `conversation.chat_type: private`, `conversation.bot_account_id`
+  and `conversation.chat_id` matching its bot and chat, and the human actor's matching `platform_actor_id` with
+  explicit `is_bot: false` and no `sender_chat`. The handler selects that standalone bot by its ordinary rules.
+  `getattr(ctx, "owner_dm_condition", None)` is a host-only condition for this invocation, not a tool argument,
+  address selector or grant. When absent (older hosts included) the ordinary route and check apply without
+  this attestation.
 - `icon` is reduced at staging to viewBox and geometry (path, circle, ellipse, line, polyline, polygon, rect, g),
   bounded, with fills and strokes set to `currentColor`; anything else falls back to the house glyph.
   Authors of `provides: place` skills must include `ui/icon.svg` and declare `icon: ui/icon.svg`.
@@ -1500,6 +1510,13 @@ Use the connector's ordinary content-hash-bound skill token for:
   back with its status; a relay refusal is a Telegram-shaped 403 with `relay_refusal` (nothing sent);
   `503 {relay_outcome: not_sent}`; `502 {relay_outcome: unknown}` has no `ok` and is never resent. Methods and
   arguments are listed in `skills/telegram/lib/telegram_group_feed.py`.
+- Authenticated `POST /presence/place` rechecks the retained condition in the JSON body `{"operation":"check_owner_dm","binding":…}`.
+  It reads current owner confirmation and Place authorization for the same address without changing either.
+  The result `{ok,allowed,owner_dm_checked,state,code}` attests a current match only when `owner_dm_checked` is true.
+  Before each physical send, including after restart, independently match the selected bot, chat and thread to
+  the retained tuple, then require a positive recheck. The POST knows only that tuple; it cannot verify the
+  client actually selected at send time. No confirmation (including HTTP 405 on an older host) grants no send;
+  a conditional row never falls back to ordinary unconditioned delivery. No receipt or content travels in this read.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
   including after a place is Paused or disconnected. The binding query is optional;
   the authenticated connector must still own the stored work.
@@ -2282,7 +2299,9 @@ The Host Service routes take the skill from `x-skill-token`, never from the body
   expects, any other or none being `409 connection_changed`; `consent`: below) → `200 {ok, access_token,
   token_type, expires_at (epoch seconds), scope, account: {key, label}, connection_id?, consent?}`; `409 {ok: false, code: "SIGN_IN_REQUIRED",
   reason, service, account, note, hint}` (hand `hint` to the mind; `note` is your `refresh_rejected` text when that is
-  the reason); `503 SIGN_IN_UNAVAILABLE` (the provider did not answer; the grant is kept); `404 {ok: false, error, reason, hint}`
+  the reason; reason `provider_refused`: the provider answered the renewal with its own refusal, such as
+  `admin_policy_enforced`, named in `error` with your `refused` note; the grant is kept and repeating will not help);
+  `503 SIGN_IN_UNAVAILABLE` (the provider did not answer, or answered 429/5xx; the grant is kept); `404 {ok: false, error, reason, hint}`
   with no account to use (`unknown_service`, `unknown_account`, `account_required`, `not_signed_in`, `no_usable_account`; hand `hint` to the mind); `403` the token floor. Cache the token until `expires_at`; never log it.
 - `consent` is an opaque account-row reference: a refresh keeps it, a new sign-in or transfer replaces it, and it is never a pass. To bind a new write, take `key`, `connection_id` and `consent` from one current `GET /sign-in/accounts` row, send them as `account`, `connection_id` and `consent` to `/sign-in/token`, and accept the bearer only when the answer repeats that `consent`: a host without the v2 field ignores it and repeats nothing. A replaced consent returns `409 consent_changed` without a token or a provider request. A receipt records what happened to the transfer. It does not authorize an earlier write to continue under a new consent; do not replace that write's expected value.
 - `POST /sign-in/handover` `{service, recover?, clients: [{client_id, client_secret?, label_hint, return_hint: "loopback" |

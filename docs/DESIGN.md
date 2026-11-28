@@ -325,7 +325,9 @@ caps with `text-transform`.
 whether it is final, its unresolved upper bound and what is unknown; composition,
 hold and technical counts follow, quieter. Budget leads with Total budget and Consciousness, last 24 hours (§5 "A
 limit's card"), then the three limits' edit rows; a card whose limit holds a wake names it with its door and “If its
-charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown). Activity names a
+charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown). Total budget's
+card names its own wake stopped by that budget, read again when the budget is saved: a line with its door, no control,
+since raising the budget alone resumes nothing and Resume and Stop now stay on its card and block. Activity names a
 work whole in primary ink above its facts; a duration reads in seconds below a minute, then minutes or hours; a
 missing one is absent, never `0s`. A narrow temporary-space tray puts a qualified size under its group's name. A widget
 card's ⋮ menu and move handle are one quiet pair at its head's end; lifecycle controls wrap below. Costs shows a
@@ -508,35 +510,37 @@ Enter as a line break.
 ### Composer owner controls
 
 Each composer saves its room's **Model**, **Subagents**, **Context** and **Effort** through the owner endpoints,
-in that order after Ouroboros's picture, with Model first. Main supplies a one-time copy of Subagents and Effort to new
-Projects, whose Context starts at Max; later changes stay in their room. A room's Model is never copied: it follows Main until the room chooses,
-and says so (name `Main`, value Main's model); a choice stays with its room.
+in that order after Ouroboros's picture, with Model first. Main supplies a one-time copy of Model (its tier too), Subagents and Effort to new
+Projects, whose Context starts at Max; later changes stay in their room. Until a room chooses a Model it follows Main
+and says so (name `Main`, value Main's model); a Main chat that follows Main gives a new room no model.
 Readback comes from Main state or the named Project, never another room. Saves apply
 to new participants; running work retains its choices through Resume. A refusal
 keeps the saved value and says why. No scope selector or extra settings row.
 
-**Model is the model new work here starts on.** Its glyph is the mark of the source that model is reached through
-(its own known mark; a held record's program, an explicitly unbound record the generic harness mark — never a
-letter or an invented logo), lit only while the room chose its own; then the name is that source. Closed, it
-always shows the room's choice, never a running work's model, and
-wears no mark for one; a tier other than Standard follows the model in the accent's word (`gpt-6-astra · Fast`). In the Main chat the capsule is Main itself:
-a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
-`model_roles.MAIN_FOLLOW_NOTE`, `composer_model.MAIN_CACHE_NOTE` with the catalog's cache-write price where it
-states one (§7), and in one line the pinned account and manual window it resets), then writes Main.
-**The sheet also says what the change does not move**: how many running works follow Main (said as unknown, never as zero, while the list
-of works is incomplete), then what is not on Main now — running and queued works on other models, each with why
-(`you chose it`, `its room's model`, `Ouroboros switched to it`, `fallback since 02:14` in amber) and its room, and
-rooms that start new work on their own model — each with its own tick to move it too. Nothing is ticked
-beforehand; a work on a fallback is listed as one and never counted among those that will switch; a work the
-server offers no model control for has no tick. Each tick is one act after the Main write (a work follows Main
-again; a room's own model is cleared), there is no batch, and a second sheet says each one's own result.
+**Model is the model the next work here starts on, kept until its owner changes it** (owner 26.11). Its glyph is the
+mark of the source that model is reached through (its own known mark; a held record's program, an explicitly unbound
+record the generic harness mark — never a letter or an invented logo), lit only while the room chose its own; then the
+name is that source. Closed, it always shows the room's choice, never a running work's model, and wears no mark for one;
+a tier other than Standard follows the model in the accent's word (`gpt-6-astra · Fast`). The Main chat's capsule is a
+room's: its pick is what new work in Main starts on and what a new room copies. It moves no existing room, running
+work, wake of consciousness or role: Main the role is Settings › Models' to change. One running work changes on its card; many, or Main's own model for new work again, by words to Ouroboros.
+
+**A pick of another model makes the next message a new task.** In the window that made it Send reads `New task` and the
+empty field `New task...` until that message goes: it starts its own work on it; no running work
+takes it. Back on the room's model, or after a tier alone, it is ordinary; a slash command and a Reply
+to a work's card or a row inside it go their own way and spend nothing. Any other Reply is the host's to place (its
+work takes it; a plain quote starts the task): Send stays `Send`, the field says both, and no Reply is held back. The
+message names the saved choice, never a model, and the host assigns from what is saved. Where another window changed
+the model first, nothing goes on either, the pick falls and the words stay in the field (a refusal
+returns plain ones there): the next Send is ordinary.
 
 **A press opens the Model sheet** (never hover), the one exception to inline capsules: a floating sheet above the row
 (a modal bottom sheet in the stack layout: its scrim's press or Back closes it first) that never moves the composer
-and leaves with its room. From the top: the field (`Model or source`), `Main · Follows Main · <its model>` (in the Main chat, Main's
-own model), `Pinned`, `Recent` (the room's own choice first), then the sources that can lead a work (those Settings
+and leaves with its room. From the top: the field (`Model or source`), while the room follows Main one line
+naming `Settings › Models`, Main's pin and a pick's effect (new tasks take it on Auto with its own window;
+running keep theirs), `Pinned`, `Recent` (the room's model now first), then the sources that can lead a work (those Settings
 offers the Main role, never agent sessions): one source's models at once, several under `All sources · Codex,
-OpenRouter + 7`. Main's row is the only way to follow Main; every other row is that route, Main's model included.
+OpenRouter + 7`. No row follows Main: every row is that route, Main's model included, and the one current now changes nothing.
 A row is one model through one source, however many accounts list it, never an account: the source, whether it is a
 subscription or paid by key (in its place the price a role's line says, §7, where the tier this pick
 would run on here is Standard: `OpenRouter · $4 in / $20 out`), its window when known, `Unavailable`
@@ -549,7 +553,7 @@ either; the active row stays its model's. Tab leaves for the tier. Search spans 
 "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings › Accounts and keys.
 The catalog suggests and never admits: any id can be used as typed. It is read when the sheet opens, never polled.
 Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the field, then
-closes. A room's pick posts at once and closes; Send waits for it, Panic never does.
+closes. A pick posts at once and closes; Send waits for it, Panic never does.
 
 **The tier strip** at the Model sheet's foot offers Flex (`economy`), Standard, Fast and Ultrafast for the current
 model, transport and account: a follower reads Main's pin or Auto on opening, unknown until confirmed; an own model uses Auto.
@@ -558,17 +562,19 @@ Offer new Ultrafast only on a transport known to carry it. Keep saved choices an
 Standard alone only when inherited processing already means Standard. An own choice is filled, with Default beside
 it; an inherited one wears a ring. With no tier requested the route decides (OpenRouter: its workspace default).
 
-Below, say who takes the choice: a room's new work at admission, Main and work inheriting its tier (even on a
-fallback), a card's work from its next call, and new subagents without their own tier. Hover or focus
+Below, say who takes the choice: a room's new work at admission (the Main chat's too),
+a card's work from its next call, and new subagents without their own tier. Hover or focus
 previews in space kept for the longest explanation. A key's rate or range needs a complete priced endpoint list for
 that model and tier, else “Price unknown”. A press saves in place; a proven refusal before generation can continue on
 Standard, and the card shows the receipt.
 
-**Ultrafast for Main asks first** when enabled or moved. Show model, account, known price or uncertainty, and
-scope: Main, inheriting work and fallbacks, new helpers, direct Main review and Safety falling back to Main without an override.
-Before rollback choose Standard or Default. A changed route, pin, account or key invalidates the answer. Auto follows
-its pool. Confirm in Models or switch the waiting task. A role hides redundant Standard-only processing, not a saved
-override or distinct inherited default. An empty Supervisor names its inherited route, account and tier.
+**Ultrafast asks first** with model, account, price or uncertainty and scope. Main's (enabled or moved, Settings › Models): Main,
+inheriting work and fallbacks, new helpers, direct Main review and Safety falling back to Main unless overridden; before rollback
+choose Standard or Default; a changed route, pin, account or key voids it; Auto follows its pool; confirm in Models or switch the
+waiting task. The Main chat's binds new work at admission, past later chip picks: Auto follows its pool; a named profile follows
+its name, so a later sign-in can pay, said first. A replaced API connection leaves old work at its ordinary tier, even
+if confirmed for new work. No room copies it. A role hides
+redundant Standard-only processing, not a saved override or distinct inherited default. An empty Supervisor names its inherited route, account and tier.
 
 Each is a neutral **capsule** of the pills' height — glyph, name, value: `Main gpt-6-astra`, `Subagents Auto`,
 `Context Max`, `Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
@@ -1012,8 +1018,9 @@ status sentence's or a composer chip's dot is its tone, §4).
   assumption or has ended, and a Project's answer whose delivery a restart left unknown), or what only the owner can do: sign in, a spending limit, Resume after a
   restart, crash or Panic, grant access, a skill review that must run first, local
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
-  or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
-  with); (2) a warning worth reading — warn toasts and sentences,
+  or was stopped by a spending limit (new starts refused by its allowance, or its own wake proven held by a limit: its
+  allowance, the limit it started with, the total budget, a cap or limit of its own work), or whose own wake a stop of
+  the app or Panic holds for Resume; (2) a warning worth reading — warn toasts and sentences,
   Settings and onboarding notes, warnings inside task timelines and reviews,
   account quota, and a work that went to a fallback route by itself, until that is resolved
   (its card's model fact and the same word in the Main sheet); (3) the System voice (a pale tint in the light theme, its name
@@ -1171,7 +1178,8 @@ words the owner typed into the control (an Evolution objective) stay theirs, exa
 
 A host fact has a subject, and the subject names its carrier: a task's fact is a
 row of its card, a fact about the owner's message is the typed annotation on that
-message, and a landed act publishes no row (its receipt or card already says it).
+message, and a landed act publishes no row (its receipt or card already says it). One exception: a skill's
+sign-in offered as a button in a conversation is said there once (`sign_in_connected`), since its card is elsewhere.
 The mind's Storage → Free request is reported in Main as a typed System row (`storage_free_notice`).
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the
@@ -2302,6 +2310,10 @@ back. Disconnect and Revoke ask in place first and answer for the consent shown 
 line of its control (the group head's once its row is gone), and the skill's own words (service label, permission
 labels, notes) stay as written.
 
+In a conversation the mind offers this card as a button of its links row (a place, never an address); once a sign-in
+offered there completes, one System row in that conversation says the skill is signed in, naming no account. Telegram,
+where a sign-in that returns to the computer cannot finish, says instead where to finish it (owner, 2026-11-27).
+
 ### Dashboard › Consciousness
 
 The switch is one (owner 15.11, 5A): its name stays Consciousness, glossed “When Ouroboros acts”, and its positions
@@ -2315,11 +2327,11 @@ there in the last 7 days, what it asks to stop and what keeps working, every pla
 button says “Reading…” (on a large install the first read takes seconds). With no place to name the turn goes at once;
 a preview or a place list that cannot be read, or a preview not answered within 15 seconds, does not hold the switch
 (the dialog says so and still offers the turn). Turning on says where it may answer and that at its first wake it sees what is unread there
-and decides what to read and answer. After Panic turning on (or, once consciousness is already on in a new run with Panic-stopped work waiting, “Allow Panic resume”)
-uses one native OS confirmation dialog in the desktop app, places or none: nothing starts right now, and in this run wakes may
+and decides what to read and answer. After Panic the desktop app's Turn on (or, once consciousness is already on in a new run with Panic-stopped work waiting,
+“Allow Panic resume”) uses one native OS confirmation dialog, places or none: nothing starts right now, and in this run wakes may
 choose which shown Panic-stopped tasks to resume (even one Panic was pressed for) until Off or restart, while separate Stops/Pauses
-and limits hold; browsers and older shells explain this (never promising restart updates an old shell) and keep manual Resume
-(ARCHITECTURE §9). The words are the host's (`consciousness_view`): the app shows them from the
+and limits hold. Elsewhere Turn on sends the plain /bg, which hands over no choice, and “Allow Panic resume” says it needs the
+current desktop app (never promising restart updates an old shell); manual Resume stays (ARCHITECTURE §9). The words are the host's (`consciousness_view`): the app shows them from the
 server's answers, and the /bg replies (every surface, headless included) and the mind's own fact come from there too.
 
 The headline reports server state apart from wakes, with the host sentence as its only clock. A past next attempt says
@@ -2354,9 +2366,28 @@ unavailable amount is “spend unknown”; known parts retain “Tracked:” and
 Open accounting keeps “so far”; it is no final total.
 The allowance's “Some calls have no price” and “next check at” promise no admission.
 Visible and accessible words agree. The allowance is edited only in Costs › Budget, behind a door row; its other
-settings are rows of this page. A wake held at its allowance says so without a
-clock; beneath it, quieter: the host's words on Resume (Costs and its Main card: estimated room, and what the total
-budget leaves of it when that is less) and that Stop now frees the clock.
+settings are rows of this page.
+
+A held own wake is its own block, apart from the switch: a tray directly under the headline card's head, which keeps
+the position, money and Turn off and leaves the held wake's state to the block (`consciousness_held_wake.js`; the chip's
+Shade draws the same block under its header). Its head is “Own time”, the wake's start in the viewer's clock and its
+mark and word by the cause its records prove: a spending limit, or a stop of the app or Panic that only the owner's
+Resume releases, is the owner's amber dot (Paused), a Pause two bars, a sleep or a wake queued for a worker the still
+mark (Waiting, Queued; queued only when its queue row holds nothing), a technical, unreadable or unproven hold a ring;
+past its hard deadline the shared “Deadline expired”. Then the host's sentence, without an id or a clock: what holds
+it, every proven cause named (only an unproven one keeps “paused or waiting in the queue”), and beneath it, quieter,
+its next step (that raising a limit alone resumes nothing; that Stop now frees the clock; that only the next own wake
+waits, wakes in places being separate) and what the same state says now: Resume's estimated room at an allowance, as
+Costs and its Main card say it, and whether the total budget has room (none left: raise it in Costs, then Resume;
+room: Resume continues it). A passed deadline drops those sentences, that advice and the Costs door. Its controls are exactly those its
+work's projection offers, on the shared task controls: Resume, Stop now after the shared confirmation, Close for a
+passed deadline. They stay, disabled, while the socket is closed or the newest state read failed, and a press of one
+disables the others until it settles; a press made on another surface shows at the next state read, and every press
+checks again. `Costs ›` stands while the next step is a limit Costs edits (the allowance and the total budget open
+their rows; the limit it started with opens the tab; a work's own cap is raised in chat); while the total budget holds
+it with nothing left `Costs ›` is the primary and Resume a neutral capsule that stays pressable, and with room again
+Resume leads. The task door “Open in Main ↗” ends the row; the controls wrap and, under a finger, each reaches the touch
+minimum. A keyboard opening of the Shade lands on the block's first control, and its confirmation keeps the Shade open.
 
 “Open in Main ↗” lands on the card Main draws, else finds it through around-history; a focus door
 opens its captured conversation in the sheet, Back returns. An unowned room disables
@@ -2524,7 +2555,8 @@ pagehide, device loss, unload and a successful Calls-off read end them. A call
 the room's context cannot fit into the selected engine's window leaves one System
 line and nothing else: the engine, what the room needs (or at least needs, when
 memory was not measured) and what the engine takes; the stage, window and
-reserve behind Details, with the parts when the room's own context was refused,
+reserve behind Details (the catalogue is credited only with the number it declares,
+any other window with its own source and date, or as unrecorded), with the parts when the room's own context was refused,
 and the request measured whole with the call's instructions and tools when the
 call's setup was; the Calls (beta) settings as its step. Its sheet says so
 calmly with Open Calls. An End pressed while the call prepared stays the
@@ -2638,9 +2670,9 @@ adds one.
 **A work's model on its card.** A root card's meta line begins with the model the work runs on, said from the
 server's published fact (`works[].lead`; a direct turn's from its activity row). It is the mark of its source and `Source · model`
 in a node of its own before the rest of the line, so a repaint of the line never re-creates it. Beside it, words
-say why the work is on that model when it does not simply follow Main: `this room's model`, `you chose it`,
+say why the work is on that model unless it just follows Main: `this room's model`, `copied from Main`, `you chose it`,
 `you asked for it`, `you pressed this option`, `Ouroboros switched to it`, or the role it follows (`follows Light`).
-A follower says nothing more there, and its popover's first line says `follows Main`. The popover quotes the
+A follower says nothing more there; its popover's first line says `follows Main`. The popover quotes the
 published citation after its reason, `you asked for it` for the owner's words and `you pressed this option` for
 the label they pressed. This includes the primary's citation while the work runs elsewhere. The pending arrow
 identifies a primary awaiting application. Authored text keeps its exact case and whitespace and is never translated.
@@ -3010,10 +3042,7 @@ Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
 Source / Model / Account row to change it. In the wizard each role says once, under its name,
 what work it serves (the setup contract's note, Fallback its order sentence); never a hover title. Under Main, Settings (not the wizard or a wait
-picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
-confirming sheet says it before it writes Main, with one more fact (`composer_model.MAIN_CACHE_NOTE`: what follows
-Main may write its start to the new model's cache again) and, where the catalog states it for the install's cache
-tier, the price of a cache write. A model suggestion and the line under a role show the catalog's
+picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save. A model suggestion and the line under a role show the catalog's
 published price per 1M tokens where it states a whole one the role pays (not on Fast or Flex), never sorting or
 filtering the list; an entry priced only for text off-peak says `Estimated for text, off-peak · USD only`, no
 figure, except under Vision, whose calls send images; there, as under any API role without a price it pays, the
@@ -3403,10 +3432,11 @@ Disturb still decide. macOS uses `UNUserNotificationCenter`, whose one permissio
 question is asked only from the owner's gesture — switching notifications on, or
 Test — never by an alert, which falls back while the question is unasked; Windows
 shows a balloon on Ouroboros's one notification-area icon, presented as a system
-notification on Windows 10/11; a source handoff can change the window/taskbar
-identity to Python. Handoff removes the old icon before its successor starts;
-a gap or Explorer ghost after a crash remains possible; Linux uses the freedesktop notification service when
-the desktop runs one. Not yet allowed, denied, unavailable or failed is a typed
+notification on Windows 10/11. The installed app shares its Start shortcut's
+identity; a portable copy's handoff can show as Python in the taskbar. Handoff
+removes the old tray icon first; a crash can leave a gap or Explorer ghost.
+Linux uses freedesktop notifications where available.
+Not yet allowed, denied, unavailable or failed is a typed
 answer, never silence (an error the system returns instead of asking is that
 error, not a denial): that alert falls back to the browser banner or the in-app
 toast. One the system took without answering in time may still appear, so
@@ -3842,15 +3872,20 @@ or `since HH:MM` only for `due` (appointment, `due` if unknown), with the `still
 Its word uses the viewer's zone and a short date when not today; passed explained
 outcomes and passed allowance resets show no time.
 `Evolving` replaces the word during a campaign, even when off; Off is grey.
-Running shows moving dots, never a breathing glyph; held shows pause bars without time (the amber dot when held at its allowance); unknown a ring,
+Running shows moving dots, never a breathing glyph; a held own wake its cause's mark without time (the amber dot for a
+spending limit or a stop only the owner's Resume releases, two bars for a Pause, the still mark for a sleep or a queued
+wake, a ring when unproven: Dashboard › Consciousness), so Telegram's row never reads a limit as `Consciousness ‖`;
+unknown a ring,
 failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except where the room covers Main (a phone, a
 finger's docked column) while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
 Its accessible name and the Shade state use the host sentence without adding a clock.
 A press opens its own sheet of the work list's material (the Shade), hung under the
-capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then
+capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, the held own wake's block with
+its controls (Dashboard › Consciousness), “Its own wakes” then
 “Wakes in places” (three rows each, Dashboard's empty sentences, one coverage or failure above both; a place's row is a
 door to that place's sheet (Active · Silent · Paused there), read from the places at the press: a
-failed read says so on that line, a place gone since disables its row), `Dashboard ›`, `Costs ›` while the allowance is the next step
+failed read says so on that line, a place gone since disables its row; an own wake's row is a door to its card in Main),
+`Dashboard ›`, `Costs ›` while the allowance is the next step and no held wake's block says so,
 and, during a campaign, `Evolution ›`
 (`web/modules/consciousness_status.js`). Evolve and Review live in Dashboard › Evolution (`Run review…` opens
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:

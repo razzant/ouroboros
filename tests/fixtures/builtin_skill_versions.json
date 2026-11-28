@@ -16,20 +16,20 @@
   "version": "0.1.22"
  },
  "grok_realtime": {
-  "content_hash": "ce1588c7c78e540ae4363b9db81103f135a8d1d2f2a68c2a70c54f7cd94140d9",
-  "version": "0.1.14"
+  "content_hash": "e6769475b9f7f9e88dd77b40be6e60ef33cdc09ee0fabf1a66b7f5d5146651db",
+  "version": "0.1.16"
  },
  "live_conversation": {
   "content_hash": "d4a5c90537b98f482cdb29c0431a88df4f066e9ccf66f62244ad592e8ab7519c",
   "version": "0.1.40"
  },
  "openai_realtime": {
-  "content_hash": "5a576510a82872fec47b138960bed9b864a0a5e8721b67c01cc7dbbc51a6485b",
-  "version": "0.1.10"
+  "content_hash": "9e0aa1bee8fe6458260b58b9ac87b332f4d17aaa83be0b5ddaed60009a96ae8d",
+  "version": "0.1.11"
  },
  "telegram": {
-  "content_hash": "83868012869a9a11b32438cc9ada409bd9c5f8168b30e76997cabe111534901c",
-  "version": "1.5.0"
+  "content_hash": "a85cd530d81808668f31d666a4b7d766a97a61a31b9173f4607a4f7e35c18494",
+  "version": "1.6.1"
  },
  "templates": {
   "content_hash": "618fdf09134e2700d1a7fd2aefe51dde4d23e0c1ec30db7824852bbcb2016f62",

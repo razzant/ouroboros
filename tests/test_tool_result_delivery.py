@@ -470,7 +470,7 @@ def test_truncate_tool_result_compat_invents_no_cap_without_an_allowance():
     big = "q" * 400_000
     for tool in ("run_command", "read_file", "get_task_result", "web_fetch", "unknown_tool"):
         assert _truncate_tool_result(big, tool) == big, tool
-        assert _truncate_tool_result(big, tool, {"path": "docs/architecture/06-agent-core.md"}) == big, tool
+        assert _truncate_tool_result(big, tool, {"path": "docs/architecture/06-1-loop-tools-and-safety.md"}) == big, tool
     view = _truncate_tool_result(big, "run_command", {"cmd": ["x"]}, allowance_chars=1_000)
     assert len(view) < 3_000 and FULL_SOURCE_UNAVAILABLE in view and "omitted 500\u2013399500" in view
 

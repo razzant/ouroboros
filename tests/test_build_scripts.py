@@ -577,6 +577,28 @@ class TestBuildWindowsPs1:
             assert r"%ROOT%\_internal\repo.bundle" in src
             assert 'set "ROOT=%ROOT%\\_internal"' in src
 
+    def test_windows_cli_wrappers_isolate_module_search_from_caller_folder(self):
+        """``python -m`` prepends the caller's folder to ``sys.path``, so with a bare
+        ``-m`` an ``ouroboros`` package in the caller's folder (an extracted older
+        checkout) shadows the bundled modules. Both official wrappers run the bundle
+        interpreter with ``-P`` (safe path; the bundled Python is 3.12) so
+        ``PYTHONPATH=%ROOT%`` alone selects the bundle; ``%*`` and the caller's cwd
+        pass through unchanged (neither wrapper ``cd``s anywhere)."""
+        for name in ("packaging/cli/ouroboros.cmd", "packaging/cli/install-ouroboros-cli.cmd"):
+            src = _read(name)
+            module = "packaged_cli_install" if name.endswith("install-ouroboros-cli.cmd") else "packaged_cli"
+            assert re.search(rf'^"%PY%" -P -m ouroboros\.{module} %\*$',
+                             src, re.MULTILINE), f"{name} lost its -P module isolation"
+            assert not re.search(r"^\s*cd\b", src, re.MULTILINE | re.IGNORECASE), f"{name} must keep the caller's cwd"
+
+    def test_windows_install_cmd_pins_the_shipped_sibling_wrapper(self):
+        """``build_windows.ps1`` ships both wrappers beside each other in ``bin\\`` while
+        the cmd's ROOT resolves into ``_internal``: the recorded wrapper path must be
+        the installer's own folder, not ``%ROOT%\\bin`` (no such file ships there)."""
+        src = _read("packaging/cli/install-ouroboros-cli.cmd")
+        assert 'set "OUROBOROS_PACKAGED_CLI_WRAPPER=%~dp0ouroboros.cmd"' in src
+        assert r"%ROOT%\bin" not in src
+
     def test_source_handoff_interpreter_receives_the_desktop_extra(self):
         """The source launcher prepares pythonnet from python-standalone before importing webview."""
         runtime = _read("ouroboros/launcher_windows_runtime.py")

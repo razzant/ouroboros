@@ -11,9 +11,9 @@ nothing is wider than the screen.
 
 ``test_model_choice_on_the_real_server``: nothing of the server is answered. The loopback provider lists its models,
 holds marked calls and refuses one model, so the page shows what the server itself publishes: a room following Main
-and with its own model, the Main chat's open sheet and its field in use, the Main sheet plain and with its lists, a
+and with its own model, the Main chat's open sheet and its field in use, a
 running card, a queued card, the card's sheet, a work on a fallback in amber with its three exits, and the arrow of a
-follower after Main changed. Each state is read from the page and pictured at the four widths in both themes for the owner
+follower after Main the role changed (through Settings' writer: no capsule writes Main). Each state is read from the page and pictured at the four widths in both themes for the owner
 (``OUROBOROS_UI_EVIDENCE_DIR``). The circle editor and the place sheet's Model field close the set; a place needs a
 connector the smoke server does not have, so the places list is answered by the test there, as in
 ``test_circle_model_browser``.
@@ -87,9 +87,10 @@ def _theme(page, theme: str) -> None:
 
 
 def _quiet(page) -> None:
-    """No toast left over the page. The pointer goes to a corner first: a toast under it does not expire."""
+    """No toast shown over the page. The pointer goes to a corner first: a toast under it does not expire. A page notice
+    held behind a modal sheet (toast.js) is hidden and keeps its time until the sheet closes: it is in no picture."""
     page.mouse.move(1, 1)
-    page.wait_for_function("() => !document.querySelector('.toast')", timeout=20_000)
+    page.wait_for_function("() => !document.querySelector('.toast-stack:not([data-held]) .toast')", timeout=20_000)
 
 
 _WIDE = "() => document.documentElement.scrollWidth - window.innerWidth"
@@ -164,7 +165,7 @@ _ROW = """() => {
         wide: document.documentElement.scrollWidth - window.innerWidth,
         out: [...row.querySelectorAll('.chat-capsule')].filter((el) => el.getClientRects().length && el.getBoundingClientRect().right > window.innerWidth + 0.5).map((el) => el.className),
         rows: rows.length, first: rows.slice(0, 2).map((node) => node.dataset.row),
-        main: rows[0] ? [rows[0].querySelector('.chat-model-row-id')?.textContent, rows[0].querySelector('.chat-model-row-tag')?.textContent || ''] : null,
+        top: rows[0] ? [rows[0].querySelector('.chat-model-row-id')?.textContent, rows[0].querySelector('.chat-model-row-tag')?.textContent || ''] : null,
         fold: fold ? { expanded: fold.getAttribute('aria-expanded'), names: fold.querySelector('.chat-model-row-facts').textContent } : null,
         sources: sheet ? sheet.querySelectorAll('.chat-model-source').length : 0,
         factsOver: sheet ? [...sheet.querySelectorAll('.chat-model-row-facts')]
@@ -207,8 +208,9 @@ def _capsule_walk(page, tag: str, *, finger: bool = False) -> None:
     still(opened, closed, "the sheet open")
     placed(opened, "the sheet open")
     assert opened["inField"] is not finger, (tag, "a mouse starts in the field; a finger's press raises no keyboard", opened)
-    assert opened["first"] == ["main", "sources"] and opened["main"] == ["gpt-6-astra", "Main"], \
-        (tag, "Main's own model, then the sources it can lead through, folded", opened)
+    # DESIGN "Composer owner controls": no row follows Main; the chat's model now (Main's, which it follows) is a route.
+    assert opened["first"] == [f"route|{ASTRA}", "sources"] and opened["top"] == ["gpt-6-astra", ""], \
+        (tag, "the chat's model now, then the sources it can lead through, folded", opened)
     assert opened["fold"]["expanded"] == "false" and " + " in opened["fold"]["names"], (tag, opened)
 
     press(".ui-popup.model-sheet .chat-model-sources .chat-model-cell")
@@ -217,7 +219,7 @@ def _capsule_walk(page, tag: str, *, finger: bool = False) -> None:
     unfolded = page.evaluate(_ROW)
     still(unfolded, closed, "the sources unfolded")
     placed(unfolded, "the sources unfolded")
-    assert unfolded["fold"]["expanded"] == "true" and unfolded["sources"] >= 5, (tag, "Main, then the sources", unfolded)
+    assert unfolded["fold"]["expanded"] == "true" and unfolded["sources"] >= 5, (tag, "the chat's model, then the sources", unfolded)
     # The floating sheet owns its non-action text too: a press there neither closes it nor picks a model.
     press(".ui-popup.model-sheet .model-tier-scope")
     page.wait_for_timeout(200)
@@ -428,23 +430,6 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
         def close_capsule(page) -> None:
             _close_sheet(page)
 
-        def ask_main(page, route: str) -> None:
-            """The Main chat's pick up to its confirming sheet."""
-            open_sheet(page)
-            page.wait_for_selector(_row(route), timeout=20_000)
-            page.click(f"{_row(route)} .chat-model-cell")
-            page.wait_for_selector(".confirm-dialog [data-main-followers]", timeout=20_000)
-            page.wait_for_timeout(300)
-            proposed = page.evaluate("""() => {
-                const model = document.querySelector('.chat-model-sheet-row b');
-                return { text: model.textContent, whole: model.scrollWidth <= model.clientWidth };
-            }""")
-            assert proposed == {"text": route.split("::", 1)[-1], "whole": True}, proposed
-
-        def cancel_sheet(page) -> None:
-            page.click(".confirm-dialog [data-confirm-cancel]")
-            page.wait_for_function("() => !document.querySelector('.confirm-dialog')")
-
         try:
             load(desk)
             load(phone)
@@ -453,23 +438,12 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             logs = _post(desk, "/api/projects", {"name": "Logs"})["project"]
             capsule = f"#pchat-{alpha['id']}-model-mode"
 
-            # --- 01: a room follows Main until it chooses. 05: the Main sheet with nothing to list.
+            # --- 01: a room follows Main until it chooses.
             in_room(alpha, "01", "capsule-follows-main")
             _open_project(desk, alpha)
             follows = desk.evaluate(_CAPSULE, capsule)
             assert (follows["name"], follows["value"], follows["own"]) == ("Main", "mock-main", "false"), follows
             _close_project(desk)
-
-            def plain_sheet(page) -> None:
-                ask_main(page, OTHER)
-
-            everywhere("05", "main-sheet-plain", plain_sheet, cancel_sheet)
-            ask_main(desk, OTHER)
-            plain = desk.evaluate("""() => ({ count: document.querySelector('[data-main-followers]').innerText,
-                rows: document.querySelectorAll('.confirm-dialog .chat-model-off').length, ok: document.querySelector('[data-confirm-ok]').innerText })""")
-            assert plain == {"count": "No running work follows Main now.", "rows": 0, "ok": "Change Main"}, plain
-            cancel_sheet(desk)
-            assert _state(desk)["main_route"]["model"] == MAIN, "a cancelled sheet writes nothing"
 
             # --- The room chooses its own model. 02: its closed capsule. 03: the Main chat's open sheet. 04: its field
             #     in use.
@@ -493,15 +467,15 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             open_sheet(desk)
             sheet = desk.evaluate(_SHEET)
             seen["main_sheet"] = sheet
-            first = sheet["groups"][0]["rows"]
-            assert [(row["row"], row["id"], row["tag"], row["selected"]) for row in first] == [("main", "mock-main", "Main", True)], sheet
-            assert sheet["headings"][0] == "Recent" and [row["id"] for row in sheet["groups"][1]["rows"]] == ["mock-picked"], \
-                ("a room's pick is a recent model everywhere", sheet)
+            assert not [row for group in sheet["groups"] for row in group["rows"] if row["row"] == "main"], ("no row follows Main", sheet)
+            # The chat's model now (Main's, which it follows) stands first among the recent ones, chosen.
+            assert sheet["headings"][0] == "Recent" and [(row["id"], row["selected"]) for row in sheet["groups"][1]["rows"]] == \
+                [("mock-main", True), ("mock-picked", False)], ("a room's pick is a recent model everywhere", sheet)
             catalog = desk.evaluate("async () => (await fetch('/api/model-catalog', { cache: 'no-store' })).json()")
             assert next(row for row in catalog["items"] if row["value"] == MAIN)["processing_transport"] == ["standard"]
             assert sheet["offered"] == [] and sheet["stop"] == [] and sheet["chosen"] == "" and not sheet["reset"], \
                 ("a known Standard-only connection with no saved choice has no tier controls", sheet)
-            assert sheet["scope"].startswith("Default · for Main and work that inherits its tier, even on a fallback model"), sheet
+            assert sheet["scope"].startswith("Default · for new work here and its new subagents without a tier of their own"), sheet
             close_capsule(desk)
 
             def search(page) -> None:
@@ -625,25 +599,12 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             close_popover(desk)
             _close_project(desk)
 
-            # --- 06: the Main sheet with its lists; then Main changes. 11: the follower's arrow.
-            def lists_sheet(page) -> None:
-                ask_main(page, OTHER)
-
-            everywhere("06", "main-sheet-lists", lists_sheet, cancel_sheet)
-            ask_main(desk, OTHER)
-            sheet = desk.evaluate("""() => { const d = document.querySelector('.confirm-dialog'); const text = (n) => (n ? n.innerText.replace(/\\s+/g, ' ').trim() : null);
-                return { count: text(d.querySelector('[data-main-followers]')), heads: [...d.querySelectorAll('.chat-model-sheet-sub')].map(text),
-                    rows: [...d.querySelectorAll('.chat-model-off')].map((row) => [text(row.querySelector('.chat-model-off-name')),
-                        row.querySelector('.ui-checkbox') ? row.querySelector('.ui-checkbox').checked : null, text(row.querySelector('.model-fallback'))]) }; }""")
-            seen["sheet"] = sheet
-            assert sheet["count"] == "1 running work follows Main now.", sheet
-            assert sheet["heads"] == ["Not on Main now · tick to move too", "Rooms that start new work on their own model · 1"], sheet
-            rows = {row[0]: row for row in sheet["rows"]}
-            assert {name: row[1] for name, row in rows.items()} == {"Read last night's logs": False, "Research": False}, sheet
-            assert rows["Read last night's logs"][2].startswith("fallback since ") and rows["Research"][2] is None, sheet
-            desk.click(".confirm-dialog [data-confirm-ok]")
+            # --- Main the role changes (Settings › Models' own writer: the Main chat's capsule never writes it).
+            #     11: the follower's arrow.
+            _post(desk, "/api/owner/safety-model", {"settings": {"OUROBOROS_MODEL": OTHER, "USE_LOCAL_MAIN": False}})
             desk.wait_for_function("() => document.querySelector('#chat-model-mode .chat-capsule-value').textContent === 'mock-other'", timeout=20_000)
             assert _state(desk)["main_route"] == {"model": OTHER, "use_local": False}
+            assert _state(desk)["main_chat"]["model_choice"] == {"kind": "main"}, "the Main chat still follows Main"
 
             def arrow(page) -> None:
                 page.wait_for_function("(sel) => document.querySelector(sel + ' .card-model-pending')?.innerText.includes('mock-other')",

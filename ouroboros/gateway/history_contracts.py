@@ -14,9 +14,9 @@ from ouroboros.gateway.attachment_contracts import ChatAttachmentView, QuizAnswe
 from ouroboros.gateway.reference_contracts import ChatReplyReference, HostNoticeField
 
 try:
-    from typing import Literal, Required, TypedDict
+    from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - Python 3.10 compatibility.
-    from typing_extensions import Literal, Required, TypedDict
+    from typing_extensions import Literal, NotRequired, Required, TypedDict  # type: ignore[assignment]
 
 
 class RequestedExecutorRoute(TypedDict):
@@ -261,6 +261,7 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     # ChatAttachmentView on owner rows; QuizAnswerFile on project_question_pointer.
     attachments: List[Union[ChatAttachmentView, QuizAnswerFile]]
     text_placeholder: bool
+    new_work: Literal[True]  # an owner row accepted as new work of its own, as its live echo said (``ChatOutbound.new_work``)
     chat_annotation: Dict[str, Any]  # the routing outcome shown on an owner message
     origin_id: str
     source_row_address: str  # the physical original of a retained copy, even outside this store
@@ -275,7 +276,7 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     download_url_compat: str
     caption: str
     size_bytes: int
-    actions: List[Dict[str, str]]  # LinkAction rows: {label, url}
+    actions: List[Dict[str, str]]  # LinkAction rows: {label, url} or {label, place}
     title: str
     quiz: ChatHistoryQuiz
     card: ChatHistoryCard
@@ -410,6 +411,8 @@ class ChatHistoryResponse(TypedDict, total=False):
     next_cursor: Required[Optional[str]]  # pass back as ?cursor= for the next older page
     page_cursor: Optional[str]  # re-reads this same page
     after_cursor: str  # the newest page and every ``after`` read: pass back as ?cursor= for what arrived since
+    repairs: List[ChatHistoryMessage]  # an ``after`` read asked ``repair=settled``: the rows the window holds of a task
+                                       # it shows that settled, as the newest page shows them now
     window: Required[ChatHistoryWindow]
     coverage: ChatHistoryCoverage
     error: str
@@ -434,10 +437,12 @@ class ChatSearchAttachment(TypedDict):
 
 
 class ChatSearchLink(TypedDict):
-    """A link button of a delivered links row: its label is shown, its address only decides whether it is."""
+    """A link button of a delivered links row: its label is shown; its address, or its place (a skill's sign-in card,
+    drawn as history draws it), only decides whether it is."""
 
     label: str
-    url: str
+    url: NotRequired[str]
+    place: NotRequired[str]
 
 
 class ChatSearchQuestion(TypedDict, total=False):

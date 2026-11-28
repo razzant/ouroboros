@@ -764,11 +764,13 @@ def take_letter_send(ctx: Any, *, role: str, account: str | None):
     """Offer at most one addressed letter to an ordinary round's optional physical copy. It stays staged until that
     copy's own dispatch is accounted for (``LetterSend.settle``/``observe``); one that can no longer reach this reader
     leaves without holding its ordinary work."""
-    from ouroboros.model_slots import task_processing_preference
+    from ouroboros.model_slots import send_processing_preference
+    from ouroboros.model_wait import current_model_wait
     from ouroboros.store import acquisition_budget
     from ouroboros.tool_access_paths import canonical_data_root
 
     tool = ctx.tools._ctx
+    waiter = current_model_wait()
     if ref := getattr(tool, "_late_report_ref", ""):
         return LetterSend(ctx, canonical_data_root(tool), ref, getattr(tool, "_late_result_route", None) or {})
     mail = getattr(tool, "_late_result_mail", None) or {}
@@ -789,8 +791,9 @@ def take_letter_send(ctx: Any, *, role: str, account: str | None):
                 if current and current != pin:
                     continue
             # The preference this round sends (as ``_dispatch_round_model`` computes it) must be the captured one.
-            if route.get("processing_preference", ()) != task_processing_preference(
-                    {"task_metadata": getattr(tool, "task_metadata", {})}, model_role=role):
+            if route.get("processing_preference", ()) != send_processing_preference(
+                    getattr(tool, "task_metadata", {}), ctx.active_model, ctx.active_use_local, role,
+                    overrides=waiter.overrides if waiter else None):
                 continue
             with acquisition_budget(0):
                 if current_target(root, binding) != ctx.task_id:

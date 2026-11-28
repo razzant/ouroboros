@@ -623,7 +623,11 @@ def _list(read: _Read) -> str:
 
         return list_artifacts(read)
     if kind == "run":
-        return read.refuse("⚠️ TOOL_ARG_ERROR: get(kind='run', target=run_id) reads a run; checks lists a commit's runs.")
+        from ouroboros.tools.github_workflows import _repo_hint
+
+        return read.refuse("⚠️ TOOL_ARG_ERROR: get(kind='run', target=run_id) reads a run; "
+                           "github_read(method='api', route='repos/{owner}/{repo}/actions/runs?head_sha=<commit SHA>'"
+                           f"{_repo_hint(read.repo)}) lists a commit's runs.")
     if kind not in KINDS:
         return read.refuse(f"⚠️ TOOL_ARG_ERROR: list needs kind ∈ {', '.join(KINDS)}.")
     if kind == "discussion":
@@ -863,7 +867,8 @@ SCHEMA: Dict[str, Any] = {
         "never a mutation (that is github_write(method='api')). get kind='run', target=run_id, include=['log'] reads "
         "a completed run's log, or a completed job's plain-text log while its parent run is still queued/in progress "
         "(optional job_id, attempt, failed_only, max_bytes, tail_lines); exact gh stdout bytes, size and sha256 are "
-        "retained as task artifacts before a bounded preview. failed_only maps to gh --log-failed; a CLI failure is a "
+        "retained as task artifacts before a bounded preview when the log fits max_bytes; past the cap, max_bytes "
+        "describes each run-log path's outcome. failed_only maps to gh --log-failed; a CLI failure is a "
         "typed error and never silently falls back to REST. The stdout cap does not bound gh's internal cache. "
         "list kind='artifact', target=run_id pages artifacts using limit/cursor; download kind='artifact', target=artifact_id "
         "requires max_bytes and retains the exact zip without extraction. Writes are github_write; merges are pr_merge."
@@ -883,7 +888,13 @@ SCHEMA: Dict[str, Any] = {
         "job_id": {"type": "integer", "default": 0, "description": "Run log: job id belonging to the selected run/attempt; omitted reads all jobs"},
         "attempt": {"type": "integer", "default": 0, "description": "Run: 0 selects latest; logs pin the observed attempt before capture"},
         "failed_only": {"type": "boolean", "default": False, "description": "Run log: failed steps only; empty when none failed"},
-        "max_bytes": {"type": "integer", "description": "Run log: default 4 MiB, ceiling 32 MiB; artifact download: required explicit cap, ceiling 64 MiB"},
+        "max_bytes": {"type": "integer",
+                      "description": "Run log: default 4 MiB, ceiling 32 MiB — a completed run's CLI log past the "
+                                     "cap keeps its first max_bytes as a disclosed truncated prefix, while a "
+                                     "completed job's own log (its run still queued/in progress) past the cap is "
+                                     "refused with the partial bytes discarded and nothing retained, so choose "
+                                     "max_bytes for that job's whole final log before requesting it; artifact "
+                                     "download: required explicit cap, ceiling 64 MiB"},
         "tail_lines": {"type": "integer", "default": 120, "description": "Run log preview: last 1–2000 lines, clipped to 400 chars each; read_file pages retained text"},
         "since": {"type": "string", "default": "", "description": "ISO-8601 UTC instant for supported list/facet timestamps; labels have no since filter"},
         "cursor": {"type": "string", "default": "", "description": "next_cursor of the previous page (list, search, or get with one facet)"},

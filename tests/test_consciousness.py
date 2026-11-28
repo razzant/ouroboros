@@ -1154,7 +1154,8 @@ def test_panic_and_an_unrecorded_stop_need_the_owners_start(held):
     clock.stop(source=AGENT_STOP)
     assert held.saved() == ((True, False), (True, "panic"))
     assert clock.start(source=AGENT_STOP) == held_stop_text("panic") and "Panic turned it off" in held_stop_text("panic")
-    assert "Turn on in the desktop app (Dashboard › Consciousness)" in held_stop_text("panic") and "Telegram" in held_stop_text("owner")
+    door = "/bg start (Start in the app or in Telegram)"  # every stop's door, Panic's too (the owner 27.11)
+    assert all(door in held_stop_text(by) for by in ("panic", "unknown", "owner"))
     # Migration: off with no recorded source (an earlier body's stop) is unknown until the owner starts it once.
     held.state.update_state(lambda st: st.pop(clock_module.STOP_SOURCE_KEY))
     assert clock.start(source=AGENT_STOP) == held_stop_text("")
@@ -1179,11 +1180,11 @@ def test_only_my_humans_start_after_a_panic_returns_what_linked_ouroboroses_are_
     assert held.saved()[1] == (True, "panic")
     clock.start(source=AGENT_STOP)
     assert returned == [] and clock.enabled is False
-    # After Panic a plain Start is not applied; the desktop native confirmation's basis is (supervisor/panic_choice.py).
-    from supervisor.panic_choice import STOP_STANDS, preview_start
-    assert clock.start() == STOP_STANDS and returned == [] and clock.enabled is False
-    assert clock.start(basis=preview_start(held.root)["basis"]).startswith("Consciousness on:")
-    assert returned == [{}]
+    # After Panic my human's plain Start from any door turns it on as in 7.12.1 (the owner 27.11): the replies linked
+    # Ouroboroses are owed go, and no choice of Panic-stopped work is handed over (only the desktop's confirmed press).
+    from supervisor.panic_choice import active_choice
+    assert clock.start().startswith("Consciousness on:") and returned == [{}]
+    assert clock.enabled is True and held.saved()[1] == (True, None) and active_choice() is None
 
 
 def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_holds_here(held, monkeypatch):
@@ -1198,10 +1199,10 @@ def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_
     held.state.update_state(recovered)
     clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
     assert clock.start(source=AGENT_STOP) == held_stop_text("") and clock.enabled is False
-    from supervisor.panic_choice import STOP_STANDS, preview_start
-    assert clock.start() == STOP_STANDS and clock.enabled is False  # how it was stopped cannot be read
-    # the owner's desktop-confirmed press of the switch confirms both again
-    assert clock.start(basis=preview_start(held.root)["basis"]).startswith("Consciousness on:")
+    from supervisor.panic_choice import active_choice
+    # how it was stopped cannot be read: my human's plain Start from any door confirms both again, handing over nothing
+    assert clock.start().startswith("Consciousness on:") and clock.enabled is True and active_choice() is None
+    assert held.saved() == ((True, True), (True, None))
     real = held.state.update_state
 
     def unwritable(*_args, **_kwargs):
@@ -1398,9 +1399,9 @@ def test_a_wake_held_at_the_allowance_it_started_with_is_said_so(clock, monkeypa
     described = describe_consciousness_state(snapshot, True)
     assert described["status"] == "wake_paused"
     # The fact is the headline; what follows from it is said beneath it.
-    assert described["detail"] == "Wake-up wake-held stopped at its allowance ($2.99)."
+    assert described["detail"] == "Its own wake-up stopped at its allowance ($2.99)."
     assert described["detail_note"] == ("No spending estimate is available for Resume. Raising the limit alone resumes "
-                                        "nothing. Stop now on its card ends it and frees the clock for its next check.")
+                                        "nothing. Stop now ends it and frees the clock for its next check.")
 
 
 def test_a_wake_held_at_a_per_task_cap_raised_before_its_resume_is_not_the_allowance(clock, monkeypatch):
@@ -1417,9 +1418,9 @@ def test_a_wake_held_at_a_per_task_cap_raised_before_its_resume_is_not_the_allow
     snapshot = clock.clock.status_snapshot()
     assert snapshot["live_wake_hold"]["cause"] == "per_task_cap"
     described = describe_consciousness_state(snapshot, True)
-    assert described["detail"] == ("Wake-up wake-held is paused at the per-task cost cap it started with; its card "
-                                   "shows why. The next wake-up follows it."), "never the allowance's words"
-    assert "detail_note" not in described
+    assert described["detail"] == "Its own wake-up is paused at the per-task cost cap it started with ($10.00).", \
+        "never the allowance's words"
+    assert described["detail_note"].startswith("Changing the setting in Costs does not raise it: raise this work's cap in chat")
 
 
 @pytest.mark.parametrize("next_attempt", [T0 - 100, T0 + 6000])

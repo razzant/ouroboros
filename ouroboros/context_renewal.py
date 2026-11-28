@@ -176,7 +176,7 @@ def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
     # task's typed incompatibility (``context_capacity``); an unknown one proves none.
     if book and (capacity is None or measure(messages) - book + reserve <= capacity):
         usage[REQUIRED_BOOK_UNFIT_KEY] = capacity is not None
-        return _cannot_help(limit_ctx)
+        return _cannot_help(limit_ctx, plan)
     seed, record = renewal_view(messages, observation=getattr(tools._ctx, "_last_context_observation", None),
                                 drive_root=root, task_id=limit_ctx.task_id, measure=measure)
     if capacity is not None and measure(seed) - book + reserve > capacity:
@@ -185,9 +185,9 @@ def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
         if cut:
             record = {**(record or {}), "physical_cut": cut}
     if measure(seed) >= measure(messages):
-        return _cannot_help(limit_ctx)
+        return _cannot_help(limit_ctx, plan)
     if not record:
-        return _cannot_help(limit_ctx)
+        return _cannot_help(limit_ctx, plan)
     _publish_reclaimed_transcript(SimpleNamespace(messages=messages, task_id=limit_ctx.task_id, tools=tools), seed,
                                   by="renewal")
     from ouroboros.loop import _emit_checkpoint_event
@@ -362,16 +362,17 @@ def physical_window_cut(messages, *, drive_root, task_id, measure, usable):
                   'before_tokens': before, 'after_tokens': after}
 
 
-def _cannot_help(limit_ctx: Any) -> bool:
-    """Name the frame's largest parts for the named refusal (``loop_transport``), then decline."""
-    from ouroboros.loop_messages import _context_components
+def _cannot_help(limit_ctx: Any, plan: Any) -> bool:
+    """Name the frame's largest parts for the named refusal (``loop_transport``), then decline: raw estimates in the
+    refused request's shape (the plan the renewal measured with and the round's active effort), kept as the
+    ``[label, tokens]`` pairs a same-task checkpoint carries across versions."""
+    from ouroboros.context_view_facts import largest_parts
 
     view = SimpleNamespace(messages=limit_ctx.messages, tool_schemas=getattr(limit_ctx, "tool_schemas", None) or [],
-                           accumulated_usage=limit_ctx.accumulated_usage,
-                           context_fit_plan=getattr(limit_ctx, "context_fit_plan", None))
+                           accumulated_usage=limit_ctx.accumulated_usage, context_fit_plan=plan,
+                           active_effort=getattr(limit_ctx, "active_effort", ""))
     try:
-        limit_ctx.accumulated_usage["_context_refusal_frame"] = [list(part) for part in _context_components(
-            view, measured=False)]
+        limit_ctx.accumulated_usage["_context_refusal_frame"] = largest_parts(view, measured=False)
     except Exception:  # the refusal text is facts only; an unreadable frame stays unnamed
         pass
     return False

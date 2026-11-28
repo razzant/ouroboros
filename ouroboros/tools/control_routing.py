@@ -17,6 +17,7 @@ from ouroboros.tools.control_events import (
     _promotion_pool_disabled_from_snapshot,
     _routing_status_root,
 )
+from ouroboros.task_results import new_task_id
 from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.tool_result import ToolResult, completed_local_read, publish_no_effect
@@ -644,7 +645,7 @@ def _start_task(
                 " (workspace_root named the Ouroboros repository itself; started as an "
                 "ordinary task over it — no separate workspace)"
             )
-    tid = uuid.uuid4().hex[:16]
+    tid = new_task_id()
     routing_token = uuid.uuid4().hex
     disabled_reason = _promotion_pool_disabled_from_snapshot(ctx)
     if disabled_reason:

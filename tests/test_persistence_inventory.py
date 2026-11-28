@@ -1048,9 +1048,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``record_owed``, read back at a start by ``owed_refs``), in the same per-link row.
 # 506 -> 508: my messages to a link still unsettled, ``state/peer_links/*/sent`` and ``state/peer_links/*/sent/*.json``
 # (``record_sending`` before a send's POST, read back at a start by ``sending_records``), in the same per-link row.
-# 508 -> 512: POSIX letters door dir ``state/peer`` and its ``/tmp/ouroboros-peer-*/*`` fallback (``peer_channel``),
+# 508 -> 509: where a skill's sign-in was offered in a conversation, ``state/sign_in/offers.json``
+# (``ouroboros/sign_in_offers.py``: ``note`` and ``announce``), its own row.
+# 509 -> 513: POSIX letters door dir ``state/peer`` and its ``/tmp/ouroboros-peer-*/*`` fallback (``peer_channel``),
 # plus offline channel queue ``state/peer_links/*/queued`` and ``state/peer_links/*/queued/*.json`` (``peer_channel_queue``).
-EXPECTED_SCAN_PATHS = 512
+EXPECTED_SCAN_PATHS = 513
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

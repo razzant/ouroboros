@@ -73,7 +73,7 @@ HISTORY = {"messages": [
      "ts": "2026-10-17T09:00:00Z", "history_id": "h-0", "row_address": "row:1@2026-10-17T09:00:00Z#aaaaaaaaaaaa"},
     {"role": "assistant", "text": "Milk, eggs and bread.", "chat_id": 1,
      "ts": "2026-10-17T09:00:20Z", "history_id": "h-1", "row_address": "row:1@2026-10-17T09:00:20Z#bbbbbbbbbbbb"},
-], "progress": []}
+], "progress": [], "profile_scope": setup_browser.PREVIEW_SCOPE}  # the profile the document proves
 
 
 def open_app(ui, path="/", *, width=1280, scheme="dark", state=None):

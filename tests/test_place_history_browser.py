@@ -67,7 +67,8 @@ def test_skills_place_reader_drafts_facts_and_teardown(skills_browser, tmp_path,
         assert ' '.join(pointer.locator('xpath=..').inner_text().split()) == '2 places · Circles ›'
         assert details.locator('[data-place-open]').count() == 0
         assert details.locator('[data-sheet-action="open_place"]').count() == 0
-        observations['connector_sections'] = details.locator('.skills-sheet-section').evaluate_all('''nodes => nodes.map(el => {
+        # The sections the sheet draws: a slot it keeps hidden until it has something to say (sign-ins) has no box.
+        observations['connector_sections'] = details.locator('.skills-sheet-section:not([hidden])').evaluate_all('''nodes => nodes.map(el => {
             const box=el.getBoundingClientRect(); return {heading:el.querySelector('h3')?.textContent,x:box.x,width:box.width};
         })''')
         sections = observations['connector_sections']

@@ -251,6 +251,23 @@ def passive_carriage(ctx: Any) -> dict:
     return found
 
 
+def in_context_row(row: dict, went: str, address: str, held: Any = None, root: Any = None) -> dict:
+    """``row`` as the host carries it to a work's members when only the work answering it owns it: its words, source,
+    time, citation and reply target as they are, carrier ``went to <task>`` as its carried copy says, files named, never
+    copied (``owner_relay.mark_context_files``); ``owner_words.safety_sources`` reads it as context, never as a
+    permission. Its writer's kind is its own (the addressed work's record of it), else what the chat row ``held`` at
+    ``address`` proves (``safety_evidence.held_mail_kind``): the passive copy is handed as a late-born helper's is."""
+    from ouroboros.owner_relay import mark_context_files
+    from ouroboros.safety_evidence import held_mail_kind
+
+    files = [dict(ref) for ref in row.get("attachments") or []]
+    kind = row.get("mail_kind") or held_mail_kind((held or {}).get(address), root, source=row.get("source"))
+    handed = {**row, "carrier": f"went to {went}", "task_id": went, **({"attachments": files} if files else {}),
+              **({"mail_kind": kind} if kind else {})}
+    mark_context_files([({"row_sha256": row["row_sha256"], "msg_id": address}, handed)], {})
+    return handed
+
+
 def acknowledged_task_message_ids(
     drive_root: pathlib.Path,
     task_id: str,

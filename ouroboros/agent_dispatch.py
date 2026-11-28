@@ -87,12 +87,16 @@ def executor_blocked_outcome(
     decision: SubagentExecutorResolution,
     *,
     availability: Optional[Dict[str, Any]] = None,
+    task_id: str = "",
 ) -> Tuple[str, Dict[str, Any]]:
     """The terminal ``(text, usage)`` of a child the host could not start: one notice for API and session rows.
 
-    Deliberately NOT a fallback: the task ends unrun and typed, having spent nothing. The text and the usage carry
-    the same facts (the cause, the producer's detail, the reset instant, the current alternatives, not ranked), so
-    the parent reads why and what it may choose instead (#1241); ``reason_code`` keeps its codes.
+    Deliberately NOT a fallback: the task ends unrun and typed, having spent nothing. The text says why (the cause,
+    the producer's detail, the reset instant, #1241) and names the alternatives recorded at this refusal, not ranked
+    and not checked. Their rows stay whole in the usage and in the task's recorded ``subagent_availability``, which
+    ``task_id`` (the refused task) lets the text address exactly; the owner's descriptions of them are resident in
+    the parent's Available subagents when present, so the text does not repeat them (owner, 27.11.2026).
+    ``reason_code`` keeps its codes.
     """
     from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
 
@@ -111,14 +115,19 @@ def executor_blocked_outcome(
                                           "could not be verified",
     }.get(reason, f"its route cannot run: {reason}")
     alternatives = availability.get("alternatives") if isinstance(availability.get("alternatives"), list) else []
+    # Each handle as the scheduler takes it (compared, never parsed: some hold spaces or brackets).
+    names = [str(row.get("subagent_id") or "") for row in alternatives if isinstance(row, dict)]
+    names = [name for name in names if name]
+    reader = (f" Their rows in this task's record: get_task_result(task_id={json.dumps(str(task_id))}, "
+              'authority_fields=["subagent_availability"]).' if task_id else "")
     text = (
         f"⚠️ SUBAGENT_UNAVAILABLE: this subagent could not start: {cause}."
         + (f" It resets at {decision.reset_at}." if decision.reset_at else "")
         # The producer's own words (a refused snapshot provision names the lock holder), not only a code (#1241).
         + (f" {availability['detail']}" if availability.get("detail") else "")
         + " The task was NOT run and spent nothing; the host did not substitute another model, route or substrate."
-        + (" Configured alternatives now (not ranked): " + json.dumps(alternatives, ensure_ascii=False, sort_keys=True)
-           if alternatives else "")
+        + (" Configured alternatives at this refusal (not ranked, availability not checked; descriptions in "
+           "Available subagents when present): " + json.dumps(names, ensure_ascii=False) + "." + reader if names else "")
     )
     # The codes stay literal (the provenance drift guard reads them from this keyword).
     return text, dict(
@@ -192,7 +201,8 @@ def _blocked_executor_terminal(cap_info: Dict[str, Any], task: Optional[Dict[str
         reason=str(cap_info.get("executor_blocked_reason") or ""),
         reset_at=str(cap_info.get("executor_blocked_reset_at") or ""),
     ), availability=(task or {}).get("subagent_availability")
-        if isinstance((task or {}).get("subagent_availability"), dict) else {})
+        if isinstance((task or {}).get("subagent_availability"), dict) else {},
+        task_id=str((task or {}).get("id") or ""))
     return text, usage, {"reasoning_notes": ["subagent_executor_unavailable"], "tool_calls": []}
 
 

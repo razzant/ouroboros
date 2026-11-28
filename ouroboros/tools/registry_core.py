@@ -1271,7 +1271,7 @@ class ToolRegistry:
                 "Ouroboros repo, runtime data, or control plane."
             ))
         if entry is not None:
-            public_arg_error = tool_resolution._prepare_public_builtin_args(entry, args)
+            public_arg_error = tool_resolution._prepare_public_builtin_args(entry, args, ctx=self._ctx)
             if public_arg_error:
                 return public_arg_error
             # Normalize the public target first. Candidate binding must observe the
@@ -1357,7 +1357,7 @@ class ToolRegistry:
                 return extension_dispatch._dispatch_extension_tool_result(self._ctx, name, ext_tool, args, handoff=handoff)
             return self._name_miss_result(name, extension_unavailable=extension_unavailable)
         args, interpreter_resolution, interpreter_block = tool_resolution._resolve_python_predispatch(
-            self, name, args, _runtime_mode, effective_constraint, resolved_binding,
+            self, name, args, _runtime_mode, effective_constraint, resolved_binding, targets_system_repo,
         )
         if interpreter_block is not None:
             return interpreter_block

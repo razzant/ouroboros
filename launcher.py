@@ -22,6 +22,12 @@ from contextlib import suppress
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+# Seal-safe imports: the current interpreter needs the flag before project imports;
+# PYTHONDONTWRITEBYTECODE alone only affects later child interpreters. Bundle writes
+# would invalidate a macOS signature and trigger AppTranslocation.
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+
 
 def _rehome_legacy_handoff() -> None:
     """Before package adoption can wait: repair a recognized legacy GUI handoff once."""
@@ -38,12 +44,11 @@ def _rehome_legacy_handoff() -> None:
 _reset_legacy_input = bool(os.environ.get("OUROBOROS_LAUNCHER_HANDOFF"))
 if __name__ == "__main__":
     _rehome_legacy_handoff()
+    if sys.platform == "win32" and getattr(sys, "frozen", False):  # Ouroboros.exe asks, never its checkout launcher
+        # The frozen bundle's package: its adoption hook has no checkout to adopt, as when ouroboros.config loads it next.
+        from ouroboros.launcher_windows_runtime import refuse_while_setup_changes
 
-# Seal-safe imports: the current interpreter needs the flag before project imports;
-# PYTHONDONTWRITEBYTECODE alone only affects later child interpreters. Bundle writes
-# would invalidate a macOS signature and trigger AppTranslocation.
-sys.dont_write_bytecode = True
-os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+        refuse_while_setup_changes(sys.executable, sys.argv[1:])
 
 from ouroboros.config import (
     AGENT_SERVER_PORT,
@@ -93,6 +98,8 @@ from ouroboros.standalone_page import themed_page
 from ouroboros.launcher_windows_runtime import (  # noqa: F401  (re-exported: same objects, prior launcher surface)
     _prepare_windows_webview_runtime,
     _show_windows_message,
+    attach_windows_window_icon,
+    prepare_windows_desktop_identity,
 )
 from ouroboros.platform_layer import (
     BUNDLE_DIR_ENV,
@@ -1171,7 +1178,10 @@ def main(argv=()):
         EMBEDDED_PYTHON = find_embedded_python(_external_seed_bundle, macos=IS_MACOS)
     if _external_ui:
         _headless = True
+    windows_icon = None
     if IS_WINDOWS and not _external_ui:
+        if _external_seed_bundle is not None or getattr(sys, "frozen", False):
+            windows_icon = prepare_windows_desktop_identity(_bundle_dir())
         ok, reason = _prepare_windows_webview_runtime()
         if not ok:
             log.error("Windows UI runtime initialization failed: %s", reason)
@@ -1188,7 +1198,8 @@ def main(argv=()):
 
     if not _headless:
         import webview
-        attach_every_window(webview)
+        decorate = None if windows_icon is None else lambda window: attach_windows_window_icon(window, windows_icon)
+        attach_every_window(webview, decorate=decorate)
 
     if not acquire_pid_lock():
         log.error("Another instance already running.")

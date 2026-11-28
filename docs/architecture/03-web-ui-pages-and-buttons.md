@@ -1,6 +1,6 @@
 # 3. Web UI Pages & Buttons
 
-One build-free SPA serves desktop, browser, Docker, Telegram, phone and Linux fallback. The browser paints host-stamped placement, outcome, receipts and liveness; text, timing and client lists grant no authority.
+This part gives me the face my owner sees: one build-free SPA serves desktop, browser, Docker, Telegram, phone and Linux fallback, with rooms, the composer, cards, widgets, the dashboard, logs, costs, files, extensions and settings; visual and interaction rules live in [DESIGN](../DESIGN.md) and client meaning in [CLIENT_CONTRACT](../CLIENT_CONTRACT.md). The browser paints host-stamped placement, outcome, receipts and liveness; text, timing and client lists grant no authority.
 
 ### SPA shape and host bridges
 
@@ -32,7 +32,7 @@ Shared UI modules (DESIGN §4, §10):
 
 #### Timeline ownership and ordering
 
-`chat.js` owns placement, routing, status and viewport. Text, media/sheets, cards, attachments, sizing and sharing: `chat_text_bubble.js`, `chat_media.js`, `chat_cards.js`, `chat_attachments.js`, `chat_input_sizing.js`, `message_actions.js`, `message_share.js` and `message_share_file.js` (Telegram uses its skill). Away subscriptions and catch-up: `room_retire.js`; a hidden follower buffers its replies across hides on a proved socket. History adopts exact addresses, sorts by time then append position and grants actions/read credit. Send ACKs update the `client_message_id` sidecar.
+`chat.js` owns placement, routing, status and viewport. Text, media/sheets, cards, attachments, sizing and sharing: `chat_text_bubble.js`, `chat_media.js`, `chat_cards.js`, `chat_attachments.js`, `chat_send_receipts.js` (owner echo/history), `chat_input_sizing.js`, `message_actions.js`, `message_share.js` and `message_share_file.js` (Telegram uses its skill). Away subscriptions and catch-up: `room_retire.js`; a hidden follower buffers its replies across hides on a proved socket. History adopts exact addresses, sorts by time then append position and grants actions/read credit. Send ACKs update the `client_message_id` sidecar.
 
 Keyed replay keeps DOM, disclosure, focus, selection and child lifecycle while current results win (`LIVE_CARD_CAP`). `chat_history.js` pages, `chat_preview.js` previews without actions/coverage, `chat_reading_position.js` anchors, `project_read_state.js` lands covered arrivals; `createHistoryControls` (`chat_render_batch.js`) puts gaps at the feed edge; floating headers reserve measured height (DESIGN "History edges"). Origins: `project_dialogue.project_origin_identity`. `chat_reply.js` lands Reply/search (`chat_history_reveal.js`, `/api/chat/search`) and `derived_question` (`chat_reply_quote.js`); `chat_reply_excerpt.js` maps authored ranges/captions; card text only whole-row. `app.js` preloads without newest/ACK. Cards reveal exact lines, not portals; task refs: cards.
 
@@ -163,7 +163,7 @@ Responses stream via `extension_route_stream.py`: process/bundle contexts span a
 
 Tabs share binding and own refresh; hidden panels run no expensive readers (CLIENT_CONTRACT §15 unless noted).
 
-- **Consciousness** (`consciousness_dashboard.js`): status, allowance, own tasks, Its own wakes, Wakes in places; host sentence owns time (`consciousness_words.js`); allowance-held wakes show amber (`consciousness_view.hold_cause`; DESIGN "Dashboard › Consciousness"; CLIENT_CONTRACT "Recent wakes"/"Places").
+- **Consciousness** (`consciousness_dashboard.js`): status, own tasks, wakes; host sentence owns time (`consciousness_words.js`); a held own wake is its own block (`consciousness_held_wake.js`; DESIGN "Dashboard › Consciousness"; CLIENT_CONTRACT "Recent wakes"/"Places").
 - **Logs**: merges live WS with compact REST backfill into deduplicated cards (`log_events.js`) and Raw pages (`logs_raw.js`, `logs_raw_worker.js`); failed sources show a status row while live events continue, and Clear deletes no log. Mounted unfinished children refresh holds via `/api/tasks?queue_only=1`; `project_admission_hold` supplies label/reason/detail (not phase; unknown queue proves no recovery) and yields to parked phases, Stop and terminal state (`chat_activity.js`).
 - **Activity** (`activity.js`, CLIENT_CONTRACT §6): joins queue and same-refresh `/api/state` (partial census proves no idleness; unavailable ≠ empty; DESIGN §4), keeping alarm/schedules independent of sibling failures. Background reads `/api/services/kept` (Stop one launch, Save outputs for ended capture debt; unreadable stays unknown); schedules mutate via audited `POST /api/schedules/{id}/action`.
 - **Costs**: reads physical-attempt ledger (confirmed/estimated spend separately, reserved/unresolved holds not spending, unpriced usage, open rows, finality, four breakdowns, UTC days by room); total budget hot-applies, per-task cap covers next root tree (§7), consciousness allowance shows spend/model/held-wake cause/when room returns/estimated room on Resume (a raise resumes no finalized or paused task), and Subscriptions counts accounts with room.

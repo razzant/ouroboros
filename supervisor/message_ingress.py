@@ -153,8 +153,10 @@ def accepted_here(row: dict) -> bool:
     return bool(stamp) and stamp == _process()
 
 
-def delivery_facts(row: dict, chat_id: int, *, bus_root=...) -> dict:
+def delivery_facts(row: dict, chat_id: int, *, drive_root=None) -> dict:
     """What the store knows of an accepted row's dispatch, as its echo and history row say it.
+
+    History reads its admitted dialogue store, even before the message bus opens on that drive.
 
     ``ingress_pending``: the dispatch is still owed (the acceptor is between the commit and the
     handoff, or a crash left it: the recovery or a same-id retry performs it once), or this
@@ -162,9 +164,7 @@ def delivery_facts(row: dict, chat_id: int, *, bus_root=...) -> dict:
     ``ingress_dispatched``: the handoff began in THIS process. Nothing: a row that owes no bus
     dispatch, an imported one, an abandoned obligation, or a dispatch an ended process took
     (its outcome is unknown here, as before the store)."""
-    # A captured None means the serving bus was absent, not the reader's config root.
-    facts = (None if bus_root is None else dispatch_facts({**(row or {}), "chat_id": chat_id},
-                                                         None if bus_root is ... else bus_root))
+    facts = dispatch_facts({**(row or {}), "chat_id": chat_id}, drive_root)
     if facts is not None and (facts["state"] == "pending" or (facts["state"] == "none" and accepted_here(row))):
         return {"ingress_pending": True}
     if _entered_here(facts):
@@ -317,6 +317,8 @@ def _chat_record(
                 record["sender_label"] += f" · Letter {letter_id}"
         if isinstance(meta.get("execution_transport"), dict):
             record["execution_transport"] = dict(meta["execution_transport"])
+        if direction == "in" and isinstance(meta.get("new_work"), dict):
+            record["new_work"] = dict(meta["new_work"])  # what this acceptance assigned (``new_work_choice``)
         if direction == "out" and meta.get("logical_room_chat_id") == 1:
             record["logical_room_chat_id"] = 1
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
@@ -503,6 +505,41 @@ def accepted_chat_message(drive_root, chat_id: int, client_message_id: str) -> O
 
 class ClientMessageIdConflict(ValueError):
     """A submission id already belongs to different accepted input."""
+
+
+class ModelChoiceChanged(ValueError):
+    """A message sent as new work named a saved model choice that is no longer the room's: refused before
+    anything was saved or handed over. ``reason_code`` is the typed fact a page acts on."""
+
+    reason_code = "model_choice_changed"
+
+
+def new_work_choice(root, chat_id: int, text: str, reply: Any, token: Any) -> Optional[Dict[str, Any]]:
+    """What a web message sent as new work starts on: the room's saved model and tier as this first acceptance reads
+    them, kept on the accepted row so every later reader takes the same answer. The frame only names the choice its
+    owner's pick was answered with (``composer_cognition.model_choice_token``): one that is no longer saved raises
+    ``ModelChoiceChanged``. ``None`` for a frame that asks for none, a slash command, and a Reply addressed to a
+    work (it reaches that work): none of them spends the choice."""
+    if not isinstance(token, str) or not token or text.startswith("/") or (isinstance(reply, dict) and "work_task_id" in reply):
+        return None
+    from ouroboros.composer_cognition import saved_choice
+    from ouroboros.project_admission import reserved_project_for_chat
+
+    try:
+        # A room's row is read once, by the strict routing read; a chat that is neither Main nor a room has no choice.
+        project = reserved_project_for_chat(root, chat_id) if chat_id != 1 else None
+        if project is not None and not project:
+            raise ValueError(f"Chat {chat_id!r} is not a room")
+        saved = saved_choice(root, str(project["id"]) if project else "", project=project)
+    except Exception as exc:
+        raise ModelChoiceChanged("The model for new work here could not be confirmed, so nothing was sent. "
+                                 "Check the model, then send again.") from exc
+    if saved["choice_token"] != token:
+        raise ModelChoiceChanged("The model for new work here was changed elsewhere before this message was saved. "
+                                 "Nothing was sent: check the model, then send again.")
+    # An Ultrafast confirmed for one destination is assigned with it, so the work asks it of that one alone.
+    return {"model_choice": saved["model_choice"], "processing_choice": saved["processing_choice"],
+            **{key: saved[key] for key in ("processing_route", "processing_connection") if key in saved}}
 
 
 def rejoin_or_refuse(root, row: dict, source: str, logged: str, refs: Any, reply: Optional[dict] = None,
@@ -844,6 +881,8 @@ def handle_web_message(
     ts = utc_now_iso()
     message_id = client_message_id or f"web-{uuid.uuid4().hex}"
     metadata = dict(task_metadata or {})
+    new_work_token = metadata.pop("new_work_token", None)
+    metadata.pop("new_work", None)  # host-only: the accepted row's own answer below, never a caller's
     host_fact = metadata.get("host_fact") or {}  # host call admission; browser ingress constructs its own metadata
     call_open = isinstance(host_fact, dict) and host_fact.get("kind") == "call_open"
     project_id = str(project_id or "").strip()
@@ -866,6 +905,10 @@ def handle_web_message(
             metadata["reply_reference"] = reply
         fresh = False
         if row is None:
+            # Before anything is claimed or saved: a choice that changed refuses the whole message.
+            new_work = new_work_choice(bus.DATA_DIR, thread_id, clean_text, reply, new_work_token)
+            if new_work:
+                metadata["new_work"] = new_work  # the obligation replays this same answer
             attachments = claim_refs(metadata.get("chat_attachments"), bus.DATA_DIR)  # DELETE refuses them now
             message = dict(
                 chat_id=thread_id, user_id=1, source="web",
@@ -882,7 +925,7 @@ def handle_web_message(
                     bool(project_id) or thread_id in project_thread_chat_ids(bus.DATA_DIR)),
                 client_surface=(metadata.get("client_surface") if isinstance(metadata.get("client_surface"), dict) else None),
                 message_meta={"attachments": attachments, "text_placeholder": placeholder, "reply_to": reply,
-                              "execution_transport": metadata.get("execution_transport"),
+                              "execution_transport": metadata.get("execution_transport"), "new_work": new_work,
                               **({"role": "system", "system_type": "call_open", "host_fact": dict(host_fact)}
                                  if call_open else {})},
                 dispatch=obligation(name, clean_text, message))
@@ -905,6 +948,8 @@ def handle_web_message(
         if handed:
             if row.get("reply_to"):  # an owed dispatch carries the first acceptance's capture, not the retry's identity
                 metadata["reply_reference"] = delivery_reply(row["reply_to"], reply)
+            if isinstance(row.get("new_work"), dict):  # likewise what the first acceptance assigned, whatever a repeat names
+                metadata["new_work"] = dict(row["new_work"])
             ref, _ = owner_row_source(row)
             message = dict(
                 chat_id=thread_id, user_id=1, source="web",
@@ -932,6 +977,8 @@ def handle_web_message(
                 echo["kind"] = row["kind"]
             if row.get("subagents_mode") == "swarm":
                 echo["subagents_mode"] = "swarm"
+            if isinstance(row.get("new_work"), dict):
+                echo["new_work"] = True  # accepted as new work of its own: its sender's choice is spent
             if placeholder:
                 echo["text_placeholder"] = True
             if row.get("system_type"):

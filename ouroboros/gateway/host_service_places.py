@@ -600,6 +600,8 @@ async def _api_presence_work(request: Request) -> JSONResponse:
 
 async def _api_presence_place(request: Request) -> JSONResponse:
     """An authenticated connector's outbox rechecks current state without model work."""
+    if request.method == "POST":
+        return await _api_presence_owner_dm(request)
     from ouroboros.gateway import host_service as host
     ctx = request.app.state.host_service_context
     try:
@@ -641,3 +643,46 @@ async def _api_presence_place(request: Request) -> JSONResponse:
         # The words a connector's Held row repeats; the exception stays a diagnostic beside them.
         return _presence_error("Ouroboros could not read whether this place allows sending right now.", 503,
                                "places_unavailable", "retry", detail=str(exc))
+
+
+def _owner_dm_read_error(status: int, code: str) -> JSONResponse:
+    return JSONResponse({"ok": False, "allowed": False, "owner_dm_checked": False,
+                         "state": "unknown", "code": code}, status_code=status)
+
+
+async def _api_presence_owner_dm(request: Request) -> JSONResponse:
+    """Read the current decision for this retained condition without reflecting it into a reply."""
+    from ouroboros.gateway import host_service as host
+    from ouroboros.place_guard import check_owner_dm
+    from ouroboros.places import PlaceError
+
+    ctx = request.app.state.host_service_context
+    try:
+        skill, _token = await host._authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
+        if request.scope.get("query_string"):
+            return _owner_dm_read_error(400, "place_binding_invalid")
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 16 * 1024:
+                return _owner_dm_read_error(413, "place_binding_invalid")
+            raw.extend(chunk)
+        body = json.loads(raw)
+        if (not isinstance(body, dict) or body.keys() != {"operation", "binding"}
+                or body["operation"] != "check_owner_dm"):
+            return _owner_dm_read_error(400, "place_binding_invalid")
+        binding = body["binding"]
+        if not isinstance(binding, dict):
+            return _owner_dm_read_error(400, "place_binding_invalid")
+        target = {key: binding.get(key) for key in
+                  ("provider", "account_id", "conversation_id", "thread_id")}
+        result = await host._bounded_host_read(ctx, functools.partial(
+            check_owner_dm, ctx.data_dir, skill, target, binding))
+    except host.HostServiceAuthError:
+        return _owner_dm_read_error(403, "presence_auth_blocked")
+    except (PlaceError, OSError, store.StoreError):
+        return _owner_dm_read_error(503, "places_unavailable")
+    except (ValueError, RecursionError):
+        return _owner_dm_read_error(400, "place_binding_invalid")
+    allowed = result["allowed"] is True
+    return JSONResponse({"ok": True, "allowed": allowed, "owner_dm_checked": allowed,
+                         "state": result["state"], "code": result["code"]})

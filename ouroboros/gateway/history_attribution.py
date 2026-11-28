@@ -8,7 +8,8 @@ same with or without them, and a read writes nothing (DEVELOPMENT "Passive GET")
 words: whether it read Main (``room``: ``main`` or ``other``, by the route's own chat id rule), each tag as a value
 of its closed set (one outside it is ``invalid``, an absent reason or cursor kind ``unspecified``, a failed read's
 HTTP status its class; a cursor's kind is the one the selection decoded, ``history_paging.DECODED_CURSOR``, where it
-decoded one), its status and the refusal the server gave (``code``, ``refusal``, ``stream``). A window keeps one
+decoded one), its status and the refusal the server gave (``code``, ``refusal``, ``stream``), or the ``repairs`` an
+``after`` read sent instead of refusing (``history_paging.REPAIR_SETTLED``). A window keeps one
 group per distinct cause with its reads, the answers' bytes and their milliseconds in the endpoint (total,
 longest), so each cost stays with what caused it; over all its reads, the same totals and a fixed histogram for
 their median and tail. Never which room beyond that, a tag as sent, a cursor, text, address or token. Not counted:
@@ -57,9 +58,9 @@ def _tag(value, allowed) -> str:
     return "unspecified" if not value else value if value in allowed else "invalid"
 
 
-def _fields(params, response, kind=None) -> dict:
-    """One read's counted words: whether it read Main, its tags as values of their sets, its status and the refusal
-    the server named."""
+def _fields(params, response, kind=None, repairs="") -> dict:
+    """One read's counted words: whether it read Main, its tags as values of their sets, its status, the refusal
+    the server named, and whether an ``after`` read answered with ``repairs`` (their class) instead of a refusal."""
     around, cursor = params.get("around"), params.get("cursor")
     # Main is the room the route reads for a chat id it cannot take as another's (absent, 0 or less, not a number).
     fields = {"room": "main" if coerce_int(params.get("chat_id"), WEB_UI_CHAT_ID) <= WEB_UI_CHAT_ID else "other",
@@ -74,6 +75,8 @@ def _fields(params, response, kind=None) -> dict:
                             and _HTTP_STATUS.fullmatch(value) else "invalid")
     status = getattr(response, "status_code", None)
     fields["status"] = str(status or "none")  # none: the endpoint answered nothing (an exception, a cancelled read)
+    if repairs and status == 200:
+        fields["repairs"] = repairs
     if status not in (None, 200):
         try:
             answer = json.loads(response.body)
@@ -136,7 +139,7 @@ def recorded(endpoint):
             DECODED_CURSOR.reset(token)
             if getattr(request, "method", "GET") == "GET":  # a HEAD's answer carries no page
                 try:
-                    _count(_fields(request.query_params, response, decoded.get("kind")),
+                    _count(_fields(request.query_params, response, decoded.get("kind"), decoded.get("repairs", "")),
                            len(response.body) if response is not None else 0, round((time.perf_counter() - started) * 1000))
                 except Exception:
                     log.debug("A history read was not counted", exc_info=True)

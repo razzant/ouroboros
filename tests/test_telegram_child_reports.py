@@ -2,7 +2,10 @@
 
 The owner chose (9 Nov 2026) to stop mirroring helpers' full internal reports as ordinary
 chat answers: the web keeps a child's final inside its task card and the root answers the
-owner. Real producers (the agent finalizer, the completion-wins builder, the owed-outbox
+owner. That holds whoever wrote the report: the host's own words for a helper it could not
+start or had to stop are its report to the parent too (27 Nov 2026: such a report, with the
+whole subagent catalog in it, reached the owner's phone in four parts). Real producers (the
+agent finalizer, the host's terminal producers, the completion-wins builder, the owed-outbox
 replay, a helper's ``send_user_message``), the supervisor's delivery seam and message bus,
 the shipped bridge handlers and ``TelegramClient`` run here; only Telegram's HTTP is
 answered locally, and every Bot API request is recorded. Nothing leaves the machine.
@@ -80,8 +83,9 @@ def _sent_texts(world) -> list[str]:
     return [form.get("text", "") for method, form in world.posts if method == "sendMessage"]
 
 
-def _finish_turn(world, monkeypatch, task, answer):
-    """The real loop and finalizer end one task; its terminal sends go through the real seam."""
+def _finish_turn(world, monkeypatch, task, answer, *, host_terminal=None):
+    """The real loop and finalizer end one task; its terminal sends go through the real seam.
+    ``host_terminal`` is a ``(text, usage)`` pair from a host producer that ends the task instead of the loop."""
     from ouroboros import agent_task_pipeline as pipeline, loop
     from ouroboros.tools.registry import ToolRegistry
 
@@ -113,11 +117,14 @@ def _finish_turn(world, monkeypatch, task, answer):
     registry._ctx.task_attempt = 1
     registry._ctx.owner_message_admission_lock = threading.RLock()
     registry._ctx.owner_message_admission_agent = SimpleNamespace(_accepting_owner_messages=True)
-    text, usage, trace = loop.run_llm_loop(
-        messages=[{"role": "user", "content": task["text"]}], tools=registry, llm=LLM(),
-        drive_logs=logs, emit_progress=lambda *a, **kw: None, incoming_messages=queue.Queue(),
-        task_id=task["id"], drive_root=drive,
-    )
+    if host_terminal is None:
+        text, usage, trace = loop.run_llm_loop(
+            messages=[{"role": "user", "content": task["text"]}], tools=registry, llm=LLM(),
+            drive_logs=logs, emit_progress=lambda *a, **kw: None, incoming_messages=queue.Queue(),
+            task_id=task["id"], drive_root=drive,
+        )
+    else:
+        (text, usage), trace = host_terminal, {"reasoning_notes": [], "tool_calls": []}
     pending = []
     pipeline.emit_task_results(SimpleNamespace(drive_root=drive, repo_dir=world.tmp), None, None, pending,
                                task, text, usage, trace, 0.0, logs, ctx=registry._ctx, event_queue=Events())
@@ -144,6 +151,53 @@ def test_a_natural_final_reaches_telegram_only_from_a_root(bridge, monkeypatch, 
     else:
         sent = _sent_texts(bridge)
         assert len(sent) >= 3 and "Finding 0" in sent[0] and "Finding 39" in sent[-1]
+
+
+def _host_terminal(cause):
+    """``(text, usage)`` of a task the host ended in its own words, each stamped by its real producer: a helper
+    whose route could not start (the reported shape, every configured alternative named) or a start refused before
+    any model ran (a window that cannot hold it)."""
+    if cause == "unstartable":
+        from ouroboros.agent_dispatch import executor_blocked_outcome
+        from ouroboros.subagents import SubagentExecutorResolution
+
+        alternatives = [{"subagent_id": f"helper-{index}", "recommended_use": "The owner's advice for it. " * 40,
+                         "route_kind": "agent_session", "target_id": f"agy=model-{index}",
+                         "availability": "check_at_dispatch"} for index in range(6)]
+        return executor_blocked_outcome(
+            SubagentExecutorResolution(requested="harness", executor="blocked", reason="registration_busy", reset_at=""),
+            availability={"route_kind": "agent_session", "alternatives": alternatives,
+                          "detail": "The workspace fence is busy: project retirement lock is unavailable."})
+    from ouroboros.agent_dispatch import _unstarted_terminal
+
+    text, usage, _trace = _unstarted_terminal("⚠️ The context window of this model is too small to start this work.",
+                                              "context_capacity", {})
+    return text, usage
+
+
+@pytest.mark.parametrize("cause", ["unstartable", "refused-start"])
+@pytest.mark.parametrize("child", [True, False], ids=["child", "root-control"])
+def test_a_host_written_final_reaches_telegram_only_from_a_root(bridge, monkeypatch, child, cause):
+    """The host's report for a helper is that helper's answer to its parent, an untyped System row: the web's card
+    keeps it and the phone stays quiet, Silent mode or not. A root's report in the same words still comes."""
+    settings_path = bridge.tmp / "state" / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings_path.write_text(json.dumps({**settings, "TELEGRAM_SILENT_MODE": "on"}), encoding="utf-8")
+    text, usage = _host_terminal(cause)
+    task = {"id": "kid-h" if child else "root-h", "type": "task", "chat_id": 1, "text": "Critique the design.",
+            "_attempt": 1, "budget_drive_root": str(bridge.root)}
+    if child:
+        task.update(parent_task_id="root-h", root_task_id="root-h", delegation_role="subagent")
+    _finish_turn(bridge, monkeypatch, task, "", host_terminal=(text, usage))
+    finals = [event for event in bridge.outbound if event.get("task_id") == task["id"] and not event.get("is_progress")]
+    assert finals and finals[-1]["text"] == text
+    assert finals[-1]["role"] == "system" and not finals[-1].get("system_type")
+    assert any(frame.get("content") == text for frame in bridge.frames)
+    if child:
+        assert finals[-1]["delegation_role"] == "subagent"
+        assert bridge.posts == []
+    else:
+        assert _sent_texts(bridge) == bridge.plugin.message_chunks(text)  # the producer's words, as Telegram gets them
 
 
 @pytest.mark.parametrize("child", [True, False], ids=["child", "root-control"])
@@ -189,8 +243,8 @@ def test_completion_wins_and_its_owed_replay_follow_the_same_rule(bridge, monkey
 
 def test_what_a_helper_tells_the_owner_still_arrives(bridge, monkeypatch):
     """A helper's deliberate message, its file and question, and the host's notices about it."""
-    from ouroboros.task_results import task_result_path
     from ouroboros.tools.control_runtime import _send_user_message
+    from tests._store_shared import seed_result
     from tests.test_telegram_quiz_answers import _EVENT
 
     lineage = {"parent_task_id": "root-3", "root_task_id": "root-3", "delegation_role": "subagent"}
@@ -205,19 +259,19 @@ def test_what_a_helper_tells_the_owner_still_arrives(bridge, monkeypatch):
     assert told["system_type"] == "proactive_message" and told["delegation_role"] == "subagent"
     assert _sent_texts(bridge) == ["Anton, the build is green."]
 
-    # The host's own notice about the child (a budget stop) is a System row and goes.
+    # A host notice about the child is typed and goes (its untyped System row is its final report, above).
     bridge.delivery._handle_send_message({"type": "send_message", "chat_id": 1, "task_id": "kid-3",
-                                          "text": "The helper stopped at its budget.", "role": "system"},
-                                         bridge.host)
-    assert _sent_texts(bridge)[-1] == "The helper stopped at its budget."
+                                          "text": "Stopped the helper.", "role": "system",
+                                          "system_type": "cancel_receipt"}, bridge.host)
+    assert bridge.outbound[-1]["delegation_role"] == "subagent"  # it reached the bridge as the helper's row
+    assert _sent_texts(bridge)[-1] == "Stopped the helper."
     # A child's typed incident waits for its root, then goes, as before.
     incident = {"type": "send_message", "chat_id": 1, "task_id": "kid-3", "role": "system",
                 "system_type": "terminal_incident", "text": "The helper's run ended unexpectedly."}
     data = bridge.tmp / "state"  # the bridge's data dir (``_Api.get_runtime_info``)
     bridge.delivery._handle_send_message(dict(incident), bridge.host)
     assert "The helper's run ended unexpectedly." not in _sent_texts(bridge)
-    task_result_path(data, "root-3").parent.mkdir(parents=True, exist_ok=True)
-    task_result_path(data, "root-3").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    seed_result(data, "root-3", {"status": "completed"})
     asyncio.run(bridge.plugin._make_outbound(bridge.api)({**incident, **lineage}))
     assert _sent_texts(bridge)[-1] == "The helper's run ended unexpectedly."
 

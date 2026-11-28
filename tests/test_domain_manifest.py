@@ -413,3 +413,20 @@ def test_duplicate_scan_reads_changed_sources_and_preserves_syntax_errors(tmp_pa
         duplicate_bodies(manifest, tmp_path)
     b.write_bytes(a.read_bytes())
     assert duplicate_bodies(manifest, tmp_path) == original
+
+
+def test_every_domain_names_existing_owning_manuals(manifest, tmp_path):
+    """``[references]`` feeds the module lookup, review packets and plan seats: a domain
+    without a row, a missing manual or an unknown prefix key is red; the live tree is clean."""
+    assert check_domains.reference_findings(manifest, REPO_ROOT) == []
+    assert manifest.references["web/"][0] == "docs/architecture/03-web-ui-pages-and-buttons.md"
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("# A\n", encoding="utf-8")
+    broken = Manifest(path=tmp_path / "m.toml", raw_bytes=b"", meta={}, domains={"D01": "x", "D02": "y"},
+                      modules={}, proposed=set(),
+                      references={"D01": ["docs/a.md", "docs/gone.md"], "nowhere/": ["docs/a.md"]})
+    found = check_domains.reference_findings(broken, tmp_path)
+    assert any("D02 has no [references] row" in f for f in found)
+    assert any("missing manual docs/gone.md" in f for f in found)
+    assert any("'nowhere/' is neither a domain" in f for f in found)
+    assert not any("docs/a.md" in f and "missing" in f for f in found)

@@ -1,6 +1,8 @@
 """Post-task checkpoint keeps the existing wait card live after answer delivery."""
 
 import json
+from types import SimpleNamespace
+
 import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -30,6 +32,7 @@ def test_answered_direct_task_waits_through_task_done_and_reload(subscription_ui
     state = {"post_task_synthesis": "running"}
     # Old rows deliberately have neither failed text nor a typed failure.
     # Only the canonical task-result file can restore the outcome after reload.
+    dialogue_test.confirm_first_use(tmp_path)  # Main reads its history once its Project registry is confirmed
     _write_history_rows(tmp_path, task)
     dialogue_test.import_all(tmp_path)  # old chain files, as the upgrade imports them
     write_task_result(
@@ -41,8 +44,9 @@ def test_answered_direct_task_waits_through_task_done_and_reload(subscription_ui
     dialogue_store.append(tmp_path, "progress", {"type": "task_model_wait", "task_id": task,
                                                  "chat_id": 1, "ts": "2026-09-07T00:00:00Z", **row})
     app = Starlette(routes=[Route("/history", make_chat_history_endpoint(tmp_path))])
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: ui_fixture.PREVIEW_SCOPE)  # the page's proof
     sockets = []
-    page.route_web_socket("**/ws", lambda socket: sockets.append(socket))
+    page.route_web_socket("**/ws", lambda socket: (sockets.append(socket), socket.send(ui_fixture.PROFILE_FRAME)))
     page.add_init_script("""window.postTaskFrames = 0;
         window.WebSocket = class extends window.WebSocket {
             constructor(...args) { super(...args); this.addEventListener('message', () => { window.postTaskFrames += 1; }); }

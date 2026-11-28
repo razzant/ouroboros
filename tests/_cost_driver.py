@@ -35,7 +35,11 @@ Boundaries (tags in the output):
   compatibility pass; both publication snapshots retain it for its own bounded-work guard;
 - ``B4``/``B4w``: an owner chat frame over ``/ws`` on the cold process, then a second one;
 - ``B3``/``B3w``: ``GET /api/state``, cold then warm;
-- ``R_active``/``R_late`` (+``w``): ``GET /api/chat/history`` of the active and the late-bound room;
+- ``R_active``/``R_late`` (+``w``): ``GET /api/chat/history`` of the active and the late-bound room, on the path
+  production serves it: the room history reader child (#4320), ready before the first (``read_paths`` names the path
+  each read took). The child is started through the product's own spawn as tests/_cost_reader.py, the reader under
+  the meter, and the work each reply cost there is added to the boundary that sent the request (``_ReaderCounts``):
+  the boundary is the read's whole work, the server's share and the child's;
 - ``B5``: ``POST /api/tasks/<root>/cancel`` with ``{"cascade": true}`` on the pending tree;
 - ``P:*`` (B8, the producer and loop boundaries, each on its FIRST pass in this process):
   ``P:metrics_run`` a delegated run's measurement publication with the metrics cursor ABSENT,
@@ -217,11 +221,76 @@ class _Tagger:
         tag = headers.get(b"x-cost-boundary", b"").decode() or None
         if tag is None:
             return await self.app(scope, receive, send)
+        from ouroboros.gateway.history_reader import READ_PATH
+
         token = BOUNDARY.set(tag)
+        observed = READ_PATH.set(lambda path: self.result.setdefault("read_paths", {}).setdefault(tag, []).append(path))
         try:
             return await self.app(scope, receive, send)
         finally:
+            READ_PATH.reset(observed)
             BOUNDARY.reset(token)
+
+
+class _ReaderCounts:
+    """The room history reader child, counted: the product's spawn starts tests/_cost_reader.py in the reader's place,
+    importing from this repository (the stand's own repo folder is empty, where an install's child imports from its
+    checkout), and each reply's work there is added to the boundary that sent the request (``merge``)."""
+
+    def __init__(self) -> None:
+        self.sent: Dict[int, str] = {}
+        self.out: pathlib.Path | None = None
+        self.offset = 0
+
+    def install(self, root: pathlib.Path, facts: Dict[str, Any]) -> None:
+        from ouroboros import process_custody, utils
+        from ouroboros.gateway import history_reader
+
+        out = self.out = root.parent / "reader-counts.jsonl"
+        out.write_bytes(b"")
+        spawn, send, module = process_custody.spawn_supervised, history_reader.HistoryReader._send, (
+            "ouroboros." + history_reader.PURPOSE)
+
+        def spawn_counted(argv, **kwargs):
+            if kwargs.get("purpose") == history_reader.PURPOSE:
+                at = argv.index(module)
+                argv = [*argv[:at], "tests._cost_reader", *argv[at + 1:]]
+                kwargs["env"] = {**kwargs["env"], "PYTHONPATH": str(pathlib.Path(__file__).resolve().parents[1]),
+                                 "COST_READER_OUT": str(out), "COST_RACY_NS": str(utils._RACY_NS),
+                                 "COST_EXECUTION_ROOT": str(facts.get("execution_root") or "")}
+            return spawn(argv, **kwargs)
+
+        def sending(reader, request_id, selectors, live):
+            self.sent[request_id] = tag_of()  # the request's boundary: ``_dispatch`` sends from its own context
+            return send(reader, request_id, selectors, live)
+
+        process_custody.spawn_supervised = spawn_counted
+        history_reader.HistoryReader._send = sending
+
+    def merge(self, meter: CostMeter, result: Dict[str, Any]) -> None:
+        """Every reply the child wrote since the last look, added to its request's boundary; the child's own start
+        (its work before READY, paid once per serving generation, no read's) is kept as ``reader_start``, its counts."""
+        if self.out is None or not self.out.exists():
+            return
+        data = self.out.read_bytes()
+        lines, self.offset = data[self.offset:].splitlines(), len(data)
+        for line in map(json.loads, lines):
+            if line["id"] == "start":
+                result["reader_start"] = line["counts"]
+                continue
+            owner = self.sent.pop(line["id"], None)
+            if owner is None:
+                result["errors"].append(f"the history reader answered request {line['id']}, which no boundary sent")
+                continue
+            with meter._lock:
+                for kind in ("counts", "statements", "names"):
+                    getattr(meter, kind)[owner].update(line[kind])
+                for kind in ("callers", "paths"):  # named as the child's, where a failure lists them
+                    getattr(meter, kind)[owner].update({f"{key} <- (reader child)": amount
+                                                        for key, amount in line[kind].items()})
+
+
+READER = _ReaderCounts()
 
 
 def _stub_external_effects(srv: Any, result: Dict[str, Any], meter: CostMeter) -> None:
@@ -432,6 +501,7 @@ def _request(meter: CostMeter, client: Any, result: Dict[str, Any], tag: str, me
              **kwargs: Any) -> None:
     response = client.request(method, path, headers={"x-cost-boundary": tag}, **kwargs)
     meter.join_spawned(tag, timeout=10.0)
+    READER.merge(meter, result)
     _mark(result, tag)
     result[tag] = _summary(meter, tag)
     result.setdefault("responses", {})[tag] = {"status": response.status_code, "bytes": len(response.content)}
@@ -1074,6 +1144,13 @@ def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str,
                       facts: Dict[str, Any], stubs: Dict[str, Any]) -> None:
     _chat_frame(meter, client, result, "B4", "cost-contract-1")
     _request(meter, client, result, "B3", "GET", "/api/state")
+    from ouroboros.gateway import history_reader
+
+    # The room reads are measured where production serves them, the same path at every size: an inline build also fills
+    # this process's task-lineage memo (projects_registry._TASK_LINEAGE) that B5's room rule then reads from, so a
+    # size whose child lost the readiness race paid B5 fewer reads (Windows, 27.11: 475 vs 482 statements).
+    if not history_reader.reader.ready.wait(READY_TIMEOUT_SEC):
+        result["errors"].append(f"the room history reader never became ready ({history_reader.reader._failure})")
     _request(meter, client, result, "R_active", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
     _request(meter, client, result, "R_late", "GET", f"/api/chat/history?chat_id={facts['late_chat_id']}")
     _chat_frame(meter, client, result, "B4w", "cost-contract-2")
@@ -1105,6 +1182,7 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
 
         force_store_journal()
         _mark(result, "imported")
+        READER.install(root, spec.get("facts", {}))
         _stub_external_effects(srv, result, meter)
         stubs = _stub_duty_effects(result)
         # The install root is resolved once per process, in whichever boundary's thread asks first:

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { composerMarkup, createPlusMenu } from '../modules/composer.js';
+import { applyPayload } from '../modules/i18n.js';
 import { ElementStub, installDom, memoryStorage, PREVIEW_SCOPE, restoreDom, roomKey } from './chat_dom_fixture.js';
 import { installDomDouble } from './dom_double.js';
 
@@ -19,10 +20,10 @@ function fetchStub(history = []) {
         : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) });
 }
 
-function mount(env, { chatId = 1, projectId = '', idPrefix = 'chat', frames = [], status = 'sent' } = {}) {
+function mount(env, { chatId = 1, projectId = '', idPrefix = 'chat', frames = [], status = 'sent', handlers = {} } = {}) {
     let generation = 0;
     return createChatInstance({
-        ws: { on: () => () => {}, isConnected: () => true,
+        ws: { on: (event, fn) => { (handlers[event] ||= []).push(fn); return () => {}; }, isConnected: () => true,
             send: (frame) => { if (status !== 'failed') frames.push(frame); return { status, clientMessageId: `cm-${frames.length}` }; } },
         state: { activePage: 'chat', projectChatIds: new Set(chatId === 1 ? [] : [chatId]), unreadCount: 0 },
         updateUnreadBadge() {}, chatId, projectId, idPrefix, mountEl: env.mount, asPanel: chatId !== 1,
@@ -78,68 +79,490 @@ test('"+" stands where the paperclip stood; the voice and chips slots are empty,
     assert.ok(rising(order(['chat-model-mode', 'chat-subagents-mode', 'chat-context-mode', 'data-composer-chips', 'chat-text-row'])));
 });
 
-test('Send waits for the room\'s model to be saved, Panic never does; a refused save keeps the draft', async () => {
-    const SOL = 'claudexor::codex=gpt-6.1-sol';
-    const ASTRA = 'claudexor::codex=gpt-6-astra';
+const SOL = 'claudexor::codex=gpt-6.1-sol';
+const ASTRA = 'claudexor::codex=gpt-6-astra';
+const KIMI = 'moonshotai/kimi-k3';
+const COGNITION = { context_mode: 'max', subagents_mode: 'auto', effort_range: { min: 'low', recommended: 'high', max: 'max' } };
+
+/* A Project room whose Model capsule can be worked: its saves wait in `saves` to be answered (`reply`), the recent
+   models are the rows its sheet offers, and `pick(model)` presses one of them as a pointer would. */
+function modelRoom({ recents = [SOL, KIMI], own = { kind: 'model', model: ASTRA, use_local: false }, staged = null } = {}) {
     const saves = [];
+    const history = [];  // the rows the room's next history read answers with
     const env = installDom(async (url, init = {}) => {
         if (String(url) === '/api/owner/chat-model') return new Promise((resolve) => saves.push({ body: JSON.parse(init.body), resolve }));
-        return fetchStub()(url);
+        if (String(url).startsWith('/api/ui/preferences')) return { ok: true, json: async () => ({ model_recents: recents.map((model) => ({ model, use_local: false })) }) };
+        return fetchStub(history)(url);
     });
+    // A Reply the room kept staged: the composer opens replying to that row.
+    if (staged) sessionStorage.setItem(roomKey('ouro_chat_reply', 7), JSON.stringify(staged));
     const frames = [];
-    const instance = mount(env, { ...PROJECT, frames });
-    try {
-        const own = { kind: 'model', model: ASTRA, use_local: false };
-        const state = (choice) => ({ main_route: { model: SOL, use_local: false }, projects: [{ id: 'p7', chat_id: 7, model_choice: choice,
-            cognition: { context_mode: 'max', subagents_mode: 'auto', effort_range: { min: 'low', recommended: 'high', max: 'max' } } }] });
-        instance.hydrateStateSnapshot(state(own));
-        const capsule = node(instance, 'pchat-p7-model-mode');
-        const value = () => capsule.querySelector('.chat-capsule-value').textContent;
-        // A press on the capsule opens the Model sheet over the page; a press on its Main row follows Main again.
-        document.defaultView = window;  // the sheet's place reads the page's window, as a browser's document has one
-        const followMain = () => {
-            for (const fn of capsule.querySelector('.chat-model-head').listeners.get('click')) fn({ detail: 1 });
-            const list = document.body.children.find((made) => made.classList.contains('model-sheet')).querySelector('.model-sheet-list');
-            const row = list.querySelectorAll('.chat-model-row').find((made) => made.dataset.row === 'main');
-            for (const fn of list.listeners.get('click')) fn({ target: { closest: (selector) => (selector === '.chat-model-row' ? row : null) } });
-        };
-        const input = node(instance, 'pchat-p7-input');
-        const send = node(instance, 'pchat-p7-send');
-        const press = (text) => {
-            input.value = text;
-            const event = { key: 'Enter', target: input, preventDefault() { event.defaultPrevented = true; } };
-            for (const listener of input.listeners.get('keydown')) listener(event);
-        };
-        const reply = (index, body, ok = true, status = 200) => saves[index].resolve({ ok, status, json: async () => body });
-        assert.equal(value(), 'gpt-6-astra', 'the room\'s own model, from the room\'s own row');
-        followMain();
-        assert.deepEqual(saves.map((save) => save.body), [{ kind: 'main', project_id: 'p7' }]);
-        instance.hydrateStateSnapshot(state(own));
-        press('/panic');
-        assert.deepEqual(frames.map((frame) => frame.content), ['/panic'], 'Panic is delivered before the save answers');
-        frames.length = 0;
-        press('start on Main');
-        await tick();
-        assert.deepEqual([frames.length, send.textContent, send.disabled], [0, 'Saving', true], 'Send waits for the save');
-        reply(0, { ok: true, project_id: 'p7', model_choice: { kind: 'main' }, previous_model_choice: own });
-        await tick(); await tick();
-        assert.deepEqual(frames.map((frame) => frame.content), ['start on Main'], 'then the message goes');
-        assert.equal(value(), 'gpt-6.1-sol', 'and the capsule follows Main');
+    const handlers = {};
+    const instance = mount(env, { ...PROJECT, frames, handlers });
+    const state = (choice = own) => ({ main_route: { model: SOL, use_local: false },
+        projects: [{ id: 'p7', chat_id: 7, model_choice: choice, cognition: COGNITION }] });
+    instance.hydrateStateSnapshot(state());
+    document.defaultView = window;  // the sheet's place reads the page's window, as a browser's document has one
+    document.body = new ElementStub('body', document);  // where the sheet and the toast stack stand
+    const capsule = node(instance, 'pchat-p7-model-mode');
+    const input = node(instance, 'pchat-p7-input');
+    const send = node(instance, 'pchat-p7-send');
+    const pick = async (model) => {
+        for (const fn of capsule.querySelector('.chat-model-head').listeners.get('click')) fn({ detail: 1 });
+        await tick(); await tick();  // the sheet's own read of the recent models
+        const list = document.body.children.find((made) => made.classList.contains('model-sheet')).querySelector('.model-sheet-list');
+        const row = list.querySelectorAll('.chat-model-row').find((made) => made.dataset.row === `route|${model}`);
+        assert.ok(row, `a row for ${model}`);
+        for (const fn of list.listeners.get('click')) fn({ target: { closest: (selector) => (selector === '.chat-model-row' ? row : null) } });
+    };
+    const press = (text) => {
+        input.value = text;
+        for (const listener of input.listeners.get('input') || []) listener({ target: input });
+        const event = { key: 'Enter', target: input, preventDefault() { event.defaultPrevented = true; } };
+        for (const listener of input.listeners.get('keydown')) listener(event);
+    };
+    const type = (text) => { input.value = text; for (const listener of input.listeners.get('input') || []) listener({ target: input }); };
+    const reply = (index, body, ok = true, status = 200) => saves[index].resolve({ ok, status, json: async () => body });
+    const saved = (index, model, token) => reply(index, { ok: true, project_id: 'p7', model_choice: { kind: 'model', model, use_local: false },
+        previous_model_choice: own, choice_token: token });
+    const fire = (event, message) => { for (const fn of handlers[event] || []) fn(message); };
+    // The host's saved row of the `n`-th frame this room sent, taken as new work or not; `delivered: false` is a row a
+    // host process took and ended with (neither dispatch fact).
+    const savedRow = (n, { newWork = false, delivered = true } = {}) => ({ role: 'user', chat_id: 7, ts: `2026-01-02T03:04:0${n}+00:00`,
+        source: 'web', sender_session_id: frames[n - 1].sender_session_id, client_message_id: `cm-${n}`, ingress_accepted: true,
+        ...(delivered ? { ingress_dispatched: true } : {}), ...(newWork ? { new_work: true } : {}) });
+    const copy = (n) => instance.page.querySelectorAll('.chat-bubble.user').find((bubble) => bubble.dataset.clientMessageId === `cm-${n}`);
+    const actions = (n) => (copy(n)?.querySelectorAll('.msg-pending') || []).flatMap((note) => note.children.filter((made) => made.tagName === 'BUTTON'));
+    return { env, instance, frames, saves, state, capsule, input, send, pick, press, type, reply, saved,
+        /** A frame from the host, as the socket hands it to the room. */
+        fire,
+        /** That row as the host's live echo. */
+        echo: (n, facts) => fire('chat', { type: 'chat', content: frames[n - 1].content, ...savedRow(n, facts) }),
+        /** That row as the room's next history read answers it (a reconnect reads the room again). */
+        async reread(n, facts) {
+            history.push({ ...savedRow(n, facts), text: frames[n - 1].content, history_id: `h-cm-${n}`, history_position: { source: 'chat', offset: n } });
+            fire('open', { previouslyConnected: true });
+            for (let i = 0; i < 12; i += 1) await tick();
+        },
+        /** The actions the unconfirmed copy of the `n`-th message offers, by their words; `act` presses one. */
+        actions: (n) => actions(n).map((made) => made.textContent),
+        act: (n, word) => actions(n).find((made) => made.textContent === word).click(),
+        value: () => capsule.querySelector('.chat-capsule-value').textContent,
+        toasts: () => document.body.querySelectorAll('.toast, [data-toast]').map((made) => made.textContent),
+        close() { instance.destroy(); restoreDom(env.prior); } };
+}
 
-        document.body = new ElementStub('body', document);  // the toast stack's host
-        instance.hydrateStateSnapshot(state(own));  // the room holds its own model again
-        followMain();
-        press('still here');
+test('Send waits for the room\'s model to be saved, Panic never does; a refused save keeps the draft', async () => {
+    const r = modelRoom();
+    try {
+        assert.equal(r.value(), 'gpt-6-astra', 'the room\'s own model, from the room\'s own row');
+        await r.pick(SOL);
+        assert.deepEqual(r.saves.map((save) => save.body), [{ kind: 'model', model: SOL, use_local: false, project_id: 'p7' }]);
+        r.instance.hydrateStateSnapshot(r.state());
+        r.press('/panic');
+        assert.deepEqual(r.frames.map((frame) => frame.content), ['/panic'], 'Panic is delivered before the save answers');
+        r.frames.length = 0;
+        r.press('start on Sol');
         await tick();
-        reply(1, { error: 'The project is not available', saved: false, code: 'project_unavailable' }, false, 404);
+        assert.deepEqual([r.frames.length, r.send.textContent, r.send.disabled], [0, 'Saving', true], 'Send waits for the save');
+        r.saved(0, SOL, 'token-sol');
         await tick(); await tick();
-        assert.equal(frames.length, 1, 'a refused save sends nothing');
-        assert.equal(input.value, 'still here', 'and keeps the draft');
-        assert.equal(value(), 'gpt-6-astra', 'the saved choice again');
-        press('next');
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.new_work]), [['start on Sol', 'token-sol']],
+            'then the message goes, as new work on the choice just saved');
+        assert.equal(r.value(), 'gpt-6.1-sol', 'and the capsule shows the room\'s model');
+
+        r.instance.hydrateStateSnapshot(r.state({ kind: 'model', model: SOL, use_local: false }));
+        await r.pick(KIMI);
+        r.press('still here');
         await tick();
-        assert.deepEqual(frames.map((frame) => frame.content), ['start on Main', 'next'], 'an earlier refusal never blocks later sends');
-    } finally { instance.destroy(); restoreDom(env.prior); }
+        r.reply(1, { error: 'The project is not available', saved: false, code: 'project_unavailable' }, false, 404);
+        await tick(); await tick();
+        assert.equal(r.frames.length, 1, 'a refused save sends nothing');
+        assert.equal(r.input.value, 'still here', 'and keeps the draft');
+        assert.equal(r.value(), 'gpt-6.1-sol', 'the saved choice again');
+        r.press('next');
+        await tick();
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.new_work]), [['start on Sol', 'token-sol'], ['next', undefined]],
+            'an earlier refusal never blocks later sends, and arms none of them');
+    } finally { r.close(); }
+});
+
+test('after a pick of another model Send and the empty field say the next message is a new task, before the press', async () => {
+    const r = modelRoom();
+    try {
+        const said = () => [r.send.textContent, r.send.title, r.input.placeholder];
+        const ORDINARY = ['Send', 'Send message', 'Message Ouroboros...'];
+        const NEW_TASK = ['New task', 'Send as a new task on gpt-6.1-sol', 'New task...'];
+        assert.deepEqual(said(), ORDINARY, 'nothing picked: an ordinary message');
+        await r.pick(ASTRA);  // the row current now
+        assert.deepEqual([r.saves.length, said()], [0, ORDINARY], 'the model the room already has arms nothing');
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        assert.deepEqual(said(), NEW_TASK);
+        assert.ok(NEW_TASK[2].length <= ORDINARY[2].length, 'the armed field\'s words never outgrow the ordinary ones: no state adds a wrapped line');
+        // A slash command is never new work, and a Reply to a work's own row reaches that work: Send says so, and
+        // the choice waits for its own message.
+        r.type('/status');
+        assert.deepEqual(said(), ORDINARY);
+        r.type('compare the drafts');
+        assert.deepEqual(said().slice(0, 2), NEW_TASK.slice(0, 2));
+        r.press('/status');
+        await tick();
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.new_work]), [['/status', undefined]], 'the command names no choice');
+        assert.deepEqual(said(), NEW_TASK, 'and spends none');
+        // The message goes naming the saved choice; until the host says how it took it, Send is an ordinary one again.
+        r.press('compare the drafts');
+        await tick();
+        assert.deepEqual(r.frames.at(-1).new_work, 'token-sol');
+        assert.deepEqual(said(), ORDINARY);
+        r.press('and one more thing');
+        await tick();
+        assert.equal(r.frames.at(-1).new_work, undefined, 'one message names it, never the next too');
+        // The host's saved row answers, by its live echo: given to a work as its Reply, the choice is not spent.
+        // Taken as new work, it is. A row of a message that named no choice says nothing about it.
+        r.echo(3);
+        assert.deepEqual(said(), ORDINARY, 'another message\'s row is not this one\'s word');
+        r.echo(2);
+        assert.deepEqual(said(), NEW_TASK);
+        r.press('now as new work');
+        await tick();
+        r.echo(r.frames.length, { newWork: true });
+        assert.deepEqual([r.frames.at(-1).new_work, said()], ['token-sol', ORDINARY]);
+        r.echo(r.frames.length);  // a repeated row without the mark is no second word
+        assert.deepEqual(said(), ORDINARY);
+    } finally { r.close(); }
+});
+
+test('a pick made before the host\'s word on the last message is the next message\'s own: that word never takes it', async () => {
+    const r = modelRoom();
+    try {
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        r.press('start on Sol');
+        await tick();
+        assert.deepEqual([r.frames.at(-1).new_work, r.send.textContent], ['token-sol', 'Send']);
+        // The echo has not come (a slow host, or a socket that dropped it); the owner picks another model.
+        await r.pick(KIMI);
+        r.saved(1, KIMI, 'token-kimi');
+        await tick(); await tick();
+        assert.deepEqual([r.send.textContent, r.send.title], ['New task', 'Send as a new task on kimi-k3']);
+        r.echo(1, { newWork: true });  // the first message was taken as new work on Sol
+        assert.deepEqual([r.send.textContent, r.send.title], ['New task', 'Send as a new task on kimi-k3'],
+            'its success spends its own choice, never the later one');
+        r.press('and this on Kimi');
+        await tick();
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.new_work]),
+            [['start on Sol', 'token-sol'], ['and this on Kimi', 'token-kimi']]);
+        r.echo(2, { newWork: true });
+        assert.equal(r.send.textContent, 'Send');
+    } finally { r.close(); }
+});
+
+/* A room whose window picked Sol and sent `start on Sol` naming it (`cm-1`); the host's echo never came. */
+async function sentUnheard() {
+    const r = modelRoom();
+    await r.pick(SOL);
+    r.saved(0, SOL, 'token-sol');
+    await tick(); await tick();
+    r.press('start on Sol');
+    await tick();
+    assert.deepEqual([r.frames.at(-1).new_work, r.send.textContent], ['token-sol', 'Send']);
+    return r;
+}
+const NEW_TASK_ON_SOL = ['New task', 'Send as a new task on gpt-6.1-sol'];
+
+test('a message that named the choice and was never confirmed: Discard frees the choice, Send again keeps its one word', async () => {
+    const discarded = await sentUnheard();
+    try {
+        discarded.fire('close');
+        assert.deepEqual(discarded.actions(1), ['Send again', 'Discard']);
+        assert.equal(discarded.send.textContent, 'Send', 'in doubt, its choice is still its own');
+        discarded.act(1, 'Discard');
+        assert.deepEqual([discarded.send.textContent, discarded.send.title], NEW_TASK_ON_SOL, 'given up, the choice waits for a message again');
+        discarded.press('start on Sol after all');
+        await tick();
+        assert.deepEqual([discarded.frames.at(-1).content, discarded.frames.at(-1).new_work, discarded.send.textContent],
+            ['start on Sol after all', 'token-sol', 'Send']);
+        discarded.echo(1, { newWork: true });  // the given-up message's late row is not the new message's word
+        assert.equal(discarded.send.textContent, 'Send');
+        discarded.echo(2);  // the host gave the new one to a work: its choice waits again
+        assert.deepEqual([discarded.send.textContent, discarded.send.title], NEW_TASK_ON_SOL);
+    } finally { discarded.close(); }
+    const repeated = await sentUnheard();
+    try {
+        repeated.fire('close');
+        repeated.act(1, 'Send again');
+        assert.deepEqual([repeated.frames.length, repeated.frames.at(-1).client_message_id, repeated.frames.at(-1).new_work, repeated.send.textContent],
+            [2, 'cm-1', 'token-sol', 'Send'], 'the same message with the same id names the same choice, and Send promises no second task');
+        repeated.echo(1, { newWork: true });
+        repeated.press('and then this');
+        await tick();
+        assert.deepEqual([repeated.frames.at(-1).content, repeated.frames.at(-1).new_work], ['and then this', undefined], 'taken as new work, the choice is spent');
+    } finally { repeated.close(); }
+});
+
+test('the saved row in history answers for the choice when the echo never came, as the echo would', async () => {
+    const taken = await sentUnheard();
+    try {
+        await taken.reread(1, { newWork: true });
+        assert.equal(taken.send.textContent, 'Send');
+        taken.press('and then this');
+        await tick();
+        assert.equal(taken.frames.at(-1).new_work, undefined, 'taken as new work, the choice is spent');
+    } finally { taken.close(); }
+    const replied = await sentUnheard();
+    try {
+        await replied.reread(1);  // the host gave it to a work as its Reply
+        assert.deepEqual([replied.send.textContent, replied.send.title], NEW_TASK_ON_SOL, 'the choice still waits for its own message');
+    } finally { replied.close(); }
+    // Taken as new work by a host process that ended: delivery is not known, and the one next step is a new message.
+    // Its choice stays with it until the owner takes that step; then the new message is the new task again.
+    const doubted = await sentUnheard();
+    try {
+        await doubted.reread(1, { newWork: true, delivered: false });
+        assert.deepEqual([doubted.send.textContent, doubted.actions(1)], ['Send', ['Send as new']]);
+        doubted.act(1, 'Send as new');  // its words go back to the composer (the browser lane reads them there)
+        assert.deepEqual([document.activeElement === doubted.input, doubted.send.textContent, doubted.send.title], [true, ...NEW_TASK_ON_SOL]);
+    } finally { doubted.close(); }
+});
+
+test('Send is shared with a conversation feature\'s entry: its face stands, and handed back the button says New task again', async () => {
+    const observers = [];
+    globalThis.MutationObserver = class {
+        constructor(fn) { this.fn = fn; this.targets = []; this.watched = new Set(); observers.push(this); }
+        observe(target) { this.targets.push(target); this.watched.add(target); }
+        disconnect() { this.targets = []; }
+        takeRecords() { return []; }
+    };
+    const changed = (target) => observers.filter((made) => made.targets.includes(target)).forEach((made) => made.fn([]));
+    const r = modelRoom();
+    try {
+        const face = () => [r.send.textContent, r.send.title];
+        const stateRead = () => r.instance.hydrateStateSnapshot(r.state({ kind: 'model', model: SOL, use_local: false }));
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        assert.deepEqual([...face(), r.input.placeholder], [...NEW_TASK_ON_SOL, 'New task...']);
+        // The feature dresses the empty field's button as its entry; no state read writes over it or its title.
+        Object.assign(r.send, { textContent: 'Talk', title: 'Talk with Ouroboros' });
+        changed(r.send);
+        stateRead();
+        assert.deepEqual(face(), ['Talk', 'Talk with Ouroboros']);
+        // The owner types: the feature hands the button back as a plain Send, and the composer says its own word.
+        Object.assign(r.send, { textContent: 'Send', title: 'Send message' });
+        changed(r.send);
+        assert.deepEqual(face(), NEW_TASK_ON_SOL, 'the message still goes as a new task, and the button says so');
+        // A call writes its own words in the empty field and gives the ordinary ones back when it ends.
+        r.input.placeholder = 'Type to Ouroboros';
+        stateRead();
+        assert.equal(r.input.placeholder, 'Type to Ouroboros');
+        r.input.placeholder = 'Message Ouroboros...';
+        changed(r.input);
+        assert.equal(r.input.placeholder, 'New task...');
+        // The composer's own busy word ends in its own word, whatever stood there.
+        r.press('start on Sol');
+        await tick();
+        assert.deepEqual([r.frames.at(-1).new_work, ...face()], ['token-sol', 'Send', 'Send message']);
+    } finally { r.close(); delete globalThis.MutationObserver; }
+    const own = observers.filter((made) => made.watched.has(r.send));
+    assert.ok(own.length && own.every((made) => !made.targets.length), 'the room\'s end stops the watching');
+});
+
+test('in a translated interface the composer still knows its own Send words, shown in that language, from a feature\'s face', async () => {
+    // The page's language overlay rewrites fixed words where they stand (i18n.js): what the composer wrote as `Send`
+    // is on the button as its translation. Read before the room has a body, so no overlay walks the test's document;
+    // `overlay()` below does what it would to the two nodes.
+    const RU = { Send: 'Отправить', 'New task': 'Новая задача', 'Send message': 'Отправить сообщение',
+        'Message Ouroboros...': 'Напишите Ouroboros...', 'New task...': 'Новая задача...' };
+    applyPayload({ language: 'ru', english: false, entries: Object.fromEntries(Object.entries(RU).map(([key, text]) => [key, { text }])) });
+    const observers = [];
+    globalThis.MutationObserver = class {
+        constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); }
+        observe(target) { this.targets.push(target); }
+        disconnect() { this.targets = []; }
+        takeRecords() { return []; }
+    };
+    const changed = (target) => observers.filter((made) => made.targets.includes(target)).forEach((made) => made.fn([]));
+    const r = modelRoom();
+    try {
+        const overlay = () => {
+            if (RU[r.send.textContent]) r.send.textContent = RU[r.send.textContent];
+            if (RU[r.send.title]) r.send.title = RU[r.send.title];
+            if (RU[r.input.placeholder]) r.input.placeholder = RU[r.input.placeholder];
+        };
+        const stateRead = () => r.instance.hydrateStateSnapshot(r.state({ kind: 'model', model: SOL, use_local: false }));
+        overlay();
+        assert.deepEqual([r.send.textContent, r.input.placeholder], ['Отправить', 'Напишите Ouroboros...']);
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        // Its own word, in whatever language it stands, is the composer's to change: the pick says New task.
+        assert.deepEqual([r.send.textContent, r.input.placeholder], ['New task', 'New task...']);
+        overlay();
+        stateRead();
+        assert.deepEqual([r.send.textContent, r.input.placeholder], ['Новая задача', 'Новая задача...'],
+            'a word already shown is not written again: the composer and the overlay never take turns');
+        // A conversation feature's face is not the composer's word in any language: it stands.
+        Object.assign(r.send, { textContent: 'Говорить', title: 'Говорить с Ouroboros' });
+        changed(r.send);
+        stateRead();
+        assert.deepEqual([r.send.textContent, r.send.title], ['Говорить', 'Говорить с Ouroboros']);
+        // Handed back as a plain Send (the feature's own English word, or its translation once the overlay saw it),
+        // the button says the next message is a new task again.
+        for (const handed of ['Send', 'Отправить']) {
+            Object.assign(r.send, { textContent: 'Говорить', title: 'Говорить с Ouroboros' });
+            changed(r.send);
+            Object.assign(r.send, { textContent: handed, title: handed === 'Send' ? 'Send message' : 'Отправить сообщение' });
+            changed(r.send);
+            assert.deepEqual([r.send.textContent, r.send.title], NEW_TASK_ON_SOL, handed);
+            overlay();
+        }
+        // A call's own words in the empty field stand; the ordinary ones given back in the page's language are the
+        // composer's again.
+        r.input.placeholder = 'Говорите или пишите';
+        stateRead();
+        assert.equal(r.input.placeholder, 'Говорите или пишите');
+        r.input.placeholder = 'Напишите Ouroboros...';
+        changed(r.input);
+        assert.equal(r.input.placeholder, 'New task...');
+    } finally {
+        r.close();
+        delete globalThis.MutationObserver;
+        applyPayload({ language: 'en', english: true, entries: {} });
+    }
+});
+
+test('another window\'s change of the room\'s model stops the message: the draft stays and nothing is sent on either model', async () => {
+    const r = modelRoom();
+    try {
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        assert.equal(r.send.textContent, 'New task');
+        r.instance.hydrateStateSnapshot(r.state({ kind: 'model', model: KIMI, use_local: false }));  // another window's pick
+        assert.equal(r.value(), 'kimi-k3', 'the capsule shows what is saved now');
+        assert.deepEqual([r.send.textContent, r.input.placeholder], ['Send', 'Message Ouroboros...'],
+            'a pick another window overtook promises no new task on its model');
+        r.press('compare the drafts');
+        await tick();
+        assert.deepEqual([r.frames.length, r.input.value, r.send.textContent], [0, 'compare the drafts', 'Send'],
+            'nothing went out, the words stay, and the pick made here no longer stands');
+        r.press('compare the drafts');
+        await tick();
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.new_work]), [['compare the drafts', undefined]],
+            'pressed again it is an ordinary message of the room as it is');
+        // A pick made after the other window's is a pick of another model again: the room is as that window left it.
+        await r.pick(SOL);
+        r.saved(1, SOL, 'token-sol-2');
+        await tick(); await tick();
+        assert.deepEqual([r.send.textContent, r.input.placeholder], ['New task', 'New task...']);
+    } finally { r.close(); }
+});
+
+// A Reply as the room stages it (chat_reply.js): a row inside a work's card names its task (`bubbleRef`), a card
+// its `task:` address (`cardRef`), an ordinary bubble neither, so only the host knows whether its row is a work's.
+const WORK_ROW = { address: 'row:7@2026-01-02T03:04:05+00:00#aaaaaaaaaaaa', chat_id: 7, role: 'assistant', kind: 'message',
+    author_label: 'Ouroboros', snippet: 'the draft is ready', ts: '2026-01-02T03:04:05+00:00', task_id: 'work-a' };
+const WORK_CARD = { address: 'task:work-a', chat_id: 7, role: 'assistant', kind: 'work_card', author_label: 'Draft review',
+    snippet: 'reading', ts: '2026-01-02T03:04:05+00:00', task_id: 'work-a' };
+const PLAIN_ROW = { address: 'row:7@2026-01-02T03:00:00+00:00#bbbbbbbbbbbb', chat_id: 7, role: 'user', kind: 'message',
+    author_label: 'You', snippet: 'my earlier words', ts: '2026-01-02T03:00:00+00:00', task_id: '' };
+
+test('a Reply to a work\'s card is its work\'s like a Reply to a row inside it', async () => {
+    const r = modelRoom({ staged: WORK_CARD });
+    try {
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        assert.deepEqual([r.send.textContent, r.input.placeholder], ['Send', 'Message Ouroboros...']);
+        r.instance.hydrateStateSnapshot(r.state({ kind: 'model', model: KIMI, use_local: false }));
+        r.press('stop after this file');
+        await tick();
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.reply_to, frame.new_work]), [['stop after this file', 'task:work-a', undefined]]);
+    } finally { r.close(); }
+});
+
+test('a Reply to a work\'s row is never held back by a pick that no longer stands, and names no choice', async () => {
+    const r = modelRoom({ staged: WORK_ROW });
+    try {
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        assert.deepEqual([r.send.textContent, r.input.placeholder], ['Send', 'Message Ouroboros...'],
+            'replying to a work\'s row, Send says an ordinary message: the same reading the send uses');
+        r.instance.hydrateStateSnapshot(r.state({ kind: 'model', model: KIMI, use_local: false }));  // another window's pick
+        r.press('about that draft');
+        await tick();
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.reply_to, frame.new_work]),
+            [['about that draft', WORK_ROW.address, undefined]], 'the Reply went to its work at once, naming no choice');
+        assert.deepEqual([r.input.value, r.toasts()], ['', []], 'nothing was held back and nothing was said');
+        // The Reply left the field with its message; the pick made here still does not stand for plain words.
+        r.press('and a plain one');
+        await tick();
+        assert.deepEqual([r.frames.length, r.input.value], [1, 'and a plain one'], 'the stale pick stops plain words once, the draft stays');
+        r.press('and a plain one');
+        await tick();
+        assert.deepEqual([r.frames.at(-1).content, r.frames.at(-1).new_work], ['and a plain one', undefined]);
+    } finally { r.close(); }
+});
+
+test('a Reply to an ordinary bubble names the choice and is the host\'s to place: never held back, never called a new task before', async () => {
+    const r = modelRoom({ staged: PLAIN_ROW });
+    try {
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        // Only the host knows whether the quoted row is a work's: Send promises nothing, the field says both outcomes.
+        assert.deepEqual([r.send.textContent, r.send.title, r.input.placeholder],
+            ['Send', 'Send the Reply: its work takes it, or it starts a new task on gpt-6.1-sol', 'Reply or new task...']);
+        r.press('do this instead');
+        await tick();
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.reply_to, frame.new_work]),
+            [['do this instead', PLAIN_ROW.address, 'token-sol']], 'a plain quote is no Reply to a work: it names the choice like any words');
+        // The host gave it to a work as its Reply: the pick still waits for its own message.
+        r.echo(1);
+        assert.deepEqual([r.send.textContent, r.input.placeholder], ['New task', 'New task...']);
+    } finally { r.close(); }
+    // Another window changed the room's model: the Reply still goes at once, naming the choice made here, and the
+    // host decides (its work takes it; a plain quote is refused and its words come back).
+    const changed = modelRoom({ staged: PLAIN_ROW });
+    try {
+        await changed.pick(SOL);
+        changed.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        changed.instance.hydrateStateSnapshot(changed.state({ kind: 'model', model: KIMI, use_local: false }));
+        changed.press('do this instead');
+        await tick();
+        assert.deepEqual(changed.frames.map((frame) => [frame.content, frame.reply_to, frame.new_work]),
+            [['do this instead', PLAIN_ROW.address, 'token-sol']]);
+        assert.deepEqual([changed.input.value, changed.toasts()], ['', []], 'nothing held it back on the page');
+    } finally { changed.close(); }
+});
+
+test('refused because the model changed elsewhere, the words return to the field and the next Send is an ordinary one', async () => {
+    const r = modelRoom();
+    try {
+        await r.pick(SOL);
+        r.saved(0, SOL, 'token-sol');
+        await tick(); await tick();
+        r.press('compare the drafts');  // this window has not heard of the other one's pick yet
+        await tick();
+        assert.deepEqual([r.frames.at(-1).new_work, r.input.value, r.send.textContent], ['token-sol', '', 'Send']);
+        r.fire('chat', { type: 'chat', role: 'system', system_type: 'initialization_notice', chat_id: 7, client_message_id: 'cm-1',
+            reason_code: 'model_choice_changed', content: 'The model for new work here was changed elsewhere before this message was saved.' });
+        await tick();
+        assert.deepEqual([r.input.value, r.send.textContent, r.input.placeholder], ['compare the drafts', 'Send', 'Message Ouroboros...'],
+            'the words are back in the field, and the pick made here no longer stands');
+        assert.equal(r.instance.page.querySelectorAll('.chat-bubble.user').filter((bubble) => bubble.dataset.clientMessageId === 'cm-1').length, 0,
+            'its unsaved copy left the feed: the words stand once, in the field');
+        r.press('compare the drafts');
+        await tick();
+        assert.deepEqual(r.frames.map((frame) => [frame.content, frame.new_work]),
+            [['compare the drafts', 'token-sol'], ['compare the drafts', undefined]], 'sent again it is an ordinary message, never the refused intent');
+        assert.equal(r.input.value, '');
+    } finally { r.close(); }
 });
 
 test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopened room restores it, Send clears it', async () => {

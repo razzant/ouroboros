@@ -143,8 +143,11 @@ def test_the_fresh_fixture_starts_on_every_shipped_call_model_and_on_hard_85k_te
     assert not shown.memory_facts.get("host_sections_addressed"), "no host section addressed for the window"
 
 
-def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None):
-    """The fresh drive's call start through the adapter's own setup: the real ``ToolRegistry``, the call feature's
+def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None, shape="fresh", published=None,
+                   published_tools=None):
+    """The ``shape`` drive's call start (``rich`` with its twelve MCP servers published through the real manager on
+    the drive the call preparation reads; their guides go into ``published``, each server's published tool names, with
+    their multiplicity, into ``published_tools``) through the adapter's own setup: the real ``ToolRegistry``, the call feature's
     ``INITIAL_TOOLS``, ``call_tools`` and ``session_options``, the ordinary builder for the call's messages, then
     ``realtime_setup.session_candidate`` with the adapter's registered session factory and a ``connect`` that fails the
     test. ``window`` narrows the catalogue's window for the candidate only (the ordinary build keeps the declared one).
@@ -176,7 +179,23 @@ def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window
     turn.route, turn.catalog_model, turn.native_model = module.ROUTE, model, model_id
     turn.model = module.ROUTE.model_prefix + model_id
     turn.spec = replace(turn.spec, chat_id=1, model=model_id)
-    drive = scale.installed(tmp_path, "fresh")
+    drive = scale.installed(tmp_path, shape)
+    # The data root is the drive before anything publishes: catalogues published on another root are dropped by the
+    # ordinary settings refresh of the call preparation (``mcp_client`` rebinds to the root it reads).
+    monkeypatch.setattr(config, "DATA_DIR", drive)
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: drive)
+    if shape == "rich":
+        from ouroboros import mcp_client
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(drive))
+        _registry, guides = scale.mcp_registry(drive, monkeypatch)
+        facts = mcp_client.get_manager().server_facts()
+        assert all(facts[server]["instructions"] == guide for server, guide in guides.items())
+        if published is not None:
+            published.update(guides)
+        if published_tools is not None:
+            from collections import Counter
+            for tool in mcp_client.get_manager().list_tools_for_registry():
+                published_tools.setdefault(tool["server_id"], Counter())[tool["raw_name"]] += 1
     env, memory = scale.env_on(drive)
     turn.feature = dict(turn.feature, initial_tools=INITIAL_TOOLS, call_tools=call_tools(drive))
     task = dict(host_world.task, chat_id=1, model=turn.model,
@@ -185,11 +204,9 @@ def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window
                       is_direct_chat=True, task_metadata=task["metadata"], task_contract={})
     registry = ToolRegistry(env.repo_dir, drive)
     registry.set_context(ctx)
-    monkeypatch.setattr(config, "DATA_DIR", drive)
-    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: drive)
     monkeypatch.setattr(context, "get_context_mode", lambda: "nano")
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
-    scope = f"{skill}-fresh-start"
+    scope = f"{skill}-{shape}-start"
     route = dict(provider=turn.route.accounting_provider, model=turn.model, base_url=turn.route.endpoint,
                  use_local=False, model_role="main", options={})
     evidence = SimpleNamespace(route_fp=scope, status="confirmed", stale=False,
@@ -244,3 +261,107 @@ def test_a_window_too_small_for_the_native_candidate_is_refused_before_any_conne
     with pytest.raises(RealtimeSetupError) as raised:  # a connection attempt would fail the test instead
         _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, window=40_000)
     assert raised.value.code == "context_capacity"
+
+
+# What each shipped call model's own start does with a mature install (``mature``) and the same install with its 39
+# running works and twelve MCP servers (``rich``), on the shipped catalogue windows: OpenAI's window measured 27.11.2026
+# holds both; Gemini's (both selections) and Grok's still refuse both, typed, before any socket. A route whose window
+# comes to hold an install moves to ``ADMITS`` in the change that makes it true.
+ADMITS = {"openai_realtime"}
+
+
+def _selected_texts(session):
+    rows = json.loads(session.selected.messages_json)
+    texts = []
+    for row in rows:
+        content = row.get("content")
+        parts = content if isinstance(content, list) else [content or ""]
+        texts.extend(part.get("text", "") if isinstance(part, dict) else str(part) for part in parts)
+    return texts
+
+
+def selected_tool_names(texts):
+    """``{server: Counter(tool names)}`` as the selected connections map lists them (``- mcp_<server> ...: a, b``)."""
+    from collections import Counter
+
+    listed = {}
+    for line in (line for text in texts for line in text.splitlines()):
+        if line.startswith("- mcp_") and "callable as mcp_" in line:
+            server = line[len("- mcp_"):].split(" ", 1)[0]
+            listed.setdefault(server, Counter()).update(line.partition("__<name>: ")[2].split(", "))
+    return listed
+
+
+START_ROOM = "Start room is smaller than requested"
+
+
+def assert_start_room(proof, window):
+    """The start's work-room record: present, consistent with the window, the selected input and the reserve, and, when
+    less than the requested eighth is left, the recorded reason with the owner-facing detail. Its delivery (the in-model
+    row when it fits, the owner's progress line otherwise) is pinned in tests/test_live_start_room.py and
+    tests/test_live_conversation.py."""
+    measured, room = proof["fit"]["measurement"], proof["work_room"]
+    left = window - measured["estimated_input_tokens"] - measured["response_reserve_tokens"]
+    assert room["remaining_tokens"] == left and room["requested_tokens"] == -(-window // 8)
+    short = left < room["requested_tokens"]
+    assert (room["deficit_tokens"] > 0) is short
+    if short:
+        assert room.get("reason") == "start_room_shortfall" and START_ROOM in room.get("detail", "")
+
+
+def _room_proof(left, *, record=True, reason=True):
+    window, reserve = 290_666, 10_000
+    measured = {"estimated_input_tokens": window - reserve - left, "response_reserve_tokens": reserve}
+    proof = {"fit": {"measurement": measured}}
+    if record:
+        requested = -(-window // 8)
+        proof["work_room"] = {"first_send": True, "requested_tokens": requested, "remaining_tokens": left,
+                              "deficit_tokens": max(0, requested - left)}
+        if reason and left < requested:
+            proof["work_room"].update(reason="start_room_shortfall",
+                                      detail=START_ROOM + ": ... this work starts with less room.")
+    return proof, window
+
+
+def test_the_start_room_guard_reads_the_record_in_both_directions():
+    """A physically valid start one unit short of the eighth passes with its recorded notice, wherever it was
+    delivered; a start whose work-room record is missing, or short without its reason, fails."""
+    requested = -(-290_666 // 8)
+    assert_start_room(*_room_proof(requested - 1))  # one unit short, notice recorded
+    assert_start_room(*_room_proof(requested))  # the eighth exactly
+    for broken in (dict(record=False), dict(reason=False)):
+        with pytest.raises((AssertionError, KeyError)):
+            assert_start_room(*_room_proof(requested - 1, **broken))
+
+
+@pytest.mark.parametrize("shape", ["mature", "rich"])
+@pytest.mark.parametrize("route", [pytest.param(route, id=f"{route[0]}:{route[1]}") for route in scale.call_routes()])
+def test_each_shipped_adapter_admits_or_refuses_a_mature_start_at_its_own_session_candidate(
+        tmp_path, monkeypatch, host_world, route, shape):
+    """The eighth of work room is the fresh install's promise; on these installs a start that physically fits is
+    admitted, and one that leaves less than the eighth carries the start-room notice the product owes."""
+    from tests import _live_works_fixture as works
+
+    skill, model_id, facts = route
+    guides, published_tools = {}, {}
+    if skill not in ADMITS:
+        with pytest.raises(fit.MinimumViewUnfit) as raised:  # a connection attempt would fail the test instead
+            _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, shape=shape, published=guides)
+        assert raised.value.window_tokens == facts.conversation_window_tokens and raised.value.deficit_tokens > 0
+        assert len(guides) == (scale.MCP_SHAPE["servers"] if shape == "rich" else 0)
+        return
+    (session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, shape=shape,
+                                                          published=guides, published_tools=published_tools)
+    measured = proof["fit"]["measurement"]
+    assert not attempts and measured["capacity_deficit_tokens"] == 0
+    assert measured["capacity_total_tokens"] == facts.conversation_window_tokens
+    assert measured["estimated_input_tokens"] + measured["response_reserve_tokens"] <= facts.conversation_window_tokens
+    texts = _selected_texts(session)
+    flat = " ".join(" ".join(text.split()) for text in texts)
+    assert_start_room(proof, facts.conversation_window_tokens)
+    if shape == "rich":  # the connections map carries every server's whole guide and every tool name, and every work
+        assert len(guides) == scale.MCP_SHAPE["servers"]
+        assert all(" ".join(guide.split()) in flat for guide in guides.values())
+        assert selected_tool_names(texts) == published_tools  # every server, every name, each as often as published
+        assert sum(sum(names.values()) for names in published_tools.values()) == scale.MCP_SHAPE["tools"]
+        assert all(f"w{n:02d}{kind[:3]}" in flat for n, kind in enumerate(works.KINDS))

@@ -1,6 +1,6 @@
 """Architecture facts over the pinned domain/contract/persistence carriers (CPL-3).
 
-Five pure queries whose consumer #1 is Ouroboros itself (self-evolution):
+Six pure queries whose consumer #1 is Ouroboros itself (self-evolution):
 
 - ``owner_of(path|symbol)`` — the domain owner per ``ouroboros/domains.toml``;
 - ``domain_dependencies(d)`` — the manifest-baseline direction edges of one domain;
@@ -10,7 +10,9 @@ Five pure queries whose consumer #1 is Ouroboros itself (self-evolution):
   per ``docs/PERSISTENCE.md``;
 - ``protected_contracts_affected(diff)`` — the protected surfaces
   (``runtime_mode_policy`` inventories) and frozen-contract rows
-  (ARCHITECTURE §11.1) a change set touches.
+  (ARCHITECTURE §11.1) a change set touches;
+- ``module_map(domains|D..|prefix)`` — module addresses and their own leads
+  (``code_intelligence_module_map``).
 
 Everything here derives from the repository's sources: the domain manifest,
 the books, local syntax and the protected-path declarations. No LLM or
@@ -26,7 +28,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple
 
 from ouroboros import work_domain
@@ -45,6 +47,7 @@ ARCHITECTURE_FACTS = (
     "facade_consumers",
     "persistence_entities_written_by",
     "protected_contracts_affected",
+    "module_map",
 )
 
 # A top-level ``from <module> import name`` carrying the F401-noqa marker is a re-export.
@@ -64,12 +67,13 @@ _DIFF_RENAME = re.compile(r"^rename (?:from|to) (\S+)$", re.MULTILINE)
 
 @dataclass(frozen=True)
 class DomainManifest:
-    """The parsed domain manifest: vocabulary, assignment, baseline edges."""
+    """The parsed domain manifest: vocabulary, assignment, baseline edges and owning manuals."""
 
     domains: Dict[str, str]        # "D02" -> title
     modules: Dict[str, str]        # repo-relative path -> domain id
     graph_allowed: Tuple[str, ...]  # strict baseline "D01->D02" pairs
     lazy_only: Tuple[str, ...]      # lazy-only baseline pairs
+    references: Dict[str, Tuple[str, ...]] = field(default_factory=dict)  # domain or path prefix -> manuals
 
 
 def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
@@ -97,7 +101,19 @@ def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
         data = tomllib.loads(raw)
     except Exception as exc:
         raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} does not parse as TOML: {exc}") from exc
-    graph = data.get("graph") or {}
+    def shaped(value, kind, name):  # a present value of the wrong container type is the carrier's error, named
+        if not isinstance(value, kind):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} {name} must be a {'table' if kind is dict else 'list'}")
+        return value
+    sections = {section: shaped(data[section], dict, f"section [{section}]") if section in data else {}
+                for section in ("domains", "modules", "references", "graph")}
+    graph = sections["graph"]
+    for key in ("allowed", "lazy_only"):
+        if key in graph:
+            shaped(graph[key], list, f"[graph] {key}")
+    for key, vals in sections["references"].items():
+        shaped(vals, list, f"[references] {key}")
+    data = {**data, **sections}
     for path in data.get("modules") or {}:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or "\\" in path:
@@ -107,6 +123,7 @@ def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
         modules={str(k): str(v) for k, v in (data.get("modules") or {}).items()},
         graph_allowed=tuple(str(p) for p in graph.get("allowed") or ()),
         lazy_only=tuple(str(p) for p in graph.get("lazy_only") or ()),
+        references={str(k): tuple(str(v) for v in vals) for k, vals in data["references"].items()},
     )
 
 
@@ -641,8 +658,12 @@ def architecture_fact_rows(
     *,
     inventory: CodeInventory | Callable[[], CodeInventory] | None = None,
     read_book_bytes: Callable[[str], bytes] | None = None,
+    list_prefix: Callable[[str], Tuple[List[str], List[str]]] | None = None,
+    deadline: float | None = None,
 ) -> List[str]:
     """Render one architecture fact as compact tool rows.
+
+    ``list_prefix``/``deadline`` serve ``module_map`` only (its module docstring).
 
     ``query`` is ``"<fact> <argument>"`` where fact is one of
     ``ARCHITECTURE_FACTS``; for ``protected_contracts_affected`` the argument
@@ -662,6 +683,10 @@ def architecture_fact_rows(
     if not arg:
         raise ValueError(f"architecture fact {fact} requires an argument after the fact name")
     root = pathlib.Path(repo_root)
+    if fact == "module_map":
+        from ouroboros.code_intelligence_module_map import module_map_rows
+        return module_map_rows(root, arg, load_domain_manifest(root), list_prefix=list_prefix,
+                               read_bytes=read_book_bytes, deadline=deadline)
     if fact == "owner_of":
         owners, unread = _owner_lookup(root, arg, inventory)
         rows = [

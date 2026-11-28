@@ -67,6 +67,37 @@ D18 = "Launcher, packaging, platform & shared substrate"
 D19 = "Frozen contracts (ABI)"
 D20 = "Presence"
 
+[references]
+# HUMAN section: the manuals that own each domain and non-Python surface, for the
+# `module_map` lookup (a seat with tools); `scripts/check_domains.py`
+# requires a row per domain and existing files. `--write` leaves it untouched.
+D01 = ["docs/architecture/06-1-loop-tools-and-safety.md"]
+D02 = ["docs/architecture/06-2-model-calls-and-budget.md", "docs/MODEL_SEND_OBSERVABILITY.md", "docs/IMAGE_GENERATION.md"]
+D03 = ["docs/architecture/06-1-loop-tools-and-safety.md", "docs/architecture/06-5-planning-memory-and-skills.md"]
+D04 = ["docs/architecture/06-1-loop-tools-and-safety.md"]
+D05 = ["docs/architecture/06-1-loop-tools-and-safety.md", "docs/architecture/06-5-planning-memory-and-skills.md", "docs/code-navigation.md"]
+D06 = ["docs/architecture/06-4-self-change-and-review.md", "docs/CHECKLISTS.md"]
+D07 = ["docs/architecture/06-3-delegation-and-subagents.md", "docs/DELEGATED_ADMISSION.md", "docs/PASSIVE_QUOTA_READ.md"]
+D08 = ["docs/architecture/05-supervisor-loop.md"]
+D09 = ["docs/architecture/09-shutdown-and-process-cleanup.md", "docs/architecture/05-supervisor-loop.md"]
+D10 = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/architecture/06-4-self-change-and-review.md"]
+D11 = ["docs/architecture/04-server-api-endpoints.md", "docs/architecture/03-web-ui-pages-and-buttons.md", "docs/CLIENT_CONTRACT.md"]
+D12 = ["docs/architecture/07-configuration.md"]
+D13 = ["docs/architecture/06-1-loop-tools-and-safety.md", "docs/architecture/10-key-invariants.md"]
+D14 = ["docs/architecture/13-external-skills-layer.md", "docs/CREATING_SKILLS.md", "docs/WIDGET_HOST_PROTOCOL.md"]
+D15 = ["docs/architecture/06-5-planning-memory-and-skills.md", "docs/architecture/06-1-loop-tools-and-safety.md", "docs/PERSISTENCE.md"]
+D16 = ["docs/architecture/06-2-model-calls-and-budget.md", "docs/USAGE_STORE.md", "docs/MODEL_SEND_OBSERVABILITY.md"]
+D17 = ["docs/architecture/06-5-planning-memory-and-skills.md", "docs/architecture/06-1-loop-tools-and-safety.md", "docs/PERSISTENCE.md"]
+D18 = ["docs/architecture/01-high-level-architecture.md", "docs/architecture/02-startup-onboarding-flow.md", "docs/DEPLOYMENT.md"]
+D19 = ["docs/architecture/11-frozen-contracts-v1.md", "docs/CLIENT_CONTRACT.md"]
+D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
+"web/" = ["docs/architecture/03-web-ui-pages-and-buttons.md", "docs/DESIGN.md", "docs/CLIENT_CONTRACT.md"]
+"prompts/" = ["docs/development/02-naming-and-boundaries.md", "docs/development/04-core-governance-artifacts.md"]
+"skills/" = ["docs/architecture/13-external-skills-layer.md", "docs/CREATING_SKILLS.md"]
+"android/" = ["docs/architecture/01-high-level-architecture.md", "docs/ANDROID_INSTALL.md", "docs/ANDROID_RECOVERY.md"]
+"scripts/" = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/development/14-build-and-ci.md"]
+"devtools/" = ["docs/architecture/01-high-level-architecture.md"]
+
 [modules]
 "ouroboros/_usage_settlement.py" = "D16"
 "ouroboros/call_peers.py" = "D11"
@@ -220,6 +251,7 @@ D20 = "Presence"
 "ouroboros/code_import_candidates.py" = "D05"
 "ouroboros/code_intelligence.py" = "D05"
 "ouroboros/code_intelligence_architecture.py" = "D05"
+"ouroboros/code_intelligence_module_map.py" = "D05"
 "ouroboros/code_navigation.py" = "D05"
 "ouroboros/code_occurrences.py" = "D05"
 "ouroboros/code_search_rg.py" = "D05"
@@ -240,6 +272,7 @@ D20 = "Presence"
 "ouroboros/configured_subagents.py" = "D07"
 "ouroboros/consciousness.py" = "D15"
 "ouroboros/consciousness_view.py" = "D15"
+"ouroboros/consciousness_hold.py" = "D15"
 "ouroboros/consciousness_allowance.py" = "D15"
 "ouroboros/consciousness_authority.py" = "D15"
 "ouroboros/consciousness_wake.py" = "D15"
@@ -571,6 +604,7 @@ D20 = "Presence"
 "ouroboros/oauth_engine.py" = "D05"  # the provider-neutral OAuth client remote MCP sign-ins run on
 "ouroboros/service_sign_in.py" = "D05"  # skills' sign-ins to the services they declare, on the same engine
 "ouroboros/service_sign_in_declaration.py" = "D05"
+"ouroboros/sign_in_offers.py" = "D05"  # where a skill's sign-in was offered in a conversation, and its "connected" row
 "ouroboros/mcp_import.py" = "D05"
 "ouroboros/mcp_result_images.py" = "D05"
 "ouroboros/mcp_task_session.py" = "D05"
@@ -915,6 +949,7 @@ D20 = "Presence"
 "ouroboros/tools/control_delegation.py" = "D07"
 "ouroboros/tools/core.py" = "D05"
 "ouroboros/tools/core_artifacts.py" = "D05"
+"ouroboros/link_actions.py" = "D05"  # the send_links action shape: a web address or a sign-in place
 "ouroboros/tools/cards.py" = "D05"
 "ouroboros/card_store.py" = "D05"
 "ouroboros/tools/secret_hitl.py" = "D05"

@@ -503,19 +503,15 @@ def test_a_short_phone_drawer_has_one_scroller_the_whole_column(shell_ui, tmp_pa
 
 def saved_history(tmp_path):
     """The real history endpoint over two saved rows, so the feed draws bubbles with Copy and Reply."""
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-
     from ouroboros import dialogue_store
-    from ouroboros.gateway.history import make_chat_history_endpoint
+    from tests._room_browser_shared import history_client
     root = tmp_path / 'history'
     root.mkdir()
     for minute, (direction, role, text) in enumerate([('in', 'user', 'Please check the build before the release.'),
                                                        ('out', 'assistant', 'The build is green; nothing to fix.')]):
         dialogue_store.append(root, 'chat', {'chat_id': 1, 'user_id': 1, 'direction': direction, 'role': role,
                                              'text': text, 'ts': f'2026-10-18T10:0{minute}:00Z'})
-    client = TestClient(Starlette(routes=[Route('/api/chat/history', make_chat_history_endpoint(root))]))
+    client = history_client(root, setup_browser.PREVIEW_SCOPE)  # the profile the shell's document proves
 
     def respond(route):
         response = client.get('/' + route.request.url.split('/', 3)[3])

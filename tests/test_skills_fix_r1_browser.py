@@ -104,7 +104,11 @@ def test_acceptance_and_update_outcomes(skills_browser, browser_name, width, the
             _contained(page)
             if name == 'self_checked':
                 detail = fixture('skill_catalog_item.json')
-                detail['item'].update(name=name, source_id='ouroboros', source_name='Ouroboros')
+                # The catalog's entry for the installed release: the sheet borrows catalog prose only for the files
+                # that are installed (skills.js `matchesRelease`), never another release's.
+                shown = next(row for row in fixture('extensions_fix_r1.json')['skills'] if row['name'] == name)
+                detail['item'].update(name=name, id=f'ouroboros/{name}', source_id='ouroboros', source_name='Ouroboros',
+                                      version=shown['version'], digest=shown['content_hash'])
                 skills.answers[f'/api/skill-catalog/item/ouroboros/{name}'] = detail
                 card.locator('.skills-card-name').click()
                 sheet = page.locator('.skills-detail-sheet')
@@ -165,7 +169,8 @@ def test_source_warning_and_my_skills_opt_in(skills_browser, browser_name, width
         assert skills.posted('/api/skill-sources/my-skills') == [], 'opening Publish has no repository side effect'
         assert dialog.get_by_role('button', name='Create or connect «My skills» on GitHub').count() == 1
         _contained(page)
-        page.locator('.toast').wait_for(state='detached', timeout=10_000)
+        # The source's notice waits, hidden, while the dialog covers the page (toast.js): the dialog is drawn alone.
+        page.locator('.toast').wait_for(state='hidden', timeout=10_000)
         capture(page, browser_name, width, f'{theme}-publish-my-skills')
         for code, next_step in [('no_token', 'Add GITHUB_TOKEN'), ('cannot_create', 'allow repository access'), ('failed', 'check your GitHub connection')]:
             skills.answers['/api/skill-sources/my-skills'] = (400, {'ok': False, 'code': code, 'error': 'fixture refusal'})

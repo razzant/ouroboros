@@ -473,6 +473,9 @@ def _ordinary_memory(ctx, observed, *, continuation_page):
         return unavailable("metadata_source_unavailable")
 
 
+_LATER_PAGE_FIELDS = frozenset({"view_revision", "restore_checkpoint", "ordinary_memory"})  # beside units and paging
+
+
 def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     """A bounded inventory of the observed view: counts and sizes by kind, then one page of
     units from ``offset`` within the tool's producer page size (``tool_result_limit``), naming
@@ -482,7 +485,8 @@ def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     its units, the paging, the view revision, the ``restore_checkpoint`` of the observation it lists (a newer
     observation has its own, so a listed unit always restores from its page) and the retained ordinary-memory
     map (``_ordinary_memory``'s continuation read). A page holds at least one unit, so paging always advances:
-    only page one's shared fields can leave no room for it, and then page one says so first (``limitation``).
+    only page one's shared fields can leave no room for it, and then page one says so first (``limitation``),
+    naming the fields only it carries by size, largest first, beside what the rest of the page takes.
     ``not_applied`` names the note and selectors this call carried: inspection lists the view and applies none."""
     from ouroboros.context_compaction import (_capsule_metadata, _first_line, context_units, note_written,
                                               owner_protected_unit_ids, unit_kind)
@@ -606,11 +610,26 @@ def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     whole = render(page, following)
     if len(whole) <= limit:
         return whole
-    # A page over the limit holds one unit (none past the end): the fields every page carries and that unit.
+    # A page over the limit holds one unit (none past the end): the fields every page carries and that unit, and on
+    # page one the fields only it carries, each named with its size, largest first, until they cover the overflow.
     why = "the fields every page carries and its one unit" if page else "the fields every page carries"
-    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): {why} "
-                  "are longer than a page." + (" Continue at next_offset." if following is not None else
-                                               " It holds every remaining unit; there is no next page."))
+    once = {key: len(json.dumps({key: value}, ensure_ascii=False, separators=(",", ":"))) - 2
+            for key, value in body.items() if key not in _LATER_PAGE_FIELDS}
+    if once:
+        named, covered = [], 0
+        for key, size in sorted(once.items(), key=lambda item: (-item[1], item[0])):
+            if covered >= len(whole) - limit:
+                break
+            named.append(f"{key} {size:,}")
+            covered += size
+        rest = f", and {len(once) - len(named)} more" if len(named) < len(once) else ""
+        why = (f"the fields only page one carries take {sum(once.values()):,} of it ({', '.join(named)}{rest}); the "
+               f"rest, {why}, takes {len(whole) - sum(once.values()):,}.")
+    else:
+        why += " are longer than a page."
+    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): {why}"
+                  + (" Continue at next_offset." if following is not None else
+                     " It holds every remaining unit; there is no next page."))
 
 
 def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = False, offset: int = 0,

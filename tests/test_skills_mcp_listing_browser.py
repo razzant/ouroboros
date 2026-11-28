@@ -43,9 +43,14 @@ def listing_page(request, skills_browser, world, manager, monkeypatch):
     # Hold the scheduled work until Connect has returned and the pending state has painted.
     scheduled = []
     monkeypatch.setattr(manager, "refresh_all_background", lambda *, reason: scheduled.append(reason))
+    # A skill's report also lists its own missing servers whatever the configuration event scheduled (mcp_discovery
+    # `_settle_skill`, #4343): that pass is held too, so the pending state stays until the test completes the listing.
+    missing = []
+    monkeypatch.setattr(manager.discovery, "refresh", lambda reason, *, missing_only=False: missing.append(reason))
     _write_settings(world, _settings(enabled=False))
     manager.configuration_changed(config.load_settings(), reason="startup")
     scheduled.clear()
+    missing.clear()
     installed = load_skill(world.skill_dir, world.data)
     row = {"name": installed.name, "title": "Chrome (shared tab)", "description": "Use the shared browser tab",
            "version": "0.3.0", "type": "script", "source": "external", "enabled": True,

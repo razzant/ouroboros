@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ouroboros.process_interpreters import record_interpreter_resolution, resolve_process_python
+from ouroboros.shell_parse import VERIFY_RUN_KINDS, verify_run_kind
 
 from ouroboros.tools.tool_result import ToolResult
 
@@ -427,13 +428,7 @@ _SKILL_LIFECYCLE_TARGET_TOOLS = frozenset({
 
 
 _PROCESS_TARGET_TOOLS = frozenset({"run_command", "run_script", "start_service"})
-
-
-_VERIFY_RUN_KINDS = frozenset({
-    "visible_verifier",
-    "explicit_command",
-    "explicit_metric",
-})
+_VERIFY_RUN_KINDS = frozenset(VERIFY_RUN_KINDS)  # Re-exported by registry.
 
 
 def _target_binding_operation(name: str, args: dict[str, Any]) -> str | None:
@@ -448,7 +443,7 @@ def _target_binding_operation(name: str, args: dict[str, Any]) -> str | None:
         return "review"
     if name in _PROCESS_TARGET_TOOLS:
         return "service" if name == "start_service" else "shell"
-    if name == "verify_and_record" and str(args.get("contract_kind") or "") in _VERIFY_RUN_KINDS:
+    if name == "verify_and_record" and verify_run_kind(args):
         return "shell"
     # CONDITIONAL, never a static map entry (R1 item 1): delegate_start becomes
     # target-bound only when it explicitly selects an exact skill payload; a
@@ -509,7 +504,7 @@ def _normalize_tool_call_args(entry: "ToolEntry", args: dict[str, Any]) -> None:
         args.pop("root")
 
 
-def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any]) -> str:
+def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any], *, ctx: Any) -> str:
     """Normalize and validate only the model-visible builtin argument surface.
 
     This runs after capability/lineage availability checks but before path
@@ -525,7 +520,7 @@ def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any]) -> st
     # meaning.  They stay absent from the schema, so only callers that send them
     # reach the handler, through this real registry path.  The handler still owns
     # the deterministic translation, named in its result, or a refusal naming the
-    # ready call; this generic seam neither chooses a route nor special-cases a tool name.
+    # ready call; this legacy-parameter step neither chooses a route nor special-cases a tool name.
     hidden_legacy = {
         str(name)
         for name in (getattr(entry.handler, "_hidden_legacy_params", ()) or ())
@@ -545,6 +540,10 @@ def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any]) -> st
         inspect.signature(entry.handler).bind(object(), **args)
     except TypeError:
         return _format_tool_arg_error(entry)
+    if entry.name == "verify_and_record":
+        from ouroboros.tools.verify import verify_command_argument_error
+
+        return verify_command_argument_error(ctx, args)
     return ""
 
 
@@ -864,13 +863,24 @@ def _resolve_python_predispatch(
     runtime_mode: str,
     effective_constraint: Any,
     resolved_binding: Any = None,
+    targets_system_repo: bool = False,
 ) -> tuple[Dict[str, Any], Any, str | ToolResult | None]:
     """Resolve an exact python/python3 request ONCE, before the shell guard.
 
     Every downstream guard and the handler therefore see byte-identical
     argv; launchers must not select an interpreter after this boundary.
     Python never EXECUTES a candidate; node probes post-gates instead.
+
+    start_service's ``cmd`` shape is judged here, on the original list that
+    resolution would stringify. Dispatch's admission refusals precede this
+    call; its Light start_service refusal follows it, so that launch is left
+    to it.
     """
+    if name == "start_service" and not (runtime_mode == "light" and targets_system_repo):
+        from ouroboros.tools.services import start_service_command_refusal
+
+        if refusal := start_service_command_refusal(args.get("cmd")):
+            return args, None, refusal
     args, python_resolution = resolve_process_python(
         registry._ctx,
         name,

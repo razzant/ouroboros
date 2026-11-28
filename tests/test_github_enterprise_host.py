@@ -7,6 +7,7 @@ are observed, not inferred. Closed proxies stand behind the socket: a gh that ig
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -431,7 +432,7 @@ class _Handler(BaseHTTPRequestHandler):
     def answer(self):
         status, payload, headers = self.server.world.respond(
             self.headers.get("host") or "", self.command, self.path, self.headers.get("authorization") or "", self._body())
-        data = json.dumps(payload).encode("utf-8")
+        data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
         self.send_response(status)
         for key, value in {"Content-Type": "application/json", "Content-Length": str(len(data)), "Connection": "close", **headers}.items():
             self.send_header(key, value)
@@ -492,6 +493,10 @@ def two_hosts(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("GH_CONFIG_DIR", str(config))
+    # gh 2.45 keeps run logs under os.TempDir(), outside XDG_CACHE_HOME.
+    gh_tmp = tmp_path / "gh-tmp"
+    gh_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(gh_tmp))
     for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(name, str(home / name.lower()))
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -543,6 +548,130 @@ REAL_LEGS = [
     ("github_write", {"method": "api", "http_method": "POST", "route": "repos/{owner}/{repo}/issues/7/reactions", "input": {"content": "heart"}}),
     ("github_write", {"method": "api", "graphql": 'mutation { addReaction(input:{subjectId:"I_1",content:HEART}) { clientMutationId } }'}),
 ]
+
+
+@pytest.mark.parametrize("failed_only", [False, True], ids=["full", "failed"])
+def test_installed_gh_reads_completed_run_logs(two_hosts, monkeypatch, failed_only):
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.tool_access import canonical_data_root
+
+    root = "/repos/corp/secret/actions"
+    run, repo = root + "/runs/11", f"{ENTERPRISE}/corp/secret"
+    pinned = run + "/attempts/2"
+    jobs = []
+    stream = BytesIO()
+    with ZipFile(stream, "w") as archive:
+        for number, name, conclusion in [(55, "broken", "failure"), (56, "healthy", "success")]:
+            jobs.append({"id": number, "name": name, "status": "completed", "conclusion": conclusion,
+                         "steps": [{"number": 1, "name": "Check", "status": "completed", "conclusion": conclusion}]})
+            line = f"2026-11-01T00:00:00.0000000Z fixture-{name}\n"
+            archive.writestr(f"{name}/1_Check.txt", line)
+            archive.writestr(f"{number - 54}_{name}.txt", line)
+
+    def rest(forge, method, path, query, request):
+        assert method == "GET", (method, path)
+        if path in (run, pinned):
+            return 200, {"id": 11, "run_attempt": 2, "html_url": URL + "/actions/runs/11", "name": "CI",
+                         "status": "completed", "conclusion": "failure", "head_sha": SHA, "workflow_id": 42,
+                         "jobs_url": f"https://{forge.api}{forge.rest}{run}/jobs"}, {}
+        if path == root + "/workflows/42":
+            return 200, {"id": 42, "name": "CI"}, {}
+        if path == pinned + "/jobs":
+            return 200, {"total_count": len(jobs), "jobs": jobs}, {}
+        if path == pinned + "/logs":
+            return 200, stream.getvalue(), {"Content-Type": "application/zip"}
+        return 404, {"message": "unexpected route"}, {}
+
+    monkeypatch.setattr(two_hosts, "rest", rest)
+    text = two_hosts.call("github_read", method="get", kind="run", target=11, include=["log"],
+                          repo=repo, failed_only=failed_only)
+    assert not text.startswith("⚠️"), text
+    result = json.loads(text.partition("\n")[2])
+    capture = result["capture"]
+    flag = "--log-failed" if failed_only else "--log"
+    assert (capture["source"], capture["format"], capture["attempt"], capture["failed_only"]) == (
+        f"gh run view 11 {flag} --attempt 2 --repo {repo}", "plain_text_stdout", 2, failed_only)
+    stored = task_artifact_dir_path(canonical_data_root(two_hosts.ctx), two_hosts.ctx.task_id)
+    data = (stored / capture["retained"]["path"]).read_bytes()
+    assert capture["bytes"] == len(data) and capture["sha256"] == hashlib.sha256(data).hexdigest()
+    assert b"fixture-broken" in data
+    if not failed_only:
+        assert b"fixture-healthy" in data
+    paths = [seen.path.removeprefix("/api/v3") for seen in two_hosts.seen]
+    assert paths[0] == run and paths.count(pinned + "/logs") == 1
+    assert all("/jobs/" not in path and seen.method == "GET" for path, seen in zip(paths, two_hosts.seen))
+    _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
+    # gh versions differ in how much successful step text their failed-only output retains.
+    # Compare what the actual selected CLI printed, not an independently invented filter.
+    native = subprocess.run(["gh", "run", "view", "11", flag, "--attempt", "2", "--repo", repo],
+                            cwd=two_hosts.cwd, capture_output=True, timeout=30, check=True)
+    assert data == native.stdout
+
+
+def test_installed_gh_takes_a_completed_jobs_own_log_from_the_documented_endpoint(two_hosts, monkeypatch):
+    """A job finishes while its run is still in progress: no CLI run log exists yet, so the read selects the
+    job's documented endpoint and the installed gh follows its redirect to the short-lived plain-text log.
+    The latest-attempt and observed-attempt jobs endpoints serve distinct job ids: the read must take the
+    job from the observed attempt and refuse the re-run's id before any download."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.tool_access import canonical_data_root
+
+    root = "/repos/corp/secret/actions"
+    run, repo = root + "/runs/11", f"{ENTERPRISE}/corp/secret"
+    job = {"id": 55, "name": "broken", "status": "completed", "conclusion": "failure",
+           "steps": [{"number": 1, "name": "Check", "status": "completed", "conclusion": "failure"}]}
+    rerun_job = {"id": 77, "name": "rerun", "status": "completed", "conclusion": "success",
+                 "steps": [{"number": 1, "name": "Check", "status": "completed", "conclusion": "success"}]}
+    log = b"2026-11-01T00:00:00.0000000Z fixture-broken\r\n"
+
+    def rest(forge, method, path, query, request):
+        assert method == "GET", (method, path)
+        if path in (run, run + "/attempts/2"):
+            return 200, {"id": 11, "run_attempt": 2, "html_url": URL + "/actions/runs/11", "name": "CI",
+                         "status": "in_progress", "conclusion": None, "head_sha": SHA, "workflow_id": 42,
+                         "jobs_url": f"https://{forge.api}{forge.rest}{root}/runs/11/jobs"}, {}
+        if path == root + "/workflows/42":
+            return 200, {"id": 42, "name": "CI"}, {}
+        if path == root + "/runs/11/jobs":
+            # The jobs a re-run leaves on the latest-attempt endpoint: a job id the observed attempt never
+            # held, so a CLI that read the latest jobs instead of the attempt's cannot pass membership.
+            return 200, {"total_count": 1, "jobs": [rerun_job]}, {}
+        if path == root + "/runs/11/attempts/2/jobs":
+            return 200, {"total_count": 1, "jobs": [job]}, {}
+        if path == root + "/jobs/55/logs":
+            return 302, b"", {"Location": f"https://{forge.api}{forge.rest}{root}/jobs/55/logs-download"}
+        if path == root + "/jobs/55/logs-download":
+            return 200, log, {"Content-Type": "text/plain"}
+        return 404, {"message": "unexpected route"}, {}
+
+    monkeypatch.setattr(two_hosts, "rest", rest)
+    text = two_hosts.call("github_read", method="get", kind="run", target=11, include=["log"],
+                          job_id=55, repo=repo)
+    assert not text.startswith("⚠️"), text
+    result = json.loads(text.partition("\n")[2])
+    capture = result["capture"]
+    assert (capture["source"], capture["format"], capture["attempt"], capture["job_id"], capture["failed_only"]) == (
+        f"gh api repos/corp/secret/actions/jobs/55/logs --hostname {ENTERPRISE}",
+        "plain_text_stdout", 2, 55, False)
+    stored = task_artifact_dir_path(canonical_data_root(two_hosts.ctx), two_hosts.ctx.task_id)
+    data = (stored / capture["retained"]["path"]).read_bytes()
+    assert data == log and capture["bytes"] == len(log)
+    assert capture["sha256"] == hashlib.sha256(log).hexdigest()
+    paths = [seen.path.removeprefix("/api/v3") for seen in two_hosts.seen]
+    assert paths[0] == run and paths.count(root + "/jobs/55/logs") == 1
+    assert root + "/jobs/55/logs-download" in paths
+    assert all(seen.method == "GET" for seen in two_hosts.seen)
+    _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
+
+    seen_before = len(two_hosts.seen)
+    refused = two_hosts.call("github_read", method="get", kind="run", target=11, include=["log"],
+                             job_id=77, repo=repo)
+    assert refused.startswith("⚠️ TOOL_ARG_ERROR: job 77 is not a job of run 11 attempt 2 in corp/secret")
+    later = [seen.path.removeprefix("/api/v3") for seen in two_hosts.seen[seen_before:]]
+    assert later and all("/jobs/" not in path for path in later), "refused before any log download"
 
 
 def test_the_fixture_sees_the_defect_a_bare_placeholder_call_has(two_hosts):

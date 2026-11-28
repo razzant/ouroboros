@@ -835,7 +835,7 @@ def _dispatch_round_model(
 
     waiter = current_model_wait()
     plan = getattr(ctx, "context_fit_plan", None) or getattr(ctx.tools._ctx, "context_fit_plan", None)
-    from ouroboros.model_slots import task_model_binding, task_processing_preference
+    from ouroboros.model_slots import send_processing_options, task_model_binding
     role, account = task_model_binding({
         "model_role": getattr(ctx, "model_role", ""),
         "task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})},
@@ -880,8 +880,9 @@ def _dispatch_round_model(
                 physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage) if disposition is not None else None),
                 candidate_predicate=candidate_predicate, physical_fit_predicate=hint(admit), model_role=role,
                 model_account_override=return_account(ctx, account),
-                processing_preference=(return_processing_preference(ctx) if restricted else task_processing_preference(
-                    {"task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})}, model_role=role)),
+                **({"processing_preference": return_processing_preference(ctx)} if restricted else send_processing_options(
+                    getattr(ctx.tools._ctx, "task_metadata", {}), ctx.active_model, ctx.active_use_local, role,
+                    overrides=waiter.overrides if waiter else None)),
                 # The loop's own active-turn slot: a reprepared send keeps this exact owner.
                 model_turn_state=getattr(ctx.tools._ctx, "model_turn_state", None),
                 send_clock_policy=main_clock_policy(
@@ -994,6 +995,14 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     ctx.active_model, ctx.active_use_local, ctx.model_role = model, use_local, role
     ctx.tools._ctx.active_model = model
     ctx.tools._ctx.active_use_local = use_local
+    if "processing_preference" in kwargs and not getattr(ctx.tools._ctx, "_late_report_ref", ""):
+        from ouroboros.model_slots import moved_send_processing_options
+
+        waiter = current_model_wait()  # a tier confirmed for one destination is asked of the route now taken
+        kwargs.pop("processing_connection", None)
+        kwargs.update(moved_send_processing_options(
+            getattr(ctx.tools._ctx, "task_metadata", None), kwargs["processing_preference"], model, use_local, role,
+            overrides=waiter.overrides if waiter else None))
     from ouroboros.lead_fact import wait_card_switched
     if wait_card_switched(ctx, role, current_model_wait()):  # the owner's card choice holds for the rest of the task
         from ouroboros.route_choice import explicit

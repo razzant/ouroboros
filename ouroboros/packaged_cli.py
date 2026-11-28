@@ -28,6 +28,11 @@ from typing import Iterable, Sequence
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
+from ouroboros.launcher_windows_runtime import refuse_while_setup_changes
+
+if __name__ == "__main__":  # the shipped CLI decides in its own process, before its package does any work
+    refuse_while_setup_changes(sys.executable, console=True)
+
 from ouroboros.git_selection import GitUnverified, select_git
 from ouroboros.launch_roots import TUPLE_KEYS, WORK_ROOT_KEYS, configured_roots
 from ouroboros.launcher_bootstrap import (
