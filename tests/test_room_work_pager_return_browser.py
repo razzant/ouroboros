@@ -31,6 +31,7 @@ import subprocess
 import pytest
 
 from ouroboros import dialogue_store
+from ouroboros.gateway.history_paging import _unpack_cursor
 from tests import test_ui_smoke_playwright as smoke
 from tests.test_chat_history_paging_browser import _OBSERVE_HISTORY, _idle, _step
 from tests.test_room_work_backend_browser import (
@@ -233,8 +234,13 @@ def test_view_question_and_back_through_real_history_pages(direct_server_with_da
                 # A fresh session: every row on screen comes from the room's real history pages.
                 open_room(page)
                 reads = _reads(page, chat_id)
-                newest = reads[-1]
+                # The opening's own fresh read follows a newest page already in flight as a read of what arrived
+                # since it (project_read_state.js ``refresh``, chat_history.js ``read``), never as an older page.
+                at = max(index for index, read in enumerate(reads) if not read["cursor"])
+                newest, since = reads[at], reads[at + 1:]
                 assert not newest["cursor"] and newest["body"]["has_more"], ("one newest page, older ones exist", newest["cursor"])
+                assert all(_unpack_cursor(read["cursor"])["kind"] == "after" for read in since), \
+                    ("only arrivals follow the newest page", [_unpack_cursor(read["cursor"])["kind"] for read in since])
                 assert not holds_question(newest) and card.count() == 0, "the question is older than the newest page"
                 newest_ids = _ids(newest)
                 base = len(reads)
